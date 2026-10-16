@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string_view>
 #include <utility>
 
@@ -20,6 +21,9 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/KimiClientIdentity.hpp"
 #include "core/auth/KimiOAuthFlow.hpp"
+#include "core/auth/KimiSessionStore.hpp"
+#include "core/auth/OAuthTokenManager.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "core/llm/KimiModelTraits.hpp"
 #include "core/tools/Tool.hpp"
 
@@ -1551,7 +1555,8 @@ TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
     const fs::path sandbox = make_temp_dir("filo_kimi_headers");
     const ScopedEnvVar xdg("XDG_CONFIG_HOME", sandbox.string());
 
-    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
+    core::auth::KimiSessionStore session;
+    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders(session.device_id());
 
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
     REQUIRE(headers.at("X-Msh-Version") == "0.42.0");
@@ -1578,7 +1583,8 @@ TEST_CASE("KimiOAuthFlow - common headers preserve legacy 32-hex device id",
         file << legacy_id;
     }
 
-    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
+    core::auth::KimiSessionStore session;
+    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders(session.device_id());
 
     REQUIRE(headers.at("X-Msh-Device-Id") == legacy_id);
 
@@ -1598,6 +1604,141 @@ TEST_CASE("KimiProtocol - headers identify Kimi CLI and preserve OAuth device id
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
     REQUIRE(headers.at("X-Msh-Device-Id") == "device-from-jwt");
     REQUIRE(headers.at("Authorization") == "Bearer token");
+}
+
+TEST_CASE("Kimi session persistence retains default paths and legacy identity", "[kimi][oauth][KimiSessionStore]") {
+    const ScopedKimiProcessEnv env;
+    core::auth::KimiSessionStore session;
+    CHECK(session.persisted_oauth_host().empty());
+    CHECK_FALSE(fs::exists(env.dir / "filo"));
+    const auto id = session.device_id();
+    CHECK(id.size() == 36);
+    CHECK(session.device_id() == id);
+    CHECK(core::auth::KimiSessionStore().device_id() == id);
+    CHECK(fs::exists(env.dir / "filo/kimi_device_id"));
+    CHECK((fs::status(env.dir / "filo/kimi_device_id").permissions()
+        & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    SECTION("HOME supplies the default when XDG is absent") {
+        const ScopedEnvClear xdg("XDG_CONFIG_HOME");
+        const ScopedEnvVar home("HOME", env.dir.string());
+        core::auth::KimiSessionStore home_session;
+        CHECK(home_session.device_id().size() == 36);
+        CHECK(fs::exists(env.dir / ".config/filo/kimi_device_id"));
+        CHECK_FALSE(fs::exists(env.dir / ".config/filo/oauth_kimi.json"));
+    }
+    SECTION("legacy device identity is retained verbatim") {
+        const auto path = env.dir / "filo/kimi_device_id";
+        std::ofstream(path) << "0123456789abcdef0123456789abcdef";
+        CHECK(session.device_id() == "0123456789abcdef0123456789abcdef");
+    }
+    SECTION("invalid identity is replaced once and survives reopen") {
+        std::ofstream(env.dir / "filo/kimi_device_id") << "invalid";
+        const auto replacement = session.device_id();
+        CHECK(replacement != id);
+        CHECK(replacement.size() == 36);
+        CHECK(core::auth::KimiSessionStore().device_id() == replacement);
+    }
+}
+
+TEST_CASE("Kimi OAuth headers cannot acquire a device identity from another session", "[kimi][oauth][headers]") {
+    const ScopedKimiProcessEnv env;
+    core::auth::AuthInfo auth;
+    auth.headers["Authorization"] = "Bearer legacy-token";
+    auth.properties["oauth"] = "1";
+    const KimiProtocol protocol;
+    const auto headers = protocol.build_headers(auth);
+    CHECK(headers.at("Authorization") == "Bearer legacy-token");
+    CHECK_FALSE(headers.contains("X-Msh-Device-Id"));
+    CHECK_FALSE(fs::exists(env.dir / "filo"));
+}
+
+TEST_CASE("Kimi session store composes token persistence without mutating credential probes", "[kimi][oauth][KimiSessionStore]") {
+    const ScopedKimiProcessEnv env;
+    const auto directory = env.dir / "selected";
+    auto store = std::make_shared<core::auth::KimiSessionStore>(directory.string());
+    CHECK_FALSE(store->load("kimi"));
+    CHECK_FALSE(fs::exists(directory));
+    class LoginFlow final : public core::auth::IOAuthFlow {
+    public:
+        core::auth::OAuthToken login() override {
+            core::auth::OAuthToken token;
+            token.access_token = "fake-kimi-access";
+            token.refresh_token = "fake-kimi-refresh";
+            token.expires_at = 4102444800LL;
+            token.device_id = "token-device";
+            token.issuer = "https://auth.kimi.com";
+            return token;
+        }
+        core::auth::OAuthToken refresh(std::string_view) override {
+            throw std::runtime_error("unexpected refresh");
+        }
+    };
+    core::auth::OAuthTokenManager manager("kimi", std::make_shared<LoginFlow>(), store);
+    manager.login();
+    REQUIRE(core::auth::FileTokenStore(directory.string()).load("kimi"));
+    CHECK(core::auth::FileTokenStore(directory.string()).load("kimi")->access_token == "fake-kimi-access");
+    CHECK(store->persisted_oauth_host() == "https://auth.kimi.com");
+    CHECK(store->load_identity().device_id == "token-device");
+    CHECK(store->load_identity().oauth_host == "https://auth.kimi.com");
+    CHECK_FALSE(fs::exists(directory / "kimi_device_id"));
+    CHECK(manager.has_stored_token());
+    CHECK_FALSE(fs::exists(directory / "kimi_device_id"));
+    CHECK_FALSE(fs::exists(env.dir / "filo"));
+    SECTION("legacy tokens read companion metadata without rewriting the token") {
+        std::ofstream(directory / "kimi_device_id") << "0123456789abcdef0123456789abcdef";
+        std::ofstream(directory / "kimi_oauth_host") << "  https://auth.kimi.ai/// \n";
+        auto token = *store->load("kimi");
+        token.device_id.clear();
+        token.issuer.clear();
+        core::auth::FileTokenStore(directory.string()).save("kimi", token);
+        CHECK(store->load("kimi")->device_id == "0123456789abcdef0123456789abcdef");
+        CHECK(store->load("kimi")->issuer == "https://auth.kimi.ai");
+        CHECK(core::auth::FileTokenStore(directory.string()).load("kimi")->device_id.empty());
+    }
+    SECTION("the persisted host retains its existing precedence over token metadata") {
+        std::ofstream(directory / "kimi_oauth_host") << "https://auth.kimi.ai";
+        CHECK(store->load_identity().oauth_host == "https://auth.kimi.ai");
+        CHECK(store->load_identity().device_id == "token-device");
+        CHECK(store->load("kimi")->issuer == "https://auth.kimi.com");
+    }
+    SECTION("tokens retain their session host when an older transfer omits the companion") {
+        fs::remove(directory / "kimi_oauth_host");
+        CHECK(store->load_identity().oauth_host == "https://auth.kimi.com");
+        CHECK_FALSE(fs::exists(directory / "kimi_oauth_host"));
+    }
+    SECTION("saving refreshed tokens leaves an unchanged host companion untouched") {
+        const auto host_path = directory / "managed-host";
+        const std::string contents = "  https://auth.kimi.com/// \n";
+        std::ofstream(host_path) << contents;
+        fs::remove(directory / "kimi_oauth_host");
+        fs::create_symlink(host_path, directory / "kimi_oauth_host");
+        auto refreshed = *store->load("kimi");
+        refreshed.access_token = "refreshed-access";
+        CHECK_NOTHROW(manager.save_token(refreshed));
+        CHECK(core::auth::FileTokenStore(directory.string()).load("kimi")->access_token == "refreshed-access");
+        CHECK(core::utils::read_file(host_path) == contents);
+    }
+    SECTION("missing companion metadata stays read-only during availability checks") {
+        auto token = *store->load("kimi");
+        token.device_id.clear();
+        core::auth::FileTokenStore(directory.string()).save("kimi", token);
+        CHECK(manager.has_stored_token());
+        CHECK_FALSE(fs::exists(directory / "kimi_device_id"));
+        CHECK_FALSE(fs::exists(directory / "kimi_device_id.lock"));
+        auto lock = core::utils::InterprocessFileLock::acquire(directory / "kimi_device_id.lock");
+        REQUIRE(lock);
+        auto probe = std::async(std::launch::async, [&] { return manager.has_stored_token(); });
+        CHECK(probe.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready);
+        lock.reset();
+        CHECK(probe.get());
+    }
+    SECTION("logout removes tokens but retains pre-login identity and last host") {
+        const auto id = store->device_id();
+        manager.logout();
+        CHECK_FALSE(core::auth::FileTokenStore(directory.string()).load("kimi"));
+        CHECK(core::auth::KimiSessionStore(directory.string()).device_id() == id);
+        CHECK(store->persisted_oauth_host() == "https://auth.kimi.com");
+    }
 }
 
 TEST_CASE("ProviderFactory - kimi oauth disables synthetic cost estimation", "[kimi][factory][oauth]") {
@@ -1709,7 +1850,9 @@ TEST_CASE("ProviderFactory - Kimi Code preset follows global region",
 TEST_CASE("ProviderFactory - persisted oauth host selects global coding endpoint",
           "[kimi][factory][oauth][region]") {
     const ScopedKimiProcessEnv env;
-    core::auth::KimiOAuthFlow::persist_oauth_host("https://auth.kimi.ai");
+    const fs::path directory = fs::path(std::getenv("XDG_CONFIG_HOME")) / "filo";
+    fs::create_directories(directory);
+    std::ofstream(directory / "kimi_oauth_host") << "https://auth.kimi.ai";
     core::config::ProviderConfig cfg;
     cfg.model = "k3";
     cfg.auth_type = "oauth_kimi";

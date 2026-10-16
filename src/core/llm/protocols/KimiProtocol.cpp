@@ -2,6 +2,7 @@
 #include "SseUtils.hpp"
 #include "../KimiModelTraits.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
+#include "../../auth/KimiSessionStore.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
@@ -634,7 +635,9 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
 
 [[nodiscard]] const cpr::Header& cached_kimi_metadata_headers() {
     static const cpr::Header kCachedHeaders = [] {
-        auto raw = core::auth::KimiOAuthFlow::getCommonHeaders();
+        // Cache machine metadata only. Device identity belongs to the token
+        // and must not read or create the default account's state here.
+        auto raw = core::auth::KimiOAuthFlow::getCommonHeaders({});
         if (raw.count("X-Msh-Os-Version")) {
             raw["X-Msh-Os-Version"] = sanitize_os_version(raw["X-Msh-Os-Version"]);
         }
@@ -1246,6 +1249,10 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     auto it = auth.properties.find("device_id");
     if (it != auth.properties.end() && !it->second.empty()) {
         kimi_headers["X-Msh-Device-Id"] = it->second;
+    } else if (!auth.properties.contains("oauth")) {
+        static const auto default_device_id =
+            core::auth::KimiSessionStore().device_id();
+        kimi_headers["X-Msh-Device-Id"] = default_device_id;
     }
     
     for (const auto& [key, value] : kimi_headers) {

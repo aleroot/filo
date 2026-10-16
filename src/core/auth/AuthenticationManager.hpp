@@ -115,7 +115,8 @@ public:
      *                       (used by tests and offline flows).
      * @return The strategy display name for user feedback.
      */
-    std::string logout(std::string_view provider, bool revoke_remote = true) const;
+    std::string logout(std::string_view provider, bool revoke_remote = true,
+                       const core::config::ConfigSource* source = nullptr) const;
 
     /**
      * @param canonical_type  The canonical provider kind string (e.g. "claude",

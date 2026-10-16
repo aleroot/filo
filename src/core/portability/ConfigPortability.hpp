@@ -31,6 +31,7 @@
 #include "ConfigBundle.hpp"
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -105,5 +106,18 @@ struct ImportResult {
 [[nodiscard]] ImportResult import_bundle(const Bundle& bundle,
                                          const PortabilityPaths& paths,
                                          const ImportOptions& options);
+
+/// Validate a bundle and assemble a sparse configuration directory in memory.
+/// Unlike import, this neither seeds shipped defaults nor applies memories.
+/// No files are read or written. Throws on invalid or ambiguous items.
+struct ConfigOverlayFiles {
+    std::map<std::string, core::utils::JsonValue> configuration;
+    std::map<std::string, core::utils::JsonValue> credentials;
+};
+
+[[nodiscard]] ConfigOverlayFiles config_overlay_files(const Bundle& bundle);
+
+/// Additional files needed alongside a token (device identity, OAuth metadata).
+[[nodiscard]] std::vector<std::string> credential_companion_files(std::string_view store);
 
 } // namespace core::portability

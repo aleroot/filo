@@ -1,18 +1,15 @@
 #include "KimiOAuthFlow.hpp"
 #include "KimiClientIdentity.hpp"
+#include "IKimiSessionState.hpp"
 #include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "core/utils/Base64.hpp"
+#include "core/utils/Uuid.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
 #include <chrono>
-#include <cctype>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
-#include <random>
-#include <sstream>
+#include <stdexcept>
 #include <thread>
 #if !defined(_WIN32)
 #include <sys/utsname.h>
@@ -69,27 +66,6 @@ std::string extractDeviceIdFromJwt(const std::string& jwt) {
     return {};
 }
 
-std::filesystem::path getDeviceIdPath() {
-    const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
-    std::filesystem::path config_dir;
-    if (xdg_config) {
-        config_dir = std::filesystem::path(xdg_config) / "filo";
-    } else {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            config_dir = std::filesystem::path(home) / ".config" / "filo";
-        } else {
-            config_dir = std::filesystem::path("/tmp") / "filo";
-        }
-    }
-    std::filesystem::create_directories(config_dir);
-    return config_dir / "kimi_device_id";
-}
-
-std::filesystem::path getOAuthHostPath() {
-    return getDeviceIdPath().parent_path() / "kimi_oauth_host";
-}
-
 [[nodiscard]] std::string normalize_oauth_host(std::string_view host) {
     while (!host.empty() && (host.back() == '/' || host.back() == ' '
                              || host.back() == '\n' || host.back() == '\r'
@@ -136,7 +112,7 @@ std::filesystem::path getOAuthHostPath() {
     return {};
 }
 
-[[nodiscard]] std::string resolve_oauth_host(bool new_login) {
+[[nodiscard]] std::string resolve_oauth_host(std::string_view persisted_host) {
     if (const auto host = env_trimmed("KIMI_CODE_OAUTH_HOST"); !host.empty()) {
         return normalize_oauth_host(host);
     }
@@ -156,11 +132,7 @@ std::filesystem::path getOAuthHostPath() {
             return host;
         }
     }
-    if (const auto persisted = KimiOAuthFlow::persisted_oauth_host();
-        !persisted.empty()) {
-        return persisted;
-    }
-    (void)new_login;
+    if (!persisted_host.empty()) return std::string(persisted_host);
     std::string locale = env_trimmed("LC_ALL");
     if (locale.empty()) locale = env_trimmed("LANG");
     if (env_starts_with_zh_cn(locale) || locale == "zh" || locale == "ZH") {
@@ -185,27 +157,6 @@ std::filesystem::path getOAuthHostPath() {
     return cleaned.substr(start, end - start + 1);
 }
 
-[[nodiscard]] bool is_uuid_device_id(std::string_view id) {
-    if (id.size() != 36) return false;
-    for (std::size_t i = 0; i < id.size(); ++i) {
-        const bool dash = (i == 8 || i == 13 || i == 18 || i == 23);
-        if (dash) {
-            if (id[i] != '-') return false;
-            continue;
-        }
-        if (!std::isxdigit(static_cast<unsigned char>(id[i]))) return false;
-    }
-    return true;
-}
-
-[[nodiscard]] bool is_legacy_device_id(std::string_view id) {
-    if (id.size() != 32) return false;
-    for (const char c : id) {
-        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
-    }
-    return true;
-}
-
 [[nodiscard]] bool is_retryable_oauth_failure(const cpr::Response& response) {
     if (response.error.code != cpr::ErrorCode::OK) return true;
     return response.status_code == 429
@@ -220,29 +171,7 @@ std::filesystem::path getOAuthHostPath() {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 std::string KimiOAuthFlow::generateDeviceId() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dist(0, 15);
-    const char hex[] = "0123456789abcdef";
-    
-    std::string id;
-    id.reserve(36);
-    for (int i = 0; i < 36; ++i) {
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            id += '-';
-            continue;
-        }
-        if (i == 14) {
-            id += '4';
-            continue;
-        }
-        if (i == 19) {
-            id += hex[8 + (dist(gen) % 4)];
-            continue;
-        }
-        id += hex[dist(gen)];
-    }
-    return id;
+    return core::utils::random_uuid_v4();
 }
 
 std::string KimiOAuthFlow::getDeviceModel() {
@@ -251,10 +180,6 @@ std::string KimiOAuthFlow::getDeviceModel() {
         return std::string(buf.sysname) + " " + std::string(buf.release) + " " + std::string(buf.machine);
     }
     return "Unknown";
-}
-
-std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders() {
-    return getCommonHeaders(loadOrCreatePersistentDeviceId());
 }
 
 std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
@@ -291,76 +216,19 @@ std::string KimiOAuthFlow::getUserAgent() {
     return kimi_code::user_agent();
 }
 
-std::string KimiOAuthFlow::persisted_oauth_host() {
-    const auto path = getOAuthHostPath();
-    if (!std::filesystem::exists(path)) return {};
-    std::ifstream file(path);
-    std::string host;
-    if (!std::getline(file, host)) return {};
-    return normalize_oauth_host(host);
+KimiOAuthFlow::KimiOAuthFlow(std::shared_ptr<IKimiSessionState> session_state)
+    : session_state_(std::move(session_state)) {
+    if (!session_state_) throw std::invalid_argument("Kimi OAuth requires session state");
 }
 
-void KimiOAuthFlow::persist_oauth_host(std::string_view oauth_host) {
-    const std::string host = normalize_oauth_host(oauth_host);
-    if (host.empty()) return;
-    const auto path = getOAuthHostPath();
-    std::filesystem::create_directories(path.parent_path());
-    std::ofstream file(path);
-    if (file) {
-        file << host;
-        std::filesystem::permissions(path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace);
-    }
-}
-
-std::string KimiOAuthFlow::resolved_oauth_host_for_login() {
-    return resolve_oauth_host(true);
-}
-
-std::string KimiOAuthFlow::resolved_oauth_host_for_session() {
-    return resolve_oauth_host(false);
-}
-
-std::string KimiOAuthFlow::getDeviceName() const {
-    char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) == 0) {
-        return std::string(hostname);
-    }
-    return "unknown";
-}
-
-std::string KimiOAuthFlow::loadOrCreatePersistentDeviceId() {
-    auto path = getDeviceIdPath();
-    if (std::filesystem::exists(path)) {
-        std::ifstream file(path);
-        std::string id;
-        if (std::getline(file, id)) {
-            if (is_uuid_device_id(id) || is_legacy_device_id(id)) return id;
-        }
-    }
-
-    std::string new_id = KimiOAuthFlow::generateDeviceId();
-    std::ofstream file(path);
-    if (file) {
-        file << new_id;
-        std::filesystem::permissions(path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace);
-    }
-    return new_id;
-}
-
-// ── KimiOAuthFlow ─────────────────────────────────────────────────────────────
-
-KimiOAuthFlow::KimiOAuthFlow() {
-    // Load or create persistent device_id
-    device_id_ = loadOrCreatePersistentDeviceId();
-    oauth_host_ = resolved_oauth_host_for_session();
+void KimiOAuthFlow::load_session_identity() {
+    auto identity = session_state_->load_identity();
+    device_id_ = std::move(identity.device_id);
+    oauth_host_ = resolve_oauth_host(identity.oauth_host);
 }
 
 OAuthToken KimiOAuthFlow::login() {
-    oauth_host_ = resolved_oauth_host_for_login();
+    load_session_identity();
     core::logging::info("Starting Kimi OAuth device flow on {}...", oauth_host_);
     
     auto auth = requestDeviceAuthorization();
@@ -505,7 +373,6 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
             }
             token.issuer = oauth_host_;
             token.client_id = std::string(kimi_code::kClientId);
-            persist_oauth_host(oauth_host_);
             
             core::logging::info("Kimi OAuth authorization successful!");
             return token;
@@ -537,13 +404,13 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
 }
 
 OAuthToken KimiOAuthFlow::refresh(std::string_view refresh_token) {
+    // Read the current session each time: another instance may have replaced
+    // its credentials while this flow was alive.
+    load_session_identity();
     return exchangeRefreshToken(refresh_token);
 }
 
 OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
-    if (oauth_host_.empty()) {
-        oauth_host_ = resolved_oauth_host_for_session();
-    }
     auto request_time = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     

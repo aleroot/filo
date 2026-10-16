@@ -1,4 +1,5 @@
 #include "ProviderFactory.hpp"
+#include "core/config/ConfigSource.hpp"
 #include "HttpLLMProvider.hpp"
 #include "KimiModelTraits.hpp"
 #include "ProviderDefinition.hpp"
@@ -23,7 +24,7 @@
 #include "OpenAIEndpointUtils.hpp"
 #include "../auth/ApiKeyCredentialSource.hpp"
 #include "../auth/AuthenticationManager.hpp"
-#include "../auth/KimiOAuthFlow.hpp"
+#include "../auth/KimiSessionStore.hpp"
 #include "../auth/GoogleCodeAssist.hpp"
 #include "../auth/SecretInput.hpp"
 #include "../logging/Logger.hpp"
@@ -188,7 +189,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 config.model,
                 static_cast<bool>(cred)
                     && normalized_auth_type == "oauth_kimi",
-                core::auth::KimiOAuthFlow::persisted_oauth_host());
+                core::auth::KimiSessionStore(config.config_source
+                    ? config.config_source->credential_directory("kimi").string() : std::string{}).persisted_oauth_host());
             override.has_value()) {
             base_url = std::move(*override);
             core::logging::debug(

@@ -277,8 +277,6 @@ void normalize_policy(PolicyDefinition& policy) {
 [[nodiscard]] bool parse_guardrails_object(simdjson::dom::object guardrails_obj,
                                            RouterGuardrails& out,
                                            std::string& error) {
-    out = RouterGuardrails{};
-
     auto read_non_negative_double = [&](std::string_view field_name,
                                         double& target) -> bool {
         simdjson::dom::element el;
@@ -352,8 +350,6 @@ void normalize_policy(PolicyDefinition& policy) {
 [[nodiscard]] bool parse_failover_object(simdjson::dom::object failover_obj,
                                          RouterFailover& out,
                                          std::string& error) {
-    out = RouterFailover{};
-
     {
         simdjson::dom::element el;
         const auto ec = failover_obj["on_exhaustion"].get(el);
@@ -621,8 +617,9 @@ RouterConfig make_default_router_config() {
 
 bool parse_router_config(simdjson::dom::object router_obj,
                          RouterConfig& out,
-                         std::string& error) {
-    out = RouterConfig{};
+                         std::string& error,
+                         RouterConfig defaults) {
+    out = defaults;
 
     // Reflection parser for scalar router fields.
     {
@@ -677,7 +674,7 @@ bool parse_router_config(simdjson::dom::object router_obj,
         simdjson::dom::object failover_obj;
         const auto ec = router_obj["failover"].get(failover_obj);
         if (ec == simdjson::SUCCESS) {
-            RouterFailover parsed_failover;
+            RouterFailover parsed_failover = out.failover;
             if (!parse_failover_object(failover_obj, parsed_failover, error)) {
                 error = std::format("router.failover: {}", error);
                 return false;
@@ -701,7 +698,7 @@ bool parse_router_config(simdjson::dom::object router_obj,
             return false;
         }
 
-        RouterGuardrails parsed_guardrails;
+        RouterGuardrails parsed_guardrails = out.guardrails.value_or(RouterGuardrails{});
         if (!parse_guardrails_object(guardrails_obj, parsed_guardrails, error)) {
             error = std::format("router.{}: {}", section_name, error);
             return false;
@@ -725,7 +722,8 @@ bool parse_router_config(simdjson::dom::object router_obj,
                 return false;
             }
 
-            PolicyDefinition policy;
+            const auto inherited = defaults.policies.find(std::string(entry.key));
+            PolicyDefinition policy = inherited == defaults.policies.end() ? PolicyDefinition{} : inherited->second;
             simdjson::dom::element policy_el = entry.value;
             if (!parse_value(policy_el, policy, error)) {
                 error = std::format("router.policies.{}: {}", entry.key, error);

@@ -58,6 +58,7 @@
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/config/ConfigSource.hpp"
 #include "core/config/ModelDefaultsPersistence.hpp"
 #include "core/config/SessionModelOverride.hpp"
 #include "core/auth/AuthenticationManager.hpp"
@@ -6854,9 +6855,11 @@ RunResult run(RunOptions opts) {
         -> core::commands::CommandOperationResult {
         const std::string name(server_name);
         try {
-            core::mcp::logout_mcp_oauth(
-                name,
-                core::config::ConfigManager::get_instance().get_config_dir());
+            const auto& config = core::config::ConfigManager::get_instance();
+            if (const auto source = config.get_config_source()) {
+                source->claim_credential(core::mcp::mcp_oauth_provider_id(name));
+            }
+            core::mcp::logout_mcp_oauth(name, config.get_config_dir());
             const std::string reload_message = reload_mcp_live();
             return {
                 .ok = true,

@@ -998,9 +998,11 @@ bool mcp_server_wants_oauth(const core::config::McpServerConfig& config) {
 // McpHttpAuth
 // ---------------------------------------------------------------------------
 
-McpHttpAuth::McpHttpAuth(core::config::McpServerConfig config, std::string config_dir)
+McpHttpAuth::McpHttpAuth(core::config::McpServerConfig config, std::string config_dir,
+                         TokenLoader token_loader)
     : config_(std::move(config))
-    , config_dir_(std::move(config_dir)) {
+    , config_dir_(std::move(config_dir))
+    , token_loader_(std::move(token_loader)) {
     static_headers_.reserve(config_.headers.size());
     bool has_static_authorization = false;
     for (const auto& [name, value] : config_.headers) {
@@ -1015,7 +1017,7 @@ McpHttpAuth::McpHttpAuth(core::config::McpServerConfig config, std::string confi
 
     oauth_mode_ = !has_static_authorization
                && mcp_server_wants_oauth(config_)
-               && !config_dir_.empty();
+               && (token_loader_ || !config_dir_.empty());
 
     // Strip Authorization from static headers when OAuth owns it so request_headers()
     // does not send a stale static value alongside a refreshed bearer.
@@ -1035,12 +1037,15 @@ McpHttpAuth::resolve_authorization_locked(bool force_refresh) const {
     }
 
     std::optional<core::auth::OAuthToken> token;
-    if (force_refresh) {
+    if (token_loader_) {
+        token = token_loader_(force_refresh);
+    } else if (force_refresh) {
         token = force_refresh_mcp_oauth_token(config_.name, config_dir_);
     } else {
         token = load_valid_mcp_oauth_token(config_.name, config_dir_);
     }
     if (!token || token->access_token.empty()) {
+        if (token_loader_) cached_authorization_.clear();
         return cached_authorization_.empty()
             ? std::nullopt
             : std::optional<std::string>{cached_authorization_};
@@ -1066,7 +1071,7 @@ std::vector<std::pair<std::string, std::string>> McpHttpAuth::request_headers() 
 }
 
 bool McpHttpAuth::can_refresh() const noexcept {
-    return oauth_mode_ && !config_dir_.empty();
+    return oauth_mode_ && (token_loader_ || !config_dir_.empty());
 }
 
 bool McpHttpAuth::refresh_after_unauthorized() {
@@ -1093,11 +1098,12 @@ bool McpHttpAuth::refresh_after_unauthorized() {
 
 std::shared_ptr<McpHttpAuth>
 make_mcp_http_auth(const core::config::McpServerConfig& config,
-                   std::string_view config_dir) {
+                   std::string_view config_dir,
+                   McpHttpAuth::TokenLoader token_loader) {
     if (config.transport != "http") {
         return nullptr;
     }
-    return std::make_shared<McpHttpAuth>(config, std::string(config_dir));
+    return std::make_shared<McpHttpAuth>(config, std::string(config_dir), std::move(token_loader));
 }
 
 } // namespace core::mcp

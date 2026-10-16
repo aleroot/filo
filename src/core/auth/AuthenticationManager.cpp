@@ -2,9 +2,12 @@
 #include "ApiKeyPromptStrategy.hpp"
 #include "ClaudeOAuthFlow.hpp"
 #include "FileTokenStore.hpp"
+#include "ConfigCredentialSource.hpp"
+#include "core/config/ConfigSource.hpp"
 #include "GoogleAntigravityOAuthFlow.hpp"
 #include "GoogleOAuthCredentialSource.hpp"
 #include "KimiOAuthFlow.hpp"
+#include "KimiSessionStore.hpp"
 #include "MimoAuthenticationStrategy.hpp"
 #include "QwenOAuthFlow.hpp"
 #include "XaiOAuthFlow.hpp"
@@ -223,8 +226,8 @@ public:
     std::shared_ptr<ICredentialSource> create_credential_source(
         const core::config::ProviderConfig& /*provider_config*/,
         std::string_view config_dir) const override {
-        auto flow    = std::make_shared<KimiOAuthFlow>();
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
+        auto store   = std::make_shared<KimiSessionStore>(std::string(config_dir));
+        auto flow    = std::make_shared<KimiOAuthFlow>(store);
         auto manager = std::make_shared<OAuthTokenManager>(
             "kimi", std::move(flow), std::move(store),
             /*allow_interactive_login=*/false);
@@ -232,8 +235,8 @@ public:
     }
 
     std::vector<std::string> login(std::string_view config_dir) const override {
-        auto flow    = std::make_shared<KimiOAuthFlow>();
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
+        auto store   = std::make_shared<KimiSessionStore>(std::string(config_dir));
+        auto flow    = std::make_shared<KimiOAuthFlow>(store);
         auto manager = std::make_shared<OAuthTokenManager>(
             "kimi", std::move(flow), std::move(store));
         manager->login();
@@ -491,7 +494,8 @@ AuthenticationManager::describe_provider(std::string_view provider) const {
 }
 
 std::string AuthenticationManager::logout(std::string_view provider,
-                                          bool revoke_remote) const {
+                                          bool revoke_remote,
+                                          const core::config::ConfigSource* source) const {
     const std::string requested = normalize(provider);
     for (const auto& strategy : strategies_) {
         if (!matches_login_provider(*strategy, requested)) continue;
@@ -523,6 +527,7 @@ std::string AuthenticationManager::logout(std::string_view provider,
             }
         }
 
+        if (source) source->claim_credential(store_key);
         store.clear(store_key);
         return std::string(strategy->display_name());
     }
@@ -540,6 +545,13 @@ std::shared_ptr<ICredentialSource> AuthenticationManager::create_credential_sour
     const std::string ptype = normalize(canonical_type);
     for (const auto& strategy : strategies_) {
         if (strategy->supports(ptype, auth_type)) {
+            if (provider_config.config_source && !strategy->token_store_key().empty()) {
+                return std::make_shared<ConfigCredentialSource>(provider_config.config_source,
+                    std::string(strategy->token_store_key()),
+                    [strategy, provider_config](const std::filesystem::path& directory) {
+                        return strategy->create_credential_source(provider_config, directory.string());
+                    });
+            }
             return strategy->create_credential_source(provider_config, config_dir_);
         }
     }

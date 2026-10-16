@@ -1174,7 +1174,8 @@ public:
                 auto manager =
                     core::auth::AuthenticationManager::create_with_defaults(config_dir);
                 // Best-effort server-side revocation + local credential clearing.
-                display_name = manager.logout(provider_name);
+                display_name = manager.logout(provider_name, true,
+                    core::config::ConfigManager::get_instance().get_config_source().get());
             } catch (const std::exception& error) {
                 error_message = error.what();
             }

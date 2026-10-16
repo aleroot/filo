@@ -1,11 +1,14 @@
 #pragma once
 
 #include "IOAuthFlow.hpp"
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 
 namespace core::auth {
+
+class IKimiSessionState;
 
 /**
  * @brief Kimi Code OAuth2 device flow implementation.
@@ -20,14 +23,14 @@ namespace core::auth {
  *   2. Request device authorization from that auth host
  *   3. Display user_code and verification_uri to user
  *   4. Poll token endpoint until user authorizes or timeout
- *   5. Store access_token, refresh_token, and the oauth host (token.issuer)
+ *   5. Return tokens and session metadata for the token manager to persist
  *
  * login() is blocking and may throw std::runtime_error on failure or timeout.
  * refresh() is blocking and may throw std::runtime_error on HTTP error.
  */
 class KimiOAuthFlow : public IOAuthFlow {
 public:
-    KimiOAuthFlow();
+    explicit KimiOAuthFlow(std::shared_ptr<IKimiSessionState> session_state);
 
     OAuthToken login() override;
     OAuthToken refresh(std::string_view refresh_token) override;
@@ -40,9 +43,7 @@ public:
     /**
      * @brief Generate common Kimi metadata headers.
      *
-     * The no-argument form matches the official Kimi Code client: it reads or
-     * creates a stable local device id and includes it as X-Msh-Device-Id.
-     * Callers with an OAuth token device id may pass it explicitly.
+     * Device identity is supplied by the caller's session or OAuth token.
      *
      * @return Map of header names to values:
      *   - X-Msh-Platform: "kimi_code_cli"
@@ -52,18 +53,8 @@ public:
      *   - X-Msh-Os-Version: OS version
      *   - X-Msh-Device-Id: stable local or caller-provided device id
      */
-    static std::unordered_map<std::string, std::string> getCommonHeaders();
     static std::unordered_map<std::string, std::string> getCommonHeaders(
         std::string_view device_id);
-
-    /// Last oauth host written by login(), if any.
-    static std::string persisted_oauth_host();
-    static void persist_oauth_host(std::string_view oauth_host);
-
-    /// Region-resolved auth host for a new device-code login.
-    static std::string resolved_oauth_host_for_login();
-    /// Region-resolved auth host for token refresh / API routing.
-    static std::string resolved_oauth_host_for_session();
 
 private:
     struct DeviceAuthorization {
@@ -77,14 +68,13 @@ private:
 
     std::string device_id_;
     std::string oauth_host_;
+    std::shared_ptr<IKimiSessionState> session_state_;
 
-    static std::string loadOrCreatePersistentDeviceId();
+    void load_session_identity();
 
     DeviceAuthorization requestDeviceAuthorization();
     OAuthToken pollForToken(const DeviceAuthorization& auth);
     OAuthToken exchangeRefreshToken(std::string_view refresh_token);
-
-    std::string getDeviceName() const;
 };
 
 } // namespace core::auth

@@ -71,8 +71,8 @@ struct CredentialCompanions {
     std::array<std::string_view, 2> files;
 };
 
-/// Kimi tokens embed a device id that must match the X-Msh-Device-Id header,
-/// which Filo reads from kimi_device_id (see KimiOAuthFlow.cpp).
+/// KimiSessionStore keeps the pre-login device identity and last OAuth host
+/// alongside tokens so the complete session remains portable.
 constexpr std::array kCredentialCompanions{
     CredentialCompanions{"kimi", {"kimi_device_id", "kimi_oauth_host"}},
 };
@@ -505,30 +505,36 @@ void place(JsonValue& root, ItemKind kind, std::string_view name, JsonValue frag
     return {item.kind, item.name, action, std::move(detail)};
 }
 
-[[nodiscard]] ImportedItem apply_credential(const BundleItem& item,
-                                            const PortabilityPaths& paths,
-                                            bool dry_run) {
+[[nodiscard]] std::optional<std::string> validate_credential(const BundleItem& item) {
     if (!FileTokenStore::is_valid_provider_id(item.name)) {
-        return failed(item, "credential name is not a valid token store name");
+        return "credential name is not a valid token store name";
     }
     const std::string token_file = FileTokenStore::file_name(item.name);
     const auto companions = companions_for(item.name);
-    if (!item.data.is_object()) return failed(item, "credential data must be an object");
+    if (!item.data.is_object()) return "credential data must be an object";
     for (const auto& [file, content] : item.data.members()) {
         const bool companion = std::ranges::contains(companions, file);
         if (file != token_file && !companion) {
-            return failed(item, std::format("unexpected file '{}' in credential", file));
+            return std::format("unexpected file '{}' in credential", file);
         }
         if (companion && !(is_json_file(file) ? content.is_object() : content.is_string())) {
-            return failed(item, std::format("'{}' must be {}", file,
-                                            is_json_file(file) ? "a JSON object" : "text"));
+            return std::format("'{}' must be {}", file,
+                               is_json_file(file) ? "a JSON object" : "text");
         }
     }
     const auto* token = item.data.find(token_file);
     const auto* access_token = token ? token->find("access_token") : nullptr;
     if (!access_token || access_token->as_string().empty()) {
-        return failed(item, std::format("{} has no access_token", token_file));
+        return std::format("{} has no access_token", token_file);
     }
+    return std::nullopt;
+}
+
+[[nodiscard]] ImportedItem apply_credential(const BundleItem& item,
+                                            const PortabilityPaths& paths,
+                                            bool dry_run) {
+    if (const auto error = validate_credential(item)) return failed(item, *error);
+    const std::string token_file = FileTokenStore::file_name(item.name);
 
     // Hold the lock the token manager rotates refresh tokens under, so a
     // concurrent refresh cannot overwrite the imported login.
@@ -739,6 +745,49 @@ ImportResult import_bundle(const Bundle& bundle,
         result.items[i] = apply(*selected[i], /*dry_run=*/false);
     }
     return result;
+}
+
+std::vector<std::string> credential_companion_files(std::string_view store) {
+    return companions_for(store);
+}
+
+ConfigOverlayFiles config_overlay_files(const Bundle& bundle) {
+    ConfigOverlayFiles files;
+    std::set<std::pair<ItemKind, std::string>> seen;
+    for (const auto& item : bundle.items) {
+        if (!seen.emplace(item.kind, item.name).second) {
+            throw std::runtime_error("duplicate bundle item: " + item.name);
+        }
+        if (item.kind == ItemKind::Memory) continue;
+        if (item.kind == ItemKind::Credential) {
+            if (const auto error = validate_credential(item)) {
+                throw std::runtime_error(item.name + ": " + *error);
+            }
+            for (const auto& [file, content] : item.data.members()) {
+                if (!files.credentials.emplace(file, content).second) {
+                    throw std::runtime_error("duplicate credential file: " + file);
+                }
+            }
+            continue;
+        }
+        if (!item.data.is_object() || item.data.members().empty()
+            || (item.kind == ItemKind::Setting && is_section_key(item.name))) {
+            throw std::runtime_error("invalid configuration item: " + item.name);
+        }
+        for (const auto& [file, fragment] : item.data.members()) {
+            if (!is_config_file(file)) {
+                throw std::runtime_error("unknown configuration file: " + file);
+            }
+            if (item.kind != ItemKind::Setting && !fragment.is_object()) {
+                throw std::runtime_error("configuration entry must be an object: " + item.name);
+            }
+            auto incoming = fragment;
+            if (item.kind == ItemKind::Mcp) incoming.set("name", item.name);
+            auto [it, _] = files.configuration.try_emplace(file, JsonValue::object());
+            place(it->second, item.kind, item.name, std::move(incoming));
+        }
+    }
+    return files;
 }
 
 } // namespace core::portability

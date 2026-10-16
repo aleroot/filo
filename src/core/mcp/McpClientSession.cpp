@@ -1617,9 +1617,10 @@ std::string normalize_streamable_http_response_body(std::string_view body) {
 std::unique_ptr<IMcpClientSession>
 make_mcp_session(const core::config::McpServerConfig& config,
                  McpSamplingCallback sampling_callback,
-                 std::string_view config_dir) {
+                 std::string_view config_dir,
+                 std::shared_ptr<McpHttpAuth> http_auth) {
     if (config.transport == "http") {
-        auto auth = make_mcp_http_auth(config, config_dir);
+        auto auth = http_auth ? std::move(http_auth) : make_mcp_http_auth(config, config_dir);
         const auto timeout = mcp_request_timeout(config, kDefaultMcpHttpTimeout);
         return std::make_unique<HttpMcpSession>(
             config,

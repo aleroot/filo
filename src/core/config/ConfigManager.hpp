@@ -6,10 +6,14 @@
 #include <optional>
 #include <filesystem>
 #include <string_view>
+#include <memory>
 #include "core/llm/ResponseFormat.hpp"
 #include "core/llm/routing/PolicyConfig.hpp"
 
 namespace core::config {
+
+class ConfigSource;
+struct ConfigDocument;
 
 enum class SettingsScope {
     User,
@@ -117,6 +121,8 @@ struct McpServerConfig {
     std::vector<std::string> oauth_scopes;
     std::string oauth_client_id;     // skip DCR when pre-registered
     std::string oauth_client_secret; // confidential clients only (0600 store)
+    /// Runtime context; not part of the persisted server configuration.
+    std::shared_ptr<const ConfigSource> config_source = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +185,8 @@ struct ProviderConfig {
 
     /// Populated only when api_type is LlamaCppLocal.
     std::optional<LocalModelConfig> local;
+    /// Runtime context; not part of the persisted provider configuration.
+    std::shared_ptr<const ConfigSource> config_source = {};
 };
 
 struct SubagentConfig {
@@ -312,6 +320,8 @@ public:
     }
 
     void load(std::optional<std::filesystem::path> working_dir = std::nullopt);
+    void set_config_override(std::optional<std::filesystem::path> input);
+    [[nodiscard]] std::shared_ptr<const ConfigSource> get_config_source() const { return config_source_; }
 
     const AppConfig& get_config() const { return config_; }
 
@@ -375,12 +385,15 @@ public:
 
 private:
     ConfigManager() = default;
+    void apply_config_override(const ConfigDocument& document,
+                               const std::vector<std::string>& applied_profiles);
     AppConfig config_;
     ManagedSettings user_settings_;
     ManagedSettings workspace_settings_;
     std::unordered_map<std::string, ProfileConfig> profiles_;
     std::string active_profile_;
     std::filesystem::path last_working_dir_;
+    std::shared_ptr<const ConfigSource> config_source_;
 };
 
 } // namespace core::config

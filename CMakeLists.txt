@@ -228,6 +228,8 @@ set(FILO_CORE_SOURCES
     src/tui/SelectionClipboardCopier.cpp
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
+    src/core/config/ConfigSource.cpp
+    src/core/config/ConfigDocument.cpp
     src/core/config/ModelDefaultsPersistence.cpp
     src/core/config/SessionModelOverride.cpp
     src/core/llm/providers/RouterProvider.cpp
@@ -288,6 +290,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/routing/AutoClassifier.cpp
     src/core/llm/routing/ComplexityScorer.cpp
     src/core/auth/FileTokenStore.cpp
+    src/core/auth/ConfigCredentialSource.cpp
     src/core/auth/AuthBrowserLauncher.cpp
     src/core/auth/ApiKeyPromptStrategy.cpp
     src/core/auth/GoogleCodeAssist.cpp
@@ -301,6 +304,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/CodexClientIdentity.cpp
     src/core/auth/KimiOAuthFlow.cpp
+    src/core/auth/KimiSessionStore.cpp
     src/core/auth/MimoOAuthFlow.cpp
     src/core/auth/MimoAuthenticationStrategy.cpp
     src/core/auth/QwenOAuthFlow.cpp
@@ -681,6 +685,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_history.cpp
     tests/test_history_compaction_planner.cpp
     tests/test_config_manager.cpp
+    tests/test_config_overlay.cpp
     tests/test_model_defaults_persistence.cpp
     tests/test_session_model_override.cpp
     tests/test_context_mentions.cpp
@@ -860,6 +865,11 @@ set_tests_properties(landrun_native_confinement PROPERTIES
 )
 
 add_test(NAME filo_version COMMAND filo --version)
+add_test(NAME filo_config_overlay_cli
+    COMMAND ${CMAKE_COMMAND}
+        -DFILO_EXECUTABLE=$<TARGET_FILE:filo>
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_config_overlay_cli.cmake)
 set_tests_properties(filo_version PROPERTIES
     PASS_REGULAR_EXPRESSION "^filo ${PROJECT_VERSION}"
     TIMEOUT 10

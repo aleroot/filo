@@ -212,17 +212,25 @@ int main(int argc, char** argv) {
                     kNoSteeringToken));
 
     core::cli::ConfigTransferRequest transfer;
+    std::string config_source;
+    auto* config_opt = app.add_option(
+        "--config", config_source,
+        "Overlay an exported config bundle or config directory on the default configuration. "
+        "Missing values fall back to the normal setup; the source stays read-only and "
+        "changes are saved in Filo's state directory, isolated per config.");
     auto* export_opt = app.add_option(
         "--export", transfer.export_target,
         "Export settings, providers, MCP servers, memories (and, with --include-secrets, "
         "OAuth logins and API keys) to a bundle file, or - for stdout, and exit. "
         "Without a value, use with --dry-run to list what would be exported.")
-        ->expected(0, 1);
+        ->expected(0, 1)
+        ->excludes(config_opt);
     auto* import_opt = app.add_option(
         "--import", transfer.import_source,
         "Import a bundle written by --export (- reads stdin) and exit. Replaced items "
         "are backed up first; memories are merged.")
-        ->excludes(export_opt);
+        ->excludes(export_opt)
+        ->excludes(config_opt);
     const std::string selector_help = core::cli::config_transfer_selector_help();
     auto* only_opt = app.add_option(
         "--only", transfer.only,
@@ -261,6 +269,15 @@ int main(int argc, char** argv) {
         return core::cli::run_config_transfer(
             transfer, core::portability::PortabilityPaths::current(),
             std::cin, std::cout, std::cerr);
+    }
+
+    if (config_opt->count() > 0) {
+        try {
+            core::config::ConfigManager::get_instance().set_config_override(config_source);
+        } catch (const std::exception& error) {
+            std::cerr << "--config: " << error.what() << '\n';
+            return 2;
+        }
     }
 
     if (sandbox_opt->count() > 0) {
@@ -501,6 +518,10 @@ int main(int argc, char** argv) {
     try {
         core::config::ConfigManager::get_instance().load();
     } catch (const std::exception& e) {
+        if (config_opt->count() > 0) {
+            std::cerr << "--config: " << e.what() << '\n';
+            return 2;
+        }
         core::logging::warn("Could not load configuration: {}", e.what());
     }
 
@@ -520,7 +541,8 @@ int main(int argc, char** argv) {
             const std::string config_dir =
                 core::config::ConfigManager::get_instance().get_config_dir();
             auto manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
-            std::cout << "Signed out of " << manager.logout(auth_provider) << ".\n";
+            std::cout << "Signed out of " << manager.logout(auth_provider, true,
+                core::config::ConfigManager::get_instance().get_config_source().get()) << ".\n";
             return 0;
         } catch (const std::exception& e) {
             core::logging::error("Logout failed: {}", e.what());

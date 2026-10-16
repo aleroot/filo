@@ -1,4 +1,6 @@
 #include "ConfigManager.hpp"
+#include "ConfigSource.hpp"
+#include "ConfigDocument.hpp"
 #include <simdjson.h>
 #include <pwd.h>
 #include <unistd.h>
@@ -18,6 +20,8 @@
 #include <array>
 #include <format>
 #include <stdexcept>
+#include <set>
+#include <map>
 
 namespace core::config {
 
@@ -767,8 +771,7 @@ std::string default_config_json() {
 )";
 }
 
-ProviderConfig parse_provider(simdjson::dom::object provider_obj) {
-    ProviderConfig provider;
+ProviderConfig parse_provider(simdjson::dom::object provider_obj, ProviderConfig provider = {}) {
 
     std::string_view value;
     if (!provider_obj["api_type"].get(value)) provider.api_type = api_type_from_string(value);
@@ -804,8 +807,8 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj) {
     {
         const bool is_local_type = (provider.api_type == ApiType::LlamaCppLocal);
 
-        LocalModelConfig local;
-        bool has_local = is_local_type;
+        LocalModelConfig local = provider.local.value_or(LocalModelConfig{});
+        bool has_local = is_local_type || provider.local.has_value();
 
         // Universal local-model keys (shared across all engines)
         if (!provider_obj["model_path"].get(value)) {
@@ -826,8 +829,8 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj) {
         // convenience (e.g. "context_size": 8192 directly in the provider object).
         // Sub-object values take precedence over flat values when both are present.
         {
-            LlamaCppConfig ll;
-            bool has_ll = false;
+            LlamaCppConfig ll = local.llamacpp.value_or(LlamaCppConfig{});
+            bool has_ll = local.llamacpp.has_value();
 
             // Flat top-level convenience keys (matches README examples).
             if (!provider_obj["context_size"].get(iv))  { ll.context_size  = static_cast<int>(iv); has_ll = true; }
@@ -865,8 +868,7 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj) {
     return provider;
 }
 
-SubagentConfig parse_subagent(simdjson::dom::object subagent_obj) {
-    SubagentConfig subagent;
+SubagentConfig parse_subagent(simdjson::dom::object subagent_obj, SubagentConfig subagent = {}) {
 
     std::string_view value;
     if (!subagent_obj["description"].get(value)) subagent.description = std::string(value);
@@ -953,13 +955,14 @@ std::optional<std::vector<std::string>> parse_string_array(
     return std::nullopt;
 }
 
-ToolPolicyConfig parse_tool_policy(simdjson::dom::object tool_obj) {
-    ToolPolicyConfig policy;
-    policy.allowed_paths = parse_string_array(tool_obj, {"allowed_paths", "allowed-paths"});
-    policy.denied_paths = parse_string_array(tool_obj, {"denied_paths", "denied-paths"});
-    policy.allowed_commands =
-        parse_string_array(tool_obj, {"allowed_commands", "allowed-commands"});
-    policy.trusted_urls = parse_string_array(tool_obj, {"trusted_urls", "trusted-urls"});
+ToolPolicyConfig parse_tool_policy(simdjson::dom::object tool_obj, ToolPolicyConfig policy = {}) {
+    const auto assign = [&](auto& slot, std::initializer_list<std::string_view> keys) {
+        if (auto value = parse_string_array(tool_obj, keys)) slot = std::move(value);
+    };
+    assign(policy.allowed_paths, {"allowed_paths", "allowed-paths"});
+    assign(policy.denied_paths, {"denied_paths", "denied-paths"});
+    assign(policy.allowed_commands, {"allowed_commands", "allowed-commands"});
+    assign(policy.trusted_urls, {"trusted_urls", "trusted-urls"});
     return policy;
 }
 
@@ -1029,6 +1032,7 @@ void parse_hook_list(simdjson::dom::object hooks_obj,
             continue;
         }
 
+        out.clear();
         for (simdjson::dom::element hook_el : hook_arr) {
             HookCommandConfig hook = parse_hook_command(hook_el);
             if (!hook.command.empty()) {
@@ -1039,8 +1043,7 @@ void parse_hook_list(simdjson::dom::object hooks_obj,
     }
 }
 
-HookConfig parse_hook_config(simdjson::dom::object hooks_obj) {
-    HookConfig hooks;
+HookConfig parse_hook_config(simdjson::dom::object hooks_obj, HookConfig hooks = {}) {
     parse_hook_list(
         hooks_obj,
         {"user_prompt_submit", "user-prompt-submit"},
@@ -1064,8 +1067,7 @@ HookConfig parse_hook_config(simdjson::dom::object hooks_obj) {
     return hooks;
 }
 
-ManagedSettings parse_managed_settings_file(const fs::path& settings_path) {
-    simdjson::padded_string json = simdjson::padded_string::load(settings_path.string());
+ManagedSettings parse_managed_settings_json(simdjson::padded_string json) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc = parser.parse(json);
 
@@ -1077,6 +1079,10 @@ ManagedSettings parse_managed_settings_file(const fs::path& settings_path) {
         }
     }
     return parsed;
+}
+
+ManagedSettings parse_managed_settings_file(const fs::path& path) {
+    return parse_managed_settings_json(simdjson::padded_string::load(path.string()));
 }
 
 std::string serialize_managed_settings(const ManagedSettings& settings) {
@@ -1121,7 +1127,9 @@ struct ParsedConfigFile {
     std::optional<std::string> active_profile;
 };
 
-void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
+void parse_config_object(simdjson::dom::object doc, AppConfig& parsed,
+                         const AppConfig* defaults = nullptr) {
+    if (defaults) parsed = *defaults;
     std::string_view value;
     if (!doc["default_provider"].get(value)) {
         parsed.default_provider = std::string(value);
@@ -1198,7 +1206,8 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
         for (auto field : providers_obj) {
             simdjson::dom::object provider_obj;
             if (!field.value.get(provider_obj)) {
-                parsed.providers[std::string(field.key)] = parse_provider(provider_obj);
+                auto& provider = parsed.providers[std::string(field.key)];
+                provider = parse_provider(provider_obj, defaults ? std::move(provider) : ProviderConfig{});
             }
         }
     }
@@ -1211,7 +1220,8 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
                 const std::string normalized_name =
                     normalize_subagent_name(std::string(field.key));
                 if (!normalized_name.empty()) {
-                    parsed.subagents[normalized_name] = parse_subagent(subagent_obj);
+                    auto& subagent = parsed.subagents[normalized_name];
+                    subagent = parse_subagent(subagent_obj, defaults ? std::move(subagent) : SubagentConfig{});
                 }
             }
         }
@@ -1228,7 +1238,8 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
             if (field.value.get(tool_obj) != simdjson::SUCCESS) {
                 continue;
             }
-            parsed.tool_policies[std::string(field.key)] = parse_tool_policy(tool_obj);
+            auto& policy = parsed.tool_policies[std::string(field.key)];
+            policy = parse_tool_policy(tool_obj, defaults ? std::move(policy) : ToolPolicyConfig{});
         }
         return true;
     };
@@ -1237,22 +1248,27 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
 
     simdjson::dom::object hooks_obj;
     if (!doc["hooks"].get(hooks_obj)) {
-        parsed.hooks = parse_hook_config(hooks_obj);
+        parsed.hooks = parse_hook_config(hooks_obj, defaults ? std::move(parsed.hooks) : HookConfig{});
     }
 
     simdjson::dom::object router_obj;
     if (!doc["router"].get(router_obj)) {
         parsed.has_router_section = true;
         std::string error;
-        if (!core::llm::routing::parse_router_config(router_obj, parsed.router, error)) {
+        if (!core::llm::routing::parse_router_config(router_obj, parsed.router, error, defaults ? parsed.router : core::llm::routing::RouterConfig{})) {
             throw std::runtime_error(std::string("router config invalid: ") + error);
         }
     }
 
     simdjson::dom::array mcp_arr;
     if (!doc["mcp_servers"].get(mcp_arr)) {
+        if (mcp_arr.size() == 0) parsed.mcp_servers.clear();
         for (simdjson::dom::element srv : mcp_arr) {
-            McpServerConfig server;
+            std::string_view name;
+            (void)srv["name"].get(name);
+            auto existing = defaults ? std::ranges::find(parsed.mcp_servers, name, &McpServerConfig::name)
+                                     : parsed.mcp_servers.end();
+            McpServerConfig server = existing == parsed.mcp_servers.end() ? McpServerConfig{} : *existing;
             if (!srv["name"].get(value))      server.name = std::string(value);
             if (!srv["transport"].get(value)) server.transport = std::string(value);
             if (!srv["command"].get(value))   server.command = std::string(value);
@@ -1288,14 +1304,16 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
 
             simdjson::dom::array oauth_scopes_arr;
             if (!srv["oauth_scopes"].get(oauth_scopes_arr)) {
+                server.oauth_scopes.clear();
                 for (simdjson::dom::element scope_item : oauth_scopes_arr) {
                     std::string_view scope_sv;
                     if (scope_item.get(scope_sv) == simdjson::SUCCESS && !scope_sv.empty()) {
                         server.oauth_scopes.emplace_back(scope_sv);
                     }
                 }
-            } else if (!srv["oauth_scopes"].get(value) && !value.empty()) {
+            } else if (!srv["oauth_scopes"].get(value)) {
                 // space/comma separated string
+                server.oauth_scopes.clear();
                 std::string_view raw = value;
                 std::size_t i = 0;
                 while (i < raw.size()) {
@@ -1315,6 +1333,7 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
 
             simdjson::dom::array args_arr;
             if (!srv["args"].get(args_arr)) {
+                server.args.clear();
                 for (simdjson::dom::element arg : args_arr) {
                     std::string_view arg_value;
                     if (!arg.get(arg_value)) server.args.push_back(std::string(arg_value));
@@ -1323,6 +1342,7 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
 
             simdjson::dom::array env_arr;
             if (!srv["env"].get(env_arr)) {
+                server.env.clear();
                 for (simdjson::dom::element env_item : env_arr) {
                     std::string_view env_value;
                     if (!env_item.get(env_value)) server.env.push_back(std::string(env_value));
@@ -1336,12 +1356,18 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
                 for (auto [key, val] : headers_obj) {
                     std::string_view header_value;
                     if (val.get(header_value) == simdjson::SUCCESS) {
-                        server.headers.emplace_back(std::string(key), std::string(header_value));
+                        const auto normalized = core::utils::str::to_lower_ascii_copy(key);
+                        auto header = defaults ? std::ranges::find_if(server.headers, [&](const auto& entry) {
+                            return core::utils::str::to_lower_ascii_copy(entry.first) == normalized;
+                        }) : server.headers.end();
+                        if (header == server.headers.end()) server.headers.emplace_back(std::string(key), std::string(header_value));
+                        else header->second = std::string(header_value);
                     }
                 }
             } else {
                 simdjson::dom::array headers_arr;
                 if (!srv["headers"].get(headers_arr)) {
+                    server.headers.clear();
                     for (simdjson::dom::element header_item : headers_arr) {
                         std::string_view header_value;
                         if (header_item.get(header_value) != simdjson::SUCCESS) continue;
@@ -1365,7 +1391,8 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
             }
 
             if (!server.name.empty() && !server.transport.empty()) {
-                parsed.mcp_servers.push_back(std::move(server));
+                if (existing == parsed.mcp_servers.end()) parsed.mcp_servers.push_back(std::move(server));
+                else *existing = std::move(server);
             }
         }
     }
@@ -1415,8 +1442,7 @@ ProfileConfig parse_profile_config(simdjson::dom::object profile_obj) {
     return profile;
 }
 
-ParsedConfigFile parse_config_file(const fs::path& config_path) {
-    simdjson::padded_string json = simdjson::padded_string::load(config_path.string());
+ParsedConfigFile parse_config_json(simdjson::padded_string json, std::optional<AppConfig> defaults = std::nullopt) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc = parser.parse(json);
     simdjson::dom::object root;
@@ -1425,7 +1451,7 @@ ParsedConfigFile parse_config_file(const fs::path& config_path) {
     }
 
     ParsedConfigFile parsed;
-    parse_config_object(root, parsed.config);
+    parse_config_object(root, parsed.config, defaults ? &*defaults : nullptr);
 
     std::string_view value;
     if (!root["active_profile"].get(value)) {
@@ -1452,6 +1478,10 @@ ParsedConfigFile parse_config_file(const fs::path& config_path) {
     }
 
     return parsed;
+}
+
+ParsedConfigFile parse_config_file(const fs::path& path) {
+    return parse_config_json(simdjson::padded_string::load(path.string()));
 }
 
 void merge_into(AppConfig& base, const AppConfig& overlay) {
@@ -1670,9 +1700,14 @@ bool apply_profile_overlay_recursive(
 bool apply_profile_overlay(const std::string& profile_name,
                            const std::unordered_map<std::string, ProfileConfig>& profiles,
                            AppConfig& config,
-                           std::string& error) {
+                           std::string& error,
+                           std::vector<std::string>* applied = nullptr) {
     std::unordered_map<std::string, int> visit_state;
-    return apply_profile_overlay_recursive(profile_name, profiles, config, visit_state, error);
+    const bool success = apply_profile_overlay_recursive(profile_name, profiles, config, visit_state, error);
+    if (applied) {
+        for (const auto& [name, state] : visit_state) if (state == 2) applied->push_back(name);
+    }
+    return success;
 }
 
 bool write_text_atomic(const fs::path& path,
@@ -1775,7 +1810,8 @@ std::string default_user_config_json() {
     return default_config_json();
 }
 
-std::string ConfigManager::get_config_dir() const {
+namespace {
+std::string default_config_directory() {
     const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
     if (xdg_config && xdg_config[0] != '\0') {
         return std::string(xdg_config) + "/filo";
@@ -1796,13 +1832,38 @@ std::string ConfigManager::get_config_dir() const {
     return ".filo"; // fallback to current dir
 }
 
+} // namespace
+
+std::string ConfigManager::get_config_dir() const {
+    return config_source_ ? config_source_->state_directory().string() : default_config_directory();
+}
+
+void ConfigManager::set_config_override(std::optional<fs::path> input) {
+    config_source_ = input ? ConfigSource::open(*input, default_config_directory()) : nullptr;
+}
+
 std::string ConfigManager::get_auth_default_provider() const {
     const fs::path overlay_path = auth_defaults_overlay_path(get_config_dir());
     try {
-        if (!fs::exists(overlay_path)) {
-            return {};
+        std::string provider;
+        if (config_source_) {
+            const auto fallback = auth_defaults_overlay_path(config_source_->fallback_directory());
+            if (fs::exists(fallback)) provider = parse_config_file(fallback).config.default_provider;
+            const auto& documents = config_source_->documents();
+            if (const auto auth = documents.find("auth_defaults.json"); auth != documents.end()) {
+                if (const auto* selected = auth->second.find("default_provider")) provider = selected->as_string();
+            }
         }
-        return parse_config_file(overlay_path).config.default_provider;
+        if (fs::exists(overlay_path)) {
+            if (config_source_) {
+                if (const auto document = ConfigSource::read_document(overlay_path)) {
+                    if (const auto* selected = document->find("default_provider")) provider = selected->as_string();
+                }
+            } else {
+                provider = parse_config_file(overlay_path).config.default_provider;
+            }
+        }
+        return provider;
     } catch (const std::exception& error) {
         core::logging::warn(
             "Failed to read authentication provider from '{}': {}",
@@ -1826,7 +1887,8 @@ std::filesystem::path ConfigManager::get_mcp_overlay_path(
 
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
-    return workspace_mcp_overlay_path(cwd);
+    return config_source_ ? config_source_->workspace_state_directory(cwd) / "mcp_servers.json"
+                          : workspace_mcp_overlay_path(cwd);
 }
 
 std::filesystem::path ConfigManager::get_settings_path(
@@ -1839,17 +1901,22 @@ std::filesystem::path ConfigManager::get_settings_path(
 
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
-    return workspace_settings_path(cwd);
+    return config_source_ ? config_source_->workspace_state_directory(cwd) / "settings.json"
+                          : workspace_settings_path(cwd);
 }
 
 void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
+    if (config_source_) {
+        config_source_ = ConfigSource::open(config_source_->input_path(), config_source_->fallback_directory());
+    }
     config_ = make_default_config();
     user_settings_ = {};
     workspace_settings_ = {};
     profiles_.clear();
     active_profile_.clear();
 
-    const fs::path config_dir = get_config_dir();
+    const fs::path config_dir = config_source_ ? config_source_->fallback_directory() : fs::path(get_config_dir());
+    if (config_source_) config_source_->verify_available();
     const fs::path global_config_path = config_dir / "config.json";
     const fs::path model_overlay_path = model_defaults_overlay_path(config_dir);
     const fs::path profile_overlay_path = profile_defaults_overlay_path(config_dir);
@@ -1863,7 +1930,7 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     const fs::path workspace_mcp_overlay = workspace_mcp_overlay_path(cwd);
     std::optional<std::string> selected_profile;
 
-    if (!fs::exists(global_config_path)) {
+    if (!config_source_ && !fs::exists(global_config_path)) {
         std::string lock_error;
         auto file_lock = core::utils::InterprocessFileLock::acquire(
             core::utils::lock_path_for(global_config_path), &lock_error);
@@ -1882,6 +1949,10 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
         }
     }
 
+    if (config_source_ && !fs::exists(global_config_path)) {
+        const auto defaults = parse_config_json(simdjson::padded_string(default_config_json()));
+        merge_into(config_, defaults.config);
+    }
     load_optional_config(global_config_path, config_, profiles_, selected_profile);
     load_optional_config(auth_overlay_path, config_, profiles_, selected_profile);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
@@ -1899,10 +1970,12 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
         }
     }
 
+    std::vector<std::string> applied_profiles;
     if (selected_profile.has_value()) {
         active_profile_ = *selected_profile;
         std::string profile_error;
-        if (!apply_profile_overlay(active_profile_, profiles_, config_, profile_error)) {
+        if (!apply_profile_overlay(active_profile_, profiles_, config_, profile_error,
+                                   config_source_ ? &applied_profiles : nullptr)) {
             core::logging::warn(
                 "Failed to apply active profile '{}': {}",
                 active_profile_,
@@ -1912,7 +1985,83 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
 
     std::optional<std::string> ignored_profile;
     load_optional_config(model_overlay_path, config_, profiles_, ignored_profile);
+    if (config_source_) {
+        const auto supplied = ConfigDocument::load(*config_source_, cwd);
+        apply_config_override(supplied, applied_profiles);
+        for (auto& [name, provider] : config_.providers) {
+            apply_api_key_fallback(name, provider);
+            provider.config_source = config_source_;
+        }
+        for (auto& server : config_.mcp_servers) server.config_source = config_source_;
+    }
     inherit_kimi_oauth_for_code_presets(config_);
+}
+
+void ConfigManager::apply_config_override(const ConfigDocument& document,
+                                          const std::vector<std::string>& applied_profiles) {
+    const auto inherited_profiles = profiles_;
+    const auto parse = [](const core::utils::JsonValue& values, AppConfig defaults) {
+        return parse_config_json(simdjson::padded_string(values.dump()), std::move(defaults));
+    };
+    std::map<std::string, std::vector<const core::utils::JsonValue*>> profile_patches;
+    bool profile_changed = false;
+    for (const auto& layer : document.layers) {
+        auto supplied = parse(layer, std::move(config_));
+        config_ = std::move(supplied.config);
+        for (const auto& [name, profile] : supplied.profiles) {
+            auto& current = profiles_[name];
+            const auto& raw = *layer.find("profiles")->find(name);
+            current.overlay = parse(raw, std::move(current.overlay)).config;
+            if (raw.find("description")) current.description = profile.description;
+            if (raw.find("extends") || raw.find("extends_from")) current.extends_from = profile.extends_from;
+            profile_patches[name].push_back(&raw);
+            profile_changed = true;
+        }
+        if (const auto* active = layer.find("active_profile")) {
+            active_profile_ = normalize_profile_name(active->as_string());
+            profile_changed = true;
+        }
+    }
+    if (const char* env = std::getenv("FILO_PROFILE"); env && env[0] != '\0') {
+        const auto normalized = normalize_profile_name(env);
+        if (!normalized.empty()) active_profile_ = normalized;
+    }
+
+    // Baseline profiles have already run. Apply only supplied patches to those
+    // profiles; newly selected profiles also inherit their original definition.
+    const std::set<std::string> inherited(applied_profiles.begin(), applied_profiles.end());
+    std::set<std::string> visiting, applied;
+    const auto apply = [&](auto&& self, const std::string& name) -> void {
+        if (applied.contains(name)) return;
+        if (!visiting.insert(name).second) throw std::runtime_error("cycle in configuration profile: " + name);
+        const auto it = profiles_.find(name);
+        if (it == profiles_.end()) throw std::runtime_error("configuration profile is not defined: " + name);
+        for (const auto& parent : it->second.extends_from) self(self, parent);
+        if (!inherited.contains(name)) {
+            if (const auto base = inherited_profiles.find(name); base != inherited_profiles.end()) {
+                merge_into(config_, base->second.overlay);
+            }
+        }
+        if (const auto patches = profile_patches.find(name); patches != profile_patches.end()) {
+            for (const auto* patch : patches->second) config_ = parse(*patch, std::move(config_)).config;
+        }
+        visiting.erase(name);
+        applied.insert(name);
+    };
+    if (!active_profile_.empty() && profile_changed) {
+        apply(apply, active_profile_);
+    }
+    for (const auto& layer : document.model_defaults) {
+        auto models = parse(layer, std::move(config_));
+        config_ = std::move(models.config);
+        merge_profiles(profiles_, models.profiles);
+    }
+    const auto user = parse_managed_settings_json(simdjson::padded_string(document.user_settings.dump()));
+    const auto workspace = parse_managed_settings_json(simdjson::padded_string(document.workspace_settings.dump()));
+    for (const auto& descriptor : kManagedSettingDescriptors) {
+        if (const auto& value = user.*(descriptor.slot)) user_settings_.*(descriptor.slot) = value;
+        if (const auto& value = workspace.*(descriptor.slot)) workspace_settings_.*(descriptor.slot) = value;
+    }
 }
 
 bool ConfigManager::persist_managed_setting(SettingsScope scope,

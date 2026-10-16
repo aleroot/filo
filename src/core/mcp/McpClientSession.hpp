@@ -274,7 +274,8 @@ private:
 [[nodiscard]] std::unique_ptr<IMcpClientSession>
 make_mcp_session(const core::config::McpServerConfig& config,
                  McpSamplingCallback sampling_callback = {},
-                 std::string_view config_dir = {});
+                 std::string_view config_dir = {},
+                 std::shared_ptr<McpHttpAuth> http_auth = {});
 
 // ---------------------------------------------------------------------------
 // parse_tools_list — converts a tools/list JSON result into McpToolDef vector.

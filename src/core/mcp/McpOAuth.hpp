@@ -5,6 +5,7 @@
 #include "core/config/ConfigManager.hpp"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -169,7 +170,10 @@ parse_www_authenticate_resource_metadata(std::string_view header_value);
  */
 class McpHttpAuth {
 public:
-    McpHttpAuth(core::config::McpServerConfig config, std::string config_dir);
+    // The caller may supply a live token loader. Directory selection stays at the composition boundary; this class only requests tokens and refreshes.
+    using TokenLoader = std::function<std::optional<core::auth::OAuthToken>(bool force_refresh)>;
+    McpHttpAuth(core::config::McpServerConfig config, std::string config_dir,
+                TokenLoader token_loader = {});
     ~McpHttpAuth() = default;
 
     McpHttpAuth(const McpHttpAuth&) = delete;
@@ -197,6 +201,7 @@ private:
 
     core::config::McpServerConfig config_;
     std::string config_dir_;
+    TokenLoader token_loader_;
     std::vector<std::pair<std::string, std::string>> static_headers_;
     bool oauth_mode_ = false;
     mutable std::mutex mutex_;
@@ -205,6 +210,7 @@ private:
 
 [[nodiscard]] std::shared_ptr<McpHttpAuth>
 make_mcp_http_auth(const core::config::McpServerConfig& config,
-                   std::string_view config_dir);
+                   std::string_view config_dir,
+                   McpHttpAuth::TokenLoader token_loader = {});
 
 } // namespace core::mcp

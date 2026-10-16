@@ -1,6 +1,7 @@
 #include "CommandPolicy.hpp"
 
 #include "../config/ConfigManager.hpp"
+#include "../config/ConfigSource.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/JsonUtils.hpp"
 
@@ -548,7 +549,9 @@ CommandDecision CommandPolicy::decide(std::string_view line) const noexcept {
 // ---------------------------------------------------------------------------
 
 std::string user_command_rules_path() {
-    const std::string config_dir = core::config::ConfigManager::get_instance().get_config_dir();
+    const auto& config = core::config::ConfigManager::get_instance();
+    if (const auto source = config.get_config_source()) return source->resolve_file("command_rules.json").string();
+    const std::string config_dir = config.get_config_dir();
     return config_dir.empty() ? std::string{} : config_dir + "/command_rules.json";
 }
 

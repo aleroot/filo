@@ -4,6 +4,7 @@
 #include "McpOAuth.hpp"
 #include "McpSamplingBridge.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../config/ConfigSource.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/LLMProvider.hpp"
 #include <stdexcept>
@@ -76,10 +77,19 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
                 };
             }
 
-            // Pass config_dir so HttpMcpSession can resolve OAuth and refresh
-            // mid-session on 401 (do not bake a one-shot bearer into headers).
+            McpHttpAuth::TokenLoader token_loader;
+            if (const auto source = srv_config.config_source; source && srv_config.transport == "http") {
+                token_loader = [source, name = srv_config.name](bool force_refresh) {
+                    const auto directory = source->credential_directory(mcp_oauth_provider_id(name)).string();
+                    return force_refresh ? force_refresh_mcp_oauth_token(name, directory)
+                                         : load_valid_mcp_oauth_token(name, directory);
+                };
+            }
+            // Compose directory selection here. HTTP auth receives only the
+            // token operation, including refresh after a server's 401 response.
+            auto http_auth = make_mcp_http_auth(srv_config, config_dir, std::move(token_loader));
             std::shared_ptr<IMcpClientSession> session =
-                make_mcp_session(srv_config, sampling_callback, config_dir);
+                make_mcp_session(srv_config, sampling_callback, config_dir, std::move(http_auth));
             std::vector<McpToolDef> tools = session->initialize();
 
             ServerEntry entry;
