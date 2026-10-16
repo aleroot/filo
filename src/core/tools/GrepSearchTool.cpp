@@ -302,31 +302,119 @@ private:
     return std::string_view(" _:,-=<>!@#%&~'\";/`").find(c) != std::string_view::npos;
 }
 
-/// The literal every match of one alternative must contain: its leading run of
-/// plain characters after any zero-width `^`, `\b` or `\B`. A quantifier on
-/// the run's last character drops that character. Empty when none is proven.
-[[nodiscard]] std::string_view required_branch_literal(std::string_view branch) {
-    std::size_t begin = 0;
-    for (;;) {
-        if (branch.substr(begin).starts_with('^')) {
-            begin += 1;
-        } else if (branch.substr(begin).starts_with("\\b") || branch.substr(begin).starts_with("\\B")) {
-            begin += 2;
+/// End of the escape whose backslash is at @p i. Escapes that span several
+/// characters (`\x41`, `\u0041`, `\cJ`, `\12`) are consumed whole, so their
+/// tail is never mistaken for literal text.
+[[nodiscard]] std::size_t skip_regex_escape(std::string_view s, std::size_t i) noexcept {
+    i += 1;
+    if (i >= s.size()) return i;
+    const char kind = s[i++];
+    const auto skip = [&](std::size_t max, bool digits) {
+        for (std::size_t k = 0; k < max && i < s.size(); ++k, ++i) {
+            const auto c = static_cast<unsigned char>(s[i]);
+            if (digits ? std::isdigit(c) == 0 : std::isxdigit(c) == 0) break;
+        }
+    };
+    if (kind >= '0' && kind <= '9') skip(s.size(), true);
+    else if (kind == 'x') skip(2, false);
+    else if (kind == 'u') skip(4, false);
+    else if (kind == 'c' && i < s.size()) ++i;
+    return i;
+}
+
+/// End of the bracket class that opens at @p i.
+[[nodiscard]] std::size_t skip_regex_class(std::string_view s, std::size_t i) noexcept {
+    i += 1;
+    while (i < s.size() && s[i] != ']') i = s[i] == '\\' ? skip_regex_escape(s, i) : i + 1;
+    return std::min(i + 1, s.size());
+}
+
+/// End of the group that opens at @p i, nested groups and classes included.
+[[nodiscard]] std::size_t skip_regex_group(std::string_view s, std::size_t i) noexcept {
+    int depth = 0;
+    while (i < s.size()) {
+        const char c = s[i];
+        if (c == '\\') {
+            i = skip_regex_escape(s, i);
+        } else if (c == '[') {
+            i = skip_regex_class(s, i);
         } else {
-            break;
+            ++i;
+            if (c == '(') ++depth;
+            else if (c == ')' && --depth == 0) break;
         }
     }
-    std::size_t end = begin;
-    while (end < branch.size() && is_plain_regex_char(branch[end])) ++end;
-    if (end < branch.size() && std::string_view("*+?{").find(branch[end]) != std::string_view::npos) {
-        if (end == begin) return {};
-        --end;
+    return i;
+}
+
+[[nodiscard]] std::vector<std::string_view> required_regex_literals(std::string_view pattern);
+
+/// Literals one of which every match of one alternative must contain; empty
+/// when none is proven. Candidates are each run of plain characters outside
+/// any group, class or escape, wherever it sits (a quantifier on the run's
+/// last character drops that character), and each group that must match,
+/// through the literals its own alternatives require. Optional groups and
+/// lookarounds are skipped. The candidate whose shortest literal is longest
+/// filters best, and wins.
+[[nodiscard]] std::vector<std::string_view> required_branch_literals(std::string_view branch) {
+    std::vector<std::string_view> best;
+    std::size_t best_floor = 0;
+    const auto offer = [&](std::vector<std::string_view> candidate) {
+        if (candidate.empty()) return;
+        std::size_t floor = candidate.front().size();
+        for (const auto text : candidate) floor = std::min(floor, text.size());
+        if (floor > best_floor || (floor == best_floor && candidate.size() < best.size())) {
+            best = std::move(candidate);
+            best_floor = floor;
+        }
+    };
+    std::size_t run = std::string_view::npos;
+    const auto close_run = [&](std::size_t end, bool quantified) {
+        if (run == std::string_view::npos) return;
+        if (quantified) --end;
+        if (end > run) offer({branch.substr(run, end - run)});
+        run = std::string_view::npos;
+    };
+    std::size_t i = 0;
+    while (i < branch.size()) {
+        const char c = branch[i];
+        if (is_plain_regex_char(c)) {
+            if (run == std::string_view::npos) run = i;
+            ++i;
+            continue;
+        }
+        close_run(i, std::string_view("*+?{").find(c) != std::string_view::npos);
+        if (c == '\\') {
+            i = skip_regex_escape(branch, i);
+        } else if (c == '[') {
+            i = skip_regex_class(branch, i);
+        } else if (c == '(') {
+            const std::size_t end = skip_regex_group(branch, i);
+            const bool optional =
+                end < branch.size() && std::string_view("*?{").find(branch[end]) != std::string_view::npos;
+            std::string_view body = branch.substr(i, end - i);
+            if (!optional && body.size() >= 2 && body.back() == ')') {
+                body = body.substr(1, body.size() - 2);
+                if (body.starts_with("?:")) {
+                    offer(required_regex_literals(body.substr(2)));
+                } else if (!body.starts_with('?')) {
+                    offer(required_regex_literals(body));
+                }
+            }
+            i = end;
+        } else if (c == '{') {
+            const auto close = branch.find('}', i);
+            i = close == std::string_view::npos ? branch.size() : close + 1;
+        } else {
+            ++i;
+        }
     }
-    return branch.substr(begin, end - begin);
+    close_run(branch.size(), false);
+    return best;
 }
 
 /// Splits @p pattern at alternations outside groups, classes and escapes, and
-/// returns the literal each alternative requires. Empty when any alternative
+/// returns the literals each alternative requires. Empty when any alternative
 /// has none or the pattern does not parse cleanly, so the result is
 /// conservative: a line containing none of the literals cannot match. This
 /// lets std::regex, which allocates on every call, run only on candidates.
@@ -336,10 +424,10 @@ private:
     bool in_class = false;
     std::size_t branch_start = 0;
     const auto close_branch = [&](std::size_t branch_end) {
-        const auto literal = required_branch_literal(
+        const auto required = required_branch_literals(
             pattern.substr(branch_start, branch_end - branch_start));
-        if (literal.empty() || literals.size() == NeedleSet::kMaxNeedles) return false;
-        literals.push_back(literal);
+        if (required.empty() || literals.size() + required.size() > NeedleSet::kMaxNeedles) return false;
+        literals.insert(literals.end(), required.begin(), required.end());
         branch_start = branch_end + 1;
         return true;
     };

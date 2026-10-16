@@ -469,7 +469,14 @@ void append_goal_graph_json(std::string& out,
 
 std::string SessionStore::to_json(const SessionData& data) {
     std::string out;
-    out.reserve(4096 + data.messages.size() * 512);
+    // Reserved for the whole session up front: doubling would copy a body
+    // that grows with the conversation at every save, and the outgrown
+    // blocks stay resident in the allocator's cache.
+    std::size_t estimate = 4096 + data.context_summary.size() + data.handoff_summary.size();
+    for (const auto& msg : data.messages) {
+        estimate += 512 + core::llm::estimated_message_bytes(msg) + msg.input_text.size();
+    }
+    out.reserve(estimate + estimate / 8);
 
     out += "{\"version\":";
     out += std::to_string(SessionData::kVersion);

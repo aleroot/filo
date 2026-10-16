@@ -777,7 +777,9 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     std::optional<std::string_view> previous_response_id_override,
     const SerializationOptions& options) const {
     std::string payload;
-    payload.reserve(8192);
+    std::size_t input_bytes = 0;
+    for (const auto& item : input_items) input_bytes += item.size();
+    payload.reserve(estimated_request_bytes(req, /*include_messages=*/false) + input_bytes);
 
     payload += R"({"model":")";
     payload += core::utils::escape_json_string(req.model);

@@ -906,7 +906,7 @@ std::string AnthropicSerializer::serialize(
     const AnthropicThinkingConfig& thinking,
     const AnthropicReasoningEmitter& reasoning_emitter) {
     std::string payload;
-    payload.reserve(8192);
+    payload.reserve(estimated_request_bytes(req));
 
     payload += R"({"model":")";
     payload += core::utils::escape_json_string(req.model);

@@ -61,7 +61,7 @@ namespace {
     }
 
     [[nodiscard]] PreparedHttpStreamRequest prepare_stream_request(
-        const ChatRequest& request,
+        ChatRequest req,
         std::string_view default_model,
         std::string_view base_url,
         const std::shared_ptr<core::auth::ICredentialSource>& cred_source,
@@ -74,7 +74,6 @@ namespace {
             auth = cred_source->get_auth();
         }
 
-        ChatRequest req = request;
         if (req.model.empty()) {
             req.model = std::string(default_model);
         }
@@ -90,7 +89,7 @@ namespace {
         prepared.headers = prepared.protocol->build_headers(auth);
         prepared.headers["Accept"] = "text/event-stream";
         prepared.protocol->prepare_headers(prepared.headers, req, base_url);
-        prepared.request = req;
+        prepared.request = std::move(req);
         prepared.auth = std::move(auth);
         return prepared;
     }
@@ -585,7 +584,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         }
 
         prepared = prepare_stream_request(
-            effective_request, effective_default_model, base_url_, cred_source_, *protocol_);
+            std::move(effective_request), effective_default_model, base_url_, cred_source_, *protocol_);
         {
             std::lock_guard lock(state_mutex_);
             last_model_ = prepared.model;
@@ -802,7 +801,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 cpr::Session session;
                 session.SetUrl(cpr::Url{url});
                 session.SetHeader(headers);
-                session.SetBody(cpr::Body{payload});
+                // A view, not a copy: payload outlives the session, and both
+                // cpr::Body and curl's COPYPOSTFIELDS would duplicate a body
+                // that grows with the whole conversation.
+                session.SetBodyView(cpr::BodyView{payload});
                 session.SetProgressCallback(cpr::ProgressCallback(
                     [cancel_requested = &self->cancel_requested_,
                      &watchdog](

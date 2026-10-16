@@ -674,6 +674,38 @@ struct ChatRequest {
     return false;
 }
 
+/// Text bytes one message contributes to a serialized request, before JSON
+/// syntax and escaping. Media read from disk at serialization time is not
+/// counted.
+[[nodiscard]] inline std::size_t estimated_message_bytes(const Message& msg) noexcept {
+    std::size_t bytes = msg.role.size() + msg.content.size() + msg.name.size()
+        + msg.tool_call_id.size() + msg.reasoning_content.size();
+    for (const auto& call : msg.tool_calls) {
+        bytes += call.id.size() + call.function.name.size() + call.function.arguments.size();
+    }
+    for (const auto& part : msg.content_parts) bytes += part.text.size() + part.url.size();
+    for (const auto& item : msg.continuation_items) bytes += item.payload.size();
+    return bytes;
+}
+
+/// Capacity a serializer should reserve for @p req: its system prompt, tools
+/// and (unless @p include_messages is false) messages, plus headroom for
+/// JSON syntax and escaping. A body holding the whole conversation that grows
+/// by doubling instead copies itself at every step, and each outgrown block
+/// stays resident in the allocator's cache. Overestimating costs nothing
+/// resident: pages never written are never touched.
+[[nodiscard]] inline std::size_t estimated_request_bytes(const ChatRequest& req,
+                                                         bool include_messages = true) noexcept {
+    std::size_t bytes = 0;
+    for (const auto& layer : req.prompt_plan.layers()) bytes += layer.content.size();
+    // Tool schemas are rendered at serialization time; a typical one is ~1 KiB.
+    bytes += req.tools.size() * 1024;
+    if (include_messages) {
+        for (const auto& msg : req.messages) bytes += estimated_message_bytes(msg) + 128;
+    }
+    return bytes + bytes / 8 + 8192;
+}
+
 [[nodiscard]] inline bool latest_user_message_has_image_input(const ChatRequest& req) noexcept {
     for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
         if (it->role == "user") {
@@ -851,7 +883,7 @@ struct Serializer {
 
     static std::string serialize(const ChatRequest& req, const Options& options) {
         std::string payload;
-        payload.reserve(4096);
+        payload.reserve(estimated_request_bytes(req));
         payload += R"({"model":")";
         payload += core::utils::escape_json_string(req.model);
         payload += R"(","stream":)";

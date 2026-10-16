@@ -274,7 +274,7 @@ std::string serialize_gemini_request(const ChatRequest& req,
         req.model.empty() ? std::string_view(default_model) : std::string_view(req.model));
     const std::string_view effective_model = normalized_effective_model;
     std::string payload;
-    payload.reserve(8192);
+    payload.reserve(estimated_request_bytes(req));
     payload += "{";
 
     // System instruction (top-level, not a content turn).

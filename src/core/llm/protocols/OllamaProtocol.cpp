@@ -63,7 +63,7 @@ std::string OllamaProtocol::serialize(const ChatRequest& req) const {
     }
 
     std::string payload;
-    payload.reserve(4096);
+    payload.reserve(estimated_request_bytes(req));
     payload += R"({"model":")";
     payload += core::utils::escape_json_string(req.model);
     payload += R"(","stream":)";

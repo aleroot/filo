@@ -12,6 +12,9 @@
 #include <vector>
 #include <optional>
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdint>
 #include <format>
 
 namespace core::tools {
@@ -29,29 +32,62 @@ struct SRBlock {
 // Fuzzy matching (only used in error messages to suggest near-misses)
 // ---------------------------------------------------------------------------
 
-// LCS-based similarity ratio: 2*LCS(a,b)/(|a|+|b|).
-// Same metric as Python's difflib.SequenceMatcher.ratio().
-static double lcs_ratio(std::string_view a, std::string_view b) {
-    if (a.empty() && b.empty()) return 1.0;
-    const size_t total = a.size() + b.size();
+// Similarity ratio 2*LCS(a,b)/(|a|+|b|), the metric of Python's
+// difflib.SequenceMatcher.ratio(). Each text is capped at kLcsCap bytes for
+// the LCS itself, while the ratio's denominator keeps the full lengths.
+constexpr size_t kLcsCap = 1500;
 
-    // Cap to keep O(n*m) bounded; search blocks are usually short.
-    constexpr size_t kCap = 1500;
-    if (a.size() > kCap) a = a.substr(0, kCap);
-    if (b.size() > kCap) b = b.substr(0, kCap);
-
-    const size_t n = a.size(), m = b.size();
-    std::vector<size_t> dp(m + 1, 0);
-    for (size_t i = 0; i < n; ++i) {
-        size_t prev = 0;
-        for (size_t j = 0; j < m; ++j) {
-            const size_t temp = dp[j + 1];
-            if (a[i] == b[j]) dp[j + 1] = prev + 1;
-            else               dp[j + 1] = std::max(dp[j + 1], dp[j]);
-            prev = temp;
+// LCS length of one fixed text against many others, bit-parallel (Hyyrö):
+// each character of the other text costs |a|/64 word operations instead of
+// |a| cell updates, with exactly the result of the dynamic program.
+namespace {
+class LcsMatcher {
+public:
+    explicit LcsMatcher(std::string_view a)
+        : n_(std::min(a.size(), kLcsCap)),
+          words_((n_ + 63) / 64),
+          masks_(256 * words_, 0),
+          row_(words_) {
+        for (size_t i = 0; i < n_; ++i) {
+            masks_[static_cast<unsigned char>(a[i]) * words_ + i / 64] |= uint64_t{1} << (i % 64);
         }
     }
-    return 2.0 * dp[m] / total;
+
+    [[nodiscard]] size_t length(std::string_view b) {
+        if (b.size() > kLcsCap) b = b.substr(0, kLcsCap);
+        // A zero bit in row_ marks a position of a that the LCS uses.
+        std::fill(row_.begin(), row_.end(), ~uint64_t{0});
+        for (const char ch : b) {
+            const uint64_t* match = &masks_[static_cast<unsigned char>(ch) * words_];
+            uint64_t carry = 0;
+            for (size_t w = 0; w < words_; ++w) {
+                const uint64_t v = row_[w];
+                const uint64_t u = v & match[w];
+                const uint64_t partial = v + u;
+                const uint64_t sum = partial + carry;
+                carry = static_cast<uint64_t>(partial < v) | static_cast<uint64_t>(sum < partial);
+                row_[w] = sum | (v & ~match[w]);
+            }
+        }
+        size_t used = 0;
+        for (size_t w = 0; w < words_; ++w) {
+            const size_t bits = std::min<size_t>(64, n_ - w * 64);
+            const uint64_t live = bits == 64 ? ~uint64_t{0} : (uint64_t{1} << bits) - 1;
+            used += bits - static_cast<size_t>(std::popcount(row_[w] & live));
+        }
+        return used;
+    }
+
+private:
+    size_t n_;
+    size_t words_;
+    std::vector<uint64_t> masks_;
+    std::vector<uint64_t> row_;
+};
+} // namespace
+
+[[nodiscard]] static double similarity_ratio(size_t lcs, size_t total) {
+    return total == 0 ? 1.0 : 2.0 * static_cast<double>(lcs) / static_cast<double>(total);
 }
 
 struct FuzzyMatch {
@@ -61,19 +97,25 @@ struct FuzzyMatch {
     std::string text;
 };
 
-static std::vector<std::string> split_lines(const std::string& s) {
-    std::vector<std::string> lines;
+// Lines of @p s without their terminators; a trailing CR is dropped too.
+static std::vector<std::string_view> split_lines(std::string_view s) {
+    std::vector<std::string_view> lines;
     size_t start = 0;
     while (start < s.size()) {
         size_t nl = s.find('\n', start);
-        if (nl == std::string::npos) { lines.push_back(s.substr(start)); break; }
+        if (nl == std::string_view::npos) { lines.push_back(s.substr(start)); break; }
         auto line = s.substr(start, nl - start);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        lines.push_back(std::move(line));
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        lines.push_back(line);
         start = nl + 1;
     }
     return lines;
 }
+
+// Windows whose similarity is actually computed, at most. A cheap upper
+// bound skips nearly every window first, so this is only reached on very
+// large files full of near-duplicates; it keeps such a miss bounded.
+constexpr size_t kMaxScoredWindows = 4000;
 
 static std::optional<FuzzyMatch> find_fuzzy_match(
     const std::string& content,
@@ -81,25 +123,59 @@ static std::optional<FuzzyMatch> find_fuzzy_match(
     double threshold = 0.85)
 {
     const auto content_lines = split_lines(content);
-    const auto search_lines  = split_lines(search_text);
-    const size_t window = search_lines.size();
+    const size_t window = split_lines(search_text).size();
     if (window == 0 || content_lines.size() < window) return std::nullopt;
 
-    // Try at most 500 windows to keep this bounded.
-    const size_t limit = std::min(content_lines.size() - window + 1, size_t{500});
-    FuzzyMatch best{0.0, 0, 0, {}};
+    // The LCS can use each byte value at most as often as both texts hold
+    // it, so the summed minimum of their byte counts bounds it from above.
+    // The window's counts slide with it, keeping that sum current in O(1)
+    // per byte; a window whose bound cannot beat the best so far is skipped
+    // without changing the result.
+    const std::string_view capped_search =
+        std::string_view(search_text).substr(0, std::min(search_text.size(), kLcsCap));
+    std::array<size_t, 256> search_counts{};
+    for (const char ch : capped_search) ++search_counts[static_cast<unsigned char>(ch)];
+    std::array<size_t, 256> window_counts{};
+    size_t bound = 0;
+    size_t window_size = 0;
+    const auto add = [&](char ch) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (window_counts[c]++ < search_counts[c]) ++bound;
+        ++window_size;
+    };
+    const auto remove = [&](char ch) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (--window_counts[c] < search_counts[c]) --bound;
+        --window_size;
+    };
+    for (size_t i = 0; i < window; ++i) {
+        if (i > 0) add('\n');
+        for (const char ch : content_lines[i]) add(ch);
+    }
 
-    for (size_t start = 0; start < limit; ++start) {
-        std::string window_text;
-        window_text.reserve(search_text.size() + 32);
-        for (size_t i = start; i < start + window; ++i) {
-            if (i > start) window_text += '\n';
-            window_text += content_lines[i];
+    LcsMatcher matcher(search_text);
+    FuzzyMatch best{0.0, 0, 0, {}};
+    std::string window_text;
+    size_t scored = 0;
+    const size_t last_start = content_lines.size() - window;
+    for (size_t start = 0;; ++start) {
+        const size_t total = search_text.size() + window_size;
+        const double ceiling = similarity_ratio(bound, total);
+        if (ceiling >= threshold && ceiling > best.similarity) {
+            window_text.clear();
+            for (size_t i = start; i < start + window; ++i) {
+                if (i > start) window_text += '\n';
+                window_text += content_lines[i];
+            }
+            const double sim = similarity_ratio(matcher.length(window_text), total);
+            if (sim >= threshold && sim > best.similarity) {
+                best = {sim, start + 1, start + window, window_text};
+            }
+            if (++scored == kMaxScoredWindows) break;
         }
-        const double sim = lcs_ratio(search_text, window_text);
-        if (sim >= threshold && sim > best.similarity) {
-            best = {sim, start + 1, start + window, std::move(window_text)};
-        }
+        if (start == last_start) break;
+        for (const char ch : content_lines[start]) remove(ch);
+        for (const char ch : content_lines[start + window]) add(ch);
     }
 
     if (best.similarity == 0.0) return std::nullopt;

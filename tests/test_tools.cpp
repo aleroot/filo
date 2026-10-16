@@ -2950,7 +2950,7 @@ TEST_CASE("GrepSearchTool returns the first 100 matches deterministically past t
 }
 
 TEST_CASE("GrepSearchTool regex prefilter never drops a matching line", "[tools][grep]") {
-    // The regex path skips lines without the pattern's leading literal. Every
+    // The regex path skips lines without a literal the pattern requires. Every
     // pattern here has a matching line that lacks some naive literal, so an
     // over-eager prefilter would lose it.
     const std::string dir = "test_grep_regex_prefilter";
@@ -2972,7 +2972,16 @@ TEST_CASE("GrepSearchTool regex prefilter never drops a matching line", "[tools]
             << "parsers\n"      // 13
             << "fooa\n"         // 14
             << "barbaz\n"       // 15
-            << "pipe | x\n";    // 16
+            << "pipe | x\n"     // 16
+            << "data: [DONE]\n" // 17
+            << "x.session_store\n" // 18
+            << "Lampo lampo\n"  // 19
+            << "aabc aaabc\n"   // 20
+            << "ABC\n"          // 21
+            << "  int count;\n" // 22
+            << "[[nodiscard]] bool safe_write\n" // 23
+            << "auto time_ago_str(\n"   // 24
+            << "relative_timestamp(\n";  // 25
     }
 
     struct Case {
@@ -2982,22 +2991,35 @@ TEST_CASE("GrepSearchTool regex prefilter never drops a matching line", "[tools]
     };
     const std::vector<Case> cases{
         {"colou?r", false, {1, 2}},           // quantified 'u': literal is "colo"
-        {"ab?c", false, {3, 4}},              // quantified 'b': literal is "a"
-        {"a{0}c", false, {1, 2, 3, 4}},       // zero-count 'a' is just "c": lines 1-2 lack 'a'
+        {"ab?c", false, {3, 4, 20}},          // quantified 'b': literal is "a"
+        {"a{0}c", false, {1, 2, 3, 4, 20, 22, 23}}, // zero-count 'a' is just "c": lines 1-2 lack 'a'
         {"foo|bar", false, {5, 14, 15}},      // one literal per alternative
         {"^col", false, {1, 2}},              // anchor is not part of the literal
         {"hello w[a-z]+", true, {6}},         // icase regex, literal "hello w"
         {"std::[a-z_]+view", false, {7}},
-        {"std.string", false, {9}},           // '.' ends the literal at "std"
-        {"x*yz", false, {8}},                 // leading quantifier: no literal
+        {"std.string", false, {9}},           // '.' splits the literals; the longer "string" wins
+        {"x*yz", false, {8}},                 // quantified 'x': literal is "yz"
         {"nomatch[0-9]", false, {}},
         {"TODO|FIXME", false, {10, 11}},      // one literal per alternative
         {"todo|fixme", true, {10, 11}},
         {"\\bparser\\b", false, {12}},        // zero-width \b is skipped
         {"foo(a|b)", false, {14}},            // nested alternation keeps "foo"
-        {"(foo|bar)baz", false, {15}},        // leading group: no prefilter
-        {"TODO|", false, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+        {"(foo|bar)baz", false, {15}},        // group skipped: literal is "baz"
+        {"TODO|", false, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25}},
         {"[|] x", false, {16}},               // '|' inside a class is literal
+        {"\\[DONE\\]", false, {17}},          // literal between escapes: "DONE"
+        {"\\.session_store", false, {18}},    // literal after an escape
+        {"[Ll]ampo", false, {19}},            // literal after a class
+        {"a{2,3}bc", false, {20}},            // a quantifier's "2,3" is no literal
+        {"\\x41BC", false, {21}},             // a hex escape's digits are no literal
+        {"\\u0041BC", false, {21}},
+        {"^\\s+[a-z]+ [a-z_]+( = .*)?;", false, {22}},
+        {"\\[\\[nodiscard\\]\\] bool safe_write", false, {23}},
+        {"(x|y)?ampo", true, {19}},           // optional group, then "ampo"
+        {"(relative_time|time_ago)[a-z_]*\\(", false, {24, 25}}, // a mandatory group's literals
+        {"(?:foo|bar)+a", false, {14}},
+        {"(?:x|y)*_ago", false, {24}},        // optional group: literal is "_ago"
+        {"(?=a)\\w+_str", false, {24}},      // lookahead skipped
     };
 
     GrepSearchTool tool;
@@ -3185,6 +3207,32 @@ TEST_CASE("SearchReplaceTool returns error when old_string not found", "[tools]"
     auto res = tool.execute(
         R"({"file_path":")" + path + R"(","edits":[{"old_string":"xyz_not_here","new_string":"replaced"}]})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("SearchReplaceTool suggests a near miss anywhere in a large file", "[tools]") {
+    const std::string path = "test_artifact_sr_fuzzy_large.txt";
+    {
+        std::ofstream out(path);
+        for (int i = 1; i <= 3000; ++i) out << "int value_" << i << " = compute(" << i << ");\n";
+    }
+
+    SearchReplaceTool tool;
+    // A transposed letter on line 2500, far past the first few hundred lines.
+    auto res = tool.execute(
+        R"({"file_path":")" + path
+        + R"(","edits":[{"old_string":"int valeu_2500 = compute(2500);","new_string":"x"}]})");
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("old_string not found"));
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("at lines 2500"));
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("int value_2500 = compute(2500);"));
+
+    // Nothing close enough: no suggestion at all.
+    res = tool.execute(
+        R"({"file_path":")" + path
+        + R"(","edits":[{"old_string":"completely unrelated text","new_string":"x"}]})");
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("old_string not found"));
+    CHECK_THAT(res, !Catch::Matchers::ContainsSubstring("Closest match"));
 
     std::filesystem::remove(path);
 }
