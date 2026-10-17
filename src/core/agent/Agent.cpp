@@ -467,7 +467,10 @@ void Agent::request_stop() {
     std::shared_ptr<core::llm::LLMProvider> provider;
     {
         std::lock_guard lock(history_mutex_);
-        provider = provider_;
+        provider = turn_provider_.lock();
+        if (!provider) {
+            provider = provider_;
+        }
     }
     if (provider) {
         provider->cancel();
@@ -642,6 +645,7 @@ void Agent::capture_turn_provider_snapshot_unlocked(
     turn_state.provider = turn_callbacks.provider_override
         ? turn_callbacks.provider_override
         : provider_;
+    turn_provider_ = turn_state.provider;
     turn_state.provider_name = turn_callbacks.provider_name_override.empty()
         ? active_provider_name_
         : turn_callbacks.provider_name_override;
@@ -1498,6 +1502,10 @@ void Agent::send_message(core::llm::Message user_message,
         }
 
         const auto turn_changes = publish_turn_changes(turn_state);
+        {
+            std::lock_guard lock(history_mutex_);
+            turn_provider_.reset();
+        }
         turn_state.reset();
         if (!turn_changes.empty() && on_turn_changes) {
             on_turn_changes(turn_changes);

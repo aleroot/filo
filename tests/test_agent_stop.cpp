@@ -64,6 +64,33 @@ public:
     }
 };
 
+class PendingStreamProvider : public core::llm::LLMProvider {
+public:
+    int cancel_calls = 0;
+    int stream_calls = 0;
+    std::function<void(const core::llm::StreamChunk&)> pending_callback;
+
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        ++stream_calls;
+        // Model a request waiting silently in a long HTTP 429 retry delay.
+        pending_callback = std::move(callback);
+    }
+
+    void cancel() override {
+        ++cancel_calls;
+        // Complete inline to also verify cancellation runs outside Agent's lock.
+        complete();
+    }
+
+    void complete() {
+        auto callback = std::move(pending_callback);
+        if (callback) {
+            callback(core::llm::StreamChunk::make_final());
+        }
+    }
+};
+
 } // namespace
 
 TEST_CASE("Agent stop request causes repeated stop messages", "[agent][stop]") {
@@ -145,4 +172,70 @@ TEST_CASE("Agent stop request handles immediate final cancellation", "[agent][st
     REQUIRE(history.size() >= 2);
     CHECK(history.back().role == "assistant");
     CHECK(history.back().content == "partial ");
+}
+
+TEST_CASE("Agent stop cancels the frozen turn provider after a model switch",
+          "[agent][stop][provider][regression]") {
+    auto selected = std::make_shared<PendingStreamProvider>();
+    auto running = selected;
+    core::agent::Agent::TurnCallbacks callbacks;
+    SECTION("the selected provider owns the request") {}
+    SECTION("a per-turn override owns the request") {
+        running = std::make_shared<PendingStreamProvider>();
+        callbacks.provider_override = running;
+    }
+    auto replacement = std::make_shared<PendingStreamProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        selected,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_workspace_session_context());
+    int done_calls = 0;
+    agent->send_message("first turn", [](const std::string&) {}, [](auto, auto) {},
+                        [&] { ++done_calls; }, callbacks);
+    REQUIRE(running->stream_calls == 1);
+    REQUIRE(agent->turn_in_progress());
+
+    agent->set_provider(replacement);
+    agent->request_stop();
+    CHECK(running->cancel_calls == 1);
+    CHECK(replacement->cancel_calls == 0);
+    CHECK(done_calls == 1);
+    CHECK_FALSE(agent->turn_in_progress());
+
+    // Release a failed test's outstanding callback without leaving a cycle.
+    if (agent->turn_in_progress()) {
+        running->cancel();
+    }
+    agent->send_message("next turn", [](const std::string&) {}, [](auto, auto) {},
+                        [&] { ++done_calls; });
+    CHECK_FALSE(agent->is_stop_requested());
+    CHECK(replacement->stream_calls == 1);
+    agent->request_stop();
+    CHECK(running->cancel_calls == 1);
+    CHECK(replacement->cancel_calls == 1);
+    CHECK(done_calls == 2);
+    CHECK_FALSE(agent->turn_in_progress());
+}
+
+TEST_CASE("Agent releases the frozen provider when a turn completes normally",
+          "[agent][stop][provider][regression]") {
+    auto original = std::make_shared<PendingStreamProvider>();
+    auto replacement = std::make_shared<PendingStreamProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        original,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_workspace_session_context());
+    int done_calls = 0;
+    agent->send_message("finish normally", [](const std::string&) {}, [](auto, auto) {},
+                        [&] { ++done_calls; });
+    agent->set_provider(replacement);
+    original->complete();
+    CHECK(done_calls == 1);
+    CHECK_FALSE(agent->turn_in_progress());
+
+    // The original provider remains alive, but an idle stop must no longer
+    // target it after completion.
+    agent->request_stop();
+    CHECK(original->cancel_calls == 0);
+    CHECK(replacement->cancel_calls == 1);
 }

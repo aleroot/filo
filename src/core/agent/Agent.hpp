@@ -528,6 +528,9 @@ private:
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
+    // Guarded by history_mutex_. The current turn keeps its provider even if
+    // provider_ changes; cancellation must reach that same frozen instance.
+    std::weak_ptr<core::llm::LLMProvider> turn_provider_;
     std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor_;
     core::tools::ToolManager& skill_manager_;
     core::context::SessionContext session_context_;

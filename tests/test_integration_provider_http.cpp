@@ -5,6 +5,8 @@
 #include <httplib.h>
 #include <simdjson.h>
 
+#include "TestSessionContext.hpp"
+#include "core/agent/Agent.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
 #include "core/auth/KimiOAuthFlow.hpp"
@@ -22,6 +24,7 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
+#include "core/tools/ToolManager.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -1684,6 +1687,96 @@ TEST_CASE("Claude OAuth refresh happens once and cancellation stops retry backof
     CHECK(chunks.back().is_final);
     CHECK(chunks.back().is_error == reject_refreshed);
     if (!cancel) CHECK(auth_headers.back() == "Bearer refreshed-test-token");
+}
+
+TEST_CASE("Agent stops a long Claude 429 retry after switching to Grok",
+          "[integration][http][agent][stop][claude][grok][regression]") {
+    httplib::Server server;
+    std::atomic<int> claude_requests{0};
+    std::atomic<int> grok_requests{0};
+    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& response) {
+        ++claude_requests;
+        response.status = 429;
+        response.set_header("Retry-After", "3600");
+        response.set_content(
+            R"({"error":{"type":"rate_limit_error","message":"Too many requests"}})",
+            "application/json");
+    });
+    server.Post("/v1/responses", [&](const httplib::Request&, httplib::Response& response) {
+        ++grok_requests;
+        response.set_content(
+            "event: response.output_text.delta\n"
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Grok resumed\"}\n\n"
+            "event: response.completed\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_resumed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    const std::string base = std::format("http://127.0.0.1:{}", port);
+    auto credentials = core::auth::ApiKeyCredentialSource::as_bearer("test-key");
+    auto claude = std::make_shared<HttpLLMProvider>(
+        base, credentials, "claude-sonnet-4-6", std::make_unique<AnthropicProtocol>());
+    auto grok = std::make_shared<HttpLLMProvider>(
+        base + "/v1", credentials, "grok-4.7", std::make_unique<GrokResponsesProtocol>());
+    auto agent = std::make_shared<core::agent::Agent>(
+        claude,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_workspace_session_context());
+    agent->set_active_model("claude-sonnet-4-6");
+
+    std::promise<void> retry_started;
+    auto retry_ready = retry_started.get_future();
+    std::atomic<bool> retry_signalled{false};
+    core::agent::Agent::TurnCallbacks callbacks;
+    callbacks.on_attempt_reset = [&] {
+        if (!retry_signalled.exchange(true)) retry_started.set_value();
+    };
+    std::atomic<int> done_calls{0};
+    std::string stopped_output;
+    auto worker = std::async(std::launch::async, [&] {
+        agent->send_message("start on Claude",
+            [&](const std::string& text) { stopped_output += text; },
+            [](auto, auto) {}, [&] { ++done_calls; }, callbacks);
+    });
+    const bool saw_retry = retry_ready.wait_for(std::chrono::seconds(3))
+        == std::future_status::ready;
+    if (!saw_retry) {
+        claude->cancel();
+        worker.wait();
+    }
+    REQUIRE(saw_retry);
+    CHECK(worker.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
+
+    agent->set_provider(grok);
+    agent->set_active_model("grok-4.7");
+    agent->request_stop();
+    const bool stopped = worker.wait_for(std::chrono::seconds(3))
+        == std::future_status::ready;
+    // Also release the original provider if this regression ever returns, so
+    // the test reports a failure without waiting an hour for Retry-After.
+    if (!stopped) claude->cancel();
+    worker.get();
+    REQUIRE(stopped);
+    CHECK_FALSE(agent->turn_in_progress());
+    CHECK(done_calls == 1);
+    CHECK_THAT(stopped_output, Catch::Matchers::ContainsSubstring("Generation stopped by user"));
+    CHECK(grok_requests == 0);
+
+    std::string resumed_output;
+    agent->send_message("continue on Grok",
+        [&](const std::string& text) { resumed_output += text; },
+        [](auto, auto) {}, [&] { ++done_calls; });
+    CHECK_THAT(resumed_output, Catch::Matchers::ContainsSubstring("Grok resumed"));
+    CHECK(claude_requests == 1);
+    CHECK(grok_requests == 1);
+    CHECK(done_calls == 2);
+    CHECK_FALSE(agent->turn_in_progress());
+    CHECK_FALSE(agent->last_turn_failed());
 }
 
 TEST_CASE("Shared HTTP transport isolates error bodies and trusts a completed stream",
