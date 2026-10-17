@@ -68,7 +68,7 @@ static std::optional<std::string> validate_patch_paths(
 ToolDefinition ApplyPatchTool::get_definition() const {
     return {
         .name  = std::string(names::kApplyPatch),
-        .title = "Apply Patch",
+        .title = "Patch",
         .description =
             "Apply a unified diff with patch -p1. working_dir defaults to the active workspace.",
         .parameters = {

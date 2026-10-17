@@ -17,7 +17,7 @@ WriteFileTool::WriteFileTool() = default;
 ToolDefinition WriteFileTool::get_definition() const {
     return {
         .name  = std::string(names::kWriteFile),
-        .title = "Write File",
+        .title = "Write",
         .description =
             "Write complete file content, creating parents. Overwrites existing content and "
             "returns bounded previous_content for diff display.",
@@ -31,6 +31,7 @@ ToolDefinition WriteFileTool::get_definition() const {
             .destructive_hint = true,  // overwrites existing file content
             .idempotent_hint  = true,  // writing the same content twice is a no-op in effect
         },
+        .primary_argument = "file_path",
     };
 }
 

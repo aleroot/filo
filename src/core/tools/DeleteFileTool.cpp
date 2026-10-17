@@ -13,7 +13,7 @@ namespace core::tools {
 ToolDefinition DeleteFileTool::get_definition() const {
     return {
         .name  = std::string(names::kDeleteFile),
-        .title = "Delete File or Folder",
+        .title = "Delete",
         .description =
             "Permanently delete a file or directory; nonempty directories require recursive=true.",
         .parameters = {

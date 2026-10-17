@@ -200,7 +200,7 @@ std::vector<ShellTool::ActiveCommand> ShellTool::active_commands() {
 ToolDefinition ShellTool::get_definition() const {
     return {
         .name  = std::string(names::kRunTerminalCommand),
-        .title = "Run Terminal Command",
+        .title = "Run",
         .description =
             "Run a local command in persistent bash. stdout and stderr are merged; check exit_code. "
             "working_dir uses a per-call subshell. Timeout defaults to 600 seconds. ",

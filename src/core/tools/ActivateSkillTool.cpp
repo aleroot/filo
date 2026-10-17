@@ -176,7 +176,7 @@ std::vector<fs::path> ActivateSkillTool::schema_workspace_roots() const {
 ToolDefinition ActivateSkillTool::get_definition() const {
     return {
         .name = std::string(names::kActivateSkill),
-        .title = "Activate Agent Skill",
+        .title = "Activate Skill",
         .description =
             "Loads an Agent Skill's full instructions on demand. "
             "Call this when the user's task matches one of the available Agent Skills. "

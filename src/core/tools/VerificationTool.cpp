@@ -121,7 +121,7 @@ VerificationTool::VerificationTool(
 ToolDefinition VerificationTool::get_definition() const {
   return {
       .name = std::string(names::kRunVerification),
-      .title = "Run Verification",
+      .title = "Verify",
       .description = "Run a deterministic build, test, lint, type-check, or "
                      "format check and return "
                      "a typed verification receipt. Use recipe_id only for "

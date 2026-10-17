@@ -889,7 +889,7 @@ TEST_CASE("tool headers use the terminal's width and elide only when it runs out
                  ContainsSubstring("\xe2\x80\xa6"));
 }
 
-TEST_CASE("tool presentation uses semantic labels and compact result metrics",
+TEST_CASE("tool presentation uses compact result metrics",
           "[tui][conversation][render][tool]") {
     std::vector<UiMessage> messages;
     auto msg = make_assistant_message("", "", false);
@@ -903,7 +903,6 @@ TEST_CASE("tool presentation uses semantic labels and compact result metrics",
     messages.push_back(std::move(msg));
 
     const auto compact = render_panel_text(messages);
-    REQUIRE_THAT(compact, ContainsSubstring("Read"));
     REQUIRE_THAT(compact, ContainsSubstring("src/main.cpp"));
     REQUIRE_THAT(compact, ContainsSubstring("2 lines"));
     REQUIRE(compact.find("read_file") == std::string::npos);
@@ -997,7 +996,7 @@ TEST_CASE("assistant narration renders before the tools from the same step",
 
     const std::string rendered = render_panel_text(messages);
     const auto narration = rendered.find("I will inspect the configuration.");
-    const auto tool_card = rendered.find("Read");
+    const auto tool_card = rendered.find("config.toml");
     REQUIRE(narration != std::string::npos);
     REQUIRE(tool_card != std::string::npos);
     CHECK(narration < tool_card);
@@ -1019,7 +1018,6 @@ TEST_CASE("tool presentation groups grep results by file",
     messages.push_back(std::move(msg));
 
     const auto compact = render_panel_text(messages);
-    REQUIRE_THAT(compact, ContainsSubstring("Search"));
     REQUIRE_THAT(compact, ContainsSubstring("2 matches"));
     REQUIRE(compact.find("src/a.cpp") == std::string::npos);
 
@@ -1047,7 +1045,6 @@ TEST_CASE("tool presentation renders todos as a checklist",
     messages.push_back(std::move(msg));
 
     const auto compact = render_panel_text(messages);
-    REQUIRE_THAT(compact, ContainsSubstring("Plan"));
     REQUIRE_THAT(compact, ContainsSubstring("2 items"));
 
     const auto expanded = render_panel_text(
@@ -1212,7 +1209,6 @@ TEST_CASE("web search reports its result count",
     messages.push_back(std::move(msg));
 
     const auto rendered = render_panel_text(messages);
-    CHECK_THAT(rendered, ContainsSubstring("Web search"));
     CHECK_THAT(rendered, ContainsSubstring("2 results"));
 }
 

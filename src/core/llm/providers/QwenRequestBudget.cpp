@@ -58,7 +58,7 @@ void QwenRequestBudget::prepare(ChatRequest& request, const ModelInfo* model,
         const auto margin = std::max(10000, window / 20);
         const auto room = static_cast<int64_t>(window) - static_cast<int64_t>(prompt) - margin;
         const auto floor = std::clamp<int64_t>(static_cast<int64_t>(window) - static_cast<int64_t>(prompt), 1, 4000);
-        ceiling = std::min<int64_t>(ceiling, std::max(room, floor));
+        ceiling = static_cast<int>(std::min<int64_t>(ceiling, std::max(room, floor)));
     }
     request.max_tokens = std::max(1, ceiling);
 }

@@ -79,7 +79,7 @@ parse_search_request(std::string_view json_args) {
 ToolDefinition WebSearchTool::get_definition() const {
     return {
         .name = std::string(names::kWebSearch),
-        .title = "Web Search",
+        .title = "Search",
         .description =
             "Search the web through the active provider and return citable results.",
         .parameters = {

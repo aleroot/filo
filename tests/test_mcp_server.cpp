@@ -8,6 +8,10 @@
 #include "core/utils/JsonWriter.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
+#include "tui/Conversation.hpp"
+#include "tui/RemoteActivityPanel.hpp"
+#include "tui/PromptComponents.hpp"
+#include <ftxui/screen/screen.hpp>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -191,13 +195,14 @@ struct ScopedWorkspaceRoot {
 
 class EmptyTopLevelErrorTool final : public core::tools::Tool {
 public:
-    explicit EmptyTopLevelErrorTool(std::string name)
-        : name_(std::move(name)) {}
+    explicit EmptyTopLevelErrorTool(std::string name, std::string title = "Empty Top-Level Error Tool")
+        : name_(std::move(name)), title_(std::move(title)) {}
 
     core::tools::ToolDefinition get_definition() const override {
+        ++definition_reads_;
         return {
             .name = name_,
-            .title = "Empty Top-Level Error Tool",
+            .title = title_,
             .description = "Testing tool that always returns an empty top-level error string."
         };
     }
@@ -206,8 +211,12 @@ public:
         return R"({"error":""})";
     }
 
+    std::size_t definition_reads() const { return definition_reads_; }
+
 private:
     std::string name_;
+    std::string title_;
+    mutable std::size_t definition_reads_ = 0;
 };
 
 struct ScopedToolRegistration {
@@ -222,6 +231,41 @@ struct ScopedToolRegistration {
 
     std::string name;
 };
+
+TEST_CASE("Tool activity headers use declared titles and preserve missing-title fallbacks",
+          "[mcp][tui][presentation]") {
+    const std::string name = "mcp_test_activity_title";
+    const auto render_text = [](ftxui::Element element) {
+        auto screen = ftxui::Screen::Create(
+            ftxui::Dimension::Fixed(160), ftxui::Dimension::Fit(element));
+        ftxui::Render(screen, element);
+        return screen.ToString();
+    };
+    for (const std::string title : {"Inspect", ""}) {
+        const auto probe = std::make_shared<EmptyTopLevelErrorTool>(name, title);
+        ScopedToolRegistration registration(probe);
+        const auto definition_reads = probe->definition_reads();
+        const std::string expected = title.empty() ? name : title;
+        const std::string remote_expected = title.empty() ? "mcp test activity title" : title;
+        auto message = tui::make_assistant_message("", "", false);
+        message.tools.push_back(tui::make_tool_activity("id", name, "{}", "", false));
+        CHECK_THAT(render_text(tui::render_history_panel({message}, 0)), ContainsSubstring(expected));
+        CHECK_THAT(render_text(tui::render_permission_prompt_panel(name, "{}", {}, "Allow", 0)),
+                   ContainsSubstring(expected));
+
+        core::mcp::RemoteActivitySnapshot snapshot;
+        snapshot.server_state = core::mcp::RemoteServerState::listening;
+        snapshot.activities.push_back({.tool_name = name, .started_at = std::chrono::steady_clock::now()});
+        CHECK_THAT(tui::format_remote_footer_status(snapshot).label, ContainsSubstring(remote_expected));
+        CHECK_THAT(render_text(tui::render_remote_activity_panel(snapshot, 0)),
+                   ContainsSubstring(remote_expected));
+        CHECK(probe->definition_reads() == definition_reads);
+        core::tools::ToolManager::get_instance().register_tool(
+            std::make_shared<EmptyTopLevelErrorTool>(name, "Updated"));
+        CHECK(core::tools::ToolManager::get_instance().get_tool_title(name) == "Updated");
+    }
+    CHECK_FALSE(core::tools::ToolManager::get_instance().get_tool_title(name));
+}
 
 /// A minimal valid initialize request (client identifies as Lampo).
 static const char* kInitRequest =
@@ -575,9 +619,39 @@ TEST_CASE("MCP tools/list includes title field for display names", "[mcp]") {
 
     // Every tool must have a title entry (display name for Lampo).
     REQUIRE_THAT(resp, ContainsSubstring(R"("title")"));
-    REQUIRE_THAT(resp, ContainsSubstring("Run Terminal Command"));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("title":"Run")"));
     REQUIRE_THAT(resp, ContainsSubstring("Read"));
-    REQUIRE_THAT(resp, ContainsSubstring("Write File"));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("title":"Write")"));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("title":"Search")"));
+}
+
+TEST_CASE("MCP tools/list declares activity metadata only for opted-in tools", "[mcp][presentation]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":55})");
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    std::size_t checked = 0;
+    bool checked_fallback = false;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        const auto name = tool["name"].get_string().value();
+        if (name == "write_file" || name == "file_search") {
+            const auto title = tool["title"].get_string().value();
+            const auto argument = tool["_meta"]["app.lampo/primaryArgument"].get_string().value();
+            CHECK(title == (name == "write_file" ? "Write" : "Search"));
+            CHECK(argument == (name == "write_file" ? "file_path" : "pattern"));
+            CHECK(tool["inputSchema"]["properties"][argument]["type"].get_string().value() == "string");
+            CHECK(tool["inputSchema"]["app.lampo/primaryArgument"].error() == simdjson::NO_SUCH_FIELD);
+            ++checked;
+        } else if (name == "read") {
+            CHECK(tool["title"].get_string().value() == "Read");
+            CHECK(tool["_meta"].error() == simdjson::NO_SUCH_FIELD);
+            checked_fallback = true;
+        }
+    }
+    REQUIRE(checked == 2);
+    REQUIRE(checked_fallback);
 }
 
 TEST_CASE("MCP tools/list emits only non-default annotation hints", "[mcp][annotations]") {

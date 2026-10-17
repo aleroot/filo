@@ -7,7 +7,7 @@ namespace core::tools {
 ToolDefinition TaskTool::get_definition() const {
     return {
         .name = std::string(kToolName),
-        .title = "Delegate Task",
+        .title = "Delegate",
         .description =
             "Manage delegated coding work. start requires title and instructions; resume requires "
             "work_id; list accepts filters. start/resume may return an MCP task handle.",

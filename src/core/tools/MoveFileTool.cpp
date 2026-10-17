@@ -11,7 +11,7 @@ namespace core::tools {
 ToolDefinition MoveFileTool::get_definition() const {
     return {
         .name  = std::string(names::kMoveFile),
-        .title = "Move File",
+        .title = "Move",
         .description =
             "Move or rename a file or directory, creating destination parents as needed.",
         .parameters = {

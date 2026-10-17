@@ -33,7 +33,7 @@ public:
     void register_tool(std::shared_ptr<Tool> tool) {
         auto def = tool->get_definition();
         std::lock_guard lock(mutex_);
-        tools_[def.name] = std::move(tool);
+        tools_[def.name] = {std::move(tool), std::move(def.title)};
     }
 
     // Thread-safe remove: useful for replacing dynamic tool sets (e.g. MCP).
@@ -56,10 +56,10 @@ public:
         std::lock_guard lock(mutex_);
         std::vector<core::llm::Tool> tools;
         tools.reserve(tools_.size());
-        for (const auto& [name, impl] : tools_) {
+        for (const auto& [name, registered] : tools_) {
             core::llm::Tool entry;
             entry.type = "function";
-            entry.function = impl->get_definition();
+            entry.function = registered.tool->get_definition();
             if (!tool_allows_transport(entry.function, transport)) continue;
             if (!landrun_allows_tool(
                     core::landrun::LandrunSettings::instance().mode(),
@@ -96,9 +96,10 @@ public:
         ToolDefinition definition;
         {
             std::lock_guard lock(mutex_);
-            tool = find_tool_unlocked(name);
-            if (!tool)
+            const auto* registered = find_tool_unlocked(name);
+            if (!registered)
                 return "{\"error\": \"Tool not found: " + name + "\"}";
+            tool = registered->tool;
             definition = tool->get_definition();
         }
         if (!tool_allows_transport(definition, invocation.session_context.transport)) {
@@ -134,11 +135,11 @@ public:
         ToolDefinition definition;
         {
             std::lock_guard lock(mutex_);
-            auto tool = find_tool_unlocked(name);
-            if (!tool) {
+            const auto* registered = find_tool_unlocked(name);
+            if (!registered) {
                 return std::unexpected("tool not found");
             }
-            definition = tool->get_definition();
+            definition = registered->tool->get_definition();
         }
         return schema::normalize_arguments(definition, json_args);
     }
@@ -152,11 +153,19 @@ public:
     get_tool_definition(const std::string& name,
         core::context::SessionTransport transport = core::context::SessionTransport::unspecified) const {
         std::lock_guard lock(mutex_);
-        auto tool = find_tool_unlocked(name);
-        if (!tool) return std::nullopt;
-        auto definition = tool->get_definition();
+        const auto* registered = find_tool_unlocked(name);
+        if (!registered) return std::nullopt;
+        auto definition = registered->tool->get_definition();
         if (!tool_allows_transport(definition, transport)) return std::nullopt;
         return definition;
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    get_tool_title(const std::string& name) const {
+        std::lock_guard lock(mutex_);
+        const auto* registered = find_tool_unlocked(name);
+        if (!registered || registered->title.empty()) return std::nullopt;
+        return registered->title;
     }
 
     void clear_session_state(std::string_view session_id) {
@@ -164,8 +173,8 @@ public:
         {
             std::lock_guard lock(mutex_);
             tools.reserve(tools_.size());
-            for (const auto& [_, tool] : tools_) {
-                tools.push_back(tool);
+            for (const auto& [_, registered] : tools_) {
+                tools.push_back(registered.tool);
             }
         }
         for (const auto& tool : tools) {
@@ -176,17 +185,22 @@ public:
 private:
     ToolManager() = default;
 
-    [[nodiscard]] std::shared_ptr<Tool> find_tool_unlocked(std::string_view name) const {
+    struct RegisteredTool {
+        std::shared_ptr<Tool> tool;
+        std::string title;
+    };
+
+    [[nodiscard]] const RegisteredTool* find_tool_unlocked(std::string_view name) const {
         const std::string key{name};
-        if (auto it = tools_.find(key); it != tools_.end()) return it->second;
+        if (auto it = tools_.find(key); it != tools_.end()) return &it->second;
         const auto canonical = policy::canonical_tool_name(name);
         if (canonical == key) return {};
-        if (auto it = tools_.find(canonical); it != tools_.end()) return it->second;
+        if (auto it = tools_.find(canonical); it != tools_.end()) return &it->second;
         return {};
     }
 
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, std::shared_ptr<Tool>> tools_;
+    std::unordered_map<std::string, RegisteredTool> tools_;
 };
 
 } // namespace core::tools

@@ -12,7 +12,7 @@ namespace core::tools {
 ToolDefinition PythonInterpreterTool::get_definition() const {
     return {
         .name  = std::string(names::kPython),
-        .title = "Python Interpreter",
+        .title = "Python",
         .description =
             "Execute Python code in a persistent embedded interpreter. "
             "The interpreter maintains state across calls: variables, imports, and "

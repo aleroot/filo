@@ -6,6 +6,7 @@
 #include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/ToolManager.hpp"
 
 #include <algorithm>
 #include <format>
@@ -76,6 +77,10 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
 }
 
 [[nodiscard]] std::string compact_tool_name(std::string_view tool_name) {
+    if (auto title = core::tools::ToolManager::get_instance()
+                         .get_tool_title(std::string(tool_name))) {
+        return *title;
+    }
     if (core::tools::names::is_terminal_tool(tool_name)) return "terminal";
     std::string label(tool_name);
     std::ranges::replace(label, '_', ' ');
@@ -347,7 +352,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                     text(client.closed ? "  ○ " : stale ? "  ◌ " : "  ● ")
                         | color(client.closed ? ColorTextMuted
                                 : stale ? Color{ColorTextSecondary} : Color{Color::Green}),
-                    text(client.name + version) | bold,
+                    text(client.name + version) | ftxui::bold,
                     filler(),
                     text(std::format(
                         "{} · seen {}",
@@ -369,7 +374,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     }
 
     rows.push_back(text(""));
-    rows.push_back(text("  Activity") | color(ColorYellowDark) | bold);
+    rows.push_back(text("  Activity") | color(ColorYellowDark) | ftxui::bold);
 
     if (snapshot.activities.empty()) {
         rows.push_back(
@@ -412,10 +417,10 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                         | color(ColorYellowBright),
                     text(std::string(status_icon(activity.status)) + " ")
                         | color(status_color(activity.status))
-                        | bold,
+                        | ftxui::bold,
                     text(compact_tool_name(activity.tool_name))
                         | color(ColorYellowBright)
-                        | bold,
+                        | ftxui::bold,
                     elided_text("  " + activity_summary(activity))
                         | color(ColorTextSecondary)
                         | xflex,
@@ -444,7 +449,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
         const auto& selected_item = snapshot.activities[selected];
         rows.push_back(text(""));
         rows.push_back(
-            text("  Details") | color(ColorYellowDark) | bold);
+            text("  Details") | color(ColorYellowDark) | ftxui::bold);
         rows.push_back(
             paragraph(std::format(
                 "  {} · {} · {}",
@@ -482,7 +487,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     rows.push_back(hbox(std::move(footer)) | xflex);
 
     return UiWindow(
-        text(" ⚡ Remote MCP activity ") | color(ColorYellowBright) | bold,
+        text(" ⚡ Remote MCP activity ") | color(ColorYellowBright) | ftxui::bold,
         vbox(std::move(rows)) | xflex);
 }
 

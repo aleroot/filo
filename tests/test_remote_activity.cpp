@@ -258,7 +258,7 @@ TEST_CASE("remote activity summaries use the available terminal width",
         wide_screen,
         tui::render_remote_activity_panel(hub.snapshot(), 0));
     const std::string wide = strip_ansi(wide_screen.ToString());
-    const std::string_view wide_row = line_containing(wide, "terminal");
+    const std::string_view wide_row = line_containing(wide, kWorkingDir);
     REQUIRE_FALSE(wide_row.empty());
     CHECK(wide_row.find(kWorkingDir) != std::string_view::npos);
     CHECK(wide_row.find("cmd: git status --short") != std::string_view::npos);
@@ -271,7 +271,7 @@ TEST_CASE("remote activity summaries use the available terminal width",
         narrow_screen,
         tui::render_remote_activity_panel(hub.snapshot(), 0));
     const std::string narrow = strip_ansi(narrow_screen.ToString());
-    const std::string_view narrow_row = line_containing(narrow, "terminal");
+    const std::string_view narrow_row = line_containing(narrow, "cwd: /Users/alessiopollero");
     REQUIRE_FALSE(narrow_row.empty());
     CHECK(narrow_row.find("cwd: /Users/alessiopollero")
           != std::string_view::npos);

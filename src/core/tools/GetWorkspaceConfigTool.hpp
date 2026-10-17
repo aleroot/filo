@@ -20,7 +20,7 @@ public:
     ToolDefinition get_definition() const override {
         return {
             .name        = std::string(names::kGetWorkspaceConfig),
-            .title       = "Get Workspace Configuration",
+            .title       = "Workspace",
             .description = "Return active workspace roots and path-enforcement state.",
             .output_schema =
                 R"({"type":"object","properties":{"primary_directory":{"type":"string","description":"The primary workspace directory."},"enforcement_enabled":{"type":"boolean","description":"Whether path enforcement is enabled for filesystem tools."},"additional_directories":{"type":"array","items":{"type":"string"},"description":"Additional allowed workspace directories."},"attached_files":{"type":"array","items":{"type":"string"},"description":"Individual files granted by attachment; present only when non-empty."},"workspace_version":{"type":"integer","description":"Monotonic version of the effective workspace selection for this session."}},"required":["primary_directory","enforcement_enabled","additional_directories","workspace_version"],"additionalProperties":false})",

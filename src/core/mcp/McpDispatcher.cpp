@@ -792,6 +792,12 @@ static const std::string& tools_list_result() {
                          .kv_str("description", def.description).comma()
                          .kv_raw("inputSchema", build_input_schema_json(def));
 
+                        if (!def.primary_argument.empty()) {
+                            w.comma().key("_meta");
+                            auto _meta = w.object();
+                            w.kv_str("app.lampo/primaryArgument", def.primary_argument);
+                        }
+
                         if (!def.output_schema.empty()) {
                             w.comma().kv_raw("outputSchema", def.output_schema);
                         }

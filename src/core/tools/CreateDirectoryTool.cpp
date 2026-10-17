@@ -11,7 +11,7 @@ namespace core::tools {
 ToolDefinition CreateDirectoryTool::get_definition() const {
     return {
         .name  = std::string(names::kCreateDirectory),
-        .title = "Create Directory",
+        .title = "Create",
         .description =
             "Create a directory and missing parents. Existing directories succeed unchanged.",
         .parameters = {

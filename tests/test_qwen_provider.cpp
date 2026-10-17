@@ -20,6 +20,7 @@
 #include <simdjson.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -121,6 +122,27 @@ TEST_CASE("Qwen budgets include schemas and media and respect endpoint limits",
     CHECK(request.max_tokens == 64000);
     CHECK(get_max_context_size("qwen3-coder-next") == 262144);
     static_assert(!std::is_base_of_v<core::llm::ContextTokenEstimator, core::llm::HttpLLMProvider>);
+}
+
+TEST_CASE("Qwen output budgets stay bounded at integer limits", "[qwen][regression][context]") {
+    using core::llm::providers::QwenRequestBudget;
+    ModelInfo model;
+    model.context_window = std::numeric_limits<int>::max();
+    model.max_output_tokens = std::numeric_limits<int>::max();
+    ChatRequest request;
+    request.model = "qwen3.8-flash";
+    request.max_tokens = std::numeric_limits<int>::max();
+    QwenRequestBudget::prepare(request, &model);
+    CHECK(request.max_tokens == model.context_window - 4096 - model.context_window / 20);
+
+    request.max_tokens = std::numeric_limits<int>::min();
+    QwenRequestBudget::prepare(request, &model);
+    CHECK(request.max_tokens == 1);
+
+    request.max_tokens = std::numeric_limits<int>::max();
+    QwenRequestBudget::prepare(request, &model,
+                               static_cast<std::size_t>(model.context_window) + 1);
+    CHECK(request.max_tokens == 1);
 }
 
 TEST_CASE("Qwen endpoint limits yield to live metadata without changing native cards",

@@ -50,7 +50,7 @@ parse_fetch_request(std::string_view json_args) {
 ToolDefinition WebFetchTool::get_definition() const {
     return {
         .name = std::string(names::kFetchUrl),
-        .title = "Fetch URL",
+        .title = "Fetch",
         .description =
             "Fetch a known HTTP(S) URL as bounded extracted text. Use web_search to find URLs.",
         .parameters = {

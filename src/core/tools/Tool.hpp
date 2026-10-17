@@ -102,6 +102,7 @@ struct ToolAnnotations {
  * | input_schema | inputSchema    | no       |
  * | output_schema| outputSchema   | no       |
  * | annotations  | annotations    | no       |
+ * | primary_argument | _meta["app.lampo/primaryArgument"] | no |
  *
  * @note If @c input_schema is empty, serializers construct @c inputSchema from
  *       @c parameters. Tools with complex nested arguments may provide a raw
@@ -110,7 +111,7 @@ struct ToolAnnotations {
  */
 struct ToolDefinition {
     std::string name = {};         ///< Programmatic identifier used in @c tools/call (e.g. @c "read")
-    std::string title = {};        ///< Human-readable display name shown in Lampo's tool list (e.g. @c "Read File")
+    std::string title = {};        ///< Human-readable display name used by MCP clients and Filo.
     std::string description = {};  ///< Prose description shown to the LLM to guide tool selection
     std::vector<ToolParameter> parameters = {};  ///< Ordered list of accepted parameters
     std::string input_schema = {}; ///< Optional raw JSON Schema object overriding parameter-derived inputSchema
@@ -122,6 +123,8 @@ struct ToolDefinition {
     /// Local exposure policy, never serialized as MCP metadata. Internal
     /// agent tools must remain private even in a shared TUI/MCP registry.
     bool agent_only = false;
+    /// Optional primary string argument shown in MCP activity rows.
+    std::string primary_argument = {};
 };
 
 [[nodiscard]] constexpr bool tool_allows_transport(

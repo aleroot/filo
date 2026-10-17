@@ -258,7 +258,7 @@ static constexpr std::string_view kEditsItemsSchema =
 ToolDefinition SearchReplaceTool::get_definition() const {
     return {
         .name  = std::string(names::kSearchReplace),
-        .title = "Search & Replace",
+        .title = "Edit",
         .description =
             "Apply ordered exact-text edits to one file. Copy old_string verbatim with enough "
             "context to be unique; later edits see earlier edits. Returns a bounded diff.",

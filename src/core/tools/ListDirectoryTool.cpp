@@ -13,7 +13,7 @@ namespace core::tools {
 ToolDefinition ListDirectoryTool::get_definition() const {
     return {
         .name  = std::string(names::kListDirectory),
-        .title = "List Directory",
+        .title = "List",
         .description =
             "List a directory's immediate file and subdirectory names.",
         .parameters = {

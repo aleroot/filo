@@ -14,7 +14,7 @@ namespace core::tools {
 ToolDefinition ReplaceTool::get_definition() const {
     return {
         .name  = std::string(names::kReplace),
-        .title = "Replace in File",
+        .title = "Replace",
         .description =
             "Replace one unique exact-text occurrence in a file and return a bounded diff.",
         .parameters = {

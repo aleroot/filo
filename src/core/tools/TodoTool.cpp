@@ -46,7 +46,7 @@ TodoTool::TodoTool(core::session::TodoManager& manager) noexcept
 ToolDefinition TodoTool::get_definition() const {
     return {
         .name = std::string(names::kWriteTodos),
-        .title = "Write Todos",
+        .title = "Plan",
         .description =
             "Replaces the current session task plan. Use for complex multi-step work, keep "
             "exactly one item in_progress while working, and mark items completed immediately. "

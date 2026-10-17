@@ -16,7 +16,7 @@ public:
     ToolDefinition get_definition() const override {
         return {
             .name        = std::string(names::kGetCurrentTime),
-            .title       = "Get Current Time",
+            .title       = "Time",
             .description =
                 "Returns the user's current local date, time, and UTC offset. Use it "
                 "only when a task depends on the current clock or calendar context. "

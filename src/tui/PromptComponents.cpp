@@ -10,6 +10,7 @@
 #include "core/session/SessionStore.hpp"
 #include "core/session/ThreadCatalog.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/ToolManager.hpp"
 #include "core/review/ReviewTargets.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/PathUtils.hpp"
@@ -1080,7 +1081,9 @@ Element render_permission_prompt_panel(std::string_view tool_name,
         FillWarn);
 
     auto preview_box = vbox({
-        hbox({ text("Tool") | dim, filler(), text(std::string(tool_name)) | ftxui::bold | color(ColorYellowBright) }),
+        hbox({ text("Tool") | dim, filler(), text(core::tools::ToolManager::get_instance()
+            .get_tool_title(std::string(tool_name)).value_or(std::string(tool_name)))
+            | ftxui::bold | color(ColorYellowBright) }),
         separator(),
         render_permission_fields(tool_name, args_preview)
     }) | UiBorder(ColorYellowDark);

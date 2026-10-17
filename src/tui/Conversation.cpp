@@ -9,6 +9,7 @@
 #include "core/changes/PatchExport.hpp"
 #include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/ToolManager.hpp"
 #include "core/tools/read/ReadTypes.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -544,46 +545,32 @@ enum class ToolPresentationKind {
     Generic,
 };
 
-/// How a tool is surfaced in the transcript: which renderer handles its result,
-/// and the human-facing label shown instead of the raw tool name.
-struct ToolPresentation {
-    ToolPresentationKind kind = ToolPresentationKind::Generic;
-    std::string_view     label;
-};
-
-/// Single source of truth for tool presentation. Each tool appears exactly once,
-/// so its renderer and its label cannot drift apart.
-ToolPresentation tool_presentation(std::string_view name) {
+/// Selects the result renderer. Display titles come from tool definitions.
+ToolPresentationKind tool_presentation_kind(std::string_view name) {
     using namespace core::tools::names;
     using Kind = ToolPresentationKind;
-    if (is_read_tool(name))                          return {Kind::Read,      "Read"};
-    if (name == kWriteFile)                         return {Kind::Write,     "Write"};
-    if (name == kApplyPatch)                        return {Kind::Edit,      "Patch"};
-    if (name == kSearchReplace || is_replace_tool(name)) return {Kind::Edit, "Edit"};
-    if (name == kDeleteFile)                        return {Kind::Edit,      "Delete"};
-    if (name == kMoveFile)                          return {Kind::Edit,      "Move"};
-    if (name == kCreateDirectory)                   return {Kind::Edit,      "Create directory"};
-    if (is_terminal_tool(name))                     return {Kind::Shell,     "Shell"};
-    if (name == kPython)                            return {Kind::Shell,     "Python"};
-    if (name == kGrepSearch)                        return {Kind::Grep,      "Search"};
-    if (name == kFileSearch)                        return {Kind::Files,     "Find files"};
-    if (name == kListDirectory)                     return {Kind::Directory, "List"};
-    if (name == kWebSearch)                         return {Kind::WebSearch, "Web search"};
-    if (name == kFetchUrl)                          return {Kind::WebFetch,  "Fetch"};
-    if (name == kWriteTodos)                        return {Kind::Todo,      "Plan"};
-    if (is_subagent_tool(name))                     return {Kind::Task,      "Agent"};
-    if (name == kMemory)                            return {Kind::Generic,   "Memory"};
-    if (name == kActivateSkill)                     return {Kind::Generic,   "Skill"};
-    if (name == kAskUserQuestion)                   return {Kind::Generic,   "Question"};
-    if (name == kGetCurrentTime)                    return {Kind::Generic,   "Time"};
-    return {Kind::Generic, name};
+    if (is_read_tool(name)) return Kind::Read;
+    if (name == kWriteFile) return Kind::Write;
+    if (name == kApplyPatch || name == kSearchReplace || is_replace_tool(name)
+        || name == kDeleteFile || name == kMoveFile || name == kCreateDirectory) {
+        return Kind::Edit;
+    }
+    if (is_terminal_tool(name) || name == kPython) return Kind::Shell;
+    if (name == kGrepSearch) return Kind::Grep;
+    if (name == kFileSearch) return Kind::Files;
+    if (name == kListDirectory) return Kind::Directory;
+    if (name == kWebSearch) return Kind::WebSearch;
+    if (name == kFetchUrl) return Kind::WebFetch;
+    if (name == kWriteTodos) return Kind::Todo;
+    if (is_subagent_tool(name)) return Kind::Task;
+    return Kind::Generic;
 }
 
 /// True for tools whose renderer reads JSON fields that `apply_tool_result`
 /// discards when it collapses a payload down to a display string. Those tools
 /// keep the original JSON in `Result::raw_payload`; see `apply_tool_result`.
 bool tool_result_needs_raw_payload(std::string_view name) {
-    switch (tool_presentation(name).kind) {
+    switch (tool_presentation_kind(name)) {
         case ToolPresentationKind::Grep:
         case ToolPresentationKind::Files:
         case ToolPresentationKind::Directory:
@@ -855,7 +842,7 @@ std::size_t read_result_line_count(std::string_view summary) {
 /// The header previously parsed the payload to compute a count and the body
 /// parsed it again to build rows — two full simdjson passes per tool per frame.
 struct ToolResultView {
-    ToolPresentation             presentation;
+    ToolPresentationKind         kind = ToolPresentationKind::Generic;
     std::vector<SearchResultRow> search_rows;
     std::vector<PathResultRow>   path_rows;
     std::vector<WebResultRow>    web_rows;
@@ -875,10 +862,10 @@ std::string summarize_read_arguments(const core::tools::read::Options& options);
 
 ToolResultView build_tool_result_view(const ToolActivity& tool) {
     ToolResultView view;
-    view.presentation = tool_presentation(tool.name);
+    view.kind = tool_presentation_kind(tool.name);
     const std::string_view payload = tool_result_payload(tool);
 
-    switch (view.presentation.kind) {
+    switch (view.kind) {
         case ToolPresentationKind::Read:
             view.read_line_count = read_result_line_count(tool.result.summary);
             view.read_start_line = read_start_line(tool.args);
@@ -946,7 +933,7 @@ std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& v
     const bool succeeded = tool.status == ToolActivity::Status::Succeeded;
     const bool structured = succeeded && view.payload_parsed;
 
-    switch (view.presentation.kind) {
+    switch (view.kind) {
         case ToolPresentationKind::Read:
             return succeeded ? count_label(view.read_line_count, "line", "lines")
                              : std::string{};
@@ -1336,7 +1323,8 @@ Element render_tool_header(const ToolActivity& tool,
         expandable
             ? ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(ColorYellowDark) | dim
             : ftxui::text("  "),
-        ftxui::text(std::string(view.presentation.label))
+        ftxui::text(core::tools::ToolManager::get_instance()
+                        .get_tool_title(tool.name).value_or(tool.name))
             | ftxui::bold
             | ftxui::color(ColorYellowBright),
     });
@@ -1427,7 +1415,7 @@ Element render_tool_result(const ToolActivity& tool,
     // — failed, denied, cancelled mid-write — falls back to plain text so a
     // partial or non-JSON body is shown verbatim instead of as "No results".
     if (tool.status == ToolActivity::Status::Succeeded) {
-        switch (view.presentation.kind) {
+        switch (view.kind) {
             case ToolPresentationKind::Read:
                 return render_numbered_tool_text(
                     tool.result.summary, view.read_start_line, options);
@@ -1451,7 +1439,7 @@ Element render_tool_result(const ToolActivity& tool,
         }
     }
 
-    const bool is_terminal_output = view.presentation.kind == ToolPresentationKind::Shell
+    const bool is_terminal_output = view.kind == ToolPresentationKind::Shell
         && core::tools::names::is_terminal_tool(tool.name);
     std::vector<Element> rows;
     if (is_terminal_output) {
@@ -1503,8 +1491,8 @@ bool edit_result_is_raw_json(const ToolActivity& tool,
         || tool.diff_preview.empty()
         || tool.result.summary.empty()
         || tool.result.summary == kDoneSummary
-        || (view.presentation.kind != ToolPresentationKind::Write
-            && view.presentation.kind != ToolPresentationKind::Edit)) {
+        || (view.kind != ToolPresentationKind::Write
+            && view.kind != ToolPresentationKind::Edit)) {
         return false;
     }
 
@@ -1688,7 +1676,8 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
                 ftxui::text("    "),
                 ftxui::text(std::string(tool_status_icon(tool.status))) | ftxui::color(tool_status_color(tool.status)),
                 ftxui::text(" "),
-                ftxui::text(tool.name) | ftxui::color(ColorYellowDark),
+                ftxui::text(core::tools::ToolManager::get_instance()
+                                .get_tool_title(tool.name).value_or(tool.name)) | ftxui::color(ColorYellowDark),
                 ftxui::text(tool.description.empty() ? "" : "  "),
                 elided_text(tool.description) | ftxui::color(ColorTextMuted) | xflex,
             }) | xflex);

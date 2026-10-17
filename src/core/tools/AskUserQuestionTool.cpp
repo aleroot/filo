@@ -39,7 +39,7 @@ AskUserQuestionTool::AskUserQuestionTool() = default;
 ToolDefinition AskUserQuestionTool::get_definition() const {
     ToolDefinition def;
     def.name = std::string(names::kAskUserQuestion);
-    def.title = "Ask User Question";
+    def.title = "Question";
     def.description = R"(Ask the user structured question(s) to guide the conversation.
 
 Use this tool when you need user input to make a decision, clarify requirements, or choose between options. The user will see a dialog with your question and the provided options.
