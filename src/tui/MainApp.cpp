@@ -862,6 +862,7 @@ RunResult run(RunOptions opts) {
         &core::budget::BudgetTracker::get_instance(),
         memory_system,
         workspace_leases);
+    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>());
     agent->set_active_provider_name(active_provider_name);
     agent->set_auto_compact_threshold(
         config.auto_compact_threshold,
@@ -2498,6 +2499,7 @@ RunResult run(RunOptions opts) {
             &core::budget::BudgetTracker::get_instance(),
             memory_system,
             workspace_leases);
+        created->set_execution_journal(agent->execution_journal());
         created->set_active_provider_name(
             data.provider.empty() ? active_provider_name : data.provider);
         created->set_auto_compact_threshold(

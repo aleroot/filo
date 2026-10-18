@@ -10,6 +10,7 @@
 #include "../power/SleepInhibitor.hpp"
 #include "../session/GoalManager.hpp"
 #include "../session/SessionData.hpp"
+#include "../session/ExecutionJournal.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../session/TodoManager.hpp"
 #include "../tools/ReadToolResultTool.hpp"
@@ -248,6 +249,13 @@ public:
     // Session persistence helpers.
     // -----------------------------------------------------------------------
 
+    /// Execution roots opt into local durable history; tests/embedders can inject
+    /// a temporary journal or leave it disabled. Attach only while idle.
+    void set_execution_journal(std::shared_ptr<core::session::ExecutionJournal> journal,
+                               std::string actor = "agent",
+                               std::string parent_tool_call_id = {});
+    [[nodiscard]] std::shared_ptr<core::session::ExecutionJournal> execution_journal() const;
+
     /// Return a snapshot of the conversation history (system message excluded).
     [[nodiscard]] std::vector<core::llm::Message> get_history() const;
 
@@ -482,7 +490,10 @@ private:
         if (turn_state->conversation_generation != conversation_generation_) {
             return false;
         }
+        const auto previous_size = history_.size();
         std::forward<Mutator>(mutator)(history_);
+        for (auto i = previous_size; i < history_.size(); ++i)
+            journal_message_unlocked(history_[i]);
         refresh_context_window_snapshot_unlocked();
         return true;
     }
@@ -494,6 +505,14 @@ private:
     void run_memory_background_review(
         core::llm::protocols::RateLimitInfo rate_limit,
         std::function<void(const std::string&)> status_log_callback);
+
+    void journal_unlocked(std::string_view event, std::string_view payload) const noexcept;
+    void journal_message_unlocked(const core::llm::Message& message) const noexcept;
+    std::shared_ptr<core::session::ExecutionJournal> execution_journal_;
+    std::string journal_actor_ = "agent";
+    std::string journal_parent_tool_call_id_;
+    std::string journal_request_context_;
+    std::string journal_context_session_id_;
 
     void ensure_system_prompt();
     void refresh_stable_prompt_state_unlocked();

@@ -75,6 +75,7 @@ execute_exploration(SubagentOrchestrator &orchestrator,
           .cancellation_requested =
               std::move(request.cancellation_requested),
           .memory_system = std::move(request.memory_system),
+          .execution_journal = std::move(request.execution_journal),
           .effort = std::move(request.effort),
       });
   if (const auto error =

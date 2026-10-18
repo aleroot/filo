@@ -9,6 +9,10 @@
 #include <string>
 #include <string_view>
 
+namespace core::session {
+class ExecutionJournal;
+}
+
 namespace core::llm {
 class LLMProvider;
 }
@@ -58,6 +62,7 @@ struct ExplorationRequest {
   std::function<void(const SubagentEvent &)> on_subagent_event = {};
   std::function<bool()> cancellation_requested;
   std::shared_ptr<core::memory::MemorySystem> memory_system;
+  std::shared_ptr<core::session::ExecutionJournal> execution_journal = {};
   std::string effort = {};
   /// A Boost implementation workstream needs to edit and build. It is only
   /// ever pointed at a throwaway worktree, never at the user's checkout, so

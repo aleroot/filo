@@ -662,6 +662,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
         session_stats_registry,
         &core::budget::BudgetTracker::get_instance(),
         memory_system);
+    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>());
     agent->set_active_provider_name(runtime.provider_name);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);

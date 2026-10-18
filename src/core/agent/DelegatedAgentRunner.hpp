@@ -76,6 +76,7 @@ public:
         PermissionCheck permission_check = {};
         EventCallback on_event = {};
         std::string effort = {};
+        std::shared_ptr<core::session::ExecutionJournal> execution_journal = {};
     };
 
     struct Result {

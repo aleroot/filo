@@ -1557,6 +1557,7 @@ void handle_api_chat(
         nullptr,
         memory_system,
         workspace_leases);
+    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>());
     agent->set_active_provider_name(config.default_provider);
 
     std::string final_response;

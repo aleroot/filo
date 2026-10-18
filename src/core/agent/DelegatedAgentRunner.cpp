@@ -91,6 +91,9 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                                        .tool_recovery}),
         request.workspace_leases,
         request.change_tracker);
+    agent->set_execution_journal(request.execution_journal,
+        request.task_id.empty() ? "worker_" + core::session::SessionStore::generate_id() : request.task_id,
+        request.parent_tool_call_id);
     agent->set_active_provider_name(request.provider_name);
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.

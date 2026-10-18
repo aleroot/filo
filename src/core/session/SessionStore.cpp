@@ -1,4 +1,5 @@
 #include "SessionStore.hpp"
+#include "ExecutionJournal.hpp"
 
 #include "ActiveSessionLease.hpp"
 #include "ThreadCatalog.hpp"
@@ -466,6 +467,12 @@ void append_goal_graph_json(std::string& out,
 }
 
 } // namespace
+
+std::string SessionStore::message_json(const core::llm::Message& message) {
+    std::string out;
+    append_message_json(out, message);
+    return out;
+}
 
 std::string SessionStore::to_json(const SessionData& data) {
     std::string out;
@@ -1368,6 +1375,8 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
             if (error) *error = lock_error;
             return false;
         }
+        if (!ExecutionJournal{sessions_dir_ / "journals"}.remove(session_id, error))
+            return false;
         std::filesystem::remove(p, ec);
         if (ec && error) {
             *error = std::format("Cannot remove session file '{}': {}",

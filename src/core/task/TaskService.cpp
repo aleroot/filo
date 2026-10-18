@@ -553,6 +553,7 @@ std::string TaskService::execute(std::string_view json_args,
         .cancellation_requested = control
             ? std::function<bool()>{[control]() { return control->cancel_requested(); }}
             : std::function<bool()>{},
+        .execution_journal = std::make_shared<core::session::ExecutionJournal>(),
     });
     if (run_result.timed_out) {
         if (control) {

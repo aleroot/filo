@@ -76,6 +76,9 @@ public:
     // Compute the canonical file path for the given session data.
     [[nodiscard]] std::filesystem::path compute_path(const SessionData& data) const;
 
+    /// Shared lossless message encoding for snapshots and execution journals.
+    [[nodiscard]] static std::string message_json(const core::llm::Message& message);
+
     // ── Static helpers ───────────────────────────────────────────────────────
 
     /// Generate a random 8-hex-character session ID.

@@ -457,6 +457,7 @@ set(FILO_CORE_SOURCES
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp
+    src/core/session/ExecutionJournal.cpp
     src/core/session/SessionStore.cpp
     src/core/session/ThreadCatalog.cpp
     src/core/session/ActiveSessionLease.cpp
@@ -736,6 +737,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_prompt_input.cpp
     tests/test_http_response_lifecycle.cpp
     tests/test_stream_resilience.cpp
+    tests/test_execution_journal.cpp
     tests/test_session.cpp
     tests/test_thread_catalog.cpp
     tests/test_session_picker.cpp

@@ -1,6 +1,7 @@
 #include "Agent.hpp"
 #include "AgentCapabilities.hpp"
 #include "../budget/BudgetTracker.hpp"
+#include "../changes/FileChangeJson.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
@@ -423,6 +424,46 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     refresh_context_window_snapshot_unlocked();
 }
 
+void Agent::set_execution_journal(
+    std::shared_ptr<core::session::ExecutionJournal> journal,
+    std::string actor, std::string parent_tool_call_id) {
+    std::lock_guard lock(history_mutex_);
+    if (turn_in_progress_.load(std::memory_order_acquire)) return;
+    execution_journal_ = std::move(journal);
+    journal_request_context_.clear();
+    journal_context_session_id_.clear();
+    journal_actor_ = std::move(actor);
+    journal_parent_tool_call_id_ = std::move(parent_tool_call_id);
+}
+
+std::shared_ptr<core::session::ExecutionJournal> Agent::execution_journal() const {
+    std::lock_guard lock(history_mutex_);
+    return execution_journal_;
+}
+
+void Agent::journal_unlocked(std::string_view event, std::string_view payload) const noexcept {
+    if (!execution_journal_) return;
+    try {
+        std::string error;
+        if (!execution_journal_->append(session_context_.session_id, journal_actor_,
+                journal_parent_tool_call_id_, event, payload, &error))
+            core::logging::warn("Execution history could not be saved: {}", error);
+    } catch (const std::exception& error) {
+        core::logging::warn("Execution history could not be saved: {}", error.what());
+    } catch (...) {
+        core::logging::warn("Execution history could not be saved: unknown error");
+    }
+}
+
+void Agent::journal_message_unlocked(const core::llm::Message& message) const noexcept {
+    if (!execution_journal_ || message.role == "system") return;
+    try {
+        journal_unlocked("message", core::session::SessionStore::message_json(message));
+    } catch (...) {
+        core::logging::warn("Execution history message could not be encoded.");
+    }
+}
+
 Agent::~Agent() = default;
 
 std::shared_ptr<Agent> Agent::make_isolated_agent(
@@ -452,6 +493,8 @@ std::shared_ptr<Agent> Agent::make_isolated_agent(
         budget_tracker_,
         memory_system_,
         workspace_leases_);
+    isolated->set_execution_journal(execution_journal(),
+        "isolated_" + core::session::SessionStore::generate_id());
     isolated->set_active_provider_name(std::move(provider_name));
     isolated->set_active_model(std::move(model));
     isolated->set_mode(mode);
@@ -575,6 +618,7 @@ Agent::run_read_only_goal_task(std::string_view description,
               },
           .cancellation_requested = [this] { return is_stop_requested(); },
           .memory_system = std::move(memory_system),
+          .execution_journal = execution_journal(),
       });
 }
 
@@ -616,6 +660,9 @@ core::changes::TurnChanges Agent::publish_turn_changes(
         }
         if (it->role == "assistant") {
             it->turn_changes = changes;
+            std::string event;
+            core::changes::append_turn_changes_json(event, changes);
+            journal_unlocked("turn_changes", event);
             return changes;
         }
     }
@@ -634,6 +681,7 @@ bool Agent::mark_latest_turn_changes_reverted() {
             return false;
         }
         it->turn_changes.reverted = true;
+        journal_unlocked("revert", "{}");
         return true;
     }
     return false;
@@ -716,6 +764,7 @@ AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
                 .cancellation_requested =
                     [this] { return is_stop_requested(); },
                 .memory_system = memory_system,
+                .execution_journal = execution_journal(),
                 .effort = boost || node.name.starts_with("BOOST") ? boost_effort : "",
             });
         if (!evidence.has_value()) {
@@ -783,6 +832,7 @@ AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
                   .cancellation_requested =
                       [this] { return is_stop_requested(); },
                   .memory_system = memory_system,
+                  .execution_journal = execution_journal(),
                   .effort = boost_effort,
                   .read_only = false,
               });
@@ -1092,6 +1142,7 @@ void Agent::append_project_facts_update_unlocked(
                 project_facts_snapshot_->tree),
             .synthetic = true,
         });
+        journal_message_unlocked(history_.back());
     }
 }
 
@@ -1165,6 +1216,7 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
 void Agent::clear_history() {
     std::lock_guard lock(history_mutex_);
     ++conversation_generation_;
+    journal_unlocked("clear", "{}");
     history_.clear();
     context_summary_.clear();
     project_facts_snapshot_.reset();
@@ -1195,6 +1247,16 @@ void Agent::apply_compaction_unlocked(
     std::string summary,
     HistoryCompactionPlan plan,
     std::string active_skill_context) {
+    if (execution_journal_) {
+        core::utils::JsonWriter event;
+        {
+            auto object = event.object();
+            event.kv_str("summary", summary).comma();
+            event.kv_num("messages_before", history_.size()).comma();
+            event.kv_num("messages_retained", plan.retained_history.size());
+        }
+        journal_unlocked("compaction", event.view());
+    }
     context_summary_ = core::utils::str::trim_ascii_copy(summary);
     append_compaction_section(
         context_summary_,
@@ -1336,6 +1398,12 @@ void Agent::undo_last() {
         return;
     }
     const auto erase_from = std::prev(last_user.base());
+    core::utils::JsonWriter event;
+    {
+        auto object = event.object();
+        event.kv_num("messages_removed", std::distance(erase_from, history_.end()));
+    }
+    journal_unlocked("rewind", event.view());
     history_.erase(erase_from, history_.end());
     ++conversation_generation_;
     refresh_context_window_snapshot_unlocked();
@@ -1504,6 +1572,13 @@ void Agent::send_message(core::llm::Message user_message,
         const auto turn_changes = publish_turn_changes(turn_state);
         {
             std::lock_guard lock(history_mutex_);
+            core::utils::JsonWriter event;
+            {
+                auto object = event.object();
+                event.kv_bool("failed", last_turn_failed()).comma();
+                event.kv_bool("cancelled", is_stop_requested());
+            }
+            journal_unlocked("turn_end", event.view());
             turn_provider_.reset();
         }
         turn_state.reset();
@@ -1571,6 +1646,18 @@ void Agent::send_message(core::llm::Message user_message,
             history_, [](const core::llm::Message& message) {
                 return message.role == "user" && !message.synthetic;
             });
+        if (execution_journal_) {
+            core::utils::JsonWriter context;
+            {
+                auto object = context.object();
+                context.kv_str("working_dir", session_context_.workspace_view().primary().string()).comma();
+                context.kv_str("provider", turn_state->provider_name).comma();
+                context.kv_str("model", turn_state->model).comma();
+                context.kv_str("mode", mode_snapshot);
+            }
+            journal_unlocked("turn_start", context.view());
+        }
+        journal_message_unlocked(user_message);
         history_.push_back(std::move(user_message));
         // After the prompt joins history: the memory block in the stable prefix
         // is ranked against the conversation, and this prompt is the one that
@@ -1694,6 +1781,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         {
             std::lock_guard lock(history_mutex_);
             history_.push_back({"assistant", message, "", "", {}});
+            journal_message_unlocked(history_.back());
             refresh_context_window_snapshot_unlocked();
         }
         text_callback(message);
@@ -1830,6 +1918,25 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
       });
     }
 
+    {
+        std::lock_guard lock(history_mutex_);
+        if (execution_journal_) {
+            core::llm::ChatRequest context;
+            context.model = request.model;
+            context.effort = request.effort;
+            context.max_tokens = request.max_tokens;
+            context.tools = request.tools;
+            for (const auto& message : request.messages)
+                if (message.role == "system") context.messages.push_back(message);
+            auto encoded = core::llm::Serializer::serialize(context);
+            if (encoded != journal_request_context_ || journal_context_session_id_ != session_context_.session_id) {
+                journal_unlocked("request_context", encoded);
+                journal_request_context_ = std::move(encoded);
+                journal_context_session_id_ = session_context_.session_id;
+            }
+        }
+    }
+
     auto assistant_response   = std::make_shared<std::string>();
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
     auto tool_cost_attribution =
@@ -1889,6 +1996,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         if (chunk.reset_attempt) {
+            {
+                std::lock_guard lock(self->history_mutex_);
+                if (self->execution_journal_)
+                    self->journal_unlocked("attempt_reset", core::session::SessionStore::message_json(
+                        core::llm::Message{.role = "assistant", .content = *assistant_response,
+                            .tool_calls = *tool_calls_accum, .reasoning_content = *reasoning_accum}));
+            }
             assistant_response->clear();
             reasoning_accum->clear();
             reasoning_protocol_accum->clear();
@@ -1988,6 +2102,28 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     .should_estimate_cost = should_estimate_cost,
                     .billable = should_estimate_cost,
                 });
+            }
+            {
+                std::lock_guard lock(self->history_mutex_);
+                if (self->execution_journal_) {
+                    core::utils::JsonWriter event;
+                    {
+                        auto object = event.object();
+                        event.kv_str("provider", provider_name_snapshot).comma();
+                        event.kv_str("model", model).comma();
+                        event.kv_num("prompt_tokens", usage.prompt_tokens).comma();
+                        event.kv_num("completion_tokens", usage.completion_tokens).comma();
+                        event.kv_num("cached_prompt_tokens", usage.cached_prompt_tokens).comma();
+                        event.kv_num("cache_creation_prompt_tokens", usage.cache_creation_prompt_tokens).comma();
+                        event.kv_num("reasoning_tokens", usage.reasoning_tokens).comma();
+                        event.kv_bool("failed", chunk.is_error).comma();
+                        event.kv_str("stop_reason", chunk.stop_reason).comma();
+                        event.kv_bool("incomplete_tool_call", chunk.incomplete_tool_call).comma();
+                        event.kv_bool("cost_estimated", should_estimate_cost).comma();
+                        event.kv_num("cost_micro_usd", core::budget::estimate_cost_micro_usd(usage, model, should_estimate_cost));
+                    }
+                    self->journal_unlocked("usage", event.view());
+                }
             }
             self->session_stats_registry_->record_turn(
                 step_session_context.session_id,
@@ -2347,6 +2483,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         !core::utils::json::is_object(tc.function.arguments);
                 }
 
+                {
+                    std::lock_guard lock(self->history_mutex_);
+                    if (self->execution_journal_)
+                        self->journal_unlocked("tool_start", core::session::SessionStore::message_json(
+                            core::llm::Message{.role = "assistant", .tool_calls = {tc}}));
+                }
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
                 }
@@ -2647,6 +2789,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     return self->is_stop_requested();
                                 },
                                 .memory_system = self->memory_system_,
+                                .execution_journal = self->execution_journal(),
                                 // The worker's edits belong to this turn's
                                 // summary, so it records into the same tracker
                                 // instead of one that is thrown away with it.
@@ -2691,6 +2834,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                               : core::tools::ToolAnnotations{}),
                                       execute)
                                 : execute();
+                        }
+                        {
+                            std::lock_guard lock(self->history_mutex_);
+                            if (self->execution_journal_)
+                                self->journal_unlocked("tool_result", core::session::SessionStore::message_json(
+                                    core::llm::Message{.role = "tool", .content = result, .tool_call_id = tc.id}));
                         }
                         const bool raw_tool_ok =
                             !recovery::result_indicates_error(result);
@@ -3038,6 +3187,7 @@ void Agent::append_history_message(core::llm::Message message) {
     if (message.role.empty()) {
         message.role = "user";
     }
+    journal_message_unlocked(message);
     history_.push_back(std::move(message));
     mark_stable_prompt_prefix_dirty();
     refresh_context_window_snapshot_unlocked();
@@ -3091,6 +3241,24 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
         "Truncated malformed saved tool transcript at history index {}: {}",
         invalid->message_index, invalid->reason);
     messages.resize(invalid->message_index);
+  }
+  if (execution_journal_) {
+    core::utils::JsonWriter event;
+    {
+      auto object = event.object();
+      event.kv_str("context_summary", context_summary).comma();
+      event.kv_str("working_dir", session_context_.workspace_view().primary().string()).comma();
+      event.kv_str("origin", "resume_snapshot").comma();
+      event.key("messages");
+      auto array = event.array();
+      bool first = true;
+      for (const auto& message : messages) {
+        if (!first) event.comma();
+        first = false;
+        event.raw(core::session::SessionStore::message_json(message));
+      }
+    }
+    journal_unlocked("resume", event.view());
   }
   history_ = std::move(messages);
   refresh_stable_prompt_state_unlocked();
