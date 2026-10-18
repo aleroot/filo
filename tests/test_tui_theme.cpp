@@ -21,6 +21,7 @@
 
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 #include "tui/Conversation.hpp"
 #include "tui/MarkdownRenderer.hpp"
@@ -45,6 +46,21 @@ public:
 
 private:
     tui::Theme previous_;
+};
+
+class ScopedColorSupport {
+public:
+    explicit ScopedColorSupport(ftxui::Terminal::Color support)
+        : previous_(ftxui::Terminal::ColorSupport()) {
+        ftxui::Terminal::SetColorSupport(support);
+    }
+    ~ScopedColorSupport() { ftxui::Terminal::SetColorSupport(previous_); }
+
+    ScopedColorSupport(const ScopedColorSupport&) = delete;
+    ScopedColorSupport& operator=(const ScopedColorSupport&) = delete;
+
+private:
+    ftxui::Terminal::Color previous_;
 };
 
 struct NamedColor {
@@ -428,6 +444,10 @@ ftxui::Element sample_transcript() {
 } // namespace
 
 TEST_CASE("Light-theme transcripts draw no pale ink on the terminal background", "[tui][theme][render]") {
+    // Inspect the actual palette and RGB inks even when the test runner sets
+    // NO_COLOR or advertises a limited terminal. Otherwise FTXUI strips or
+    // quantizes them, invalidating the dark control and skipping RGB checks.
+    const ScopedColorSupport true_color{ftxui::Terminal::Color::TrueColor};
     // Palette white / light grey are near-invisible on a light terminal. Exact
     // RGB inks must clear WCAG AA against white: 4.5:1 for text, 3:1 for
     // borders, bars and other non-text glyphs (WCAG 1.4.11).
