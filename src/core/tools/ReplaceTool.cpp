@@ -16,7 +16,8 @@ ToolDefinition ReplaceTool::get_definition() const {
         .name  = std::string(names::kReplace),
         .title = "Replace",
         .description =
-            "Replace one unique exact-text occurrence in a file and return a bounded diff.",
+            "Replace one unique exact-text occurrence in a file and return a bounded diff. "
+            "Prefer this tool for a single edit; use search_replace for ordered batches.",
         .parameters = {
             {"file_path",  "string", "File path.", true},
             {"old_string", "string", "Unique verbatim text to replace.", true},

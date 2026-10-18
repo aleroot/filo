@@ -261,7 +261,8 @@ ToolDefinition SearchReplaceTool::get_definition() const {
         .title = "Edit",
         .description =
             "Apply ordered exact-text edits to one file. Copy old_string verbatim with enough "
-            "context to be unique; later edits see earlier edits. Returns a bounded diff.",
+            "context to be unique; later edits see earlier edits. Prefer replace for a single "
+            "edit. Returns a bounded diff.",
         .parameters = {
             {
                 .name = "file_path",
@@ -273,8 +274,9 @@ ToolDefinition SearchReplaceTool::get_definition() const {
                 .name = "edits",
                 .type = "array",
                 .description =
-                    "Ordered {old_string,new_string} edits, as a JSON array value "
-                    "(never a string containing JSON).",
+                    R"(Ordered edits, e.g. [{"old_string":"before","new_string":"after"}]. )"
+                    "Keep both fields inside each item. Send a JSON array, never a string "
+                    "containing JSON; split large edits across smaller calls.",
                 .required = true,
                 .items_schema = std::string{kEditsItemsSchema},
             },
