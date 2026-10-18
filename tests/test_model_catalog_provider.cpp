@@ -2087,3 +2087,21 @@ TEST_CASE("ModelRegistry load_from_json rejects malformed catalog JSON", "[llm][
     CHECK(ModelRegistry::instance().load_from_json("{not json") == -1);
     CHECK(ModelRegistry::instance().load_from_json(R"JSON({"items":[]})JSON") == -1);
 }
+
+TEST_CASE("Codex catalog retains authoritative reasoning defaults and exact levels",
+          "[llm][model-catalog][openai][regression]") {
+    CodexModelCatalogProvider catalog;
+    const auto result = catalog.parse_models_response(R"({"models":[
+        {"slug":"gpt-future","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"},{"effort":"ultra"}]},
+        {"slug":"no-controls","supported_reasoning_levels":[]}
+    ]})");
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+    const auto& profile = result.models[0].reasoning;
+    CHECK(profile.complete);
+    CHECK(profile.catalog_default_effort == "high");
+    CHECK(profile.supported_efforts == std::vector<std::string>{"high", "ultra"});
+    CHECK(profile.effort.supports(ReasoningCapability::UltraEffort));
+    CHECK(result.models[1].reasoning.complete);
+    CHECK_FALSE(result.models[1].reasoning.effort.supports_effort());
+}

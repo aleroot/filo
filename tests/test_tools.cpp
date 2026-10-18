@@ -3338,3 +3338,36 @@ TEST_CASE("get_workspace_config reports attached files apart from directories",
     CHECK_THAT(output, Catch::Matchers::ContainsSubstring(
         std::format(R"("attached_files":["{}"])", escaped(shot))));
 }
+
+TEST_CASE("OpenAI subscription web search uses streaming array input and requires completion",
+          "[tools][web][openai][regression]") {
+    core::tools::web::SearchRequest request;
+    request.query = "Filo release notes";
+    const auto body = core::tools::web::openai_web_search_request_json(request, "gpt-5.6-sol", true);
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(body);
+    CHECK(bool(doc["stream"]));
+    CHECK_FALSE(bool(doc["store"]));
+    CHECK(doc["input"].is_array());
+    CHECK(doc["input"].at(0)["content"].is_array());
+    CHECK(std::string_view(doc["reasoning"]["summary"]) == "auto");
+    const auto public_body = core::tools::web::openai_web_search_request_json(request, "gpt-5.6-sol", false);
+    simdjson::dom::parser public_parser;
+    const auto public_doc = public_parser.parse(public_body);
+    CHECK_FALSE(bool(public_doc["stream"]));
+    CHECK(public_doc["input"].is_string());
+    const std::string complete =
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\r\n\r\n"
+        "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":["
+        "{\"type\":\"web_search_call\",\"action\":{\"sources\":[{\"url\":\"https://example.com/source\",\"title\":\"Source\"}]}},"
+        "{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Found it.\"}]}]}}\r\n\r\n";
+    const auto result = core::tools::web::parse_openai_web_search_response(complete, 5, true);
+    REQUIRE(result);
+    CHECK(result->answer == "Found it.");
+    REQUIRE(result->results.size() == 1);
+    CHECK(result->results[0].url == "https://example.com/source");
+    CHECK_FALSE(core::tools::web::parse_openai_web_search_response(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n", 5, true));
+    CHECK_FALSE(core::tools::web::parse_openai_web_search_response(
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"overloaded\"}}}\n\n", 5, true));
+}

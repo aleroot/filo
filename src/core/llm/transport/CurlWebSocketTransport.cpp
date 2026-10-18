@@ -1,6 +1,9 @@
 #include "CurlWebSocketTransport.hpp"
 #include "HttpHeaderUtils.hpp"
 #include "core/net/NetworkTraffic.hpp"
+#if defined(__APPLE__)
+#include "AppleWebSocketTransport.hpp"
+#endif
 
 #include <curl/curl.h>
 
@@ -128,9 +131,11 @@ struct SendResult {
 
 [[nodiscard]] SendResult send_all(CURL* curl,
                                   std::string_view payload,
-                                  const std::atomic_bool* cancel_requested) {
+                                  const std::atomic_bool* cancel_requested,
+                                  std::chrono::milliseconds idle) {
     bool sent_any = false;
     uint64_t bytes_sent = 0;
+    auto last_activity = std::chrono::steady_clock::now();
     while (!payload.empty()) {
         if (cancel_requested != nullptr
             && cancel_requested->load(std::memory_order_acquire)) {
@@ -148,8 +153,12 @@ struct SendResult {
         sent_any = sent_any || sent_bytes;
         if (sent_bytes) {
             bytes_sent += static_cast<uint64_t>(std::min(sent, payload.size()));
+            last_activity = std::chrono::steady_clock::now();
         }
         if (code == CURLE_AGAIN) {
+            if (std::chrono::steady_clock::now() - last_activity >= idle) {
+                return SendResult{CURLE_OPERATION_TIMEDOUT, sent_any, bytes_sent};
+            }
             if (sent_bytes) {
                 payload.remove_prefix(std::min(sent, payload.size()));
             }
@@ -178,20 +187,42 @@ struct CurlWebSocketTransport::Connection {
     std::string url;
     std::string key;
     long http_status = 0;
+    std::chrono::steady_clock::time_point opened_at = std::chrono::steady_clock::now();
 };
 
 CurlWebSocketTransport::CurlWebSocketTransport(std::chrono::milliseconds idle_timeout)
-    : idle_timeout_(idle_timeout) {}
+    : idle_timeout_(idle_timeout)
+#if defined(__APPLE__)
+    , native_(std::make_unique<AppleWebSocketTransport>())
+#endif
+{}
 
 CurlWebSocketTransport::~CurlWebSocketTransport() = default;
 
 bool CurlWebSocketTransport::runtime_supports_url(std::string_view url) noexcept {
+#if defined(__APPLE__)
+    return !websocket_scheme(url).empty();
+#else
     return runtime_supports_websocket_protocol(url);
+#endif
 }
 
 void CurlWebSocketTransport::reset() {
     std::lock_guard lock(mutex_);
     connection_.reset();
+#if defined(__APPLE__)
+    native_->reset();
+#endif
+}
+
+bool CurlWebSocketTransport::matches_connection(std::string_view key) {
+    std::lock_guard lock(mutex_);
+#if defined(__APPLE__)
+    return native_->matches_connection(key);
+#else
+    return connection_ && connection_->key == key
+        && std::chrono::steady_clock::now() - connection_->opened_at < std::chrono::minutes(55);
+#endif
 }
 
 WebSocketStreamResult CurlWebSocketTransport::stream_text(
@@ -204,6 +235,24 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     std::optional<std::chrono::milliseconds> idle_timeout) {
     std::lock_guard lock(mutex_);
     const std::chrono::milliseconds idle = idle_timeout.value_or(idle_timeout_);
+    const auto guarded_callback = [&](std::string_view message) {
+        try {
+            return on_message(message);
+        } catch (...) {
+            // A consumer may fail before draining the generation. Its unread
+            // events must never be delivered as part of a later request.
+            connection_.reset();
+#if defined(__APPLE__)
+            native_->reset();
+#endif
+            throw;
+        }
+    };
+
+#if defined(__APPLE__)
+    return native_->stream_text(url, connection_key, headers, request_payload,
+                               guarded_callback, cancel_requested, idle);
+#endif
 
     if (cancel_requested != nullptr
         && cancel_requested->load(std::memory_order_acquire)) {
@@ -219,7 +268,7 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     }
 
     const bool connection_reused = connect_result.connection_reused;
-    SendResult send_result = send_all(connection_->curl.get(), request_payload, cancel_requested);
+    SendResult send_result = send_all(connection_->curl.get(), request_payload, cancel_requested, idle);
     core::net::NetworkTrafficStats::get_instance().record_sent(send_result.bytes_sent);
     if (send_result.code != CURLE_OK) {
         auto response_headers = connection_->response_headers;
@@ -320,12 +369,19 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
             continue;
         }
 
+        if (received > kMaxWebSocketMessageBytes - message.size()) {
+            auto result = failed(WebSocketStreamResult::Status::StreamFailed,
+                connection_->curl.get(), CURLE_RECV_ERROR, "websocket message exceeds size limit",
+                connection_->response_headers, true, connection_reused);
+            connection_.reset();
+            return result;
+        }
         message.append(buffer, received);
-        if (meta->bytesleft != 0) {
+        if (meta->bytesleft != 0 || (meta->flags & CURLWS_CONT)) {
             continue;
         }
 
-        const bool done = on_message(message);
+        const bool done = guarded_callback(message);
         message.clear();
         if (done) {
             return WebSocketStreamResult{
@@ -343,7 +399,8 @@ WebSocketStreamResult CurlWebSocketTransport::ensure_connected(
     std::string_view url,
     std::string_view connection_key,
     const cpr::Header& headers) {
-    if (connection_ && connection_->key == connection_key) {
+    if (connection_ && connection_->key == connection_key
+        && std::chrono::steady_clock::now() - connection_->opened_at < std::chrono::minutes(55)) {
         return WebSocketStreamResult{
             .status = WebSocketStreamResult::Status::Completed,
             .http_status = connection_->http_status,

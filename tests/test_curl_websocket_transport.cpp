@@ -2,6 +2,7 @@
 
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/ApiProtocol.hpp"
+#include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/transport/CurlWebSocketTransport.hpp"
 #include "core/utils/Base64.hpp"
 
@@ -195,9 +196,9 @@ void close_socket(int fd) noexcept {
     return std::nullopt;
 }
 
-[[nodiscard]] std::string text_frame(std::string_view payload) {
+[[nodiscard]] std::string text_frame(std::string_view payload, std::uint8_t flags = 0x81) {
     std::string frame;
-    frame.push_back(static_cast<char>(0x81));
+    frame.push_back(static_cast<char>(flags));
     if (payload.size() <= 125) {
         frame.push_back(static_cast<char>(payload.size()));
     } else if (payload.size() <= 0xFFFFu) {
@@ -258,8 +259,12 @@ void close_socket(int fd) noexcept {
 
 class LoopbackWebSocketServer {
 public:
-    explicit LoopbackWebSocketServer(std::vector<std::vector<std::string>> responses)
-        : responses_(std::move(responses)) {
+    explicit LoopbackWebSocketServer(std::vector<std::vector<std::string>> responses,
+                                     std::vector<std::size_t> reconnect_after = {},
+                                     bool fragment_messages = false,
+                                     std::chrono::milliseconds response_delay = {})
+        : responses_(std::move(responses)), reconnect_after_(std::move(reconnect_after)),
+          fragment_messages_(fragment_messages), response_delay_(response_delay) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) throw std::runtime_error("socket failed");
 
@@ -304,14 +309,14 @@ public:
     }
 
 private:
-    void run() {
+    int accept_client() {
         const int client = ::accept(listen_fd_, nullptr, nullptr);
-        if (client < 0) return;
+        if (client < 0) return -1;
         client_fd_.store(client);
 
         const std::string headers = read_headers(client);
         const auto key = header_value(headers, "Sec-WebSocket-Key");
-        if (!key.has_value()) return;
+        if (!key.has_value()) return -1;
 
         const std::string response =
             "HTTP/1.1 101 Switching Protocols\r\n"
@@ -320,17 +325,33 @@ private:
             "Sec-WebSocket-Accept: " + websocket_accept(*key) + "\r\n"
             "x-test-websocket: loopback\r\n"
             "\r\n";
-        if (!write_all(client, response)) return;
+        if (!write_all(client, response)) return -1;
+        return client;
+    }
 
+    void run() {
+        int client = -1;
+        std::size_t group_index = 0;
         for (const auto& response_group : responses_) {
+            if (client < 0) client = accept_client();
+            if (client < 0) return;
             auto payload = read_client_text_frame(client);
             if (!payload.has_value()) return;
             {
                 std::lock_guard lock(mutex_);
                 received_payloads_.push_back(std::move(*payload));
             }
+            std::this_thread::sleep_for(response_delay_);
             for (const auto& message : response_group) {
-                if (!write_all(client, text_frame(message))) return;
+                if (fragment_messages_ && message.size() > 1) {
+                    const auto split = message.size() / 2;
+                    if (!write_all(client, text_frame(std::string_view(message).substr(0, split), 0x01))
+                        || !write_all(client, text_frame(std::string_view(message).substr(split), 0x80))) return;
+                } else if (!write_all(client, text_frame(message))) return;
+            }
+            if (std::ranges::find(reconnect_after_, group_index++) != reconnect_after_.end()) {
+                close_socket(client_fd_.exchange(-1));
+                client = -1;
             }
         }
     }
@@ -339,6 +360,9 @@ private:
     std::atomic<int> client_fd_{-1};
     int port_ = 0;
     std::vector<std::vector<std::string>> responses_;
+    std::vector<std::size_t> reconnect_after_;
+    bool fragment_messages_ = false;
+    std::chrono::milliseconds response_delay_;
     mutable std::mutex mutex_;
     std::vector<std::string> received_payloads_;
     std::thread thread_;
@@ -527,3 +551,164 @@ TEST_CASE("CurlWebSocketTransport marks sent requests on websocket stream failur
     REQUIRE(result.request_sent);
 #endif
 }
+
+TEST_CASE("Codex WebSocket retries discard provisional output and rewarm a new connection",
+          "[transport][websocket][codex][regression][retry]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    bool disconnected = false;
+    SECTION("retryable server error") {}
+    SECTION("connection closes after provisional output") { disconnected = true; }
+    std::vector<std::string> failed{
+        R"({"type":"response.output_text.delta","delta":"discard this"})",
+        R"({"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"discard opaque"}})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","call_id":"discard_call","name":"exec","arguments":"{}"}})",
+    };
+    if (!disconnected) failed.push_back(
+        R"({"type":"response.failed","response":{"error":{"code":"server_error","message":"temporary"}}})");
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"warm_old"}})"},
+        failed,
+        {R"({"type":"response.completed","response":{"id":"warm_new"}})"},
+        {R"({"type":"response.output_text.delta","delta":"complete"})",
+         R"({"type":"response.completed","response":{"id":"resp_ok","usage":{"input_tokens":2,"output_tokens":1}}})"},
+    }, {1});
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 1;
+    options.retries.retry_only_before_output = false;
+    options.retries.initial_backoff = std::chrono::milliseconds(1);
+    options.retries.minimum_delay = std::chrono::milliseconds(0);
+    options.retries.jitter_ratio = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.session_id = "ws-retry";
+    request.transport_turn_id = "ws-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+    std::string text;
+    int terminals = 0, resets = 0;
+    bool error = false;
+    std::vector<core::llm::ToolCall> tools;
+    std::vector<core::llm::ContinuationItem> continuation;
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (chunk.reset_attempt) { ++resets; text.clear(); tools.clear(); continuation.clear(); return; }
+        text += chunk.content;
+        tools.insert(tools.end(), chunk.tools.begin(), chunk.tools.end());
+        continuation.insert(continuation.end(), chunk.continuation_items.begin(), chunk.continuation_items.end());
+        terminals += chunk.is_final;
+        error |= chunk.is_error;
+    });
+    CHECK_FALSE(error);
+    CHECK(text == "complete");
+    CHECK(terminals == 1);
+    CHECK(resets == 1);
+    CHECK(tools.empty());
+    CHECK(continuation.empty());
+    CHECK(provider->get_last_usage().completion_tokens == 1);
+    const auto payloads = server.received_payloads();
+    REQUIRE(payloads.size() == 4);
+    CHECK(payloads[0].find("generate\":false") != std::string::npos);
+    CHECK(payloads[2].find("previous_response_id") == std::string::npos);
+    CHECK(payloads[2].find("inspect") != std::string::npos);
+    CHECK(payloads[3].find("warm_new") != std::string::npos);
+    CHECK(payloads[3].find("warm_old") == std::string::npos);
+#endif
+}
+
+TEST_CASE("WebSocket cancellation interrupts a waiting receive and invalidates the socket",
+          "[transport][websocket][regression][cancel]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) SKIP("WebSocket transport unavailable");
+    LoopbackWebSocketServer server({{}});
+    CurlWebSocketTransport transport;
+    std::atomic_bool cancelled{false};
+    std::jthread cancel([&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (server.received_payloads().empty() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        cancelled.store(true);
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = transport.stream_text(
+        "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses",
+        "cancel", {}, R"({"type":"response.create"})", [](auto) { return false; }, &cancelled);
+    CHECK_FALSE(result.completed());
+    CHECK(result.request_sent);
+    CHECK_FALSE(transport.matches_connection("cancel"));
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
+#endif
+}
+
+TEST_CASE("WebSocket transport assembles fragmented messages before parsing JSON",
+          "[transport][websocket][regression][fragmentation]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) SKIP("WebSocket transport unavailable");
+    const std::string event = R"({"type":"response.completed","response":{"id":"fragmented"}})";
+    LoopbackWebSocketServer server({{event}}, {}, true);
+    CurlWebSocketTransport transport(std::chrono::seconds(2));
+    std::vector<std::string> messages;
+    const auto result = transport.stream_text(
+        "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses", "fragmented", {},
+        R"({"type":"response.create"})", [&](std::string_view message) {
+            messages.emplace_back(message);
+            return true;
+        });
+    REQUIRE(result.completed());
+    REQUIRE(messages.size() == 1);
+    CHECK(messages[0] == event);
+#endif
+}
+
+TEST_CASE("WebSocket transport discards a connection when its consumer throws",
+          "[transport][websocket][regression][exception]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) SKIP("WebSocket transport unavailable");
+    LoopbackWebSocketServer server({{R"({"type":"response.output_text.delta","delta":"partial"})"}});
+    CurlWebSocketTransport transport(std::chrono::seconds(2));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+    CHECK_THROWS_AS(transport.stream_text(url, "throwing-consumer", {}, "{}",
+        [](std::string_view) -> bool { throw std::runtime_error("consumer failed"); }), std::runtime_error);
+    CHECK_FALSE(transport.matches_connection("throwing-consumer"));
+#endif
+}
+
+#if defined(__APPLE__)
+TEST_CASE("Native WebSocket handshake timeout does not shorten the generation idle budget",
+          "[transport][websocket][regression][timeout]") {
+    // Codex reasoning can remain silent longer than the 15-second handshake
+    // timeout. Foundation must leave established receives under our idle budget.
+    LoopbackWebSocketServer server({{R"({"type":"response.completed"})"}}, {}, false,
+                                  std::chrono::seconds(16));
+    CurlWebSocketTransport transport(std::chrono::seconds(25));
+    const auto result = transport.stream_text(
+        "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses", "long-reasoning", {},
+        "{}", [](std::string_view) { return true; });
+    CHECK(result.completed());
+}
+
+TEST_CASE("Native WebSocket transport rejects invalid UTF-8 without an Objective-C exception",
+          "[transport][websocket][regression][validation]") {
+    LoopbackWebSocketServer server({{}});
+    CurlWebSocketTransport transport(std::chrono::seconds(2));
+    const auto result = transport.stream_text(
+        "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses", "invalid-utf8", {},
+        std::string(1, static_cast<char>(0xff)), [](auto) { return false; });
+    CHECK_FALSE(result.completed());
+    CHECK_FALSE(result.request_sent);
+    CHECK_FALSE(transport.matches_connection("invalid-utf8"));
+}
+#endif

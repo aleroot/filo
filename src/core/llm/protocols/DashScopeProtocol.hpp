@@ -193,6 +193,7 @@ private:
  */
 class DashScopeResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
+    [[nodiscard]] bool uses_provider_reasoning_catalog() const noexcept override { return false; }
     struct Options {
         std::string default_effort = "high";
         bool enable_hosted_tools = true;
@@ -215,6 +216,7 @@ public:
     [[nodiscard]] bool requires_terminal_event() const noexcept override { return true; }
     [[nodiscard]] ParseResult parse_event(std::string_view event) override;
     void reset_state() override;
+    void reset_attempt_state() override { reset_state(); }
     [[nodiscard]] std::string_view name() const noexcept override {
         return "dashscope_responses";
     }
@@ -226,6 +228,10 @@ public:
         share_continuity_state_with(*cloned);
         return cloned;
     }
+
+protected:
+    // DashScope buffers tools until completion and owns their replay shape.
+    [[nodiscard]] bool preserves_output_messages() const noexcept override { return false; }
 
 private:
     Options options_;

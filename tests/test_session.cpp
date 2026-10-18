@@ -9,6 +9,7 @@
 #include "core/session/SessionStore.hpp"
 #include "core/session/TodoManager.hpp"
 #include "core/session/TodoUtils.hpp"
+#include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/tools/TodoTool.hpp"
 #include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
@@ -1293,4 +1294,32 @@ TEST_CASE("SessionReport keeps rows aligned and prints --resume command", "[sess
     CHECK(column_of(tokens_line, "\xe2\x86\x91") == column_of(network_line, "\xe2\x86\x91"));
     CHECK(column_of(tokens_line, "\xe2\x86\x93") == column_of(network_line, "\xe2\x86\x93"));
     CHECK(column_of(tokens_line, "\xce\xa3") == column_of(network_line, "\xce\xa3"));
+}
+
+TEST_CASE("Session resume preserves Responses message phases and boundaries",
+          "[session][openai][phase][regression]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_phases"};
+    core::session::SessionStore store{tmp.path};
+    auto data = make_test_session("phase01");
+    data.messages.push_back(core::llm::Message{
+        .role = "assistant", .content = "Checking.Done.",
+        .continuation_items = {
+            {.provider = "openai", .kind = "assistant_content",
+             .payload = R"({"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]})"},
+            {.provider = "openai", .kind = "assistant_content",
+             .payload = R"({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done."}]})"},
+        },
+    });
+    REQUIRE(store.save(data));
+    const auto loaded = store.load_by_id("phase01");
+    REQUIRE(loaded);
+    REQUIRE(loaded->messages.back().continuation_items.size() == 2);
+    CHECK(loaded->messages.back().continuation_items[0].payload == data.messages.back().continuation_items[0].payload);
+    CHECK(loaded->messages.back().continuation_items[1].payload == data.messages.back().continuation_items[1].payload);
+    core::llm::ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.messages = loaded->messages;
+    const auto replay = core::llm::protocols::CodexResponsesProtocol{}.serialize(request);
+    CHECK(replay.find(R"("phase":"commentary")") != std::string::npos);
+    CHECK(replay.find(R"("phase":"final_answer")") != std::string::npos);
 }

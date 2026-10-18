@@ -162,6 +162,8 @@ private:
     void ensure_model_metadata(std::string_view model) const;
     [[nodiscard]] std::optional<ModelInfo> resolved_model_info(
         std::string_view model) const;
+    [[nodiscard]] std::optional<ModelReasoningProfile> resolved_reasoning_profile(
+        std::string_view model) const;
 
     struct WebSocketTransportState {
         WebSocketTransportState();

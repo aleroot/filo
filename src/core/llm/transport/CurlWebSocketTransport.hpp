@@ -13,6 +13,12 @@
 
 namespace core::llm::transport {
 
+inline constexpr std::size_t kMaxWebSocketMessageBytes = 16 * 1024 * 1024;
+
+#if defined(__APPLE__)
+class AppleWebSocketTransport;
+#endif
+
 struct WebSocketStreamResult {
     enum class Status {
         Completed,
@@ -53,6 +59,7 @@ public:
         std::optional<std::chrono::milliseconds> idle_timeout = std::nullopt);
 
     void reset();
+    [[nodiscard]] bool matches_connection(std::string_view connection_key);
 
 private:
     struct Connection;
@@ -65,6 +72,9 @@ private:
     std::chrono::milliseconds idle_timeout_;
     std::mutex mutex_;
     std::unique_ptr<Connection> connection_;
+#if defined(__APPLE__)
+    std::unique_ptr<AppleWebSocketTransport> native_;
+#endif
 };
 
 } // namespace core::llm::transport

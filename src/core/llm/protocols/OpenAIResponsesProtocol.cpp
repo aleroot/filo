@@ -112,10 +112,17 @@ void append_tool_schema(
 }
 
 void append_message_item(std::string& payload,
-                         const Message& msg) {
+                         const Message& msg,
+                         std::string_view phase = {}) {
     payload += R"({"type":"message","role":")";
     payload += core::utils::escape_json_string(msg.role);
-    payload += R"(","content":[)";
+    payload += '"';
+    if (msg.role == "assistant" && !phase.empty()) {
+        payload += R"(,"phase":")";
+        payload += core::utils::escape_json_string(phase);
+        payload += '"';
+    }
+    payload += R"(,"content":[)";
 
     bool first_part = true;
     const auto append_part_sep = [&]() {
@@ -189,6 +196,52 @@ void append_function_call_output_item(std::string& payload,
     payload += R"("})";
 }
 
+// Native output snapshots preserve message boundaries, phases, and interleaved
+// reasoning. Only replay them when they still describe the current history:
+// tool normalization or a history edit must not resurrect stale output.
+[[nodiscard]] std::optional<std::vector<std::string>> native_response_items(
+    const Message& message) {
+    std::vector<std::string> items;
+    std::string text;
+    std::size_t tool_index = 0;
+    bool has_snapshot = false;
+    for (const auto& continuation : message.continuation_items) {
+        if (continuation.provider != "openai") continue;
+        if (continuation.kind != "assistant_content" && continuation.kind != "reasoning") continue;
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(continuation.payload);
+        simdjson::dom::object item;
+        if (parser.parse(padded).get(item) != simdjson::SUCCESS) return std::nullopt;
+        std::string_view type;
+        if (item["type"].get(type) != simdjson::SUCCESS) return std::nullopt;
+        if (type == "message") {
+            has_snapshot = true;
+            text += extract_assistant_output_text(item);
+        } else if (type == "function_call") {
+            has_snapshot = true;
+            if (tool_index >= message.tool_calls.size()) return std::nullopt;
+            const auto& call = message.tool_calls[tool_index++];
+            std::string_view id, name, arguments;
+            if (item["call_id"].get(id) != simdjson::SUCCESS || id != call.id
+                || item["name"].get(name) != simdjson::SUCCESS || name != call.function.name
+                || item["arguments"].get(arguments) != simdjson::SUCCESS) {
+                return std::nullopt;
+            }
+            // Argument coercion may update a call after generation. Preserve
+            // its surrounding message phases while replaying the current call.
+            std::string serialized;
+            append_function_call_item(serialized, call, tool_index);
+            items.push_back(std::move(serialized));
+            continue;
+        } else if (type != "reasoning") {
+            return std::nullopt;
+        }
+        items.push_back(continuation.payload);
+    }
+    if (has_snapshot && text == message.content && tool_index == message.tool_calls.size()) return items;
+    return std::nullopt;
+}
+
 [[nodiscard]] std::vector<std::string> build_input_items(
     const std::vector<Message>& messages,
     bool include_system_messages = false) {
@@ -199,8 +252,13 @@ void append_function_call_output_item(std::string& payload,
         if (msg.role == "system" && !include_system_messages) continue;
 
         if (msg.role == "assistant") {
+            if (auto native = native_response_items(msg)) {
+                items.insert(items.end(), native->begin(), native->end());
+                continue;
+            }
             for (const auto& continuation : msg.continuation_items) {
                 if ((continuation.provider.empty() || continuation.provider == "openai")
+                    && continuation.kind != "assistant_content"
                     && has_valid_continuation_payload(continuation)) {
                     items.push_back(continuation.payload);
                 }
@@ -259,16 +317,6 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
     payload += "]";
 }
 
-[[nodiscard]] std::vector<Message> system_messages_only(const std::vector<Message>& messages) {
-    std::vector<Message> system_messages;
-    for (const auto& message : messages) {
-        if (message.role == "system") {
-            system_messages.push_back(message);
-        }
-    }
-    return system_messages;
-}
-
 [[nodiscard]] bool has_prefix(const std::vector<std::string>& values,
                               const std::vector<std::string>& prefix) {
     return values.size() >= prefix.size()
@@ -323,9 +371,13 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         message.content = text;
 
         std::string serialized;
-        append_message_item(serialized, message);
+        std::string_view phase;
+        (void)item["phase"].get(phase);
+        append_message_item(serialized, message, phase);
         return serialized;
     }
+
+    if (item_type == "reasoning") return simdjson::to_string(item);
 
     return {};
 }
@@ -757,9 +809,15 @@ void OpenAIResponsesProtocol::reset_state() {
     std::scoped_lock lock(shared_state_->mutex);
     shared_state_->sessions.clear();
     active_session_id_.clear();
+    OpenAIResponsesProtocol::reset_attempt_state();
+}
+
+void OpenAIResponsesProtocol::reset_attempt_state() {
     in_progress_response_id_.clear();
     last_response_id_.clear();
     saw_text_delta_ = false;
+    stream_retry_vetoed_ = false;
+    last_rate_limit_ = {};
 }
 
 std::string OpenAIResponsesProtocol::serialize_with_input_items(
@@ -808,24 +866,45 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         }
     }
 
-    if (req.temperature.has_value()) {
+    if (options.include_sampling_controls && req.temperature.has_value()) {
         payload += R"(,"temperature":)";
         payload += std::to_string(*req.temperature);
     }
-    if (req.max_tokens.has_value()) {
+    if (options.include_sampling_controls && req.max_tokens.has_value()) {
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
     }
+    const auto* catalog = uses_provider_reasoning_catalog() && req.catalog_reasoning
+        ? &*req.catalog_reasoning : nullptr;
+    const auto reasoning = catalog && catalog->complete
+        ? catalog->effort : reasoning_capabilities(req.model);
+    std::string_view requested_effort = req.effort;
+    if (requested_effort.empty() && catalog && catalog->catalog_default_effort) {
+        requested_effort = *catalog->catalog_default_effort;
+    }
     if (options.include_reasoning_summary
         || options.reasoning_effort_override.has_value()
-        || reasoning_capabilities(req.model).supports_effort()) {
+        || reasoning.supports_effort()) {
         // Public OpenAI/Grok/DashScope send effort only. Codex opts into
         // `summary: auto` via SerializationOptions because the ChatGPT
         // backend 400s when that field is missing.
-        const std::string effort = options.reasoning_effort_override.has_value()
+        std::string effort = options.reasoning_effort_override.has_value()
             ? std::string(*options.reasoning_effort_override)
-            : normalize_openai_reasoning_effort(
-                  req.effort, reasoning_capabilities(req.model));
+            : reasoning.supports_effort()
+                ? normalize_openai_reasoning_effort(requested_effort, reasoning)
+                : std::string{};
+        if (!options.reasoning_effort_override && catalog && !catalog->supported_efforts.empty()) {
+            const auto& levels = catalog->supported_efforts;
+            if (std::ranges::find(levels, requested_effort) != levels.end()) {
+                effort = requested_effort;
+            } else if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
+                // An authoritative catalog may expose only a subset of the
+                // usual low/medium/high ladder. Its default is always safer
+                // than sending a level the deployment does not accept.
+                effort = catalog->catalog_default_effort.value_or("");
+                if (std::ranges::find(levels, effort) == levels.end()) effort.clear();
+            }
+        }
         if (!effort.empty() || options.include_reasoning_summary) {
             payload += R"(,"reasoning":{)";
             bool first = true;
@@ -976,6 +1055,7 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     std::optional<std::string_view> previous_response_id_override) const {
     SerializationOptions options;
     options.include_reasoning_summary = true;
+    options.include_sampling_controls = false;
     std::string payload = serialize_with_input_items(
         request, input_items, previous_response_id_override, options);
     const std::string thread_id = request.session_id.empty()
@@ -1098,12 +1178,18 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     bool prewarm) const {
     const auto full_input_items = codex_input_items(request);
 
-    ChatRequest signature_request = request;
-    signature_request.messages = system_messages_only(request.messages);
-    signature_request.previous_response_id.clear();
+    // Compare request controls and stable instructions without copying the
+    // complete conversation just to discard it for the signature.
+    std::vector<std::string> signature_input;
+    if (const auto instructions = collect_instructions(request); !instructions.empty()) {
+        Message developer{.role = "developer", .content = instructions};
+        std::string item;
+        append_message_item(item, developer);
+        signature_input.push_back(std::move(item));
+    }
     const std::string request_signature = serialize_codex_with_input_items(
-        signature_request,
-        codex_input_items(signature_request),
+        request,
+        signature_input,
         std::string_view{});
 
     std::string incremental_previous_response_id;
@@ -1114,17 +1200,17 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
             last != transport_state_->last_ws_requests.end()
             && last->second.request_signature == request_signature
             && !last->second.response_id.empty()) {
-            std::vector<std::string> baseline = last->second.request_input_items;
-            baseline.insert(
-                baseline.end(),
-                last->second.response_items_added.begin(),
-                last->second.response_items_added.end());
-
-            if (has_prefix(full_input_items, baseline)
-                && (full_input_items.size() > baseline.size()
+            const auto& previous = last->second;
+            const auto baseline_size = previous.request_input_items.size()
+                + previous.response_items_added.size();
+            if (full_input_items.size() >= baseline_size
+                && has_prefix(full_input_items, previous.request_input_items)
+                && std::equal(previous.response_items_added.begin(), previous.response_items_added.end(),
+                    full_input_items.begin() + static_cast<std::ptrdiff_t>(previous.request_input_items.size()))
+                && (full_input_items.size() > baseline_size
                     || last->second.from_prewarm)) {
                 incremental_input_items = std::vector<std::string>{
-                    full_input_items.begin() + static_cast<std::ptrdiff_t>(baseline.size()),
+                    full_input_items.begin() + static_cast<std::ptrdiff_t>(baseline_size),
                     full_input_items.end()};
                 incremental_previous_response_id = last->second.response_id;
             }
@@ -1165,6 +1251,7 @@ void CodexResponsesProtocol::abandon_websocket_request(const ChatRequest& reques
 
     std::lock_guard lock(transport_state_->mutex);
     transport_state_->pending_ws_requests.erase(request.transport_turn_id);
+    transport_state_->last_ws_requests.erase(request.transport_turn_id);
     if (active_transport_turn_id_ == request.transport_turn_id) {
         active_transport_turn_id_.clear();
         active_response_items_.clear();
@@ -1232,10 +1319,11 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     .from_prewarm = pending->second.prewarm,
                 };
             transport_state_->pending_ws_requests.erase(pending);
-            while (transport_state_->last_ws_requests.size() > 32) {
-                transport_state_->last_ws_requests.erase(
-                    transport_state_->last_ws_requests.begin());
-            }
+            // The transport owns one socket. Old turns cannot continue on it;
+            // retaining 32 complete histories here needlessly multiplies RAM.
+            std::erase_if(transport_state_->last_ws_requests, [&](const auto& entry) {
+                return entry.first != active_transport_turn_id_;
+            });
         }
         active_transport_turn_id_.clear();
         active_response_items_.clear();
@@ -1278,6 +1366,7 @@ std::string CodexResponsesProtocol::websocket_connection_key(
 
 void CodexResponsesProtocol::observe_response_headers(const cpr::Header& headers,
                                                       const ChatRequest& request) {
+    OpenAIResponsesProtocol::observe_response_headers(headers, request);
     if (request.transport_turn_id.empty()) {
         return;
     }
@@ -1331,10 +1420,9 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
     const std::string_view payload_sv = parsed.data;
     if (parsed.is_done) {
-        ParseResult result;
-        result.done = true;
-        saw_text_delta_ = false;
-        return result;
+        // [DONE] belongs to Chat Completions. It cannot prove that a
+        // Responses generation completed (or supply its status/usage).
+        return {};
     }
 
     thread_local simdjson::dom::parser parser;
@@ -1358,6 +1446,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (event_type == "response.created") {
         in_progress_response_id_ = parse_response_id(doc);
+        result.stream_started = true;
         return result;
     }
 
@@ -1400,6 +1489,11 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
         std::string_view item_type;
         if (item["type"].get(item_type) != simdjson::SUCCESS) return result;
+
+        if (event_type == "response.output_item.added") {
+            if (item_type == "message") saw_text_delta_ = false;
+            return result;
+        }
 
         if (item_type == "function_call") {
             // output_item.added is a provisional item snapshot, not an
@@ -1455,17 +1549,26 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
                 .payload = simdjson::to_string(item),
             });
             result.chunks.push_back(std::move(chunk));
-        } else if (item_type == "message" && !saw_text_delta_) {
+        } else if (item_type == "message") {
             std::string_view role;
             if (item["role"].get(role) != simdjson::SUCCESS || role != "assistant") {
                 return result;
             }
 
             std::string text = extract_assistant_output_text(item);
-            if (!text.empty()) {
+            if (!text.empty() && !saw_text_delta_) {
                 result.chunks.push_back(StreamChunk::make_content(std::move(text)));
             }
         }
+
+        if (preserves_output_messages() && (item_type == "message" || item_type == "function_call")) {
+            if (const auto snapshot = serialize_assistant_output_item(item); !snapshot.empty()) {
+                if (result.chunks.empty()) result.chunks.emplace_back();
+                result.chunks.back().continuation_items.push_back({
+                    .provider = "openai", .kind = "assistant_content", .payload = snapshot});
+            }
+        }
+        if (item_type == "message") saw_text_delta_ = false;
 
         return result;
     }
@@ -1496,6 +1599,34 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (event_type == "response.failed" || event_type == "error") {
         const std::string message = parse_failed_message(doc);
+        simdjson::dom::element error;
+        if (doc["response"]["error"].get(error) != simdjson::SUCCESS) {
+            (void)doc["error"].get(error);
+        }
+        std::string_view code;
+        (void)error["code"].get(code);
+        if (code.empty()) (void)error["type"].get(code);
+        result.stream_error = true;
+        result.stream_error_type = std::string(code);
+        result.stream_error_message = message;
+        result.retryable_stream_error = !stream_retry_vetoed_
+            && (code == "server_error" || code == "internal_server_error"
+                || code == "server_is_overloaded" || code == "rate_limit_exceeded"
+                || code == "rate_limit_error" || code == "timeout"
+                || code == "request_timeout" || code == "temporarily_unavailable"
+                || code == "previous_response_not_found"
+                || code == "websocket_connection_limit_reached");
+        cpr::Header advice;
+        for (const auto key : {"headers", "response_headers"}) {
+            simdjson::dom::object headers;
+            if (doc[key].get(headers) != simdjson::SUCCESS) continue;
+            for (const auto field : headers) {
+                std::string_view value;
+                if (field.value.get(value) == simdjson::SUCCESS) advice[std::string(field.key)] = std::string(value);
+            }
+        }
+        result.retryable_stream_error = result.retryable_stream_error && !transport::retry_vetoed(advice);
+        result.rate_limit.retry_after = transport::retry_after_seconds(advice);
         result.chunks.push_back(StreamChunk::make_error("\n[Responses API error: " + message + "]"));
         result.done = true;
         saw_text_delta_ = false;
@@ -1530,7 +1661,7 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
             response.headers, "x-ratelimit-reset-tokens"); value.has_value()) {
         info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*value);
     }
-    info.retry_after        = parse_int("retry-after");
+    info.retry_after        = transport::retry_after_seconds(response.headers);
     info.is_rate_limited    = (response.status_code == 429 || info.retry_after > 0);
 
     if (info.requests_limit > 0 && !info.is_rate_limited
@@ -1570,7 +1701,25 @@ RateLimitInfo CodexResponsesProtocol::last_rate_limit() const noexcept {
 
 bool OpenAIResponsesProtocol::is_retryable(
     const HttpResponse& response) const noexcept {
+    if (stream_retry_vetoed_ || transport::retry_vetoed(response.headers)) return false;
+    if (response.status_code == 429) {
+        try {
+            simdjson::dom::parser parser;
+            simdjson::padded_string body(response.body);
+            simdjson::dom::element doc;
+            std::string_view code;
+            if (parser.parse(body).get(doc) == simdjson::SUCCESS
+                && doc["error"]["code"].get(code) == simdjson::SUCCESS
+                && (code == "insufficient_quota" || code == "usage_limit_reached"
+                    || code == "billing_hard_limit_reached")) return false;
+        } catch (...) {}
+    }
     return is_openai_retryable_status(response.status_code);
+}
+
+void OpenAIResponsesProtocol::observe_response_headers(
+    const cpr::Header& headers, const ChatRequest&) {
+    stream_retry_vetoed_ = parse_bool_header(headers, "x-should-retry") == false;
 }
 
 } // namespace core::llm::protocols

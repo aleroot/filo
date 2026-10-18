@@ -2191,6 +2191,19 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
                 "manual_thinking",
                 info.reasoning.manual_thinking);
             get_json_bool(reasoning, "complete", info.reasoning.complete);
+            std::string default_effort;
+            if (get_json_string(reasoning, "catalog_default_effort", default_effort)) {
+                info.reasoning.catalog_default_effort = std::move(default_effort);
+            }
+            simdjson::dom::array efforts;
+            if (reasoning["supported_efforts"].get(efforts) == simdjson::SUCCESS) {
+                for (const auto value : efforts) {
+                    std::string_view effort;
+                    if (value.get(effort) == simdjson::SUCCESS) {
+                        info.reasoning.supported_efforts.emplace_back(effort);
+                    }
+                }
+            }
         }
 
         simdjson::dom::object wire_obj;
@@ -2330,6 +2343,17 @@ std::string ModelRegistry::export_to_json() const {
                         "manual_thinking",
                         info.reasoning.manual_thinking).comma();
                     writer.kv_bool("complete", info.reasoning.complete);
+                    if (info.reasoning.catalog_default_effort) {
+                        writer.comma().kv_str("catalog_default_effort", *info.reasoning.catalog_default_effort);
+                    }
+                    if (!info.reasoning.supported_efforts.empty()) {
+                        writer.comma().key("supported_efforts");
+                        auto efforts = writer.array();
+                        for (std::size_t i = 0; i < info.reasoning.supported_efforts.size(); ++i) {
+                            if (i > 0) writer.comma();
+                            writer.str(info.reasoning.supported_efforts[i]);
+                        }
+                    }
                 }
                 writer.comma();
 

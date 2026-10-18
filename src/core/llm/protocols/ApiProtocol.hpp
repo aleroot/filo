@@ -451,6 +451,9 @@ public:
         return {};
     }
 
+    /// Whether deployment metadata takes precedence over model-family rules.
+    [[nodiscard]] virtual bool uses_provider_reasoning_catalog() const noexcept { return false; }
+
     /**
      * Idle and response-start deadlines for one HTTP stream.
      *
@@ -729,6 +732,10 @@ public:
      * prompt cache keys when Filo intentionally starts a fresh session segment.
      */
     virtual void reset_state() {}
+
+    /// Clear an abandoned generation without forgetting other sessions.
+    /// Providers with shared continuity override this narrower retry hook.
+    virtual void reset_attempt_state() { reset_state(); }
 };
 
 } // namespace core::llm::protocols

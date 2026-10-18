@@ -42,14 +42,19 @@ public:
 
     void prepare_request(ChatRequest& request) override;
     void reset_state() override;
+    void reset_attempt_state() override;
 
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
+    [[nodiscard]] bool requires_terminal_event() const noexcept override { return true; }
+    [[nodiscard]] bool uses_provider_reasoning_catalog() const noexcept override { return true; }
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name() const noexcept override { return "openai_responses"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
 
     void on_response(const HttpResponse& response) override;
+    void observe_response_headers(const cpr::Header& headers,
+                                  const ChatRequest& request) override;
     [[nodiscard]] bool is_retryable(
         const HttpResponse& response) const noexcept override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
@@ -63,6 +68,7 @@ public:
     }
 
 protected:
+    [[nodiscard]] virtual bool preserves_output_messages() const noexcept { return true; }
     /// Defines how a Responses API implementation carries conversation context.
     /// The default preserves state through previous_response_id; replay-only
     /// implementations can instead place the complete conversation in input.
@@ -88,6 +94,7 @@ protected:
         bool include_response_include = true;
         // Codex requires `reasoning.summary`; public OpenAI, Grok, and DashScope omit it.
         bool include_reasoning_summary = false;
+        bool include_sampling_controls = true;
         std::optional<std::string_view> reasoning_effort_override;
         std::span<const std::string_view> hosted_tool_types;
     };
@@ -126,6 +133,7 @@ protected:
 private:
     std::string active_session_id_;
     bool saw_text_delta_ = false;
+    bool stream_retry_vetoed_ = false;
     std::string in_progress_response_id_;
     std::string last_response_id_;
     RateLimitInfo last_rate_limit_;

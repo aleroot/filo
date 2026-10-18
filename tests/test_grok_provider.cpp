@@ -1140,7 +1140,17 @@ TEST_CASE("GrokResponsesProtocol omits effort when the catalog leaves the server
 TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported models",
           "[grok][serializer][responses]") {
     GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};
-    const auto payload = proto.serialize(make_simple_request("grok-4"));
+    auto request = make_simple_request("grok-4");
+    SECTION("without catalog metadata") {}
+    SECTION("catalog effort cannot override the vendor model policy") {
+        request.catalog_reasoning = core::llm::ModelReasoningProfile{
+            .effort = core::llm::ReasoningCapabilities{core::llm::ReasoningCapability::Effort},
+            .complete = true,
+            .catalog_default_effort = "high",
+            .supported_efforts = {"high"},
+        };
+    }
+    const auto payload = proto.serialize(request);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort")"));
 }
 

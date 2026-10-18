@@ -435,6 +435,16 @@ public:
         const core::llm::ChatRequest&,
         std::function<void(const core::llm::StreamChunk&)> callback) override {
         callback(core::llm::StreamChunk::make_content("partial "));
+        callback(core::llm::StreamChunk::make_tools({{
+            .id = "provisional_call", .type = "function",
+            .function = {.name = "provisional_tool", .arguments = "{}"},
+        }}));
+        core::llm::StreamChunk opaque;
+        opaque.continuation_items.push_back({
+            .provider = "openai", .kind = "reasoning",
+            .payload = R"({"type":"reasoning","encrypted_content":"provisional"})",
+        });
+        callback(opaque);
         callback(core::llm::StreamChunk::make_attempt_reset(
             "[grok_responses retrying after a generation failure (1/3)]"));
         callback(core::llm::StreamChunk::make_content("recovered after generation failure"));
@@ -1474,6 +1484,8 @@ TEST_CASE("Agent retracts in-progress output when the transport resets an attemp
     REQUIRE_FALSE(history.empty());
     CHECK(history.back().role == "assistant");
     CHECK(history.back().content == "recovered after generation failure");
+    CHECK(history.back().tool_calls.empty());
+    CHECK(history.back().continuation_items.empty());
     CHECK_FALSE(agent->last_turn_failed());
 }
 

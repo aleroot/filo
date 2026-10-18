@@ -112,6 +112,20 @@ ModelCapabilities compatible_advertised_capabilities(
 ModelReasoningProfile compatible_reasoning_profile(
     const JsonObjectView& model) {
     ModelReasoningProfile profile;
+    simdjson::dom::array levels;
+    if (model.raw()["supported_reasoning_levels"].get(levels) == simdjson::SUCCESS) {
+        profile.complete = true;
+        for (const auto level : levels) {
+            std::string_view effort;
+            if (level["effort"].get(effort) == simdjson::SUCCESS && !effort.empty()) {
+                profile.supported_efforts.emplace_back(effort);
+            }
+        }
+    }
+    std::string default_effort;
+    if (model.string("default_reasoning_level", default_effort)) {
+        profile.catalog_default_effort = std::move(default_effort);
+    }
     const bool has_effort =
         model.capability_supported("effort")
         || model.capability_supported("reasoning")
@@ -126,7 +140,9 @@ ModelReasoningProfile compatible_reasoning_profile(
         || model.object_array_contains(
             "supported_reasoning_levels", "effort", "xhigh")
         || model.object_array_contains(
-            "supported_reasoning_levels", "effort", "ultra");
+            "supported_reasoning_levels", "effort", "ultra")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "max");
     if (has_effort) {
         profile.effort = ReasoningCapabilities{ReasoningCapability::Effort};
     }
@@ -141,6 +157,12 @@ ModelReasoningProfile compatible_reasoning_profile(
     if (model.object_array_contains(
             "supported_reasoning_levels", "effort", "ultra")) {
         profile.effort = profile.effort | ReasoningCapability::UltraEffort;
+    }
+    if (model.object_array_contains("supported_reasoning_levels", "effort", "minimal")) {
+        profile.effort = profile.effort | ReasoningCapability::MinimalEffort;
+    }
+    if (model.object_array_contains("supported_reasoning_levels", "effort", "none")) {
+        profile.effort = profile.effort | ReasoningCapability::Disable;
     }
     return profile;
 }

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace core::llm {
 
@@ -92,6 +93,7 @@ struct ModelReasoningProfile {
     bool manual_thinking = false;
     bool complete = false;
     std::optional<std::string> catalog_default_effort;
+    std::vector<std::string> supported_efforts;
 };
 
 } // namespace core::llm

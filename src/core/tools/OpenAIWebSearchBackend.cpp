@@ -3,6 +3,8 @@
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include "../llm/ProviderClientIdentity.hpp"
+#include "../llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "../llm/protocols/SseUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -93,12 +95,12 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     }
 
     if (is_codex_backend(metadata.base_url)) {
-        const std::string request_id = request_id_for(context);
-        headers["x-client-request-id"] = request_id;
-        headers["x-codex-installation-id"] =
-            metadata.client_identity_source->installation_id();
-        headers["x-codex-window-id"] = request_id + ":0";
-        headers["x-responsesapi-include-timing-metrics"] = "true";
+        core::llm::protocols::CodexResponsesProtocol protocol(
+            false, {}, metadata.client_identity_source);
+        headers = protocol.build_headers(auth);
+        core::llm::ChatRequest request;
+        request.session_id = request_id_for(context);
+        protocol.prepare_headers(headers, request, metadata.base_url);
     }
 
     return headers;
@@ -152,15 +154,32 @@ void write_domain_filters(core::utils::JsonWriter& writer,
 }
 
 [[nodiscard]] std::string search_payload(const SearchRequest& request,
-                                         std::string_view model) {
+                                         std::string_view model,
+                                         bool codex) {
     core::utils::JsonWriter writer(2048);
     {
         auto _root = writer.object();
         writer.kv_str("model", model).comma()
-              .kv_bool("stream", false).comma()
-              .kv_bool("store", false).comma()
-              .kv_str("input", search_prompt(request)).comma()
-              .kv_str("tool_choice", "required").comma()
+              .kv_bool("stream", codex).comma()
+              .kv_bool("store", false).comma().key("input");
+        if (codex) {
+            auto input = writer.array();
+            auto message = writer.object();
+            writer.kv_str("type", "message").comma()
+                  .kv_str("role", "user").comma().key("content");
+            auto content = writer.array();
+            auto text = writer.object();
+            writer.kv_str("type", "input_text").comma()
+                  .kv_str("text", search_prompt(request));
+        } else {
+            writer.str(search_prompt(request));
+        }
+        if (codex) {
+            writer.comma().key("reasoning");
+            auto reasoning = writer.object();
+            writer.kv_str("summary", "auto");
+        }
+        writer.comma().kv_str("tool_choice", "required").comma()
               .key("tools");
         {
             auto _tools = writer.array();
@@ -380,50 +399,97 @@ public:
             return std::unexpected("OpenAI web search requires an active model.");
         }
 
-        const auto auth = metadata->credential_source->get_auth();
-        const cpr::Response response = cpr::Post(
-            cpr::Url{responses_url(metadata->base_url)},
-            openai_headers(auth, *metadata, context),
-            cpr::Body{search_payload(request, model)},
-            cpr::Timeout{kSearchTimeoutMs});
+        const bool codex = is_codex_backend(metadata->base_url);
+        auto auth = metadata->credential_source->get_auth();
+        std::string body;
+        const auto perform = [&] {
+            body.clear();
+            return cpr::Post(
+                cpr::Url{responses_url(metadata->base_url)},
+                openai_headers(auth, *metadata, context),
+                cpr::Body{search_payload(request, model, codex)},
+                cpr::Timeout{codex ? 300000 : kSearchTimeoutMs},
+                cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {
+                    constexpr std::size_t max_bytes = 16 * 1024 * 1024;
+                    if (bytes.size() > max_bytes - body.size()) return false;
+                    body.append(bytes);
+                    return true;
+                }});
+        };
+        auto response = perform();
+        if (response.status_code == 401
+            && metadata->credential_source->refresh_on_auth_failure()) {
+            auth = metadata->credential_source->get_auth();
+            response = perform();
+        }
 
         if (response.error.code != cpr::ErrorCode::OK) {
             return std::unexpected(
                 "OpenAI web search request failed: " + response.error.message);
         }
 
-        simdjson::dom::parser parser;
-        simdjson::padded_string padded(response.text);
-        simdjson::dom::element doc;
-        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
-            if (response.status_code < 200 || response.status_code >= 300) {
-                return std::unexpected(std::format(
-                    "OpenAI web search failed with HTTP {}: {}",
-                    response.status_code,
-                    response.text.substr(0, 1000)));
-            }
-            return std::unexpected("OpenAI web search response was not valid JSON.");
-        }
-
         if (response.status_code < 200 || response.status_code >= 300) {
-            const std::string message = read_error_message(doc);
             return std::unexpected(std::format(
                 "OpenAI web search failed with HTTP {}: {}",
-                response.status_code,
-                message.empty() ? response.text.substr(0, 1000) : message));
+                response.status_code, body.substr(0, 1000)));
         }
-
-        SearchResponse out{.backend = std::string(name())};
-        parse_results(out, doc, request.limit);
-        if (out.answer.empty() && out.results.empty()) {
-            return std::unexpected(
-                "OpenAI web search response did not contain output text or citations.");
-        }
-        return out;
+        return parse_openai_web_search_response(body, request.limit, codex);
     }
 };
 
 } // namespace
+
+std::string openai_web_search_request_json(
+    const SearchRequest& request, std::string_view model, bool codex) {
+    return search_payload(request, model, codex);
+}
+
+std::expected<SearchResponse, std::string> parse_openai_web_search_response(
+    std::string_view body, int limit, bool streaming) {
+    const auto decode = [&](std::string_view json) -> std::expected<SearchResponse, std::string> {
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(json);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+            return std::unexpected("OpenAI web search response was not valid JSON.");
+        }
+        if (const auto error = read_error_message(doc); !error.empty()) return std::unexpected(error);
+        SearchResponse out{.backend = "openai-responses-web-search"};
+        parse_results(out, doc, limit);
+        if (out.answer.empty() && out.results.empty()) {
+            return std::unexpected("OpenAI web search response did not contain output text or citations.");
+        }
+        return out;
+    };
+    if (!streaming) return decode(body);
+    // Responses completion carries the full output, including search sources
+    // and annotations. Deltas and [DONE] are not successful terminal events.
+    while (!body.empty()) {
+        auto end = body.find("\n\n");
+        std::size_t delimiter = 2;
+        if (const auto crlf = body.find("\r\n\r\n"); crlf < end) {
+            end = crlf;
+            delimiter = 4;
+        }
+        const auto event = end == std::string_view::npos ? body : body.substr(0, end);
+        body = end == std::string_view::npos ? std::string_view{} : body.substr(end + delimiter);
+        core::llm::protocols::sse::ParsedEventView parsed;
+        std::string scratch;
+        if (!core::llm::protocols::sse::parse_event_payload(event, parsed, scratch) || parsed.is_done) continue;
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(parsed.data);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) continue;
+        std::string_view type;
+        (void)doc["type"].get(type);
+        if (type == "response.completed") return decode(parsed.data);
+        if (type == "response.failed" || type == "response.incomplete" || type == "error") {
+            const auto message = read_error_message(doc);
+            return std::unexpected(message.empty() ? "OpenAI web search did not complete." : message);
+        }
+    }
+    return std::unexpected("OpenAI web search stream ended before response.completed.");
+}
 
 std::shared_ptr<IWebSearchBackend> make_openai_web_search_backend() {
     return std::make_shared<OpenAIWebSearchBackend>();

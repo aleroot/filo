@@ -973,3 +973,149 @@ TEST_CASE("OpenAIResponsesProtocol - parse incomplete event as terminal error ch
     REQUIRE(result.chunks[0].is_final);
     REQUIRE_THAT(result.chunks[0].content, Catch::Matchers::ContainsSubstring("max_output_tokens"));
 }
+
+TEST_CASE("Responses require completion and classify transient stream failures",
+          "[openai][responses][regression][retry]") {
+    CodexResponsesProtocol protocol;
+    CHECK(protocol.requires_terminal_event());
+    const auto started = protocol.parse_event(
+        R"({"type":"response.created","response":{"id":"resp_start"}})");
+    CHECK(started.stream_started);
+    for (const auto code : {"server_error", "rate_limit_exceeded", "previous_response_not_found",
+                             "websocket_connection_limit_reached"}) {
+        const auto result = protocol.parse_event(std::string{
+            R"({"type":"response.failed","headers":{"Retry-After":"1.2"},"response":{"error":{"code":")"}
+            + code + R"(","message":"try again"}}})");
+        CHECK(result.stream_error);
+        CHECK(result.retryable_stream_error);
+        CHECK(result.rate_limit.retry_after == 2);
+    }
+    for (const auto code : {"insufficient_quota", "context_length_exceeded", "invalid_request_error",
+                             "cyber_policy", "content_filter"}) {
+        const auto result = protocol.parse_event(std::string{
+            R"({"type":"response.failed","response":{"error":{"code":")"}
+            + code + R"(","message":"do not retry"}}})");
+        CHECK(result.stream_error);
+        CHECK_FALSE(result.retryable_stream_error);
+    }
+    protocol.observe_response_headers({{"x-should-retry", "false"}}, {});
+    CHECK_FALSE(protocol.parse_event(
+        R"({"type":"error","error":{"code":"server_error","message":"veto"}})").retryable_stream_error);
+    protocol.reset_state();
+    CHECK(protocol.parse_event(
+        R"({"type":"error","error":{"code":"server_error","message":"recover"}})").retryable_stream_error);
+}
+
+TEST_CASE("Codex replay preserves phases and interleaved encrypted reasoning",
+          "[openai][responses][regression][continuation][phase]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.session_id = "phase-replay";
+    request.transport_turn_id = "phase-turn";
+    request.messages = {{.role = "user", .content = "inspect the project"}};
+    protocol.prepare_request(request);
+    (void)protocol.serialize_websocket_request(request);
+    Message assistant{.role = "assistant"};
+    const auto consume = [&](std::string_view event) {
+        auto parsed = protocol.parse_event(event);
+        for (const auto& chunk : parsed.chunks) {
+            assistant.content += chunk.content;
+            assistant.tool_calls.insert(assistant.tool_calls.end(), chunk.tools.begin(), chunk.tools.end());
+            assistant.continuation_items.insert(assistant.continuation_items.end(),
+                chunk.continuation_items.begin(), chunk.continuation_items.end());
+        }
+    };
+    consume(R"({"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[]}})");
+    consume(R"({"type":"response.output_text.delta","delta":"Inspecting."})");
+    consume(R"({"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Inspecting."}]}})");
+    consume(R"({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}})");
+    consume(R"({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_read","name":"read","arguments":"{}"}})");
+    consume(R"({"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[]}})");
+    consume(R"({"type":"response.output_text.delta","delta":"Found it."})");
+    consume(R"({"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"partial_answer","content":[{"type":"output_text","text":"Found it."}]}})");
+    consume(R"({"type":"response.completed","response":{"id":"resp_phase"}})");
+    REQUIRE(assistant.content == "Inspecting.Found it.");
+    REQUIRE(assistant.continuation_items.size() == 4);
+    request.messages.push_back(assistant);
+    request.messages.push_back({.role = "tool", .content = "contents", .tool_call_id = "call_read"});
+    const auto replay = protocol.serialize(request);
+    const auto commentary = replay.find(R"("phase":"commentary")");
+    const auto reasoning = replay.find(R"("encrypted_content":"opaque")");
+    const auto call = replay.find(R"("type":"function_call")");
+    const auto partial = replay.find(R"("phase":"partial_answer")");
+    REQUIRE(commentary != std::string::npos);
+    REQUIRE(partial != std::string::npos);
+    CHECK(commentary < reasoning);
+    CHECK(reasoning < call);
+    CHECK(call < partial);
+    const auto incremental = protocol.serialize_websocket_request(request);
+    CHECK_THAT(incremental, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_phase")"));
+    CHECK_THAT(incremental, !Catch::Matchers::ContainsSubstring("opaque"));
+    CHECK_THAT(incremental, !Catch::Matchers::ContainsSubstring("Inspecting."));
+    protocol.abandon_websocket_request(request);
+    const auto reconnected = protocol.serialize_websocket_request(request);
+    CHECK_THAT(reconnected, !Catch::Matchers::ContainsSubstring("previous_response_id"));
+    CHECK_THAT(reconnected, Catch::Matchers::ContainsSubstring("opaque"));
+
+    SECTION("edited text invalidates stale snapshots") {
+        request.messages[1].content = "Updated history";
+        const auto edited = protocol.serialize(request);
+        CHECK_THAT(edited, Catch::Matchers::ContainsSubstring("Updated history"));
+        CHECK_THAT(edited, !Catch::Matchers::ContainsSubstring("Inspecting."));
+    }
+    SECTION("normalized tools invalidate stale snapshots") {
+        request.messages[1].tool_calls[0].function.arguments = R"({"path":"README.md"})";
+        const auto edited = protocol.serialize(request);
+        CHECK_THAT(edited, Catch::Matchers::ContainsSubstring(R"(\"path\":\"README.md\")"));
+    }
+}
+
+TEST_CASE("Codex request controls honor the endpoint catalog and omit unsupported sampling fields",
+          "[openai][responses][codex][regression][catalog]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest request;
+    request.model = "new-catalog-model";
+    request.messages = {{.role = "user", .content = "reason"}};
+    request.max_tokens = 1000;
+    request.temperature = 0.5;
+    request.catalog_reasoning = ModelReasoningProfile{
+        .effort = ReasoningCapability::Effort | ReasoningCapability::UltraEffort,
+        .complete = true,
+        .catalog_default_effort = "high",
+        .supported_efforts = {"high", "ultra"},
+    };
+    auto payload = protocol.serialize(request);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("temperature"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("max_output_tokens"));
+    request.effort = "ultra";
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"ultra")"));
+    request.effort = "low";
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
+    request.catalog_reasoning->effort = {};
+    request.catalog_reasoning->supported_efforts.clear();
+    request.catalog_reasoning->catalog_default_effort.reset();
+    CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring(R"("effort")"));
+    CHECK_FALSE(protocol.parse_event("data: [DONE]").done);
+}
+
+TEST_CASE("Responses retry reset preserves other session continuity and permanent quota failures",
+          "[openai][responses][regression][retry][continuity]") {
+    OpenAIResponsesProtocol owner;
+    auto stream = owner.clone();
+    ChatRequest first;
+    first.model = "gpt-5";
+    first.session_id = "keep-session";
+    stream->prepare_request(first);
+    (void)stream->parse_event(R"({"type":"response.completed","response":{"id":"keep-response"}})");
+    const cpr::Header headers;
+    stream->on_response({200, {}, headers});
+    stream->reset_attempt_state();
+    auto resumed = owner.clone();
+    ChatRequest next = first;
+    resumed->prepare_request(next);
+    CHECK(next.previous_response_id == "keep-response");
+    CHECK_FALSE(stream->is_retryable({429, R"({"error":{"code":"insufficient_quota"}})", headers}));
+    CHECK(stream->is_retryable({429, R"({"error":{"code":"rate_limit_exceeded"}})", headers}));
+}

@@ -81,7 +81,11 @@ namespace {
         prepared.protocol->prepare_request(req);
         prepared.protocol->prepare_media_uploads(req, base_url, auth);
         prepared.model = req.model;
-        prepared.payload = prepared.protocol->serialize(req);
+        // The WebSocket path serializes its own frame. Avoid holding a second
+        // complete encoded history for an HTTP fallback that may never run.
+        if (!prepared.protocol->supports_websocket_transport()) {
+            prepared.payload = prepared.protocol->serialize(req);
+        }
         prepared.delimiter = std::string(prepared.protocol->event_delimiter());
         prepared.url = core::utils::uri::append_query_params(
             prepared.protocol->build_url(base_url, req.model), auth.query_params);
@@ -98,7 +102,8 @@ namespace {
         protocols::ApiProtocolBase& protocol,
         const ChatRequest& request,
         std::string_view base_url,
-        const core::auth::AuthInfo& auth) {
+        const core::auth::AuthInfo& auth,
+        transport::CurlWebSocketTransport& client) {
         PreparedWebSocketStreamRequest prepared;
         prepared.websocket_url = protocol.build_websocket_url(base_url, request.model);
         if (prepared.websocket_url.empty()
@@ -109,14 +114,17 @@ namespace {
 
         prepared.websocket_headers = protocol.build_headers(auth);
         protocol.prepare_websocket_headers(prepared.websocket_headers, request, base_url);
+        prepared.websocket_connection_key = protocol.websocket_connection_key(
+            prepared.websocket_url, prepared.websocket_headers, request);
+        if (!client.matches_connection(prepared.websocket_connection_key)) {
+            protocol.abandon_websocket_request(request);
+        }
         prepared.websocket_frame = protocol.initial_websocket_request_frame(request);
         if (prepared.websocket_frame.payload.empty()) {
             protocol.abandon_websocket_request(request);
             return std::nullopt;
         }
 
-        prepared.websocket_connection_key = protocol.websocket_connection_key(
-            prepared.websocket_url, prepared.websocket_headers, request);
         return prepared;
     }
 
@@ -320,6 +328,18 @@ std::optional<ModelInfo> HttpLLMProvider::resolved_model_info(
     return resolved.model;
 }
 
+std::optional<ModelReasoningProfile> HttpLLMProvider::resolved_reasoning_profile(
+    std::string_view model) const {
+    if (protocol_ && protocol_->uses_provider_reasoning_catalog()) {
+        const auto snapshot = ModelCatalogAvailability::instance().snapshot(catalog_id());
+        const auto resolved = resolve_model_metadata(model, snapshot.models, nullptr);
+        if (resolved.model) return resolved.model->reasoning;
+        return std::nullopt;
+    }
+    if (const auto info = resolved_model_info(model)) return info->reasoning;
+    return std::nullopt;
+}
+
 std::string HttpLLMProvider::get_last_model() const {
     std::lock_guard lock(state_mutex_);
     return last_model_;
@@ -462,14 +482,14 @@ ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(
     const auto protocol_capabilities = protocol_
         ? protocol_->reasoning_capabilities(model)
         : ReasoningCapabilities{};
-    if (!protocol_capabilities.empty()) return protocol_capabilities;
-    // The protocol's answer wins; this endpoint's catalog only fills a gap. The
-    // rule is monotone, so it can add support for a model released after this
-    // build without changing any model the protocol already describes.
+    if (!protocol_capabilities.empty() && !protocol_->uses_provider_reasoning_catalog()) {
+        return protocol_capabilities;
+    }
+    // A complete endpoint catalog is authoritative; family-name heuristics
+    // cannot know which reasoning controls a particular deployment accepts.
     try {
-        if (const auto info = resolved_model_info(model);
-            info && info->reasoning.complete) {
-            return info->reasoning.effort;
+        if (const auto profile = resolved_reasoning_profile(model); profile && profile->complete) {
+            return profile->effort;
         }
     } catch (...) {
         // A catalog lookup must not turn a capability query into a failure.
@@ -555,12 +575,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         }
         // Same reasoning as max_tokens: a model this endpoint serves but the
         // global registry has never seen still has to reach the serializer.
+        const auto reasoning_profile = resolved_reasoning_profile(metadata_model);
         if (!effective_request.catalog_reasoning.has_value()
-            && metadata_info.has_value()
-            && (metadata_info->reasoning.complete
-                || metadata_info->reasoning.catalog_default_effort
+            && reasoning_profile.has_value()
+            && (reasoning_profile->complete
+                || reasoning_profile->catalog_default_effort
                        .has_value())) {
-            effective_request.catalog_reasoning = metadata_info->reasoning;
+            effective_request.catalog_reasoning = reasoning_profile;
         }
         if (metadata_info.has_value()
             && metadata_info->capabilities != 0) {
@@ -616,148 +637,182 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
      auth = std::move(prepared.auth),
      callback] () mutable {
 
+        const auto abandon_websocket = [&] {
+            if (protocol->supports_websocket_transport()) {
+                self->websocket_.client->reset();
+                protocol->abandon_websocket_request(request_metadata);
+            }
+        };
+        const auto read_auth = [&] {
+            if (self->cred_source_) {
+                auth = self->cred_source_->get_auth();
+                request_metadata.auth_properties = auth.properties;
+            }
+        };
+        const auto prepare_http_headers = [&] {
+            headers = protocol->build_headers(auth);
+            headers["Accept"] = "text/event-stream";
+            protocol->prepare_headers(headers, request_metadata, self->base_url_);
+            url = core::utils::uri::append_query_params(
+                protocol->build_url(self->base_url_, request_metadata.model), auth.query_params);
+        };
         try {
             if (self->cancel_requested_.load(std::memory_order_acquire)) {
                 callback(StreamChunk::make_final());
                 return;
             }
 
-            if (self->websocket_.available() && protocol->supports_websocket_transport()) {
-                std::optional<PreparedWebSocketStreamRequest> websocket_request;
-                try {
-                    websocket_request = prepare_websocket_stream_request(
-                        *protocol, request_metadata, self->base_url_, auth);
-                } catch (const std::exception& e) {
-                    core::logging::debug(
-                        "[WebSocket] Failed to prepare request; falling back to HTTP: {}",
-                        e.what());
-                    protocol->abandon_websocket_request(request_metadata);
-                } catch (...) {
-                    core::logging::debug(
-                        "[WebSocket] Failed to prepare request; falling back to HTTP: unknown exception");
-                    protocol->abandon_websocket_request(request_metadata);
-                }
-
-                if (websocket_request.has_value()
-                    && !websocket_request->websocket_frame.payload.empty()) {
-                    protocols::WebSocketRequestFrame websocket_frame =
-                        std::move(websocket_request->websocket_frame);
-
-                    while (!websocket_frame.payload.empty()) {
-                        bool websocket_done = false;
-                        bool suppressed_error = false;
-                        self->set_last_usage(0, 0);
-
-                        auto websocket_result = self->websocket_.client->stream_text(
-                            websocket_request->websocket_url,
-                            websocket_request->websocket_connection_key,
-                            websocket_request->websocket_headers,
-                            websocket_frame.payload,
-                            [&](std::string_view event_payload) {
-                                protocols::ParseResult result = protocol->parse_event(event_payload);
-
-                                for (auto& chunk : result.chunks) {
-                                    if (websocket_frame.suppress_output) {
-                                        suppressed_error = suppressed_error || chunk.is_error;
-                                        if (chunk.is_final) websocket_done = true;
-                                        continue;
-                                    }
-
-                                    callback(chunk);
-                                    if (chunk.is_final) websocket_done = true;
-                                }
-
-                                if (websocket_done) {
-                                    return true;
-                                }
-
-                                if (!websocket_frame.suppress_output
-                                    && (result.prompt_tokens > 0 || result.completion_tokens > 0)) {
-                                    self->set_last_usage(token_usage_from(result));
-                                }
-
-                                if (result.done) {
-                                    websocket_done = true;
-                                    if (!websocket_frame.suppress_output) {
-                                        callback(StreamChunk::make_final(result.stop_reason, result.incomplete_tool_call));
-                                    }
-                                }
-                                return websocket_done;
-                            },
-                            &self->cancel_requested_,
-                            protocol->stream_timeouts().inactivity);
-
-                        protocol->observe_response_headers(
-                            websocket_result.response_headers, request_metadata);
-
-                        if (self->cancel_requested_.load(std::memory_order_acquire)) {
-                            if (!websocket_frame.suppress_output && !websocket_done) {
-                                callback(StreamChunk::make_final());
-                            }
-                            return;
-                        }
-
-                        if (websocket_result.completed() && !suppressed_error) {
-                            if (!websocket_frame.suppress_output) {
-                                const protocols::HttpResponse websocket_response{
-                                    200, "", websocket_result.response_headers};
-                                protocol->on_response(websocket_response);
-                                self->set_last_rate_limit_info(protocol->last_rate_limit());
-                                return;
-                            }
-
-                            websocket_frame = protocol->next_websocket_request_frame(
-                                request_metadata, websocket_frame);
-                            if (!websocket_frame.payload.empty()) {
-                                continue;
-                            }
-                        }
-
-                        self->websocket_.client->reset();
-                        self->websocket_.disable();
-                        protocol->abandon_websocket_request(request_metadata);
-
-                        if (websocket_result.request_sent
-                            && !websocket_frame.suppress_output) {
-                            core::logging::debug(
-                                "[WebSocket] Stream failed after request send status={} reason={}",
-                                websocket_result.http_status,
-                                websocket_result.message);
-                            callback(StreamChunk::make_error(
-                                "\n[WebSocket stream failed after the request was sent: "
-                                + websocket_result.message + "]"));
-                            callback(StreamChunk::make_final());
-                            return;
-                        }
-
-                        core::logging::debug(
-                            "[WebSocket] Falling back to HTTP status={} reason={}",
-                            websocket_result.http_status,
-                            websocket_result.message);
-                        protocol = protocol->clone();
-                        break;
-                    }
-                }
-            }
-
-            // Preserve protocol defaults unless the caller supplied a non-default
-            // transport override. These options already belong to this driver.
+            // Both transports use the provider's bounded retry policy. Retrying
+            // retracts provisional text, tools, and encrypted continuation state.
             const auto timeouts = self->transport_options_.timeouts == transport::StreamTimeoutPolicy{}
                 ? protocol->stream_timeouts() : self->transport_options_.timeouts;
             const auto retries = self->transport_options_.retries == transport::RetryPolicy{}
                 ? protocol->stream_retry_policy() : self->transport_options_.retries;
-            transport::RetryController retry_controller(retries);
             bool attempted_auth_recovery = false;
-
             const auto emit_retry_reset = [&](const transport::RetrySchedule& retry,
                                               std::string_view reason) {
                 callback(StreamChunk::make_attempt_reset(std::format(
                     "[{} retrying after {} ({}/{})]",
-                    protocol->name(),
-                    reason,
-                    retry.attempt,
-                    retry.max_retries)));
+                    protocol->name(), reason, retry.attempt, retry.max_retries)));
             };
+
+            if (self->websocket_.available() && protocol->supports_websocket_transport()) {
+                transport::RetryController websocket_retries(retries);
+                while (true) {
+                    std::optional<PreparedWebSocketStreamRequest> ws;
+                    try {
+                        ws = prepare_websocket_stream_request(
+                            *protocol, request_metadata, self->base_url_, auth,
+                            *self->websocket_.client);
+                    } catch (const std::exception& e) {
+                        core::logging::debug("[WebSocket] Failed to prepare request: {}", e.what());
+                        abandon_websocket();
+                    }
+                    if (!ws) break;
+                    auto frame = std::move(ws->websocket_frame);
+                    bool retry_connection = false;
+                    while (!frame.payload.empty()) {
+                        bool terminal_forwarded = false;
+                        bool output_emitted = false;
+                        bool stream_error = false;
+                        bool retryable = false;
+                        int32_t retry_after = 0;
+                        std::string error_message;
+                        self->set_last_usage(0, 0);
+                        const auto result = self->websocket_.client->stream_text(
+                            ws->websocket_url, ws->websocket_connection_key,
+                            ws->websocket_headers, frame.payload,
+                            [&](std::string_view event) {
+                                auto parsed = protocol->parse_event(event);
+                                if (parsed.stream_error) {
+                                    stream_error = true;
+                                    retryable = parsed.retryable_stream_error;
+                                    retry_after = parsed.rate_limit.retry_after;
+                                    error_message = std::move(parsed.stream_error_message);
+                                    return true;
+                                }
+                                if (!frame.suppress_output) {
+                                    if (parsed.prompt_tokens > 0 || parsed.completion_tokens > 0) {
+                                        self->set_last_usage(token_usage_from(parsed));
+                                    }
+                                    for (const auto& chunk : parsed.chunks) {
+                                        output_emitted |= !chunk.content.empty() || !chunk.reasoning_content.empty()
+                                            || !chunk.tools.empty() || !chunk.continuation_items.empty();
+                                        callback(chunk);
+                                        terminal_forwarded |= chunk.is_final;
+                                    }
+                                    if (parsed.done && !terminal_forwarded) {
+                                        callback(StreamChunk::make_final(parsed.stop_reason, parsed.incomplete_tool_call));
+                                        terminal_forwarded = true;
+                                    }
+                                } else {
+                                    for (const auto& chunk : parsed.chunks) {
+                                        if (chunk.is_error) {
+                                            stream_error = true;
+                                            error_message = chunk.content;
+                                        }
+                                    }
+                                }
+                                return parsed.done || terminal_forwarded || stream_error;
+                            }, &self->cancel_requested_, timeouts.inactivity);
+                        protocol->observe_response_headers(result.response_headers, request_metadata);
+                        if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                            abandon_websocket();
+                            if (!terminal_forwarded) callback(StreamChunk::make_final());
+                            return;
+                        }
+                        if (result.completed() && !stream_error) {
+                            if (frame.suppress_output) {
+                                frame = protocol->next_websocket_request_frame(request_metadata, frame);
+                                continue;
+                            }
+                            const protocols::HttpResponse response{200, "", result.response_headers};
+                            protocol->on_response(response);
+                            self->set_last_rate_limit_info(protocol->last_rate_limit());
+                            return;
+                        }
+                        abandon_websocket();
+                        if (result.http_status == 401 && !attempted_auth_recovery && self->cred_source_) {
+                            attempted_auth_recovery = true;
+                            if (self->cred_source_->refresh_on_auth_failure()) {
+                                read_auth();
+                                protocol = protocol->clone();
+                                retry_connection = true;
+                                break;
+                            }
+                        }
+                        if (error_message.empty()) error_message = result.message;
+                        retry_after = std::max(retry_after, transport::retry_after_seconds(result.response_headers));
+                        const bool veto = transport::retry_vetoed(result.response_headers);
+                        if (veto || (stream_error && !retryable)) {
+                            callback(StreamChunk::make_error("\n[WebSocket stream failed: " + error_message + "]"));
+                            return;
+                        }
+                        // A failed warmup or unsupported handshake can go directly
+                        // to HTTP. No generated model output has been committed.
+                        if (!frame.suppress_output && result.request_sent) {
+                            const auto retry = websocket_retries.schedule(
+                                !veto && (!stream_error || retryable), output_emitted,
+                                std::chrono::seconds(retry_after));
+                            if (retry) {
+                                emit_retry_reset(*retry, "a WebSocket failure");
+                                if (!transport::wait_for_retry(retry->delay, self->cancel_requested_)) {
+                                    callback(StreamChunk::make_final());
+                                    return;
+                                }
+                                protocol = protocol->clone();
+                                // Re-read credentials after backoff; a refreshed token
+                                // must establish a new connection with full input.
+                                read_auth();
+                                retry_connection = true;
+                                break;
+                            }
+                            if (output_emitted && retries.retry_only_before_output) {
+                                callback(StreamChunk::make_error("\n[WebSocket stream failed: " + error_message + "]"));
+                                return;
+                            }
+                            callback(StreamChunk::make_attempt_reset(
+                                "[WebSocket retries exhausted; continuing over HTTPS]"));
+                        }
+                        // Handshake errors and warmups can carry server advice
+                        // too. A transport switch must not bypass its deadline.
+                        if (!transport::wait_for_retry(std::chrono::seconds(retry_after), self->cancel_requested_)) {
+                            callback(StreamChunk::make_final());
+                            return;
+                        }
+                        self->websocket_.disable();
+                        protocol = protocol->clone();
+                        break;
+                    }
+                    if (!retry_connection) break;
+                }
+                // HTTP always starts from complete history and current credentials.
+                payload = protocol->serialize(request_metadata);
+                prepare_http_headers();
+            }
+
+            if (payload.empty()) payload = protocol->serialize(request_metadata);
+            transport::RetryController retry_controller(retries);
 
             const auto prepare_retry = [&](const transport::RetrySchedule& retry) {
                 if (!transport::wait_for_retry(
@@ -765,10 +820,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     callback(StreamChunk::make_final());
                     return false;
                 }
-                protocol->reset_state();
-                url = core::utils::uri::append_query_params(
-                    protocol->build_url(self->base_url_, request_metadata.model),
-                    auth.query_params);
+                protocol->reset_attempt_state();
+                prepare_http_headers();
                 return true;
             };
 
@@ -779,6 +832,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 bool        stream_started = false;
                 bool        stream_error_seen = false;
                 bool        stream_error_retryable = false;
+                int32_t     stream_retry_after = 0;
                 std::string stream_error_type;
                 std::string stream_error_message;
                 bool        output_emitted = false;
@@ -859,6 +913,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         stream_error_retryable = result.retryable_stream_error;
                         stream_error_type = std::move(result.stream_error_type);
                         stream_error_message = std::move(result.stream_error_message);
+                        stream_retry_after = result.rate_limit.retry_after;
                         done_signalled = true;
                         return;
                     }
@@ -1018,12 +1073,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                 if (stream_error_seen || incomplete_required_stream) {
                     const bool retryable_stream_failure =
-                        incomplete_required_stream || stream_error_retryable;
+                        !transport::retry_vetoed(r.header)
+                        && (incomplete_required_stream || stream_error_retryable);
                     const auto rate_limit_info = protocol->last_rate_limit();
                     const auto retry = retry_controller.schedule(
                         retryable_stream_failure,
                         output_emitted,
-                        std::chrono::seconds(rate_limit_info.retry_after));
+                        std::chrono::seconds(std::max(rate_limit_info.retry_after, stream_retry_after)));
                     if (retry.has_value()) {
                         core::logging::warn(
                             "[HTTP] Retrying {} stream failure type='{}' message='{}' attempt={}/{}",
@@ -1071,7 +1127,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 const bool transport_failed =
                     r.error.code != cpr::ErrorCode::OK && !done_signalled;
                 const auto transport_retry = retry_controller.schedule(
-                    transport_failed, output_emitted);
+                    transport_failed && !transport::retry_vetoed(r.header), output_emitted);
                 if (transport_retry.has_value()) {
                     const std::string_view timeout_label =
                         transport::timeout_log_label(watchdog.timeout_kind());
@@ -1099,10 +1155,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     attempted_auth_recovery = true;
                     try {
                         if (self->cred_source_->refresh_on_auth_failure()) {
-                            auto refreshed_auth = self->cred_source_->get_auth();
-                            headers = protocol->build_headers(refreshed_auth);
-                            headers["Accept"] = "text/event-stream";
-                            protocol->prepare_headers(headers, request_metadata, self->base_url_);
+                            read_auth();
+                            protocol->reset_attempt_state();
+                            payload = protocol->serialize(request_metadata);
+                            prepare_http_headers();
                             if (self->cancel_requested_.load(std::memory_order_acquire)) {
                                 callback(StreamChunk::make_final());
                                 break;
@@ -1181,10 +1237,15 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
                 break;  // Exit retry loop on non-retryable response
             }
+        } catch (const core::auth::ReauthenticationRequired& error) {
+            abandon_websocket();
+            callback(make_reauthentication_chunk(error, /*retry_safe=*/true));
         } catch (const std::exception& e) {
+            abandon_websocket();
             core::logging::error("[HTTP] Unhandled streaming exception: {}", e.what());
             callback(StreamChunk::make_error(std::string("\n[Internal streaming error: ") + e.what() + "]"));
         } catch (...) {
+            abandon_websocket();
             core::logging::error("[HTTP] Unhandled streaming exception: unknown exception");
             callback(StreamChunk::make_error("\n[Internal streaming error: unknown exception]"));
         }

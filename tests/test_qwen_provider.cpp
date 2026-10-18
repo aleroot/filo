@@ -217,7 +217,7 @@ TEST_CASE("Qwen Responses preserves output limits and SSE quota rejection",
     protocol.on_response({200, {}, headers});
     CHECK_FALSE(protocol.last_rate_limit().is_rate_limited);
     CHECK(protocol.requires_terminal_event());
-    CHECK_FALSE(OpenAIResponsesProtocol{}.requires_terminal_event());
+    CHECK(OpenAIResponsesProtocol{}.requires_terminal_event());
 }
 
 TEST_CASE("Qwen tool buffering preserves reasoning continuation chunks",

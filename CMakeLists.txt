@@ -491,15 +491,17 @@ set(FILO_CORE_SOURCES
 
 # Lampo is a native macOS App Store app: its backends only exist in Apple
 # builds. Every other platform simply never registers them in the prompt-editor
-# or diff-comparer catalogs. The shared CLI transport is the only Objective-C++
-# translation unit in the project; the backends that speak it are plain C++.
+# or diff-comparer catalogs. Keep native Apple transports in Objective-C++;
+# the provider and agent runtime remain portable C++.
 if(APPLE)
     list(APPEND FILO_CORE_SOURCES
+        src/core/llm/transport/AppleWebSocketTransport.mm
         src/tui/lampo/LampoCliSession.mm
         src/tui/editor/LampoPromptEditor.cpp
         src/tui/viewer/LampoDiffViewer.cpp
     )
     set_source_files_properties(
+        src/core/llm/transport/AppleWebSocketTransport.mm
         src/tui/lampo/LampoCliSession.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
@@ -596,11 +598,13 @@ target_link_libraries(filo_core
 
 if(APPLE)
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(CFNETWORK_FRAMEWORK CFNetwork REQUIRED)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
     target_link_libraries(filo_core
         PUBLIC
+            ${FOUNDATION_FRAMEWORK}
             ${APPKIT_FRAMEWORK}
             ${CFNETWORK_FRAMEWORK}
             ${COREFOUNDATION_FRAMEWORK}
@@ -832,6 +836,10 @@ set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60)
 add_test(NAME provider_http_integration
     COMMAND test_integration "[integration][http]" --reporter compact)
 set_tests_properties(provider_http_integration PROPERTIES TIMEOUT 60)
+
+add_test(NAME websocket_transport_integration
+    COMMAND test_integration "[transport][websocket]" --reporter compact)
+set_tests_properties(websocket_transport_integration PROPERTIES TIMEOUT 60)
 
 add_test(NAME qwen_web_integration
     COMMAND test_integration "[integration][qwen][web]" --reporter compact)

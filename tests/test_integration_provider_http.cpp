@@ -16,6 +16,7 @@
 #include "core/llm/Models.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ToolCallAssembly.hpp"
+#include "core/llm/transport/CurlWebSocketTransport.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
@@ -1884,4 +1885,270 @@ TEST_CASE("HttpLLMProvider re-resolves the protocol URL on retry",
     CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
         return chunk.content == "from-second";
     }));
+}
+
+TEST_CASE("Shared HTTP authentication recovery replaces URL and payload credentials",
+          "[integration][http][regression][oauth]") {
+    class RetryingGeminiProtocol final : public GeminiCodeAssistProtocol {
+    public:
+        bool is_retryable(const HttpResponse& response) const noexcept override {
+            return response.status_code == 503;
+        }
+        std::unique_ptr<ApiProtocolBase> clone() const override {
+            return std::make_unique<RetryingGeminiProtocol>(*this);
+        }
+    };
+    class Credentials final : public core::auth::ICredentialSource {
+    public:
+        int refreshes = 0;
+        core::auth::AuthInfo get_auth() override {
+            const std::string value = refreshes ? "fresh" : "expired";
+            return {.headers = {{"Authorization", "Bearer " + value}},
+                    .query_params = {{"key", value}},
+                    .properties = {{"project_id", value}}};
+        }
+        bool refresh_on_auth_failure() override { ++refreshes; return true; }
+    };
+    auto credentials = std::make_shared<Credentials>();
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/v1internal:streamGenerateContent", [&](const auto& request, auto& response) {
+        const int attempt = ++requests;
+        const std::string value = attempt == 1 ? "expired" : "fresh";
+        CHECK(request.get_header_value("Authorization") == "Bearer " + value);
+        CHECK(request.get_param_value("key") == value);
+        CHECK(request.body.find("\"project\":\"" + value + "\"") != std::string::npos);
+        response.status = attempt == 1 ? 401 : attempt == 2 ? 503 : 200;
+        response.set_content(attempt < 3 ? "{}"
+            : "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"recovered\"}]}}]}}\n\n",
+            "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local sockets unavailable");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+    HttpStreamTransportOptions options;
+    options.retries.initial_backoff = std::chrono::milliseconds(1);
+    options.retries.minimum_delay = std::chrono::milliseconds(0);
+    options.retries.jitter_ratio = 0;
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port), credentials, "gemini-2.5-flash",
+        std::make_unique<RetryingGeminiProtocol>(), core::config::ApiType::Unknown,
+        "", nullptr, nullptr, "", options);
+    ChatRequest request;
+    request.messages = {{.role = "user", .content = "hello"}};
+    std::string text;
+    int terminals = 0;
+    provider->stream_response(request, [&](const auto& chunk) {
+        CHECK_FALSE(chunk.is_error);
+        if (!chunk.reset_attempt) text += chunk.content;
+        terminals += chunk.is_final;
+    });
+    CHECK(requests == 3);
+    CHECK(credentials->refreshes == 1);
+    CHECK(text == "recovered");
+    CHECK(terminals == 1);
+}
+
+TEST_CASE("Codex HTTP streams require completion and recover transient failures",
+          "[integration][http][openai][codex][regression]") {
+    std::string failure;
+    bool permanent = false;
+    bool exhausted = false;
+    SECTION("clean EOF after partial output") {
+        failure = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
+    }
+    SECTION("clean EOF after a provisional tool") {
+        failure = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"unsafe\",\"name\":\"exec\",\"arguments\":\"{}\"}}\n\n";
+    }
+    SECTION("temporary backend error after reasoning") {
+        failure = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"discard\"}}\n\n"
+                  "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"temporary\"}}}\n\n";
+    }
+    SECTION("permanent quota error") {
+        permanent = true;
+        failure = "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"quota\"}}}\n\n";
+    }
+    SECTION("truncation exhausts the retry budget") { exhausted = true; }
+    httplib::Server server;
+    std::atomic<int> attempts{0};
+    server.Post("/v1/responses", [&](const auto&, auto& response) {
+        if (++attempts == 1 || permanent || exhausted) {
+            response.set_content(failure, "text/event-stream");
+        } else {
+            response.set_content(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"complete\"}\n\n"
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n", "text/event-stream");
+        }
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+    HttpStreamTransportOptions options;
+    options.retries.max_retries = 1;
+    options.retries.retry_only_before_output = false;
+    options.retries.initial_backoff = std::chrono::milliseconds(1);
+    options.retries.minimum_delay = std::chrono::milliseconds(0);
+    options.retries.jitter_ratio = 0;
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("mock"), "gpt-5.6-sol",
+        std::make_unique<CodexResponsesProtocol>(), core::config::ApiType::OpenAI,
+        "codex-regression", nullptr, nullptr, "codex-regression", options);
+    ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.messages = {{.role = "user", .content = "run"}};
+    std::vector<StreamChunk> chunks;
+    std::string committed;
+    std::vector<ToolCall> tools;
+    std::vector<ContinuationItem> continuation;
+    provider->stream_response(request, [&](const auto& chunk) {
+        chunks.push_back(chunk);
+        if (chunk.reset_attempt) { committed.clear(); tools.clear(); continuation.clear(); return; }
+        committed += chunk.content;
+        tools.insert(tools.end(), chunk.tools.begin(), chunk.tools.end());
+        continuation.insert(continuation.end(), chunk.continuation_items.begin(), chunk.continuation_items.end());
+    });
+    CHECK(attempts == (permanent ? 1 : 2));
+    REQUIRE_FALSE(chunks.empty());
+    CHECK(std::ranges::count_if(chunks, [](const auto& c) { return c.is_final; }) == 1);
+    CHECK(chunks.back().is_error == (permanent || exhausted));
+    if (!permanent && !exhausted) {
+        CHECK(committed == "complete");
+        CHECK(tools.empty());
+        CHECK(continuation.empty());
+        CHECK(provider->get_last_usage().completion_tokens == 1);
+    }
+}
+
+TEST_CASE("Codex WebSocket failure recovery falls back safely and honors permanent errors",
+          "[integration][http][transport][websocket][codex][regression]") {
+    if (!core::llm::transport::CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    bool permanent = false;
+    bool server_delay = false;
+    bool warmup = false;
+    bool veto = false;
+    SECTION("retry budget exhausted then HTTP succeeds") {}
+    SECTION("permanent quota rejection stops immediately") { permanent = true; }
+    SECTION("server delay survives reconnect and fallback") { server_delay = true; }
+    SECTION("permanent warmup rejection stops immediately") { permanent = true; warmup = true; }
+    SECTION("server veto stops a transient generation failure") { veto = true; }
+    SECTION("server veto stops a transient warmup failure") { veto = true; warmup = true; }
+    httplib::Server server;
+    std::atomic<int> sockets{0}, posts{0};
+    server.WebSocket("/v1/responses", [&](const auto&, httplib::ws::WebSocket& socket) {
+        ++sockets;
+        socket.set_read_timeout(std::chrono::seconds(2));
+        std::string message;
+        if (socket.read(message) != httplib::ws::Text) return;
+        socket.send(R"({"type":"response.output_text.delta","delta":"provisional"})");
+        socket.send(std::string{R"({"type":"response.failed",)"}
+            + (server_delay ? R"("headers":{"Retry-After":"1"},)" : "")
+            + (veto ? R"("headers":{"x-should-retry":"false"},)" : "")
+            + R"("response":{"error":{"code":")" + (permanent ? "insufficient_quota" : "server_error")
+            + R"(","message":"failure"}}})");
+    });
+    server.Post("/v1/responses", [&](const auto& request, auto& response) {
+        ++posts;
+        CHECK(request.body.find("original request") != std::string::npos);
+        CHECK(request.body.find("previous_response_id") == std::string::npos);
+        response.set_content(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"HTTP recovered\"}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\"}}\n\n", "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local sockets unavailable");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+    HttpStreamTransportOptions options;
+    options.retries.max_retries = 1;
+    options.retries.retry_only_before_output = false;
+    options.retries.initial_backoff = std::chrono::milliseconds(1);
+    options.retries.minimum_delay = std::chrono::milliseconds(0);
+    options.retries.jitter_ratio = 0;
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port), nullptr, "gpt-5.6-sol",
+        std::make_unique<CodexResponsesProtocol>(), core::config::ApiType::Unknown,
+        "", nullptr, nullptr, "", options);
+    ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.messages = {{.role = "user", .content = "original request"}};
+    if (warmup) request.transport_turn_id = "warmup-rejection";
+    int terminals = 0;
+    bool error = false;
+    std::string text;
+    const auto started = std::chrono::steady_clock::now();
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (chunk.reset_attempt) { text.clear(); return; }
+        text += chunk.content;
+        terminals += chunk.is_final;
+        error |= chunk.is_error;
+    });
+    CHECK(sockets == (permanent || veto ? 1 : 2));
+    CHECK(posts == (permanent || veto ? 0 : 1));
+    CHECK(terminals == 1);
+    CHECK(error == (permanent || veto));
+    if (!permanent && !veto) CHECK(text == "HTTP recovered");
+    if (server_delay) CHECK(std::chrono::steady_clock::now() - started >= std::chrono::seconds(2));
+}
+
+TEST_CASE("Codex WebSocket authentication refresh reconnects with replacement credentials",
+          "[integration][http][transport][websocket][codex][regression][oauth]") {
+    if (!core::llm::transport::CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    class Credentials final : public core::auth::ICredentialSource {
+    public:
+        int refreshes = 0;
+        core::auth::AuthInfo get_auth() override {
+            return {.headers = {{"Authorization", refreshes ? "Bearer fresh" : "Bearer expired"}}};
+        }
+        bool refresh_on_auth_failure() override { ++refreshes; return true; }
+    };
+    auto credentials = std::make_shared<Credentials>();
+    httplib::Server server;
+    std::atomic<int> rejected{0}, sockets{0};
+    server.set_pre_routing_handler([&](const auto& request, auto& response) {
+        if (request.get_header_value("Authorization") == "Bearer expired") {
+            ++rejected;
+            response.status = 401;
+            response.set_content("expired", "text/plain");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+    server.WebSocket("/v1/responses", [&](const auto& request, httplib::ws::WebSocket& socket) {
+        CHECK(request.get_header_value("Authorization") == "Bearer fresh");
+        ++sockets;
+        socket.set_read_timeout(std::chrono::seconds(2));
+        std::string message;
+        if (socket.read(message) != httplib::ws::Text) return;
+        socket.send(R"({"type":"response.output_text.delta","delta":"authenticated"})");
+        socket.send(R"({"type":"response.completed","response":{"id":"resp_auth"}})");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local sockets unavailable");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port), credentials, "gpt-5.6-sol",
+        std::make_unique<CodexResponsesProtocol>());
+    ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.messages = {{.role = "user", .content = "hello"}};
+    std::string text;
+    bool error = false;
+    provider->stream_response(request, [&](const auto& chunk) { text += chunk.content; error |= chunk.is_error; });
+    CHECK_FALSE(error);
+    CHECK(text == "authenticated");
+    CHECK(rejected == 1);
+    CHECK(sockets == 1);
+    CHECK(credentials->refreshes == 1);
 }

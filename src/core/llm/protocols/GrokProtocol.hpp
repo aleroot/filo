@@ -252,6 +252,7 @@ private:
  */
 class GrokResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
+    [[nodiscard]] bool uses_provider_reasoning_catalog() const noexcept override { return false; }
     /**
      * @param service_tier       Optional Responses API service tier override.
      * @param enable_hosted_tools When true (default), advertises the xAI hosted
@@ -315,6 +316,7 @@ public:
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
 
     void reset_state() override;
+    void reset_attempt_state() override { reset_state(); }
     void observe_response_headers(const cpr::Header& headers,
                                   const ChatRequest& request) override;
     [[nodiscard]] std::string format_error_message(
