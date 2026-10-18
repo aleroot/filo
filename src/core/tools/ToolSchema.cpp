@@ -466,8 +466,11 @@ std::optional<ArgumentIssue> validate_value(
     if (!schema_accepts_value_type(schema_element, actual)) {
         const std::string expected =
             core::utils::json::string_field(schema, "type", "a valid schema type");
+        const bool stringified_container = actual == "string"
+            && (expected == "array" || expected == "object");
         return make_issue(
-            ArgumentIssueCode::TypeMismatch,
+            stringified_container ? ArgumentIssueCode::StringifiedContainer
+                                  : ArgumentIssueCode::TypeMismatch,
             relative_path(path),
             declared_type_tokens(schema_element),
             std::format("{} must be {}, got {}{}",
@@ -656,6 +659,7 @@ std::string_view issue_code_name(ArgumentIssueCode code) noexcept {
         case ArgumentIssueCode::UnknownArgument: return "unknown_argument";
         case ArgumentIssueCode::MissingRequired: return "missing_required";
         case ArgumentIssueCode::TypeMismatch: return "type_mismatch";
+        case ArgumentIssueCode::StringifiedContainer: return "stringified_container";
         case ArgumentIssueCode::EnumMismatch: return "enum_mismatch";
         case ArgumentIssueCode::ConstMismatch: return "const_mismatch";
         case ArgumentIssueCode::ConstraintViolation: return "constraint_violation";

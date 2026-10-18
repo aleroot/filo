@@ -5,6 +5,7 @@
 #include "core/tools/ArgumentCoercion.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/ToolSchema.hpp"
+#include "core/utils/JsonWriter.hpp"
 
 using Catch::Matchers::ContainsSubstring;
 
@@ -318,4 +319,72 @@ TEST_CASE("coerce_arguments reports when nothing can be repaired",
     // Unparsable input is a different failure and is not coercion's business.
     CHECK_FALSE(core::tools::schema::coerce_arguments("{not json", schema)
                     .has_value());
+}
+
+TEST_CASE("malformed quoted edits are not diagnosed as an output limit",
+          "[tools][coercion][regression]") {
+    // The complete outer call can contain a damaged JSON string: raw control
+    // characters, wrong separators, or a closing quote at the wrong level.
+    // Missing later delimiters must not conceal an earlier syntax error.
+    for (const auto& payload : {
+            std::string("[{\"old_string\":\"before\nline\",\"new_string\":\"after\"}]"),
+            std::string(R"([{"old_string">"before","new_string":"after"}])"),
+            std::string(R"([{"old_string":"before\q)"),
+            std::string(R"([{"old_string":"before"},])")}) {
+        CAPTURE(payload);
+        core::utils::JsonWriter writer;
+        {
+            auto object = writer.object();
+            writer.kv_str("file_path", "example.cpp").comma().kv_str("edits", payload);
+        }
+        const auto issue = core::tools::schema::validate_arguments(edit_tool(), writer.view());
+        REQUIRE_FALSE(issue.has_value());
+        CHECK(issue.error().code == core::tools::schema::ArgumentIssueCode::StringifiedContainer);
+        CHECK_THAT(issue.error().message, ContainsSubstring("malformed"));
+        CHECK_THAT(issue.error().message, !ContainsSubstring("truncated"));
+        CHECK_THAT(issue.error().message, !ContainsSubstring("split large"));
+    }
+}
+
+TEST_CASE("incomplete quoted edits retain the smaller-call diagnosis",
+          "[tools][coercion][regression]") {
+    for (const auto payload : {R"([{"old_string":"before)", R"([{"old_string":"before","new_string":)",
+                               R"([{"old_string":"before","new_string":"\u12)"}) {
+        CAPTURE(payload);
+        const auto explanation = core::tools::schema::explain_string_value(payload, "array");
+        CHECK_THAT(explanation, ContainsSubstring("truncated"));
+        CHECK_THAT(explanation, ContainsSubstring("smaller calls"));
+    }
+    // Syntax damage is distinct from an interrupted output stream, including
+    // an invalid escape followed by an unclosed quote.
+    CHECK(core::tools::schema::explain_unparsable_arguments(R"({"edits":"bad\q)").empty());
+    CHECK(core::tools::schema::explain_unparsable_arguments(R"({"edits" > [)").empty());
+    CHECK_THAT(core::tools::schema::explain_unparsable_arguments(R"({"edits":[)"),
+               ContainsSubstring("may have been cut off"));
+}
+
+TEST_CASE("well-formed serialized edits with invalid items are not called malformed",
+          "[tools][coercion][regression]") {
+    const auto issue = core::tools::schema::validate_arguments(
+        edit_tool(), R"({"file_path":"example.cpp","edits":"[{\"old_string\":\"before\"}]"})");
+    REQUIRE_FALSE(issue.has_value());
+    CHECK(issue.error().code == core::tools::schema::ArgumentIssueCode::StringifiedContainer);
+    CHECK_THAT(issue.error().message, !ContainsSubstring("malformed"));
+    CHECK_THAT(issue.error().message, !ContainsSubstring("truncated"));
+    CHECK_THAT(issue.error().message, ContainsSubstring("items matching the declared schema"));
+}
+
+TEST_CASE("valid edit JSON prefixes are incomplete rather than malformed",
+          "[tools][coercion][streaming][regression]") {
+    // Quotes, backslashes, control-character escapes and partial unicode
+    // escapes occur in source text. An output cap at any prefix is different
+    // from an invalid escape or misplaced separator.
+    constexpr std::string_view payload =
+        R"([{"old_string":"line\n\"quoted\"\\path\t\u20ac","new_string":"replacement {[]}"}])";
+    for (std::size_t length = 1; length < payload.size(); ++length) {
+        CAPTURE(length);
+        const auto explanation = core::tools::schema::explain_string_value(payload.substr(0, length), "array");
+        CHECK_THAT(explanation, ContainsSubstring("truncated"));
+        CHECK_THAT(explanation, !ContainsSubstring("malformed"));
+    }
 }

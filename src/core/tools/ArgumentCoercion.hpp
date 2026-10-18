@@ -63,10 +63,10 @@ namespace core::tools::schema {
 /**
  * Explains why an argument payload could not be parsed at all.
  *
- * Distinguishes output that was cut off mid-value — by far the most common
- * cause, and one the model can act on by sending less — from other syntax
- * damage. Returns a sentence fragment beginning with " — ", or an empty
- * string when there is nothing specific to say.
+ * Recognizes a valid JSON prefix that ends mid-value, without confusing
+ * malformed escaping or an earlier syntax error with output truncation.
+ * Returns a sentence fragment beginning with " — ", or an empty string
+ * when there is no reliable indication of an interrupted payload.
  */
 [[nodiscard]] std::string explain_unparsable_arguments(std::string_view raw);
 

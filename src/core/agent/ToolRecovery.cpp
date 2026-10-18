@@ -158,6 +158,47 @@ RecoveryKey make_key(std::string_view tool,
     };
 }
 
+namespace {
+// A bounded shape example from required string fields in the actual contract.
+// Never include failed argument values (which can contain source or secrets).
+[[nodiscard]] std::optional<std::string> container_shape(
+    const core::tools::schema::ArgumentIssue& issue,
+    const core::tools::ToolDefinition& definition, bool array) {
+    simdjson::dom::parser parser;
+    const simdjson::padded_string schema(core::tools::schema::canonical_input_schema(definition));
+    Element root, item;
+    if (parser.parse(schema).get(root) != simdjson::SUCCESS
+        || root["properties"][issue.parameter].get(item) != simdjson::SUCCESS)
+        return std::nullopt;
+    if (array) {
+        Element nested;
+        if (item["items"].get(nested) != simdjson::SUCCESS) return std::nullopt;
+        item = nested;
+    }
+    simdjson::dom::array required;
+    if (item["required"].get(required) != simdjson::SUCCESS
+        || required.size() == 0 || required.size() > kMaxListedCandidates)
+        return std::nullopt;
+    core::utils::JsonWriter writer;
+    if (array) writer.raw("[");
+    {
+        auto object = writer.object();
+        bool first = true;
+        for (Element field : required) {
+            std::string_view name, type;
+            if (field.get(name) != simdjson::SUCCESS
+                || item["properties"][name]["type"].get(type) != simdjson::SUCCESS
+                || type != "string") return std::nullopt;
+            if (!first) writer.comma();
+            first = false;
+            writer.kv_str(name, "...");
+        }
+    }
+    if (array) writer.raw("]");
+    return std::move(writer).take();
+}
+} // namespace
+
 std::optional<RecoveryHint> advise(
     const core::tools::schema::ArgumentIssue& issue,
     const core::tools::ToolDefinition& definition) {
@@ -202,6 +243,18 @@ std::optional<RecoveryHint> advise(
             return deduced(
                 std::format("'{}' accepts one of: {}.",
                             issue.parameter, join_names(issue.allowed)));
+        }
+        case ArgumentIssueCode::StringifiedContainer: {
+            if (issue.parameter.empty() || issue.allowed.size() != 1) return std::nullopt;
+            const auto& type = issue.allowed.front();
+            if (type != "array" && type != "object") return std::nullopt;
+            const auto prefix = std::format(
+                "Resend '{}' as a JSON {}, not a string.", issue.parameter, type);
+            if (auto shape = container_shape(issue, definition, type == "array")) {
+                auto hint = std::format("{} Shape: {}. Use actual text.", prefix, *shape);
+                if (hint.size() <= kMaxHintChars) return deduced(std::move(hint));
+            }
+            return deduced(prefix + " Use the declared field types and nesting.");
         }
         case ArgumentIssueCode::TypeMismatch: {
             if (issue.allowed.empty()) return std::nullopt;

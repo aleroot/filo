@@ -28,6 +28,7 @@ enum class ArgumentIssueCode {
     UnknownArgument,    ///< An argument is not declared by the schema.
     MissingRequired,    ///< A required argument is absent.
     TypeMismatch,       ///< An argument's JSON type is not accepted.
+    StringifiedContainer, ///< A container parameter received a string value.
     EnumMismatch,       ///< An argument value is outside the allowed enum.
     ConstMismatch,      ///< An argument value differs from the required const.
     ConstraintViolation, ///< A string or array size bound is violated.

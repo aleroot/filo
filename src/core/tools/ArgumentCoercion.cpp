@@ -437,30 +437,127 @@ private:
     return quoted;
 }
 
-/// Cheap structural diagnosis of a JSON payload that failed to parse: an
-/// unclosed string or unbalanced brackets means the model's output was cut
-/// short, which calls for a different correction than a quoting mistake.
-[[nodiscard]] bool looks_truncated(std::string_view payload) noexcept {
-    int depth = 0;
-    bool in_string = false;
-    bool escaped = false;
-    for (const char ch : payload) {
-        if (in_string) {
-            if (escaped) { escaped = false; continue; }
-            if (ch == '\\') escaped = true;
-            else if (ch == '"') in_string = false;
-            continue;
+// Diagnosis only: recognize a valid JSON prefix without repairing or executing
+// it. Counting quotes/brackets misclassified bad escaping as output truncation.
+// Stop at the first syntax error, even if a later quote/bracket is unclosed.
+enum class JsonPrefix { Complete, Incomplete, Malformed };
+
+class JsonPrefixReader {
+public:
+    explicit JsonPrefixReader(std::string_view text) : text_(text) {}
+    [[nodiscard]] JsonPrefix inspect() {
+        const auto result = value(0);
+        whitespace();
+        return result == JsonPrefix::Complete && position_ != text_.size()
+            ? JsonPrefix::Malformed : result;
+    }
+private:
+    void whitespace() {
+        while (position_ < text_.size()
+               && core::utils::json::is_whitespace(static_cast<unsigned char>(text_[position_])))
+            ++position_;
+    }
+    [[nodiscard]] JsonPrefix string() {
+        ++position_; // opening quote
+        while (position_ < text_.size()) {
+            const unsigned char ch = text_[position_++];
+            if (ch == '"') return JsonPrefix::Complete;
+            if (ch < 0x20) return JsonPrefix::Malformed;
+            if (ch != '\\') continue;
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            const char escape = text_[position_++];
+            if (escape == 'u') {
+                for (int i = 0; i < 4; ++i) {
+                    if (position_ == text_.size()) return JsonPrefix::Incomplete;
+                    const char hex = text_[position_++];
+                    if (!((hex >= '0' && hex <= '9') || (hex >= 'a' && hex <= 'f')
+                          || (hex >= 'A' && hex <= 'F'))) return JsonPrefix::Malformed;
+                }
+            } else if (std::string_view("\"\\/bfnrt").find(escape) == std::string_view::npos) {
+                return JsonPrefix::Malformed;
+            }
         }
-        switch (ch) {
-            case '"': in_string = true; break;
-            case '[':
-            case '{': ++depth; break;
-            case ']':
-            case '}': --depth; break;
-            default: break;
+        return JsonPrefix::Incomplete;
+    }
+    [[nodiscard]] JsonPrefix literal(std::string_view expected) {
+        for (const char ch : expected) {
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            if (text_[position_++] != ch) return JsonPrefix::Malformed;
+        }
+        return JsonPrefix::Complete;
+    }
+    [[nodiscard]] bool digit() const {
+        return position_ < text_.size() && text_[position_] >= '0' && text_[position_] <= '9';
+    }
+    [[nodiscard]] JsonPrefix number() {
+        if (text_[position_] == '-') ++position_;
+        if (position_ == text_.size()) return JsonPrefix::Incomplete;
+        if (!digit()) return JsonPrefix::Malformed;
+        if (text_[position_] == '0') ++position_;
+        else while (digit()) ++position_;
+        if (position_ < text_.size() && text_[position_] == '.') {
+            ++position_;
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            if (!digit()) return JsonPrefix::Malformed;
+            while (digit()) ++position_;
+        }
+        if (position_ < text_.size() && (text_[position_] == 'e' || text_[position_] == 'E')) {
+            ++position_;
+            if (position_ < text_.size() && (text_[position_] == '+' || text_[position_] == '-')) ++position_;
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            if (!digit()) return JsonPrefix::Malformed;
+            while (digit()) ++position_;
+        }
+        return JsonPrefix::Complete;
+    }
+    [[nodiscard]] JsonPrefix container(bool object, std::size_t depth) {
+        ++position_;
+        whitespace();
+        const char close = object ? '}' : ']';
+        if (position_ < text_.size() && text_[position_] == close) {
+            ++position_;
+            return JsonPrefix::Complete;
+        }
+        while (true) {
+            whitespace();
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            if (object) {
+                if (text_[position_] != '"') return JsonPrefix::Malformed;
+                const auto key = string();
+                if (key != JsonPrefix::Complete) return key;
+                whitespace();
+                if (position_ == text_.size()) return JsonPrefix::Incomplete;
+                if (text_[position_++] != ':') return JsonPrefix::Malformed;
+            }
+            const auto item = value(depth + 1);
+            if (item != JsonPrefix::Complete) return item;
+            whitespace();
+            if (position_ == text_.size()) return JsonPrefix::Incomplete;
+            const char separator = text_[position_++];
+            if (separator == close) return JsonPrefix::Complete;
+            if (separator != ',') return JsonPrefix::Malformed;
         }
     }
-    return in_string || depth > 0;
+    [[nodiscard]] JsonPrefix value(std::size_t depth) {
+        if (depth >= 64) return JsonPrefix::Malformed;
+        whitespace();
+        if (position_ == text_.size()) return JsonPrefix::Incomplete;
+        switch (text_[position_]) {
+            case '{': return container(true, depth);
+            case '[': return container(false, depth);
+            case '"': return string();
+            case 't': return literal("true");
+            case 'f': return literal("false");
+            case 'n': return literal("null");
+            default: return number();
+        }
+    }
+    std::string_view text_;
+    std::size_t position_ = 0;
+};
+
+[[nodiscard]] bool looks_truncated(std::string_view payload) {
+    return JsonPrefixReader(payload).inspect() == JsonPrefix::Incomplete;
 }
 
 } // namespace
@@ -498,7 +595,7 @@ std::string explain_unparsable_arguments(std::string_view raw) {
     if (trimmed.empty()) return {};
     if (looks_truncated(trimmed)) {
         return " — the payload ends mid-value (unterminated string or bracket),"
-               " so the tool call was cut off rather than mis-typed. Send the"
+               " so the tool call may have been cut off. Send the"
                " call again with less content, splitting large work across"
                " several calls";
     }
@@ -516,7 +613,14 @@ std::string explain_string_value(std::string_view value,
                 " — send a JSON {0} value, not a quoted string",
                 expected_type);
         }
-        if (looks_truncated(trimmed)) {
+        const auto prefix = JsonPrefixReader(trimmed).inspect();
+        if (prefix == JsonPrefix::Complete) {
+            return std::format(
+                " — the value is a JSON {0} serialized into a string. Send the"
+                " {0} as a real JSON value with items matching the declared schema",
+                expected_type);
+        }
+        if (prefix == JsonPrefix::Incomplete) {
             return std::format(
                 " — the value is a JSON {0} serialized into a string and the"
                 " payload is truncated (unterminated string or bracket). Send"

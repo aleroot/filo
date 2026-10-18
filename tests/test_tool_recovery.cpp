@@ -3,6 +3,7 @@
 
 #include "core/agent/Agent.hpp"
 #include "core/agent/ToolRecovery.hpp"
+#include "core/utils/JsonWriter.hpp"
 #include "core/memory/MemorySystem.hpp"
 #include "core/memory/ToolRecoveryMemory.hpp"
 #include "core/llm/LLMProvider.hpp"
@@ -193,8 +194,9 @@ public:
     }
 
     void stream_response(
-        const core::llm::ChatRequest&,
+        const core::llm::ChatRequest& request,
         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        requests.push_back(request);
         const auto call = static_cast<std::size_t>(
             calls_.fetch_add(1, std::memory_order_acq_rel));
         if (call < steps_.size()) {
@@ -224,6 +226,8 @@ public:
         callback(core::llm::StreamChunk::make_content("done"));
         callback(core::llm::StreamChunk::make_final());
     }
+
+    std::vector<core::llm::ChatRequest> requests;
 
 private:
     std::vector<Step> steps_;
@@ -1064,4 +1068,62 @@ TEST_CASE("agent does not learn from same-step parallel runtime outcomes",
             memory);
         CHECK(memory->lessons().empty());
     }
+}
+
+TEST_CASE("quoted container recovery supplies a bounded shape from the tool contract",
+          "[agent][recovery][schema][regression]") {
+    const ArgumentRecordingTool tool;
+    const auto issue = core::tools::schema::validate_arguments(tool.get_definition(),
+        R"({"edits":"[{\"old_string\":\"PRIVATE_REPLACEMENT"})");
+    REQUIRE_FALSE(issue.has_value());
+    CHECK(core::tools::schema::issue_code_name(issue.error().code) == "stringified_container");
+    const auto hint = rec::advise(issue.error(), tool.get_definition());
+    REQUIRE(hint.has_value());
+    CHECK_THAT(hint->instruction, ContainsSubstring("not a string"));
+    CHECK_THAT(hint->instruction, ContainsSubstring(R"([{"old_string":"...","new_string":"..."}])"));
+    CHECK_THAT(hint->instruction, !ContainsSubstring("PRIVATE_REPLACEMENT"));
+    CHECK(hint->instruction.size() <= rec::kMaxHintChars);
+
+    auto large_definition = tool.get_definition();
+    large_definition.input_schema = R"({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"long_parameter_name_that_makes_the_shape_example_too_large_to_send":{"type":"string"},"another_very_long_parameter_name_in_the_contract":{"type":"string"}},"required":["long_parameter_name_that_makes_the_shape_example_too_large_to_send","another_very_long_parameter_name_in_the_contract"]}}},"required":["edits"]})";
+    const auto bounded = rec::advise(issue.error(), large_definition);
+    REQUIRE(bounded.has_value());
+    CHECK(bounded->instruction.size() <= rec::kMaxHintChars);
+    CHECK_THAT(bounded->instruction, ContainsSubstring("not a string"));
+    CHECK_THAT(bounded->instruction, !ContainsSubstring("Shape:"));
+}
+
+TEST_CASE("agent rejects damaged quoted edits and sends a usable retry shape",
+          "[agent][recovery][integration][regression]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<ArgumentRecordingTool>());
+    ArgumentRecordingTool::reset();
+    core::utils::JsonWriter arguments;
+    {
+        auto object = arguments.object();
+        arguments.kv_str("edits", "[{\"old_string\":\"before\nline\",\"new_string\":\"after\"}]");
+    }
+    auto provider = std::make_shared<ScriptedToolCallProvider>(
+        std::string(ArgumentRecordingTool::kName), std::vector<std::string>{
+            std::string(arguments.view()),
+            R"({"edits":[{"old_string":"before\nline","new_string":"after"}]})"});
+    const auto history = run_turn(provider, std::make_shared<RecordingToolRecoveryMemory>(),
+                                  {.allow_background_memory_review = false});
+    REQUIRE(provider->requests.size() == 3);
+    // Only the complete, correctly nested edit reaches execution. There is no
+    // attempt to reconstruct missing source text or apply a partial batch.
+    const auto executed = ArgumentRecordingTool::executed();
+    REQUIRE(executed.size() == 1);
+    CHECK(executed.front() == R"({"edits":[{"new_string":"after","old_string":"before\nline"}]})");
+    const auto& retry_messages = provider->requests[1].messages;
+    const auto rejection = std::ranges::find_if(retry_messages, [](const auto& message) {
+        return message.role == "tool" && message.content.find("recovery_hint") != std::string::npos;
+    });
+    REQUIRE(rejection != retry_messages.end());
+    simdjson::dom::parser parser;
+    auto data = parser.parse(rejection->content);
+    const std::string_view hint = data["recovery_hint"];
+    CHECK_THAT(std::string(hint), ContainsSubstring(R"([{"old_string":"...","new_string":"..."}])"));
+    CHECK_THAT(std::string(std::string_view(data["error"])), ContainsSubstring("malformed"));
+    CHECK_THAT(std::string(std::string_view(data["error"])), !ContainsSubstring("truncated"));
 }
