@@ -54,7 +54,7 @@ namespace {
 ToolDefinition FileSearchTool::get_definition() const {
     return {
         .name  = std::string(names::kFileSearch),
-        .title = "Search",
+        .title = "Find",
         .description =
             "Find up to 100 files recursively by glob, skipping generated and VCS directories.",
         .parameters = {

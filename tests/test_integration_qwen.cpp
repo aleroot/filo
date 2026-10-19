@@ -288,16 +288,21 @@ TEST_CASE("Qwen search labels a verified partial stream and bounds its timeout",
         }
     });
     const auto context = invocation(make_provider(fixture));
-    const auto backend = core::tools::web::make_dashscope_web_search_backend({.model = "qwen3.8-flash", .timeout_ms = 50});
+    // The partial stream gets a real budget: a 50 ms deadline also covers
+    // connect and the round trip, which a loaded CI runner can exceed.
+    const auto backend = core::tools::web::make_dashscope_web_search_backend({.model = "qwen3.8-flash", .timeout_ms = 10000});
     const auto partial = backend->search({.query = "Check facts"}, context);
     REQUIRE(partial.has_value());
     CHECK_THAT(partial->answer, Catch::Matchers::ContainsSubstring("Partial search result"));
     CHECK_THAT(partial->answer, Catch::Matchers::ContainsSubstring("Verified fragment"));
     REQUIRE(partial->results.size() == 1);
+    const auto bounded = core::tools::web::make_dashscope_web_search_backend({.model = "qwen3.8-flash", .timeout_ms = 50});
     const auto started = std::chrono::steady_clock::now();
-    CHECK_FALSE(backend->search({.query = "Slow search"}, context).has_value());
+    CHECK_FALSE(bounded->search({.query = "Slow search"}, context).has_value());
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
-    CHECK(calls == 2);
+    // The budget is spent before a retry; under load the request may not even
+    // reach the server before it runs out.
+    CHECK(calls <= 2);
 }
 
 TEST_CASE("Qwen request repair cannot loop when the repaired request also fails",

@@ -617,7 +617,7 @@ void search_file(
 ToolDefinition GrepSearchTool::get_definition() const {
     return {
         .name  = std::string(names::kGrepSearch),
-        .title = "Grep",
+        .title = "Search",
         .description =
             "Find up to 100 matching lines recursively, skipping generated and VCS directories. "
             "Regex syntax is C++ ECMAScript only; inline flags such as (?i) are unsupported.",

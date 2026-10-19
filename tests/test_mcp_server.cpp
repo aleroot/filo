@@ -5,6 +5,8 @@
 #include "core/mcp/RemoteActivity.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/WebFetchTool.hpp"
+#include "core/tools/WebSearchTool.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
@@ -18,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -639,7 +642,7 @@ TEST_CASE("MCP tools/list declares activity metadata only for opted-in tools", "
         if (name == "write_file" || name == "file_search") {
             const auto title = tool["title"].get_string().value();
             const auto argument = tool["_meta"]["app.lampo/primaryArgument"].get_string().value();
-            CHECK(title == (name == "write_file" ? "Write" : "Search"));
+            CHECK(title == (name == "write_file" ? "Write" : "Find"));
             CHECK(argument == (name == "write_file" ? "file_path" : "pattern"));
             CHECK(tool["inputSchema"]["properties"][argument]["type"].get_string().value() == "string");
             CHECK(tool["inputSchema"]["app.lampo/primaryArgument"].error() == simdjson::NO_SUCH_FIELD);
@@ -652,6 +655,41 @@ TEST_CASE("MCP tools/list declares activity metadata only for opted-in tools", "
     }
     REQUIRE(checked == 2);
     REQUIRE(checked_fallback);
+}
+
+TEST_CASE("MCP tools/list gives every built-in tool a distinct title", "[mcp][presentation]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":56})");
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    // The TUI and Lampo label a tool call by its title alone, so two tools
+    // sharing one would be indistinguishable in the transcript.
+    std::map<std::string, std::string, std::less<>> owner_by_title;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        const std::string name(tool["name"].get_string().value());
+        const std::string title(tool["title"].get_string().value());
+        const auto [it, inserted] = owner_by_title.emplace(title, name);
+        INFO("title '" << title << "' is used by " << it->second << " and " << name);
+        CHECK(inserted);
+    }
+    // The web tools are listed only when the provider has a web backend.
+    for (const auto& def : {core::tools::WebSearchTool{}.get_definition(),
+                            core::tools::WebFetchTool{}.get_definition()}) {
+        const auto [it, inserted] = owner_by_title.emplace(def.title, def.name);
+        INFO("title '" << def.title << "' is used by " << it->second << " and " << def.name);
+        CHECK((inserted || it->second == def.name));
+    }
+
+    const auto title_of = [&](std::string_view name) -> std::string {
+        for (const auto& [title, owner] : owner_by_title)
+            if (owner == name) return title;
+        return {};
+    };
+    CHECK(title_of("grep_search") == "Search");
+    CHECK(title_of("file_search") == "Find");
+    CHECK(title_of("web_search") == "Web Search");
 }
 
 TEST_CASE("MCP tools/list emits only non-default annotation hints", "[mcp][annotations]") {
