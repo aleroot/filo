@@ -1,6 +1,10 @@
 #include "TurnChangeTracker.hpp"
+#include "TurnRecovery.hpp"
+#include "WorkspaceInventory.hpp"
+#include "WorkspaceMutationGate.hpp"
 
 #include "../tools/ToolDiffUtils.hpp"
+#include "../utils/PathUtils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -36,12 +40,7 @@ std::uint64_t fnv1a(std::string_view bytes,
 }
 
 std::string canonical_string(const fs::path& path) {
-    std::error_code ec;
-    fs::path canonical = fs::weakly_canonical(path, ec);
-    if (ec) {
-        canonical = path.lexically_normal();
-    }
-    std::string key = canonical.generic_string();
+    std::string key = core::utils::path::normalized(path).generic_string();
     while (key.size() > 1 && key.ends_with('/')) {
         key.pop_back();
     }
@@ -60,15 +59,40 @@ std::size_t count_lines(std::string_view text) {
 
 } // namespace
 
-TurnChangeTracker::TurnChangeTracker(fs::path display_root)
-    : TurnChangeTracker(std::move(display_root), Limits{}) {}
+TurnChangeTracker::TurnChangeTracker(fs::path display_root, std::shared_ptr<WorkspaceMutationGate> mutations)
+    : TurnChangeTracker(std::move(display_root), Limits{}, std::move(mutations)) {}
 
-TurnChangeTracker::TurnChangeTracker(fs::path display_root, Limits limits)
-    : display_root_(canonical_string(display_root)), limits_(limits) {}
+TurnChangeTracker::TurnChangeTracker(fs::path display_root, Limits limits,
+                                   std::shared_ptr<WorkspaceMutationGate> mutations)
+    : mutations_(mutations ? std::move(mutations) : std::make_shared<WorkspaceMutationGate>()), display_root_(canonical_string(display_root)),
+      limits_(limits), workspace_roots_{display_root_} {
+}
+
+void TurnChangeTracker::set_workspace_roots(std::vector<fs::path> roots) {
+    std::lock_guard lock(mutex_);
+    workspace_roots_ = std::move(roots);
+}
+void TurnChangeTracker::set_observation_filter(std::function<bool(const fs::path&)> filter) {
+    std::lock_guard lock(mutex_);
+    observation_filter_ = std::move(filter);
+}
+
+void TurnChangeTracker::set_recovery(std::shared_ptr<TurnRecovery> recovery) {
+    std::lock_guard lock(mutex_);
+    recovery_ = std::move(recovery);
+}
+void TurnChangeTracker::note_process_group(int group) {
+    std::lock_guard lock(mutex_);
+    if (recovery_) recovery_->process_group(group);
+}
+void TurnChangeTracker::finish_recovery() {
+    std::lock_guard lock(mutex_);
+    if (recovery_) recovery_->finish();
+}
 
 TurnChangeTracker::Stat TurnChangeTracker::stat_of(const fs::path& path) {
     std::error_code ec;
-    const auto status = fs::status(path, ec);
+    const auto status = fs::symlink_status(path, ec);
     if (ec || !fs::exists(status)) {
         return {};  // Absent, or gone before it could be examined.
     }
@@ -76,12 +100,13 @@ TurnChangeTracker::Stat TurnChangeTracker::stat_of(const fs::path& path) {
         return {.exists = true};
     }
     Stat stat{.exists = true, .regular = true};
+    stat.mode = static_cast<unsigned>(status.permissions() & fs::perms::mask);
     stat.size = fs::file_size(path, ec);
     if (!ec) {
         std::error_code time_ec;
         const auto modified = static_cast<long long>(
             fs::last_write_time(path, time_ec).time_since_epoch().count());
-        stat.stamp = fnv1a(std::to_string(stat.size) + ':' + std::to_string(modified));
+        stat.stamp = fnv1a(std::to_string(stat.size) + ':' + std::to_string(modified) + ':' + std::to_string(stat.mode));
     }
     return stat;
 }
@@ -108,7 +133,7 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
         return {};
     }
 
-    Snapshot snapshot{.state = Snapshot::State::Opaque, .stamp = stat.stamp};
+    Snapshot snapshot{.state = Snapshot::State::Opaque, .stamp = stat.stamp, .mode = stat.mode};
     if (!stat.regular || stat.stamp == 0) {
         // Not a regular file, or its size and mtime could not be read: nothing
         // to diff, and no cheap way to notice a change either.
@@ -168,7 +193,7 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
     return {.state = Snapshot::State::Text,
             .text = std::move(bytes),
             .lines = lines,
-            .stamp = snapshot.stamp};
+            .stamp = snapshot.stamp, .mode = snapshot.mode};
 }
 
 std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining(
@@ -323,12 +348,24 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
         // than trusted as whole.
         unscoped_mutations_ = true;
         note_unscoped_tool_unlocked(scope.tool);
+        observe_workspace_unlocked(when);
         reconcile_known_unlocked();
     }
     for (const auto& path : scope.paths) {
         const Key root = key_for(path);
-        const auto expansion = expand_unlocked(root);
+        auto expansion = expand_unlocked(root);
+        std::erase_if(expansion.keys, [&](const auto& path) { return !observable_unlocked(path); });
         partial_enumeration_ |= !expansion.complete;
+        if (recovery_) {
+            std::vector<fs::path> paths(expansion.keys.begin(), expansion.keys.end());
+            if (when == Observation::Before) recovery_->before(paths);
+            else {
+                std::vector<fs::path> created;
+                if (expansion.complete) for (const auto& path : paths)
+                    if (!baseline_.contains(path.generic_string())) created.push_back(path);
+                recovery_->after(paths, created);
+            }
+        }
         for (const auto& key : expansion.keys) {
             Snapshot snapshot = read_unlocked(key, reclaimable_for_unlocked(key));
             if (!baseline_.contains(key)) {
@@ -349,16 +386,71 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
     }
 }
 
+void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
+    // A post-hook notification without a preceding capture cannot establish
+    // what existed before the hook. Preserve the explicit coverage caveat.
+    if (when == Observation::After && !workspace_observed_) {
+        checkpoint_current_unlocked();
+        return;
+    }
+    auto inventory = workspace_inventory(workspace_roots_, limits_.max_files_per_directory,
+        [&](const auto& path) { return observable_unlocked(path); });
+    partial_enumeration_ |= !inventory.complete;
+    if (when == Observation::Before) {
+        workspace_observed_ = true;
+        inventory_complete_ = inventory.complete;
+        if (recovery_) {
+            recovery_->before_workspace(inventory.paths, workspace_roots_, inventory.complete);
+        }
+    }
+    std::vector<fs::path> created;
+    for (const auto& path : inventory.paths) {
+        const auto key = key_for(path);
+        if (baseline_.contains(key)) continue;
+        if (when == Observation::After && !inventory_complete_) continue;
+        Snapshot current = read_unlocked(path, {});
+        Snapshot original = when == Observation::Before ? current : Snapshot{};
+        charge_unlocked(original);
+        baseline_.emplace(key, std::move(original));
+        store_current_unlocked(key, std::move(current));
+        if (when == Observation::After) created.push_back(path);
+    }
+    if (when == Observation::After) checkpoint_current_unlocked(created);
+}
+
+bool TurnChangeTracker::observable_unlocked(const fs::path& path) const {
+    return (!recovery_ || recovery_->can_observe(path)) && (!observation_filter_ || observation_filter_(path));
+}
+
+void TurnChangeTracker::checkpoint_current_unlocked(std::span<const fs::path> created) {
+    if (!recovery_) return;
+    std::vector<fs::path> paths;
+    paths.reserve(current_.size());
+    for (const auto& [path, _] : current_) paths.emplace_back(path);
+    recovery_->after(paths, created);
+}
+
 void TurnChangeTracker::note_unscoped_mutation(std::string tool) {
     observe(MutationScope{.unbounded = true, .tool = std::move(tool)}, Observation::After);
 }
 
 void TurnChangeTracker::settle() {
+    std::vector<fs::path> roots;
+    {
+        std::lock_guard lock(mutex_);
+        if (!unscoped_mutations_) return;
+        roots = workspace_roots_;
+    }
+    // Detached hooks reserve the gate before launch. Waiting here keeps the
+    // published post-image and durable recovery record on the same boundary.
+    auto lease = mutations_->acquire(roots, WorkspaceMutationGate::Access::Exclusive);
+    if (!lease) throw std::runtime_error(lease.error());
     std::lock_guard lock(mutex_);
     if (!unscoped_mutations_) {
         return;
     }
     reconcile_known_unlocked();
+    observe_workspace_unlocked(Observation::After);
 }
 
 void TurnChangeTracker::note_unscoped_tool_unlocked(std::string_view tool) {
@@ -543,8 +635,13 @@ FileChange TurnChangeTracker::describe(FileChangeKind kind,
 TurnChanges TurnChangeTracker::changes() const {
     std::lock_guard lock(mutex_);
     TurnChanges result;
-    result.partial_enumeration = partial_enumeration_;
+    if (recovery_) {
+        result.recovery_path = recovery_->directory().string();
+        result.partial_enumeration = recovery_->partial();
+    }
+    result.partial_enumeration |= partial_enumeration_;
     result.unscoped_mutations = unscoped_mutations_;
+    result.workspace_observed = workspace_observed_;
     result.unscoped_tools = unscoped_tools_;
     ReportBudget budget{.diff_bytes = limits_.max_diff_bytes,
                         .count_work = core::tools::detail::WorkBudget(limits_.max_count_work)};

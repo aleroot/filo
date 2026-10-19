@@ -1,3 +1,4 @@
+#include "core/tools/shell/ShellSessions.hpp"
 /**
  * Tests for main() exit behavior and session summary display.
  * 
@@ -24,7 +25,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/budget/BudgetTracker.hpp"
-#include "core/tools/ShellTool.hpp"
+#include "core/tools/ToolManager.hpp"
 
 using namespace Catch::Matchers;
 
@@ -130,7 +131,7 @@ TEST_CASE("SessionReport displays tool call success/failure counts", "[exit][sum
  * the MCP thread.
  */
 TEST_CASE("MCP server exits cleanly on stdin EOF", "[exit][mcp]") {
-    core::tools::ShellTool::clear_mcp_session("mcp-test-session");
+    core::tools::ToolManager::get_instance().shell_sessions()->clear("mcp-test-session");
 
     // Create a pipe to simulate stdin
     int pipe_fds[2];
@@ -260,7 +261,7 @@ TEST_CASE("BudgetTracker accessible on exit for summary display", "[exit][budget
  * Test that verifies the fix for the hanging issue - closing stdin unblocks getline.
  */
 TEST_CASE("Closing stdin unblocks blocking read for clean exit", "[exit][regression]") {
-    core::tools::ShellTool::clear_mcp_session("mcp-test-session");
+    core::tools::ToolManager::get_instance().shell_sessions()->clear("mcp-test-session");
 
     // This test verifies the specific fix: fclose(stdin) allows the MCP thread to exit
     int pipe_fds[2];

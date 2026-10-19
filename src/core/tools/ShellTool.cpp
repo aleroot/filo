@@ -3,199 +3,31 @@
 #include "ToolArgumentUtils.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
-#include "shell/ShellUtils.hpp"
 #include "../context/SessionContext.hpp"
 #include "../landrun/LandrunPolicyCompiler.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include "../utils/JsonUtils.hpp"
-#include "../workspace/Workspace.hpp"
+#include "../changes/TurnChangeTracker.hpp"
 #include <simdjson.h>
-#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace core::tools {
 
-namespace {
-
-using detail::shell_single_quote;
-
-struct SessionShellState {
-    std::unique_ptr<shell::IShellExecutor> executor{shell::make_shell_executor()};
-    std::mutex mutex;
-    std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
-
-    ~SessionShellState() {
-        if (!executor || !executor->is_alive()) return;
-        [[maybe_unused]] const auto ignored =
-            executor->run("exit 0", {}, std::chrono::seconds{2});
-    }
-};
-
-std::mutex g_session_shells_mutex;
-std::unordered_map<std::string, std::shared_ptr<SessionShellState>> g_session_shells;
-constexpr std::size_t kMaxSessionShells = 64;
-
-std::mutex g_active_commands_mutex;
-std::unordered_map<std::string, ShellTool::ActiveCommand> g_active_commands;
-
-void mark_session_shell_used(const std::shared_ptr<SessionShellState>& state) {
-    std::lock_guard<std::mutex> lock(g_session_shells_mutex);
-    state->last_used = std::chrono::steady_clock::now();
-}
-
-[[nodiscard]] std::shared_ptr<SessionShellState>
-get_or_create_session_shell(
-    const std::string& session_id,
-    const std::filesystem::path& initial_working_dir,
-    const core::landrun::LandrunPolicy& landrun_policy) {
-    std::shared_ptr<SessionShellState> evicted;
-    std::lock_guard<std::mutex> lock(g_session_shells_mutex);
-    if (auto it = g_session_shells.find(session_id); it != g_session_shells.end()) {
-        it->second->last_used = std::chrono::steady_clock::now();
-        return it->second;
-    }
-
-    auto state = std::make_shared<SessionShellState>();
-    state->executor->configure_landrun(landrun_policy);
-    if (!initial_working_dir.empty()) {
-        [[maybe_unused]] const auto ignored = state->executor->run(
-            std::format("cd '{}'", shell_single_quote(initial_working_dir.string())),
-            {},
-            std::chrono::seconds{5});
-    }
-    state->last_used = std::chrono::steady_clock::now();
-    g_session_shells[session_id] = state;
-    if (g_session_shells.size() > kMaxSessionShells) {
-        auto oldest_it = g_session_shells.begin();
-        for (auto it = std::next(g_session_shells.begin()); it != g_session_shells.end(); ++it) {
-            if (it->second->last_used < oldest_it->second->last_used) oldest_it = it;
-        }
-        evicted = oldest_it->second;
-        g_session_shells.erase(oldest_it);
-    }
-    (void)evicted; // keep until after erase; destruction may block but happens outside map use
-    return state;
-}
-
-class ActiveCommandRegistration {
-public:
-    explicit ActiveCommandRegistration(ShellTool::ActiveCommand command)
-        : session_id_(command.session_id)
-    {
-        if (session_id_.empty()) return;
-        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
-        g_active_commands[session_id_] = std::move(command);
-    }
-
-    ~ActiveCommandRegistration() {
-        if (session_id_.empty()) return;
-        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
-        g_active_commands.erase(session_id_);
-    }
-
-    ActiveCommandRegistration(const ActiveCommandRegistration&) = delete;
-    ActiveCommandRegistration& operator=(const ActiveCommandRegistration&) = delete;
-
-private:
-    std::string session_id_;
-};
-
-} // namespace
-
-ShellTool::ShellTool()
-    : ShellTool(shell::make_shell_executor()) {}
-
+ShellTool::ShellTool() : ShellTool(std::make_shared<shell::ShellSessions>()) {}
 ShellTool::ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
-    : executor_(std::move(executor)) {
-    if (!executor_) {
-        executor_ = shell::make_shell_executor();
-    }
+    : ShellTool(std::make_shared<shell::ShellSessions>(std::move(executor))) {}
+ShellTool::ShellTool(std::shared_ptr<shell::ShellSessions> sessions) : sessions_(std::move(sessions)) {
+    if (!sessions_) throw std::invalid_argument("ShellTool requires a session owner");
 }
-
-void ShellTool::clear_mcp_session(std::string_view session_id) {
-    if (session_id.empty()) return;
-
-    // Destroyed after the lock is released: shutting a shell down blocks for
-    // up to two seconds, which must not stall every other session's command.
-    std::shared_ptr<SessionShellState> removed;
-    {
-        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
-        auto it = g_session_shells.find(std::string(session_id));
-        if (it != g_session_shells.end()) {
-            removed = std::move(it->second);
-            g_session_shells.erase(it);
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
-        g_active_commands.erase(std::string(session_id));
-    }
-}
-
-void ShellTool::clear_session_state(std::string_view session_id) {
-    clear_mcp_session(session_id);
-}
-
-std::optional<std::chrono::steady_clock::time_point> ShellTool::reap_idle_mcp_sessions(
-    std::span<const std::string> session_ids,
-    std::chrono::steady_clock::duration idle_timeout) {
-    std::vector<std::shared_ptr<SessionShellState>> reaped;
-    std::optional<std::chrono::steady_clock::time_point> next_deadline;
-    {
-        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
-        const auto now = std::chrono::steady_clock::now();
-        for (const auto& session_id : session_ids) {
-            auto it = g_session_shells.find(session_id);
-            if (it == g_session_shells.end()) continue;
-            const auto deadline = it->second->last_used + idle_timeout;
-            // A running command holds its own reference, and new references
-            // are only taken under this mutex, so a sole owner is idle.
-            if (deadline <= now && it->second.use_count() == 1) {
-                reaped.push_back(std::move(it->second));
-                g_session_shells.erase(it);
-                continue;
-            }
-            if (!next_deadline || deadline < *next_deadline) next_deadline = deadline;
-        }
-    }
-    return next_deadline;  // `reaped` shuts the shells down outside the lock.
-}
-
-bool ShellTool::interrupt_mcp_session(std::string_view session_id) {
-    if (session_id.empty()) return false;
-
-    std::shared_ptr<SessionShellState> state;
-    {
-        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
-        auto it = g_session_shells.find(std::string(session_id));
-        if (it == g_session_shells.end()) return false;
-        state = it->second;
-    }
-    if (!state || !state->executor) return false;
-    return state->executor->interrupt();
-}
-
-std::vector<ShellTool::ActiveCommand> ShellTool::active_commands() {
-    std::lock_guard<std::mutex> lock(g_active_commands_mutex);
-    std::vector<ActiveCommand> commands;
-    commands.reserve(g_active_commands.size());
-    for (const auto& [_, command] : g_active_commands) {
-        commands.push_back(command);
-    }
-    std::ranges::sort(commands, [](const ActiveCommand& lhs, const ActiveCommand& rhs) {
-        return lhs.started_at < rhs.started_at;
-    });
-    return commands;
-}
+void ShellTool::clear_session_state(std::string_view session_id) { sessions_->clear(session_id); }
 
 ToolDefinition ShellTool::get_definition() const {
     return {
@@ -234,13 +66,15 @@ std::string ShellTool::execute(
     return execute_impl(
         json_args,
         invocation.session_context,
-        invocation.tool_call_id);
+        invocation.tool_call_id,
+        invocation.change_tracker);
 }
 
 std::string ShellTool::execute_impl(
     const std::string& json_args,
     const core::context::SessionContext& context,
-    std::string_view tool_call_id)
+    std::string_view tool_call_id,
+    std::shared_ptr<core::changes::TurnChangeTracker> tracker)
 {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
@@ -316,36 +150,18 @@ std::string ShellTool::execute_impl(
     // Delegate to the platform executor.
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
-    shell::IShellExecutor::Result result;
     const auto landrun_policy = steering.child_policy(
         core::landrun::LandrunPolicyCompiler::compile(
             context.workspace_view(),
             core::landrun::LandrunSettings::instance().mode()));
-    const std::string_view session_id = context.session_id;
-    if (session_id.empty()) {
-        std::lock_guard<std::mutex> lock(executor_mutex_);
-        executor_->configure_landrun(landrun_policy);
-        result = executor_->run(command_view, working_dir, timeout);
-    } else {
-        ActiveCommandRegistration active_command({
-            .session_id = std::string(session_id),
-            .command = std::string(command_view),
-            .working_dir = working_dir,
-            .tool_call_id = std::string(tool_call_id),
-            .started_at = std::chrono::steady_clock::now(),
-        });
-        const auto state = get_or_create_session_shell(
-            std::string(session_id),
-            context.workspace_view().primary(),
-            landrun_policy);
-        mark_session_shell_used(state);
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->executor->configure_landrun(landrun_policy);
-            result = state->executor->run(command_view, working_dir, timeout);
-        }
-        mark_session_shell_used(state);
-    }
+    std::function<void(int)> before_dispatch;
+    if (tracker) before_dispatch = [tracker](int group) { tracker->note_process_group(group); };
+    const auto result = sessions_->run({
+        .session_id = context.session_id,
+        .command = std::string(command_view),
+        .working_dir = working_dir,
+        .tool_call_id = std::string(tool_call_id),
+    }, context.workspace_view().primary(), landrun_policy, timeout, before_dispatch);
 
     // Field is named "output" because both stdout and stderr are captured.
     // Escaped straight into the reply: output can be megabytes, and an

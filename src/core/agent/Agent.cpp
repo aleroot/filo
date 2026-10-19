@@ -1,4 +1,6 @@
+#include "../tools/shell/ShellSessions.hpp"
 #include "Agent.hpp"
+#include "../changes/TurnRecovery.hpp"
 #include "AgentCapabilities.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../changes/FileChangeJson.hpp"
@@ -15,8 +17,8 @@
 #include "../session/SessionStats.hpp"
 #include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
-#include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../tools/ToolArgumentUtils.hpp"
 #include "../tools/ToolPolicy.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../tools/ToolSchema.hpp"
@@ -520,7 +522,7 @@ void Agent::request_stop() {
     }
     const auto context = session_context_snapshot();
     if (!context.session_id.empty()) {
-        core::tools::ShellTool::interrupt_mcp_session(context.session_id);
+        skill_manager_.shell_sessions()->interrupt(context.session_id);
     }
 }
 
@@ -632,8 +634,19 @@ std::shared_ptr<core::changes::TurnChangeTracker> Agent::make_change_tracker(
     if (inherited_change_tracker_) {
         return inherited_change_tracker_;
     }
-    return std::make_shared<core::changes::TurnChangeTracker>(
-        session_context.workspace_view().primary());
+    auto tracker = std::make_shared<core::changes::TurnChangeTracker>(
+        session_context.workspace_view().primary(), skill_manager_.mutation_gate());
+    tracker->set_workspace_roots(session_context.workspace_view().ordered_roots());
+    tracker->set_observation_filter([session_context](const std::filesystem::path& path) {
+        return !core::tools::detail::check_workspace_access(path, path.string(), session_context);
+    });
+    if (execution_journal_) {
+        const auto root = core::changes::RecoveryStore::session_root(
+            execution_journal_->path_for(session_context.session_id), session_context.session_id);
+        if (!root.empty()) tracker->set_recovery(std::make_shared<core::changes::TurnRecovery>(
+            core::changes::RecoveryStore::new_directory(root), session_context.workspace_view().primary()));
+    }
+    return tracker;
 }
 
 core::changes::TurnChanges Agent::publish_turn_changes(
@@ -644,8 +657,16 @@ core::changes::TurnChanges Agent::publish_turn_changes(
         return {};
     }
     // A detached hook may still have been writing when the last tool returned.
-    turn_state->change_tracker->settle();
+    bool recovery_incomplete = false;
+    try {
+        turn_state->change_tracker->settle();
+        turn_state->change_tracker->finish_recovery();
+    } catch (const std::exception& error) {
+        recovery_incomplete = true;
+        core::logging::warn("Could not finalize turn recovery: {}", error.what());
+    }
     auto changes = turn_state->change_tracker->changes();
+    changes.partial_enumeration |= recovery_incomplete;
     if (changes.empty()) {
         return {};
     }
@@ -1680,7 +1701,7 @@ void Agent::send_message(core::llm::Message user_message,
     core::hooks::dispatch(
         core::hooks::HookEvent::UserPromptSubmit,
         build_user_prompt_hook_payload(hook_message, mode_snapshot),
-        session_context);
+        session_context, *skill_manager_.mutation_gate(), {}, turn_state->change_tracker);
     if (turn_state->auto_turn &&
         turn_callbacks.on_status_log) {
       turn_callbacks.on_status_log(std::format(
@@ -2335,7 +2356,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return core::hooks::evaluate_completion(
                 build_stop_hook_payload(
                     asst_msg, self->get_mode(), mutation_observed),
-                context, turn_state->completion_hooks);
+                context, *self->skill_manager_.mutation_gate(), turn_state->completion_hooks, {}, turn_state->change_tracker);
           };
 
           if (turn_state->auto_turn &&
@@ -2506,7 +2527,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                 const auto hook_decision = core::hooks::run_pre_tool_use(
                     build_tool_hook_payload(tc),
-                    step_session_context);
+                    step_session_context, *self->skill_manager_.mutation_gate(), {}, turn_state->change_tracker);
                 if (!hook_decision.allowed) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::BlockedByHook;
@@ -2809,31 +2830,19 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 tc.function.arguments,
                                 session_context);
                         } else {
-                            const auto execute = [&] {
-                                return self->skill_manager_.execute_tool(
-                                    tc.function.name,
-                                    tc.function.arguments,
-                                    core::tools::ToolInvocationContext{
-                                        .session_context = session_context,
-                                        .tool_call_id = tc.id,
-                                        .provider_name = active_provider_name_for_task,
-                                        .model_name = active_model_for_task,
-                                        .provider = provider_for_task,
-                                        .cancellation_requested = [self] { return self->is_stop_requested(); },
-                                        .session_stats = self->session_stats_registry_,
-                                    });
-                            };
-                            result = recovery_turn_state->change_tracker
-                                ? recovery_turn_state->change_tracker->track(
-                                      core::changes::mutation_scope(
-                                          tc.function.name,
-                                          tc.function.arguments,
-                                          session_context,
-                                          recovery_definition
-                                              ? recovery_definition->annotations
-                                              : core::tools::ToolAnnotations{}),
-                                      execute)
-                                : execute();
+                            result = self->skill_manager_.execute_tool(
+                                tc.function.name,
+                                tc.function.arguments,
+                                core::tools::ToolInvocationContext{
+                                    .session_context = session_context,
+                                    .tool_call_id = tc.id,
+                                    .provider_name = active_provider_name_for_task,
+                                    .model_name = active_model_for_task,
+                                    .provider = provider_for_task,
+                                    .cancellation_requested = [self] { return self->is_stop_requested(); },
+                                    .session_stats = self->session_stats_registry_,
+                                    .change_tracker = recovery_turn_state->change_tracker,
+                                });
                         }
                         {
                             std::lock_guard lock(self->history_mutex_);
@@ -2929,7 +2938,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         if (core::hooks::dispatch(
                                 core::hooks::HookEvent::PostToolUse,
                                 build_tool_hook_payload(tc, &message),
-                                session_context) > 0
+                                session_context, *self->skill_manager_.mutation_gate(), {}, recovery_turn_state->change_tracker) > 0
                             && recovery_turn_state->change_tracker) {
                             recovery_turn_state->change_tracker->note_unscoped_mutation(
                                 "a post-tool hook");
@@ -2961,7 +2970,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             if (core::hooks::dispatch(
                     core::hooks::HookEvent::PostToolBatch,
                     build_tool_batch_hook_payload(*tool_calls_accum, tool_messages),
-                    step_session_context) > 0
+                    step_session_context, *self->skill_manager_.mutation_gate(), {}, turn_state->change_tracker) > 0
                 && turn_state->change_tracker) {
                 turn_state->change_tracker->note_unscoped_mutation("a post-batch hook");
             }
@@ -3197,6 +3206,26 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
                          const std::string &context_summary,
                          const std::string &mode,
                          HistoryLoad kind) {
+  if (kind == HistoryLoad::Resume && execution_journal_) {
+    const auto context = session_context_snapshot();
+    const auto root = core::changes::RecoveryStore::session_root(
+        execution_journal_->path_for(context.session_id), context.session_id);
+    std::vector<std::string> attached;
+    for (const auto& message : messages) if (!message.turn_changes.recovery_path.empty())
+        attached.push_back(message.turn_changes.recovery_path);
+    auto recovered = core::changes::TurnRecovery::pending(root, context.workspace_view().primary(), *skill_manager_.mutation_gate(), attached,
+        [context](const std::filesystem::path& path) {
+            return !core::tools::detail::check_workspace_access(path, path.string(), context);
+        });
+    if (!recovered) {
+      messages.push_back({.role = "assistant", .content = "Interrupted workspace recovery requires attention: " + recovered.error()});
+    } else for (auto& changes : *recovered) {
+      messages.push_back({.role = "assistant",
+          .content = "Recovered the file inventory of an interrupted turn. Review /changes before using /revert. "
+                     "These are observed changes; any earlier verification must be run again.",
+          .turn_changes = std::move(changes)});
+    }
+  }
   // Normalize the caller-owned snapshot before taking the history lock. The
   // input is local to this call, so JSON parsing does not need shared state.
   for (auto& message : messages) sanitize_tool_arguments(message);

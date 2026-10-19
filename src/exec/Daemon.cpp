@@ -1,3 +1,4 @@
+#include "../core/tools/shell/ShellSessions.hpp"
 #include "Daemon.hpp"
 #include "ApiGateway.hpp"
 #include "RequestReplayCache.hpp"
@@ -11,7 +12,6 @@
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
 #include "../core/mcp/RemoteActivity.hpp"
-#include "../core/tools/ShellTool.hpp"
 #include "../core/tools/ToolManager.hpp"
 #include "../core/context/SessionContext.hpp"
 #include "../core/session/SessionStore.hpp"
@@ -723,7 +723,7 @@ bool g_http_session_reaper_stop = false;
 /// Retires sessions idle for kHttpSessionIdleTimeout, shells idle for
 /// kSessionShellIdleTimeout and expired replay responses. Sleeps without
 /// waking while no session exists (replay entries belong to sessions).
-void run_http_session_reaper() {
+void run_http_session_reaper(core::tools::shell::ShellSessions& shells) {
     std::unique_lock<std::mutex> lock(g_http_sessions_mutex);
     while (!g_http_session_reaper_stop) {
         const auto now = std::chrono::steady_clock::now();
@@ -747,7 +747,7 @@ void run_http_session_reaper() {
         }
         expired.clear();
         replay_cache().prune_expired();
-        const auto next_shell_deadline = core::tools::ShellTool::reap_idle_mcp_sessions(
+        const auto next_shell_deadline = shells.reap_idle(
             live_session_ids, kSessionShellIdleTimeout);
 
         lock.lock();
@@ -771,12 +771,12 @@ void run_http_session_reaper() {
 /// Owns the reaper thread for the lifetime of one daemon run.
 class HttpSessionReaperThread {
 public:
-    HttpSessionReaperThread() {
+    explicit HttpSessionReaperThread(std::shared_ptr<core::tools::shell::ShellSessions> shells) {
         {
             std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
             g_http_session_reaper_stop = false;
         }
-        thread_ = std::thread(run_http_session_reaper);
+        thread_ = std::thread([shells = std::move(shells)] { run_http_session_reaper(*shells); });
     }
 
     HttpSessionReaperThread(const HttpSessionReaperThread&) = delete;
@@ -1598,7 +1598,9 @@ void run_server(int port,
 
     clear_http_sessions();
     std::optional<HttpSessionReaperThread> session_reaper;
-    if (enable_mcp_http) session_reaper.emplace();
+    if (enable_mcp_http) {
+        session_reaper.emplace(core::tools::ToolManager::get_instance().shell_sessions());
+    }
 
     // Pre-construct the McpDispatcher singleton so tools are registered once,
     // at startup, before any request arrives.  Concurrent HTTP handler threads

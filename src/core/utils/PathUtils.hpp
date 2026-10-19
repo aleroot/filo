@@ -15,6 +15,20 @@
 // the two would be a user-visible inconsistency.
 namespace core::utils::path {
 
+// Stable absolute identity for existing paths and not-yet-created children.
+[[nodiscard]] inline std::filesystem::path normalized(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(path, ec);
+    return ec ? std::filesystem::absolute(path).lexically_normal() : canonical;
+}
+
+// Directory scope for a directory or file; missing paths use their parent.
+[[nodiscard]] inline std::filesystem::path directory_for(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto root = normalized(path);
+    return std::filesystem::is_directory(root, ec) ? root : root.parent_path();
+}
+
 /// The user's home directory, or an empty path when `$HOME` is unset.
 [[nodiscard]] inline std::filesystem::path home_directory() {
     const char* home = std::getenv("HOME");
@@ -37,6 +51,10 @@ namespace core::utils::path {
         return std::nullopt;
     }
     return relative;
+}
+
+[[nodiscard]] inline bool overlaps(const std::filesystem::path& a, const std::filesystem::path& b) {
+    return relative_within(a, b).has_value() || relative_within(b, a).has_value();
 }
 
 /// Expand a leading `~` / `~/` to @p home (left untouched when @p home is empty).

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -111,4 +112,32 @@ TEST_CASE("atomic_write_file replaces content without shared temp names", "[conc
     for (const auto& entry : std::filesystem::directory_iterator(temp.path)) {
         CHECK_FALSE(entry.path().filename().string().contains(".tmp."));
     }
+}
+
+TEST_CASE("Bounded regular file reads distinguish absence, empty files and unsafe paths", "[file][recovery]") {
+    TempDir temp;
+    const auto path = temp.path / "source";
+    auto missing = core::utils::read_regular_file(path, 4);
+    REQUIRE(missing);
+    CHECK_FALSE(missing->permissions);
+
+    REQUIRE(core::utils::atomic_write_file(path, "", nullptr,
+        std::filesystem::perms::owner_all));
+    auto empty = core::utils::read_regular_file(path, 0);
+    REQUIRE(empty);
+    REQUIRE(empty->permissions);
+    CHECK(*empty->permissions == std::filesystem::perms::owner_all);
+    CHECK(empty->bytes.empty());
+
+    const std::string binary("a\0bc", 4);
+    REQUIRE(core::utils::atomic_write_file(path, binary));
+    auto contents = core::utils::read_regular_file(path, binary.size());
+    REQUIRE(contents);
+    CHECK(contents->bytes == binary);
+    CHECK_FALSE(core::utils::read_regular_file(path, binary.size() - 1));
+    std::filesystem::create_symlink(path, temp.path / "link");
+    CHECK_FALSE(core::utils::read_regular_file(temp.path / "link", 4));
+    CHECK_FALSE(core::utils::read_regular_file(temp.path, 4));
+    REQUIRE(::mkfifo((temp.path / "pipe").c_str(), 0600) == 0);
+    CHECK_FALSE(core::utils::read_regular_file(temp.path / "pipe", 4));
 }

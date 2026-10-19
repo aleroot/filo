@@ -20,10 +20,23 @@
 #include "../utils/JsonUtils.hpp"
 #include "../llm/Models.hpp"
 
+namespace core::changes { class WorkspaceMutationGate; }
+namespace core::tools::shell { class ShellSessions; }
+
 namespace core::tools {
 
 class ToolManager {
 public:
+    // Omitted services are owned per instance; callers may explicitly share them.
+    explicit ToolManager(std::shared_ptr<core::changes::WorkspaceMutationGate> mutations = {},
+                         std::shared_ptr<shell::ShellSessions> shells = {});
+
+    [[nodiscard]] const std::shared_ptr<core::changes::WorkspaceMutationGate>& mutation_gate() const noexcept {
+        return mutations_;
+    }
+
+    [[nodiscard]] const std::shared_ptr<shell::ShellSessions>& shell_sessions() const noexcept { return shells_; }
+
     static ToolManager& get_instance() {
         static ToolManager instance;
         return instance;
@@ -78,57 +91,10 @@ public:
     // Thread-safe: locks only for the map lookup, then releases before executing
     // the tool (execution can be slow — shell commands, file I/O — and must not
     // hold the mutex while it runs).
-    std::string execute_tool(
-        const std::string& name,
-        const std::string& json_args,
-        const core::context::SessionContext& context)
-    {
-        return execute_tool(name, json_args, ToolInvocationContext{
-            .session_context = context,
-        });
-    }
-
-    std::string execute_tool(
-        const std::string& name,
-        const std::string& json_args,
-        const ToolInvocationContext& invocation)
-    {
-        std::shared_ptr<Tool> tool;
-        ToolDefinition definition;
-        {
-            std::lock_guard lock(mutex_);
-            const auto* registered = find_tool_unlocked(name);
-            if (!registered)
-                return "{\"error\": \"Tool not found: " + name + "\"}";
-            tool = registered->tool;
-            definition = tool->get_definition();
-        }
-        if (!tool_allows_transport(definition, invocation.session_context.transport)) {
-            return R"({"error":"Tool is available only to Filo's internal agents."})";
-        }
-        const auto sandbox_mode =
-            core::landrun::LandrunSettings::instance().mode();
-        if (!landrun_allows_tool(sandbox_mode, definition.name)) {
-            return "{\"error\":\"Tool "
-                + core::utils::escape_json_string(name)
-                + " is unavailable while sandbox mode is "
-                + std::string(core::landrun::landrun_mode_name(sandbox_mode))
-                + ".\"}";
-        }
-        const auto normalized = schema::normalize_arguments(definition, json_args);
-        if (!normalized.has_value()) {
-            return "{\"error\":\"Invalid arguments for "
-                + core::utils::escape_json_string(name)
-                + ": "
-                + core::utils::escape_json_string(normalized.error())
-                + "\"}";
-        }
-        try {
-            return tool->execute(*normalized, invocation);
-        } catch (const std::exception& e) {
-            return "{\"error\": \"Exception executing tool: " + std::string(e.what()) + "\"}";
-        }
-    }
+    std::string execute_tool(const std::string& name, const std::string& json_args,
+                             const core::context::SessionContext& context);
+    std::string execute_tool(const std::string& name, const std::string& json_args,
+                             const ToolInvocationContext& invocation);
 
     [[nodiscard]] std::expected<std::string, std::string>
     normalize_tool_arguments(const std::string& name,
@@ -189,8 +155,6 @@ public:
     }
 
 private:
-    ToolManager() = default;
-
     struct RegisteredTool {
         std::shared_ptr<Tool> tool;
         std::string title;
@@ -205,6 +169,8 @@ private:
         return {};
     }
 
+    std::shared_ptr<core::changes::WorkspaceMutationGate> mutations_;
+    std::shared_ptr<shell::ShellSessions> shells_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, RegisteredTool> tools_;
 };

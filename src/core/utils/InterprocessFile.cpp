@@ -259,4 +259,46 @@ std::optional<std::string> read_file(const std::filesystem::path& path) {
     return content;
 }
 
+std::expected<RegularFileContents, std::string> read_regular_file(
+    const std::filesystem::path& path, std::size_t max_bytes) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno == ENOENT || errno == ENOTDIR) return RegularFileContents{};
+        return std::unexpected("Cannot read file: " + path.string());
+    }
+    struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
+    struct stat stat{};
+    if (::fstat(fd, &stat) != 0 || !S_ISREG(stat.st_mode) || stat.st_size < 0 ||
+        static_cast<std::uintmax_t>(stat.st_size) > max_bytes)
+        return std::unexpected("Path is not a supported regular file or exceeds the read limit: " + path.string());
+    RegularFileContents result;
+    result.bytes.resize(static_cast<std::size_t>(stat.st_size));
+    std::size_t offset = 0;
+    while (offset < result.bytes.size()) {
+        const auto n = ::read(fd, result.bytes.data() + offset, result.bytes.size() - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return std::unexpected("File changed while reading: " + path.string());
+        offset += static_cast<std::size_t>(n);
+    }
+    char extra;
+    if (::read(fd, &extra, 1) != 0)
+        return std::unexpected("File grew while reading: " + path.string());
+    struct stat current{};
+    if (::lstat(path.c_str(), &current) != 0 || stat.st_dev != current.st_dev ||
+        stat.st_ino != current.st_ino || stat.st_size != current.st_size || stat.st_mode != current.st_mode)
+        return std::unexpected("File changed while reading: " + path.string());
+#if defined(__APPLE__)
+    const auto modified = stat.st_mtimespec, now_modified = current.st_mtimespec;
+    const auto changed = stat.st_ctimespec, now_changed = current.st_ctimespec;
+#else
+    const auto modified = stat.st_mtim, now_modified = current.st_mtim;
+    const auto changed = stat.st_ctim, now_changed = current.st_ctim;
+#endif
+    if (modified.tv_sec != now_modified.tv_sec || modified.tv_nsec != now_modified.tv_nsec ||
+        changed.tv_sec != now_changed.tv_sec || changed.tv_nsec != now_changed.tv_nsec)
+        return std::unexpected("File changed while reading: " + path.string());
+    result.permissions = static_cast<std::filesystem::perms>(stat.st_mode & 0777);
+    return result;
+}
+
 } // namespace core::utils

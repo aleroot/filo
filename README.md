@@ -450,6 +450,33 @@ Every agent turn ends with the net changes it made, listed under its answer. Fil
 
 > The comparer is opt-in. `Built in` keeps every diff in the transcript, and `Terminal` pages it through `$PAGER` — on any platform.
 
+### File recovery
+
+`/revert` restores the most recent turn's recorded file changes; `/rewind`
+rewinds conversation history. Recovery uses native filesystem checkpoints and
+works without Git or any other source-control system. Original bytes and file
+permissions are saved before writes, separately from the bounded display diff.
+Shell, Python, MCP, and hook changes are discovered with a bounded workspace
+scan, honoring `.ignore`, `.agentignore`, and `.gitignore` patterns. Symlinks and
+Filo's own state are excluded from automatic scans.
+
+On session resume, an unfinished checkpoint is reconciled against actual files
+and surfaced for review through `/changes` and `/revert`. Commands are never
+automatically replayed. A possibly live recorded shell process group blocks
+recovery; a revert also refuses active tool and hook writers in the same Filo
+process and later conflicting edits,
+then verifies restored contents. Earlier test results do not certify recovered
+files: rerun the checks appropriate to the state you intend to keep.
+
+Checkpoints live beside session journals under `recovery/<session-id>/`.
+Original storage is capped at 8 MiB per file, 64 MiB and 4,096 files per turn;
+the automatic inventory follows the existing 1,000-file turn scan limit.
+The newest eight completed checkpoints are retained per session. Older text
+changes can still use their saved diffs; unsupported, excluded, or over-budget
+paths are reported as incomplete coverage. Deleting a session removes its
+checkpoints. External services and processes that deliberately detach from a
+managed process group are outside this recovery boundary.
+
 ## Settings
 
 Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, diff comparer, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.

@@ -27,7 +27,7 @@ int main() {
     core::tools::ToolManager& sm = core::tools::ToolManager::get_instance();
     
     sm.register_tool(std::make_shared<core::tools::GetTimeTool>());
-    sm.register_tool(std::make_shared<core::tools::ShellTool>());
+    sm.register_tool(std::make_shared<core::tools::ShellTool>(sm.shell_sessions()));
     sm.register_tool(std::make_shared<core::tools::ApplyPatchTool>());
     sm.register_tool(std::make_shared<core::tools::FileSearchTool>());
     sm.register_tool(std::make_shared<core::tools::ReadTool>());

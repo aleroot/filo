@@ -1,5 +1,6 @@
 #include "SessionStore.hpp"
 #include "ExecutionJournal.hpp"
+#include "../changes/RecoveryStore.hpp"
 
 #include "ActiveSessionLease.hpp"
 #include "ThreadCatalog.hpp"
@@ -726,7 +727,18 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
     }
 
     const std::string json = to_json(data);
-    return core::utils::atomic_write_file(target_path, json, error);
+    if (!core::utils::atomic_write_file(target_path, json, error)) return false;
+    std::error_code recovery_ec;
+    const auto recovery_root = std::filesystem::weakly_canonical(core::changes::RecoveryStore::session_root_in(sessions_dir_, data.session_id), recovery_ec);
+    for (const auto& message : data.messages) {
+        const std::filesystem::path checkpoint(message.turn_changes.recovery_path);
+        std::error_code ec;
+        if (checkpoint.empty() || std::filesystem::weakly_canonical(checkpoint.parent_path(), ec) != recovery_root ||
+            !std::filesystem::is_regular_file(checkpoint / "manifest.json", ec)) continue;
+        try { core::changes::RecoveryStore(checkpoint).acknowledge(); }
+        catch (...) { /* Rediscovering an unacknowledged checkpoint remains safe. */ }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1389,11 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
         }
         if (!ExecutionJournal{sessions_dir_ / "journals"}.remove(session_id, error))
             return false;
+        std::filesystem::remove_all(core::changes::RecoveryStore::session_root_in(sessions_dir_, session_id), ec);
+        if (ec) {
+            if (error) *error = ec.message();
+            return false;
+        }
         std::filesystem::remove(p, ec);
         if (ec && error) {
             *error = std::format("Cannot remove session file '{}': {}",

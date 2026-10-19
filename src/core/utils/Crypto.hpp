@@ -32,6 +32,8 @@ namespace core::utils::crypto {
 /** FIPS 180-4 SHA-256. */
 [[nodiscard]] std::array<std::uint8_t, 32> sha256(std::span<const std::uint8_t> data);
 [[nodiscard]] std::array<std::uint8_t, 32> sha256(std::string_view data);
+/** Lowercase hexadecimal SHA-256, for persisted content identities. */
+[[nodiscard]] std::string sha256_hex(std::string_view data);
 
 /** RFC 7748 X25519 scalar multiplication. Returns the 32-byte shared secret. */
 [[nodiscard]] std::array<std::uint8_t, 32> x25519(

@@ -17,6 +17,8 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include "../changes/WorkspaceMutationGate.hpp"
+#include "../changes/TurnChangeTracker.hpp"
 
 namespace core::hooks {
 
@@ -298,12 +300,15 @@ using core::tools::detail::shell_single_quote;
     return decision;
 }
 
-[[nodiscard]] core::tools::shell::IShellExecutor::Result run_hook_command(
+[[nodiscard]] core::tools::shell::IShellExecutor::Result run_reserved_hook_command(
     const core::config::HookCommandConfig& hook,
     HookEvent event,
     std::string_view payload_json,
     const core::context::SessionContext& session_context,
-    const std::vector<std::pair<std::string, std::string>>& extra_env) {
+    const std::vector<std::pair<std::string, std::string>>& extra_env,
+    const std::shared_ptr<core::changes::WorkspaceMutationGate::Lease>& reservation,
+    const std::shared_ptr<core::changes::TurnChangeTracker>& tracker) {
+    (void)reservation; // Held until the executor and its process group have stopped.
     const auto working_dir = hook.working_dir.empty()
         ? session_context.workspace_view().primary().string()
         : session_context.resolve_path(hook.working_dir).string();
@@ -316,10 +321,29 @@ using core::tools::detail::shell_single_quote;
     executor->configure_landrun(core::landrun::LandrunPolicyCompiler::compile(
         session_context.workspace_view(),
         core::landrun::LandrunSettings::instance().mode()));
-    return executor->run(
-        command,
-        working_dir,
-        std::chrono::seconds(timeout_seconds));
+    const auto execute = [&] {
+        if (tracker) {
+            (void)executor->run(":", working_dir, std::chrono::seconds(5));
+            tracker->note_process_group(executor->process_group());
+        }
+        return executor->run(command, working_dir, std::chrono::seconds(timeout_seconds));
+    };
+    return tracker ? tracker->track(core::changes::MutationScope{
+        .unbounded = true, .tool = "a hook"}, execute) : execute();
+}
+
+[[nodiscard]] core::tools::shell::IShellExecutor::Result run_hook_command(
+    const core::config::HookCommandConfig& hook,
+    HookEvent event,
+    std::string_view payload_json,
+    const core::context::SessionContext& session_context,
+    core::changes::WorkspaceMutationGate& mutations,
+    const std::vector<std::pair<std::string, std::string>>& extra_env,
+    const std::shared_ptr<core::changes::TurnChangeTracker>& tracker) {
+    auto lease = mutations.acquire(session_context.workspace_view().ordered_roots(),
+                                   core::changes::WorkspaceMutationGate::Access::Exclusive);
+    if (!lease) return {lease.error(), -1};
+    return run_reserved_hook_command(hook, event, payload_json, session_context, extra_env, *lease, tracker);
 }
 
 } // namespace
@@ -343,7 +367,9 @@ std::string_view to_string(HookEvent event) noexcept {
 std::size_t dispatch(HookEvent event,
                      std::string payload_json,
                      const core::context::SessionContext& session_context,
-                     std::vector<std::pair<std::string, std::string>> extra_env) {
+                     core::changes::WorkspaceMutationGate& mutations,
+                     std::vector<std::pair<std::string, std::string>> extra_env,
+                     std::shared_ptr<core::changes::TurnChangeTracker> tracker) {
     const auto hooks = hooks_for_event(
         core::config::ConfigManager::get_instance().get_config().hooks,
         event);
@@ -360,20 +386,28 @@ std::size_t dispatch(HookEvent event,
             continue;
         }
 
+        auto lease = mutations.acquire(
+            session_context.workspace_view().ordered_roots(),
+            core::changes::WorkspaceMutationGate::Access::Exclusive);
+        if (!lease) {
+            core::logging::warn("[hooks] {}", lease.error());
+            continue;
+        }
         ++started;
         std::thread([hook_name = hook.name.empty() ? std::string(to_string(event)) : hook.name,
                      hook,
                      event,
                      payload_json,
                      session_context,
-                     extra_env]() {
+                     extra_env,
+                     reservation = std::move(*lease), tracker]() {
             try {
-                const auto result = run_hook_command(
+                const auto result = run_reserved_hook_command(
                     hook,
                     event,
                     payload_json,
                     session_context,
-                    extra_env);
+                    extra_env, reservation, tracker);
                 if (result.exit_code != 0) {
                     core::logging::warn(
                         "[hooks] '{}' exited with status {}: {}",
@@ -394,7 +428,9 @@ std::size_t dispatch(HookEvent event,
 HookDecision run_pre_tool_use(
     std::string payload_json,
     const core::context::SessionContext& session_context,
-    std::vector<std::pair<std::string, std::string>> extra_env) {
+    core::changes::WorkspaceMutationGate& mutations,
+    std::vector<std::pair<std::string, std::string>> extra_env,
+    std::shared_ptr<core::changes::TurnChangeTracker> tracker) {
     const auto hooks = hooks_for_event(
         core::config::ConfigManager::get_instance().get_config().hooks,
         HookEvent::PreToolUse);
@@ -423,7 +459,7 @@ HookDecision run_pre_tool_use(
                 hook,
                 run_hook_command(
                     hook, HookEvent::PreToolUse, payload_json,
-                    session_context, extra_env));
+                    session_context, mutations, extra_env, tracker));
         } catch (const std::exception& error) {
             current = pre_tool_use_failure(
                 hook,
@@ -451,7 +487,9 @@ HookDecision run_pre_tool_use(
 StopDecision run_stop(
     std::string payload_json,
     const core::context::SessionContext& session_context,
-    std::vector<std::pair<std::string, std::string>> extra_env) {
+    core::changes::WorkspaceMutationGate& mutations,
+    std::vector<std::pair<std::string, std::string>> extra_env,
+    std::shared_ptr<core::changes::TurnChangeTracker> tracker) {
     const auto hooks = hooks_for_event(
         core::config::ConfigManager::get_instance().get_config().hooks,
         HookEvent::Stop);
@@ -488,7 +526,7 @@ StopDecision run_stop(
                 hook,
                 run_hook_command(
                     hook, HookEvent::Stop, payload_json,
-                    session_context, extra_env));
+                    session_context, mutations, extra_env, tracker));
         } catch (const std::exception& error) {
             const std::string failure = std::format(
                 "Stop hook '{}' failed: {}",
@@ -536,10 +574,12 @@ StopDecision run_stop(
 core::session::TurnCompletionResult evaluate_completion(
     std::string payload_json,
     const core::context::SessionContext& session_context,
+    core::changes::WorkspaceMutationGate& mutations,
     CompletionGateState& state,
-    std::vector<std::pair<std::string, std::string>> extra_env) {
+    std::vector<std::pair<std::string, std::string>> extra_env,
+    std::shared_ptr<core::changes::TurnChangeTracker> tracker) {
     const auto decision = run_stop(
-        std::move(payload_json), session_context, std::move(extra_env));
+        std::move(payload_json), session_context, mutations, std::move(extra_env), std::move(tracker));
     if (decision.complete) {
         return {
             .quality_gate_satisfied =

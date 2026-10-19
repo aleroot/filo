@@ -127,7 +127,7 @@ TEST_CASE("ShellTool clear_mcp_session resets that session shell state",
         REQUIRE_THAT(echo_res, Catch::Matchers::ContainsSubstring(std::string(kToken)));
     }
 
-    ShellTool::clear_mcp_session(kSession);
+    tool.sessions().clear(kSession);
 
     {
         auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})", session);
@@ -155,7 +155,7 @@ TEST_CASE("ShellTool reap_idle_mcp_sessions retires only idle shells of listed s
     // A shell that has not been idle long enough survives and reports when it
     // will become reapable.
     const std::array<std::string, 1> idle_only{idle_id};
-    const auto deadline = ShellTool::reap_idle_mcp_sessions(idle_only, std::chrono::hours{1});
+    const auto deadline = tool.sessions().reap_idle(idle_only, std::chrono::hours{1});
     REQUIRE(deadline.has_value());
     CHECK(*deadline > std::chrono::steady_clock::now());
     CHECK_THAT(tool.execute(R"({"command":"echo $FILO_REAP_VAR"})", idle),
@@ -167,7 +167,7 @@ TEST_CASE("ShellTool reap_idle_mcp_sessions retires only idle shells of listed s
     });
     const std::array<std::string, 1> busy_only{busy_id};
     for (int i = 0; i < 100; ++i) {
-        const auto active = ShellTool::active_commands();
+        const auto active = tool.sessions().active_commands();
         if (std::ranges::any_of(active, [&](const auto& command) {
                 return command.session_id == busy_id;
             })) {
@@ -175,12 +175,12 @@ TEST_CASE("ShellTool reap_idle_mcp_sessions retires only idle shells of listed s
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
-    CHECK(ShellTool::reap_idle_mcp_sessions(busy_only, std::chrono::seconds{0}).has_value());
+    CHECK(tool.sessions().reap_idle(busy_only, std::chrono::seconds{0}).has_value());
     CHECK_THAT(running.get(), Catch::Matchers::ContainsSubstring("busy_done"));
 
     // An idle shell is reaped; the next command starts a fresh one.
     const std::array<std::string, 2> both{idle_id, busy_id};
-    CHECK_FALSE(ShellTool::reap_idle_mcp_sessions(both, std::chrono::seconds{0}).has_value());
+    CHECK_FALSE(tool.sessions().reap_idle(both, std::chrono::seconds{0}).has_value());
     const auto after = tool.execute(R"({"command":"echo \"[$FILO_REAP_VAR]\""})", idle);
     CHECK_THAT(after, Catch::Matchers::ContainsSubstring("[]"));
     CHECK_THAT(after, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
@@ -189,9 +189,9 @@ TEST_CASE("ShellTool reap_idle_mcp_sessions retires only idle shells of listed s
     CHECK_THAT(tool.execute(R"({"command":"echo $FILO_REAP_VAR"})", unlisted),
                Catch::Matchers::ContainsSubstring("unlisted_token"));
 
-    ShellTool::clear_mcp_session(idle_id);
-    ShellTool::clear_mcp_session(busy_id);
-    ShellTool::clear_mcp_session(unlisted_id);
+    tool.sessions().clear(idle_id);
+    tool.sessions().clear(busy_id);
+    tool.sessions().clear(unlisted_id);
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
@@ -261,15 +261,15 @@ TEST_CASE("ShellTool interrupt_mcp_session cancels a running command",
 
     bool observed_active = false;
     for (int i = 0; i < 100; ++i) {
-        const auto active = ShellTool::active_commands();
-        observed_active = std::ranges::any_of(active, [kSession](const ShellTool::ActiveCommand& command) {
+        const auto active = tool.sessions().active_commands();
+        observed_active = std::ranges::any_of(active, [kSession](const core::tools::shell::ShellSessions::ActiveCommand& command) {
             return command.session_id == kSession && command.command == "sleep 60";
         });
         if (observed_active) break;
         std::this_thread::sleep_for(std::chrono::milliseconds{20});
     }
     REQUIRE(observed_active);
-    REQUIRE(ShellTool::interrupt_mcp_session(kSession));
+    REQUIRE(tool.sessions().interrupt(kSession));
 
     const auto res = future.get();
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("INTERRUPTED"));
@@ -278,7 +278,7 @@ TEST_CASE("ShellTool interrupt_mcp_session cancels a running command",
     auto next = tool.execute(R"({"command":"echo recovered_after_interrupt"})", session);
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_interrupt"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
-    ShellTool::clear_mcp_session(kSession);
+    tool.sessions().clear(kSession);
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
@@ -384,6 +384,27 @@ TEST_CASE("ShellTool kills child processes spawned by timed-out command",
 
     REQUIRE_FALSE(std::filesystem::exists(marker));
     std::filesystem::remove(marker);
+}
+
+TEST_CASE("Shell shutdown kills remaining children even after the parent exits",
+          "[integration][tools][shell][recovery]") {
+    const auto marker = std::format("/tmp/filo_shell_shutdown_{}", ::getpid());
+    const auto ready = marker + ".ready";
+    std::filesystem::remove(marker);
+    std::filesystem::remove(ready);
+    {
+        ShellTool tool;
+        const auto command = std::format(
+            "(trap '' TERM; touch {}; sleep 0.5; touch {}) >/dev/null 2>&1 & "
+            "while [ ! -f {} ]; do sleep 0.01; done", ready, marker, ready);
+        const auto result = tool.execute("{\"command\":\"" + command + "\"}");
+        REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+        REQUIRE(std::filesystem::exists(ready));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(650));
+    CHECK_FALSE(std::filesystem::exists(marker));
+    std::filesystem::remove(marker);
+    std::filesystem::remove(ready);
 }
 
 TEST_CASE("ShellTool working_dir subshell preserves exit status and session cwd",
@@ -995,4 +1016,32 @@ TEST_CASE("ShellTool subshell cd does not leak while grouped cd persists",
     auto pwd = tool.execute(R"({"command":"pwd"})");
     REQUIRE_THAT(pwd, Catch::Matchers::ContainsSubstring("/var"));
     REQUIRE_THAT(pwd, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+#undef execute
+TEST_CASE("Independent shell owners isolate identical session identifiers", "[integration][tools][shell]") {
+    ShellTool first, second;
+    const auto context = make_tool_test_context("same-session");
+    const auto exported = first.execute(R"({"command":"export FILO_OWNER_TOKEN=first-owner"})", context);
+    REQUIRE_THAT(exported, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    CHECK_THAT(second.execute(R"({"command":"printf '%s' \"$FILO_OWNER_TOKEN\""})", context),
+               !Catch::Matchers::ContainsSubstring("first-owner"));
+    CHECK_THAT(first.execute(R"({"command":"printf '%s' \"$FILO_OWNER_TOKEN\""})", context),
+               Catch::Matchers::ContainsSubstring("first-owner"));
+    second.sessions().clear(context.session_id);
+    CHECK_THAT(first.execute(R"({"command":"printf '%s' \"$FILO_OWNER_TOKEN\""})", context),
+               Catch::Matchers::ContainsSubstring("first-owner"));
+}
+
+TEST_CASE("Explicit shell ownership preserves sessions across tool replacement", "[integration][tools][shell]") {
+    auto sessions = std::make_shared<core::tools::shell::ShellSessions>();
+    const auto context = make_tool_test_context("replaced-tool");
+    {
+        ShellTool first(sessions);
+        REQUIRE_THAT(first.execute(R"({"command":"export FILO_OWNER_TOKEN=shared-owner"})", context),
+                     Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    }
+    ShellTool replacement(sessions);
+    CHECK_THAT(replacement.execute(R"({"command":"printf '%s' \"$FILO_OWNER_TOKEN\""})", context),
+               Catch::Matchers::ContainsSubstring("shared-owner"));
 }

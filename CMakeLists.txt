@@ -387,6 +387,7 @@ set(FILO_CORE_SOURCES
     src/core/landrun/macos/MacOSSeatbeltDriver.cpp
     src/core/tools/SteeringEnforcement.cpp
     src/core/tools/ShellTool.cpp
+    src/core/tools/shell/ShellSessions.cpp
     src/core/tools/VerificationTool.cpp
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/PathVisibilityToolDecorator.cpp
@@ -411,6 +412,10 @@ set(FILO_CORE_SOURCES
     src/core/changes/StoredDiff.cpp
     src/core/changes/TurnChangeTracker.cpp
     src/core/changes/TurnRevert.cpp
+    src/core/changes/TurnRecovery.cpp
+    src/core/changes/RecoveryStore.cpp
+    src/core/changes/WorkspaceMutationGate.cpp
+    src/core/changes/WorkspaceInventory.cpp
     src/core/tools/ListDirectoryTool.cpp
     src/core/tools/ReplaceTool.cpp
     src/core/tools/GrepSearchTool.cpp
@@ -425,6 +430,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ReadToolResultTool.cpp
     src/core/tools/ConversationTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
+    src/core/tools/ToolManager.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
     src/core/tools/DashScopeWebSearchBackend.cpp

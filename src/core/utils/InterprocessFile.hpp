@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
+#include <expected>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,6 +70,17 @@ inline constexpr std::filesystem::perms kPrivateFilePermissions =
                                      std::string_view content,
                                      std::string* error = nullptr,
                                      std::optional<std::filesystem::perms> permissions = std::nullopt);
+
+struct RegularFileContents {
+    std::string bytes;
+    std::optional<std::filesystem::perms> permissions; // nullopt means absent.
+};
+
+// Reads one regular file without following the final symlink or blocking on a
+// special file. Refuses oversized files and identity/metadata changes during
+// the read. Absence is a successful result, distinct from an unreadable file.
+[[nodiscard]] std::expected<RegularFileContents, std::string> read_regular_file(
+    const std::filesystem::path& path, std::size_t max_bytes);
 
 // Whole-file read; nullopt when the file cannot be opened or read.
 [[nodiscard]] std::optional<std::string> read_file(const std::filesystem::path& path);

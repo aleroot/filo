@@ -22,20 +22,25 @@ namespace {
 
 } // namespace
 
+void AutoQualityLedger::note_possible_mutation() noexcept {
+  mutation_observed_.store(true, std::memory_order_release);
+  mutation_generation_.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void AutoQualityLedger::observe_tool(
     std::string_view tool_name, std::string_view arguments,
     std::string_view result, bool succeeded, bool mutation_hint,
     bool trusted_verification_receipts) noexcept {
   const bool verification_tool =
       core::tools::names::is_verification_tool(tool_name);
-  bool mutation = succeeded && !verification_tool &&
+  bool mutation = !verification_tool &&
                   (mutation_hint ||
                    core::tools::names::is_file_modification_tool(tool_name));
-  if (succeeded && core::tools::names::is_terminal_tool(tool_name) &&
+  if (core::tools::names::is_terminal_tool(tool_name) &&
       !core::permissions::shell_call_is_allowed(arguments)) {
     mutation = true;
   }
-  if (succeeded && core::tools::names::is_subagent_tool(tool_name)) {
+  if (core::tools::names::is_subagent_tool(tool_name)) {
     const std::string worker =
         ascii_lower(core::utils::json::first_string_field(
                         arguments, {"subagent_type", "worker"})
@@ -45,13 +50,12 @@ void AutoQualityLedger::observe_tool(
     }
   }
   if (mutation) {
-    mutation_observed_.store(true, std::memory_order_release);
-    mutation_generation_.fetch_add(1, std::memory_order_acq_rel);
+    note_possible_mutation();
   }
   if (verification_tool && trusted_verification_receipts) {
     verification_attempted_.store(true, std::memory_order_release);
     const auto receipt = core::verification::parse_receipt(result);
-    if (succeeded && receipt.has_value() && receipt->passed()) {
+    if (succeeded && receipt.has_value()) {
       observe_verification_receipt(*receipt);
     }
   }
@@ -88,8 +92,11 @@ void AutoQualityLedger::record_passed_recipe(
 void AutoQualityLedger::observe_verification_receipt(
     const core::verification::Receipt &receipt) noexcept {
   verification_attempted_.store(true, std::memory_order_release);
-  if (!receipt.passed())
+  if (!receipt.passed()) {
+    std::lock_guard lock(receipts_mutex_);
+    passed_recipes_.erase(receipt.recipe_id);
     return;
+  }
   record_passed_recipe(receipt, evidence_generation());
 }
 

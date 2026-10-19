@@ -3,6 +3,7 @@
 #include "SessionDigest.hpp"
 #include "SessionId.hpp"
 #include "../utils/Crypto.hpp"
+#include "../utils/Hex.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <algorithm>
@@ -33,14 +34,8 @@ struct Cursor {
     std::string prefix;
     for (std::size_t i = 0; i < index; ++i) prefix += entries[i].text;
     prefix.append(entries[index].text, 0, offset);
-    constexpr std::string_view kHex = "0123456789abcdef";
-    std::string out;
     const auto digest = core::utils::crypto::sha256(prefix);
-    for (std::size_t i = 0; i < 8; ++i) {
-        out.push_back(kHex[digest[i] >> 4]);
-        out.push_back(kHex[digest[i] & 15]);
-    }
-    return out;
+    return core::utils::hex_encode(std::span(digest).first<8>());
 }
 
 [[nodiscard]] std::string format_cursor(const Cursor& cursor) {

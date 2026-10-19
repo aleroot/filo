@@ -19,8 +19,8 @@ struct MutationScope {
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves;
     /// The call may write, but where cannot be enumerated up front: a shell
     /// command, a script, a verification build, an MCP tool. The tracker
-    /// reconciles the paths the turn already knows and reports the summary as
-    /// incomplete, because paths such a call creates cannot be discovered.
+    /// inventories the workspace and reconciles known paths, while marking
+    /// coverage outside that bounded inventory as incomplete.
     bool unbounded = false;
     /// The tool that made this scope unbounded, so a summary can name what to
     /// weigh instead of guessing. Empty for a scope that lists its paths.

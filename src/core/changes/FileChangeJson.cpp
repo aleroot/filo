@@ -120,6 +120,11 @@ void append_turn_changes_json(std::string& out, const TurnChanges& changes) {
     if (changes.reverted) {
         append_bool_field(out, "reverted", true);
     }
+    if (!changes.recovery_path.empty()) {
+        out += ',';
+        append_string_field(out, "recovery_path", changes.recovery_path);
+    }
+    if (changes.workspace_observed) append_bool_field(out, "workspace_observed", true);
     out += '}';
 }
 
@@ -143,6 +148,8 @@ TurnChanges parse_turn_changes_json(simdjson::dom::object object) {
         }
     }
     changes.reverted = core::utils::json::bool_field(object, "reverted");
+    changes.workspace_observed = core::utils::json::bool_field(object, "workspace_observed");
+    if (std::string_view path; !object["recovery_path"].get(path)) changes.recovery_path = path;
     return changes;
 }
 

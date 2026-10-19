@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/utils/Crypto.hpp"
+#include "core/utils/Hex.hpp"
 
 #include <algorithm>
 #include <array>
@@ -37,14 +38,7 @@ template <std::size_t N>
 }
 
 [[nodiscard]] std::string to_hex(std::span<const std::uint8_t> bytes) {
-    static constexpr char kDigits[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(bytes.size() * 2);
-    for (const auto byte : bytes) {
-        out.push_back(kDigits[byte >> 4]);
-        out.push_back(kDigits[byte & 0x0f]);
-    }
-    return out;
+    return core::utils::hex_encode(bytes);
 }
 
 template <std::size_t N>
@@ -251,4 +245,15 @@ TEST_CASE("random_bytes returns fresh, correctly sized output", "[crypto][random
 
     // An all-zero draw would indicate a dead entropy source.
     CHECK(std::ranges::any_of(first, [](std::uint8_t b) { return b != 0; }));
+}
+
+TEST_CASE("Hex encoding preserves all byte values and SHA-256 content identities", "[crypto][sha256]") {
+    std::array<std::uint8_t, 256> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::uint8_t>(i);
+    const auto encoded = core::utils::hex_encode(bytes);
+    CHECK(from_hex(encoded) == std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+    CHECK(core::utils::hex_encode({}).empty());
+    CHECK(sha256_hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    CHECK(sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(sha256_hex(std::string_view("a\0b", 3)) != sha256_hex("a"));
 }

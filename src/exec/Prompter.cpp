@@ -662,7 +662,6 @@ RunDiagnostics run_for_test(const RunOptions& options,
         session_stats_registry,
         &core::budget::BudgetTracker::get_instance(),
         memory_system);
-    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>());
     agent->set_active_provider_name(runtime.provider_name);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);
@@ -698,6 +697,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     const auto session_dir = session_dir_override.value_or(
         core::session::SessionStore::default_sessions_dir());
     core::session::SessionStore store(session_dir);
+    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>(session_dir / "journals"));
 
     std::string session_id = core::session::SessionStore::generate_id();
     std::string session_name;
@@ -751,6 +751,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
             session_id = resumed_session->session_id;
             session_name = resumed_session->name;
             created_at = resumed_session->created_at;
+            agent->set_session_id(session_id);
             agent->load_history(
                 resumed_session->messages,
                 resumed_session->context_summary,

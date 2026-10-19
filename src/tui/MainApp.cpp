@@ -1,3 +1,4 @@
+#include "core/tools/shell/ShellSessions.hpp"
 #include "MainApp.hpp"
 #include "Autocomplete.hpp"
 #include "ActivityTimer.hpp"
@@ -12,6 +13,7 @@
 #include "KeyInput.hpp"
 #include "MemoryMenu.hpp"
 #include "SessionReplay.hpp"
+#include "core/changes/WorkspaceMutationGate.hpp"
 #include "SessionPicker.hpp"
 #include "ThreadRuntime.hpp"
 #include "SelectionClipboardCopier.hpp"
@@ -68,7 +70,7 @@
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/BuiltinToolRegistry.hpp"
 #include "core/tools/GetTimeTool.hpp"
-#include "core/tools/ShellTool.hpp"
+#include "core/tools/shell/ShellExecutorFactory.hpp"
 #include "core/tools/SteeringEnforcement.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/FileSearchTool.hpp"
@@ -198,6 +200,9 @@ private:
 };
 
 struct DirectShellState {
+    explicit DirectShellState(std::shared_ptr<core::changes::WorkspaceMutationGate> gate)
+        : mutations(std::move(gate)) {}
+    std::shared_ptr<core::changes::WorkspaceMutationGate> mutations;
     std::unique_ptr<core::tools::shell::IShellExecutor> executor{
         core::tools::shell::make_shell_executor()};
     std::mutex run_mutex;
@@ -206,6 +211,7 @@ struct DirectShellState {
     std::optional<core::commands::ActiveTerminalInfo> active_command;
     std::chrono::steady_clock::time_point active_started_at{};
     std::size_t workers_in_flight = 0;
+    std::vector<std::filesystem::path> execution_roots;
 
     void begin_worker() {
         std::lock_guard lock(active_mutex);
@@ -288,10 +294,28 @@ struct DirectShellState {
         });
     }
 
+    bool quiesce(const std::filesystem::path& root) {
+        std::unique_lock lock(run_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return false;
+        const auto target = core::utils::path::directory_for(root);
+        if (!std::ranges::any_of(execution_roots, [&](const auto& path) {
+                return core::utils::path::overlaps(path, target);
+            })) return true;
+        if (executor && !executor->quiesce()) return false;
+        execution_roots.clear();
+        return true;
+    }
+
     core::tools::shell::IShellExecutor::Result run(std::string_view command,
                                                    std::string_view working_dir,
                                                    std::string session_id) {
+        const std::vector<std::filesystem::path> roots{std::filesystem::path(working_dir)};
+        auto lease = mutations->acquire(
+            roots, core::changes::WorkspaceMutationGate::Access::Exclusive);
+        if (!lease) return {lease.error(), -1};
         std::lock_guard lock(run_mutex);
+        const auto root = core::utils::path::directory_for(std::filesystem::path(working_dir));
+        if (!std::ranges::contains(execution_roots, root)) execution_roots.push_back(root);
         mark_active(std::move(session_id), std::string(command), std::string(working_dir));
 
         struct ActiveGuard {
@@ -959,7 +983,7 @@ RunResult run(RunOptions opts) {
     std::chrono::steady_clock::time_point quit_confirm_deadline =
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
-    auto direct_shell_state = std::make_shared<DirectShellState>();
+    auto direct_shell_state = std::make_shared<DirectShellState>(tool_manager.mutation_gate());
     std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAuthenticationRecovery {
         ThreadRuntime::Ptr runtime;
@@ -1701,7 +1725,7 @@ RunResult run(RunOptions opts) {
     }
 
     if (startup_data.has_value()) {
-        const auto& data = *startup_data;
+        auto& data = *startup_data;
         session_id         = data.session_id;
         session_name       = data.name;
         session_created_at = data.created_at;
@@ -1713,7 +1737,9 @@ RunResult run(RunOptions opts) {
         agent->restore_todos(data.todos);
 
         // Restore agent state.
+        agent->set_session_id(data.session_id);
         agent->load_history(data.messages, data.context_summary, data.mode);
+        data.messages = agent->get_history();
         agent->set_session_goal(goal_manager.active_goal());
 
         // Align mode picker.
@@ -1953,7 +1979,7 @@ RunResult run(RunOptions opts) {
     auto list_active_terminals = [&]() {
         std::vector<core::commands::ActiveTerminalInfo> terminals;
         const auto now = std::chrono::steady_clock::now();
-        for (const auto& command : core::tools::ShellTool::active_commands()) {
+        for (const auto& command : tool_manager.shell_sessions()->active_commands()) {
             if (command.session_id != session_id) {
                 continue;
             }
@@ -2588,8 +2614,10 @@ RunResult run(RunOptions opts) {
             if (!next_agent) {
                 return next_agent.error();
             }
+            auto replay_data = data;
+            replay_data.messages = (*next_agent)->get_history();
             auto next_messages = std::make_shared<std::vector<UiMessage>>(
-                build_resumed_ui_messages(data));
+                build_resumed_ui_messages(replay_data));
             if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
                     data.working_dir, agent->workspace_snapshot().primary().string());
                 notice.has_value()) {
@@ -6007,7 +6035,7 @@ RunResult run(RunOptions opts) {
         }
         const std::string target_session_id = runtime->session_id();
         const bool has_active_shell = std::ranges::any_of(
-            core::tools::ShellTool::active_commands(),
+            tool_manager.shell_sessions()->active_commands(),
             [&](const auto& command) {
                 return command.session_id == target_session_id;
             });
@@ -6262,7 +6290,14 @@ RunResult run(RunOptions opts) {
         }
 
         const auto result = core::changes::revert_turn(
-            changes, agent->workspace_snapshot().primary());
+            changes, agent->workspace_snapshot().primary(), *tool_manager.mutation_gate(),
+            [&](std::span<const std::filesystem::path> roots) {
+                for (const auto& root : roots) {
+                    if (!tool_manager.shell_sessions()->quiesce_workspace(root) ||
+                        (direct_shell_state && !direct_shell_state->quiesce(root))) return false;
+                }
+                return true;
+            });
         if (!result.reverted()) {
             return {.ok = false, .message = describe_revert(result)};
         }

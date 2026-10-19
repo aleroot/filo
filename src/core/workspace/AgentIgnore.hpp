@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <initializer_list>
 
 namespace core::context {
 struct SessionContext;
@@ -40,6 +41,9 @@ public:
 
     [[nodiscard]] static AgentIgnoreMatcher load_for_roots(
         const std::vector<std::filesystem::path>& roots);
+    [[nodiscard]] static AgentIgnoreMatcher load_for_roots(
+        const std::vector<std::filesystem::path>& roots,
+        std::initializer_list<std::string_view> ignore_files);
 
     [[nodiscard]] static AgentIgnoreMatcher load_for_context(
         const core::context::SessionContext& context);

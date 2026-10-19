@@ -4,6 +4,7 @@
 #include "../../landrun/LandrunPolicy.hpp"
 #include "../../landrun/LandrunEnvironment.hpp"
 #include "ShellUtils.hpp"
+#include "../../utils/ProcessUtils.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +20,7 @@
 #include <signal.h>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -225,6 +227,19 @@ public:
         return ::killpg(pgid, SIGKILL) == 0 || errno == ESRCH;
     }
 
+    bool quiesce() {
+        const pid_t group = pgid_.load(std::memory_order_acquire);
+        if (group <= 0) return true;
+        kill_session();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        do {
+            if (!core::utils::process::group_may_exist(group)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    }
+    int process_group() const noexcept { return pgid_.load(std::memory_order_acquire); }
+
 private:
     // -----------------------------------------------------------------------
     // Internals
@@ -421,7 +436,8 @@ private:
         }
     }
 
-    // Graceful shutdown (SIGTERM -> wait -> SIGKILL if still alive).
+    // Graceful shutdown, then terminate any remaining group members. Reaping
+    // bash does not establish that a child which ignores SIGTERM exited.
     // Kills the entire process group so no orphaned sub-processes are left.
     void stop() {
         close_pipes();
@@ -429,8 +445,9 @@ private:
         const pid_t pgid = pgid_.load(std::memory_order_acquire);
         if (pid > 0) {
             if (pgid > 0) ::killpg(pgid, SIGTERM);
-            if (!wait_for_child_exit(pid, std::chrono::milliseconds{100}) && pgid > 0) {
-                ::killpg(pgid, SIGKILL);
+            const bool exited = wait_for_child_exit(pid, std::chrono::milliseconds{100});
+            if (pgid > 0) ::killpg(pgid, SIGKILL);
+            if (!exited) {
                 [[maybe_unused]] const bool reaped =
                     wait_for_child_exit(pid, std::chrono::milliseconds{250});
             }

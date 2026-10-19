@@ -2803,6 +2803,10 @@ namespace {
         caveats.emplace_back("too many files to detail fully");
     }
     if (changes.unscoped_mutations) {
+        if (changes.workspace_observed) {
+            caveats.emplace_back("writes outside the observed workspace or to excluded paths are not listed");
+            return caveats;
+        }
         // Files the turn already knew about were reconciled after such a tool
         // ran, so their diffs are sound; only new paths are undiscoverable.
         caveats.emplace_back(std::format(

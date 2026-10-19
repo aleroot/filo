@@ -438,7 +438,7 @@ def execute(json_args):
     return '{"output": "should never run"}'
 )");
 
-    ToolManager& tm = ToolManager::get_instance();
+    ToolManager tm;
     const int count = SkillLoader::discover_and_register(
         tm, std::vector<fs::path>{primary, extra});
 

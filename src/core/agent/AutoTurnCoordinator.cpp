@@ -174,6 +174,9 @@ WorkspaceWriterState AutoTurnCoordinator::prepare_tool_batch(
   if (!std::ranges::any_of(tools, mutates_workspace)) {
     return WorkspaceWriterState::NotRequired;
   }
+  if (std::ranges::any_of(tools, [](const auto& tool) {
+        return mutates_workspace(tool) && !core::tools::names::is_verification_tool(tool.name);
+      })) turn.quality.note_possible_mutation();
   if (!turn.repository_lease.has_value()) {
     return WorkspaceWriterState::Unavailable;
   }

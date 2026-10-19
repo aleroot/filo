@@ -2124,7 +2124,7 @@ TEST_CASE("ToolManager executes tools against an explicit SessionContext workspa
 
 TEST_CASE("ToolManager passes provider-aware invocation context to tools",
           "[tools]") {
-    auto& mgr = ToolManager::get_instance();
+    ToolManager mgr;
     mgr.register_tool(std::make_shared<ToolManagerContextProbeTool>());
 
     const auto res = mgr.execute_tool(

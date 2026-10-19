@@ -6,7 +6,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
+#include <span>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -16,6 +19,9 @@
 
 namespace core::changes {
 
+class TurnRecovery;
+class WorkspaceMutationGate;
+
 /// Net file changes made during one agent turn.
 ///
 /// The turn's own file tools report what they touch through `track`, which
@@ -24,11 +30,9 @@ namespace core::changes {
 /// state. `changes()` then diffs baseline against current, so repeated edits
 /// collapse into one diff and a file restored to its baseline disappears.
 ///
-/// A scope the tracker cannot enumerate (shell, Python, MCP, subagents) is
-/// still observed: every path the turn already knows is reconciled against
-/// the filesystem, so a later untracked edit cannot leave an earlier diff
-/// stale. Paths such a tool creates from nothing stay invisible, and the
-/// summary says so rather than implying completeness.
+/// Unscoped tools get a bounded native workspace inventory before and after
+/// execution. Previously known paths are reconciled too. Excluded paths and
+/// effects outside the observed roots remain explicitly outside coverage.
 ///
 /// Every resource a turn can consume without limit is bounded: how much
 /// content a directory scan retains, how many lines of it are kept as hashes,
@@ -84,14 +88,21 @@ public:
     };
 
     /// Files beneath `display_root` are reported relative to it.
-    explicit TurnChangeTracker(std::filesystem::path display_root);
+    explicit TurnChangeTracker(std::filesystem::path display_root,
+        std::shared_ptr<WorkspaceMutationGate> mutations = {});
     /// Same, with the resource bounds overridden.
-    TurnChangeTracker(std::filesystem::path display_root, Limits limits);
+    TurnChangeTracker(std::filesystem::path display_root, Limits limits,
+        std::shared_ptr<WorkspaceMutationGate> mutations = {});
+    void set_recovery(std::shared_ptr<TurnRecovery> recovery);
+    void set_workspace_roots(std::vector<std::filesystem::path> roots);
+    void set_observation_filter(std::function<bool(const std::filesystem::path&)> filter);
+    void note_process_group(int group);
+    void finish_recovery();
 
     /// Records that something wrote where no scope can say: a shell command, a
     /// script, a hook. Paths the turn already knows are reconciled, so a later
-    /// diff cannot be left stale; paths created from nothing stay invisible,
-    /// and the summary names `tool` as the reason.
+    /// diff cannot be left stale. Without a preceding workspace inventory,
+    /// new paths cannot be attributed; the summary names `tool` as the reason.
     void note_unscoped_mutation(std::string tool);
 
     /// One more look before a report, for a turn that knows something wrote
@@ -110,14 +121,18 @@ public:
             return std::forward<Mutation>(mutate)();
         }
         observe(scope, Observation::Before);
-        try {
-            auto result = std::forward<Mutation>(mutate)();
-            observe(scope, Observation::After);
-            return result;
-        } catch (...) {
-            observe(scope, Observation::After);
-            throw;
-        }
+        // Only a mutation failure needs this catch. A failed post-observation
+        // must propagate once, without repeating its reads and durable writes.
+        auto result = [&] {
+            try {
+                return std::forward<Mutation>(mutate)();
+            } catch (...) {
+                observe(scope, Observation::After);
+                throw;
+            }
+        }();
+        observe(scope, Observation::After);
+        return result;
     }
 
     /// Net changes so far, sorted by path, with the fidelity flags that say
@@ -148,11 +163,12 @@ private:
         /// Lets an unscoped mutation be reconciled with one stat per known
         /// path instead of a read.
         std::uint64_t stamp = 0;
+        unsigned mode = 0;
 
         /// Whether both snapshots hold the same bytes. `stamp` is deliberately
         /// excluded: a file rewritten with identical content is not a change.
         [[nodiscard]] bool same_content_as(const Snapshot& other) const {
-            if (state != other.state) {
+            if (state != other.state || mode != other.mode) {
                 return false;
             }
             switch (state) {
@@ -197,6 +213,7 @@ private:
         bool regular = false;
         std::uint64_t size = 0;
         std::uint64_t stamp = 0;  ///< size+mtime identity; 0 when unavailable
+        unsigned mode = 0;
     };
 
     /// What one bounded read says about a file whose bytes are not kept.
@@ -260,6 +277,7 @@ private:
                                       const Key& to,
                                       ReportBudget& budget) const;
 
+    std::shared_ptr<WorkspaceMutationGate> mutations_;
     std::filesystem::path display_root_;
     Limits limits_;
     mutable std::mutex mutex_;
@@ -271,6 +289,14 @@ private:
     bool partial_enumeration_ = false;
     bool unscoped_mutations_ = false;
     std::vector<std::string> unscoped_tools_;  ///< Distinct, in first-run order
+    std::shared_ptr<TurnRecovery> recovery_;
+    std::vector<std::filesystem::path> workspace_roots_;
+    bool workspace_observed_ = false;
+    bool inventory_complete_ = false;
+    std::function<bool(const std::filesystem::path&)> observation_filter_;
+    void observe_workspace_unlocked(Observation when);
+    [[nodiscard]] bool observable_unlocked(const std::filesystem::path& path) const;
+    void checkpoint_current_unlocked(std::span<const std::filesystem::path> created = {});
 };
 
 } // namespace core::changes

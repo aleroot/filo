@@ -54,6 +54,11 @@ public:
     // Implementations should be safe to call from a different thread than run().
     virtual bool interrupt() = 0;
 
+    // Stop managed descendants and establish that their process group exited.
+    // Unknown backends refuse restoration rather than claiming quiescence.
+    virtual bool quiesce() { return !is_alive(); }
+    virtual int process_group() const noexcept { return -1; }
+
     // Human-readable name of the shell in use (e.g. "bash").
     virtual std::string_view shell_name() const noexcept = 0;
 };

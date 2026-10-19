@@ -2173,7 +2173,7 @@ TEST_CASE("AUTO enforces fresh verification after a successful mutation",
 
   auto &tool_manager = core::tools::ToolManager::get_instance();
   tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
-  tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+  tool_manager.register_tool(std::make_shared<core::tools::ShellTool>(tool_manager.shell_sessions()));
   tool_manager.register_tool(std::make_shared<core::tools::VerificationTool>());
 
   auto provider = std::make_shared<AutoQualityProvider>();

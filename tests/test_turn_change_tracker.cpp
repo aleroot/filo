@@ -394,14 +394,17 @@ TEST_CASE("An unscoped mutation leaves an untouched file alone", "[changes]") {
     CHECK(summary.unscoped_mutations);
 }
 
-TEST_CASE("A file an unscoped tool creates is flagged, not silently missed", "[changes]") {
+TEST_CASE("A file an unscoped tool creates is discovered by the native inventory", "[changes]") {
     TempDir dir;
     TurnChangeTracker tracker(dir.path);
     const MutationScope unbounded{.unbounded = true};
     edit(tracker, unbounded, [&] { put(dir.path / "generated.txt", "x\n"); });
 
     const auto summary = tracker.changes();
-    CHECK(summary.files.empty());
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files.front().path == "generated.txt");
+    CHECK(summary.files.front().kind == FileChangeKind::Added);
+    CHECK(summary.workspace_observed);
     CHECK(summary.unscoped_mutations);
     CHECK_FALSE(summary.complete());
 }

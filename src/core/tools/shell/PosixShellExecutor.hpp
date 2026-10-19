@@ -55,6 +55,8 @@ public:
     bool is_alive() const noexcept override { return session_.is_alive(); }
     void reset()   override { session_.reset(); }
     bool interrupt() override { return session_.interrupt(); }
+    bool quiesce() override { return session_.quiesce(); }
+    int process_group() const noexcept override { return session_.process_group(); }
     std::string_view shell_name() const noexcept override { return "bash"; }
 
 private:

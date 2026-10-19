@@ -3,11 +3,15 @@
 #include "FileChange.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace core::changes {
+
+class WorkspaceMutationGate;
 
 /// One change a revert could not honour. `reason` reads as the predicate of
 /// "'<path>' …", so a report can join several of them into one sentence.
@@ -42,6 +46,10 @@ struct RevertResult {
     }
 };
 
+// The runtime supplies quiescence for its managed processes. The callback
+// runs under the exclusive lease and receives every affected directory scope.
+using QuiesceWriters = std::function<bool(std::span<const std::filesystem::path>)>;
+
 /// Restores the files `changes` describes to the state they had before the turn
 /// that produced them. `workspace_root` resolves the display paths a summary
 /// reports; a change outside it carries an absolute path and needs no root.
@@ -57,6 +65,8 @@ struct RevertResult {
 /// empty directories a reverted add left behind is left to the reader, since a
 /// directory the turn did not create is not the revert's to remove.
 [[nodiscard]] RevertResult revert_turn(const TurnChanges& changes,
-                                       const std::filesystem::path& workspace_root);
+                                       const std::filesystem::path& workspace_root,
+                                       WorkspaceMutationGate& mutations,
+                                       const QuiesceWriters& quiesce_writers = {});
 
 } // namespace core::changes

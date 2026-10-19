@@ -1,4 +1,5 @@
 #include "Crypto.hpp"
+#include "Hex.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -513,6 +514,10 @@ void increment_counter(Block& counter) noexcept {
 }
 
 } // namespace
+
+std::string sha256_hex(std::string_view data) {
+    return core::utils::hex_encode(sha256(data));
+}
 
 std::array<std::uint8_t, 32> sha256(std::span<const std::uint8_t> data) {
     return sha256_bytes(data);

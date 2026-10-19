@@ -1,16 +1,10 @@
 #pragma once
 
 #include "Tool.hpp"
-#include "shell/IShellExecutor.hpp"
-#include "shell/ShellExecutorFactory.hpp"
-#include <chrono>
+#include "shell/ShellSessions.hpp"
 #include <memory>
-#include <mutex>
-#include <optional>
-#include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace core::tools {
 
@@ -20,8 +14,8 @@ namespace core::tools {
  * Exposed to MCP clients as @c run_terminal_command.
  *
  * ### Execution model
- * Unlike a stateless fork-per-command approach, ShellTool maintains a single
- * long-lived bash process.  State persists across calls:
+ * Unlike a stateless fork-per-command approach, ShellTool maintains one
+ * long-lived bash process per session. State persists across calls:
  *
  *  - **Working directory**: @c cd changes are visible in subsequent commands.
  *  - **Environment variables**: @c export persists for the lifetime of the
@@ -58,30 +52,13 @@ namespace core::tools {
  */
 class ShellTool : public Tool {
 public:
-    struct ActiveCommand {
-        std::string session_id;
-        std::string command;
-        std::string working_dir;
-        std::string tool_call_id;
-        std::chrono::steady_clock::time_point started_at;
-    };
-
     ShellTool();
 
     // Dependency-injection constructor — used in tests to supply a mock executor.
     explicit ShellTool(std::unique_ptr<shell::IShellExecutor> executor);
 
-    static void clear_mcp_session(std::string_view session_id);
-    static bool interrupt_mcp_session(std::string_view session_id);
-    /// Terminates the persistent shells of @p session_ids that have been idle
-    /// for at least @p idle_timeout and are not running a command; the next
-    /// command in such a session starts a fresh shell. Returns when the
-    /// earliest remaining shell of those sessions becomes reapable, or nullopt
-    /// when none remain.
-    static std::optional<std::chrono::steady_clock::time_point> reap_idle_mcp_sessions(
-        std::span<const std::string> session_ids,
-        std::chrono::steady_clock::duration idle_timeout);
-    static std::vector<ActiveCommand> active_commands();
+    explicit ShellTool(std::shared_ptr<shell::ShellSessions> sessions);
+    [[nodiscard]] shell::ShellSessions& sessions() const noexcept { return *sessions_; }
 
     ToolDefinition get_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
@@ -91,10 +68,10 @@ public:
 private:
     std::string execute_impl(const std::string& json_args,
                              const core::context::SessionContext& context,
-                             std::string_view tool_call_id);
+                             std::string_view tool_call_id,
+                             std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
 
-    std::unique_ptr<shell::IShellExecutor> executor_;
-    std::mutex                             executor_mutex_;
+    std::shared_ptr<shell::ShellSessions> sessions_;
 };
 
 } // namespace core::tools

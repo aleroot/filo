@@ -284,7 +284,7 @@ TEST_CASE("Agent auto-approves local read and gates HTTP read",
 TEST_CASE("Agent still gates destructive tools in EXECUTE mode",
           "[agent][permission]") {
     const std::string tool_name = "permission_test_execute_destructive_tool";
-    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::tools::ToolManager tool_manager;
     tool_manager.register_tool(std::make_shared<AnnotatedNoopTool>(tool_name));
 
     auto provider = std::make_shared<SingleToolCallProvider>(

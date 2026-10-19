@@ -274,7 +274,7 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>(tool_manager.shell_sessions()));
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
     const auto session_context = test_support::make_workspace_session_context();
@@ -543,7 +543,7 @@ TEST_CASE("AUTO parent mode is not inherited by delegated workers",
     tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>(tool_manager.shell_sessions()));
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
     const auto session_context = test_support::make_workspace_session_context();

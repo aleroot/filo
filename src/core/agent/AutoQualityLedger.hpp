@@ -19,6 +19,9 @@ namespace core::agent {
 // to the latest mutation generation so a later edit invalidates older proof.
 class AutoQualityLedger final {
 public:
+  // An approved writer may fail or throw after changing files. Invalidate
+  // evidence before dispatch, rather than trusting its eventual exit status.
+  void note_possible_mutation() noexcept;
   void observe_tool(std::string_view tool_name, std::string_view arguments,
                     std::string_view result, bool succeeded,
                     bool mutation_hint = false,

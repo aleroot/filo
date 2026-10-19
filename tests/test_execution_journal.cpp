@@ -3,6 +3,7 @@
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/session/ExecutionJournal.hpp"
+#include "core/changes/TurnRecovery.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -288,4 +289,52 @@ TEST_CASE("Execution journal coordinates separate processes", "[journal]") {
         CHECK(WEXITSTATUS(status) == 0);
     }
     CHECK(lines(fixture.journal()->path_for("processes")).size() == 16);
+}
+
+TEST_CASE("Resume surfaces durable file recovery and saving the session acknowledges it",
+          "[journal][agent][recovery][resume]") {
+    JournalFixture fixture;
+    constexpr std::string_view id = "abcdef12";
+    auto journal = fixture.journal();
+    const auto root = core::changes::RecoveryStore::session_root(journal->path_for(id), id);
+    const auto checkpoint = core::changes::RecoveryStore::new_directory(root);
+    const auto file = fixture.root / "source.cpp";
+    std::ofstream(file) << "original dirty contents\n";
+    core::changes::TurnRecovery recovery(checkpoint, fixture.root);
+    const std::vector<std::filesystem::path> paths{file};
+    recovery.before(paths);
+    std::ofstream(file) << "partial task\n";
+    SECTION("The process stopped before recording tool completion") {}
+    SECTION("The turn finished before the session snapshot was saved") {
+        recovery.after(paths);
+        recovery.finish();
+    }
+    auto agent = std::make_shared<core::agent::Agent>(nullptr,
+        core::tools::ToolManager::get_instance(), fixture.context(), fixture.root / "results");
+    agent->set_session_id(std::string(id));
+    agent->set_execution_journal(journal);
+    agent->load_history({{.role = "user", .content = "Fix the source"}}, {}, "BUILD");
+    auto history = agent->get_history();
+    const auto recovered = std::ranges::find_if(history, [](const auto& message) {
+        return !message.turn_changes.recovery_path.empty();
+    });
+    REQUIRE(recovered != history.end());
+    REQUIRE(recovered->turn_changes.files.size() == 1);
+    CHECK(recovered->turn_changes.files.front().path == "source.cpp");
+    CHECK(core::utils::read_file(file) == "partial task\n"); // Resume never replays or reverts a tool.
+    core::session::SessionData data;
+    data.session_id = id;
+    data.created_at = core::session::SessionStore::now_iso8601();
+    data.working_dir = fixture.root.string();
+    data.messages = history;
+    core::session::SessionStore store(fixture.root);
+    REQUIRE(store.save(data));
+    CHECK(std::filesystem::exists(checkpoint / "attached"));
+    agent->load_history(data.messages, {}, "BUILD");
+    CHECK(std::ranges::count_if(agent->get_history(), [](const auto& message) {
+        return !message.turn_changes.recovery_path.empty();
+    }) == 1);
+    agent.reset();
+    CHECK(store.remove(id));
+    CHECK_FALSE(std::filesystem::exists(root));
 }

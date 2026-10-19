@@ -53,7 +53,8 @@ struct TurnChanges {
     bool partial_enumeration = false;
     /// A tool ran whose writes cannot be enumerated up front (shell, Python,
     /// MCP, subagents). Paths the turn already knew about were reconciled
-    /// afterwards; paths such a tool created from nothing are absent.
+    /// afterwards. `workspace_observed` says a native inventory also covered
+    /// new paths; effects beyond that inventory remain outside coverage.
     bool unscoped_mutations = false;
     /// The tools that set `unscoped_mutations`, in the order they first ran, so
     /// a summary can name what to weigh: a verification build leaves artifacts,
@@ -64,6 +65,10 @@ struct TurnChanges {
     /// These changes were put back by a revert. The summary stays — it is still
     /// what the turn did — and says that the workspace no longer reflects it.
     bool reverted = false;
+    /// Private checkpoint directory. Originals remain recoverable even when
+    /// the display diff was omitted; empty on older saved conversations.
+    std::string recovery_path;
+    bool workspace_observed = false;
 
     [[nodiscard]] bool empty() const noexcept { return files.empty(); }
     [[nodiscard]] bool complete() const noexcept {

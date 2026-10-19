@@ -14,6 +14,9 @@ class LLMProvider;
 namespace core::session {
 class SessionStatsRegistry;
 }
+namespace core::changes {
+class TurnChangeTracker;
+}
 
 namespace core::tools {
 
@@ -33,6 +36,7 @@ struct ToolInvocationContext {
     std::shared_ptr<core::llm::LLMProvider> provider{};
     std::function<bool()> cancellation_requested{};
     std::shared_ptr<core::session::SessionStatsRegistry> session_stats{};
+    std::shared_ptr<core::changes::TurnChangeTracker> change_tracker{};
 };
 
 /**

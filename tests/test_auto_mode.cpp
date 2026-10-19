@@ -197,6 +197,57 @@ TEST_CASE("AUTO quality exceptions are explicit and narrow",
              ContainsSubstring("AUTO quality gate"));
 }
 
+TEST_CASE("Failed and interrupted writers invalidate earlier verification",
+          "[agent][auto][quality][regression]") {
+  using core::agent::AutoQualityLedger;
+  using namespace core::tools::names;
+  for (const auto tool : {kApplyPatch, kRunTerminalCommand, kTask}) {
+    AutoQualityLedger ledger;
+    core::verification::Receipt receipt;
+    receipt.recipe_id = "quality";
+    receipt.exit_code = 0;
+    ledger.observe_verification_receipt(receipt);
+    REQUIRE(ledger.verification_passed());
+    ledger.observe_tool(tool, R"({"command":"generate","subagent_type":"build"})",
+                        R"({"error":"failed after writing"})", false);
+    CHECK(ledger.needs_verification());
+  }
+  AutoQualityLedger ledger;
+  core::verification::Receipt receipt;
+  receipt.recipe_id = "quality";
+  receipt.exit_code = 0;
+  ledger.observe_verification_receipt(receipt);
+  ledger.note_possible_mutation(); // No result need ever arrive after dispatch.
+  CHECK(ledger.needs_verification());
+}
+
+TEST_CASE("A verification-only batch can produce fresh proof and a failed rerun revokes it",
+          "[agent][auto][quality][regression]") {
+  const auto root = std::filesystem::temp_directory_path() /
+      std::format("filo_verification_batch_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::create_directories(root);
+  core::agent::AutoTurnCoordinator coordinator;
+  auto turn = coordinator.start("Inspect the project", {}, root);
+  (void)coordinator.prepare(*turn, "Inspect the project", {}, root, {});
+  const core::agent::AutoToolIntent intent{
+      .name = core::tools::names::kRunVerification, .approved = true, .destructive_hint = true};
+  CHECK(coordinator.prepare_tool_batch(*turn, root, {&intent, 1}) !=
+        core::agent::WorkspaceWriterState::Unavailable);
+  CHECK_FALSE(coordinator.mutation_observed(*turn));
+  core::agent::AutoQualityLedger ledger;
+  core::verification::Receipt receipt;
+  receipt.recipe_id = "quality";
+  receipt.exit_code = 0;
+  ledger.note_possible_mutation();
+  ledger.observe_verification_receipt(receipt);
+  REQUIRE(ledger.verification_passed());
+  receipt.exit_code = 1;
+  ledger.observe_verification_receipt(receipt);
+  CHECK(ledger.needs_verification());
+  turn.reset();
+  std::filesystem::remove_all(root);
+}
+
 TEST_CASE("AUTO graph executes only the parallel shared-read frontier",
           "[agent][auto][graph]") {
   using namespace std::chrono_literals;

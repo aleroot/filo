@@ -342,6 +342,12 @@ AgentIgnoreMatcher AgentIgnoreMatcher::load_for_root(
 
 AgentIgnoreMatcher AgentIgnoreMatcher::load_for_roots(
     const std::vector<std::filesystem::path>& roots) {
+    return load_for_roots(roots, {".agentignore"});
+}
+
+AgentIgnoreMatcher AgentIgnoreMatcher::load_for_roots(
+    const std::vector<std::filesystem::path>& roots,
+    std::initializer_list<std::string_view> ignore_files) {
     std::vector<detail::AgentIgnoreRootPolicy> policies;
     policies.reserve(roots.size());
 
@@ -356,7 +362,11 @@ AgentIgnoreMatcher AgentIgnoreMatcher::load_for_roots(
         }
         seen.push_back(normalized_root);
 
-        auto rules = load_rules(normalized_root / ".agentignore");
+        std::vector<detail::AgentIgnoreRule> rules;
+        for (auto name : ignore_files) {
+            auto loaded = load_rules(normalized_root / name);
+            rules.insert(rules.end(), std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
+        }
         if (!rules.empty()) {
             policies.push_back(detail::AgentIgnoreRootPolicy{
                 .root = normalized_root,

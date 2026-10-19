@@ -71,7 +71,7 @@ void register_builtin_tools(ToolManager& tool_manager,
         tool_manager.register_tool(std::make_shared<ConversationTool>());
     }
 
-    tool_manager.register_tool(std::make_shared<ShellTool>());
+    tool_manager.register_tool(std::make_shared<ShellTool>(tool_manager.shell_sessions()));
     tool_manager.register_tool(std::make_shared<VerificationTool>());
     tool_manager.register_tool(with_path_visibility(std::make_shared<ApplyPatchTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<FileSearchTool>()));
