@@ -10,7 +10,9 @@
 #include "core/session/TodoManager.hpp"
 #include "core/session/TodoUtils.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/tools/ReadToolResultTool.hpp"
 #include "core/tools/TodoTool.hpp"
+#include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
 #include <simdjson.h>
@@ -584,6 +586,24 @@ TEST_CASE("TodoManager reserves explicit ids before assigning new ids", "[sessio
     REQUIRE(result->size() == 2);
     CHECK((*result)[0].id == "t2");
     CHECK((*result)[1].id == "t1");
+}
+
+TEST_CASE("Agent-served tools resolve their declared display titles",
+          "[session][todos][tools]") {
+    // write_todos, read_tool_result and task are served by the Agent and are
+    // never registered in ToolManager, which is where the TUI resolves titles.
+    core::session::TodoManager manager{&fixed_todo_time};
+    const core::tools::TodoTool todo_tool{manager};
+    core::agent::ToolResultStore store;
+    const core::tools::ReadToolResultTool read_result_tool{store};
+    const auto& tool_manager = core::tools::ToolManager::get_instance();
+
+    for (const auto& definition :
+         {todo_tool.get_definition(), read_result_tool.get_definition()}) {
+        REQUIRE_FALSE(definition.title.empty());
+        CHECK(tool_manager.get_tool_title(definition.name) == definition.title);
+    }
+    CHECK(tool_manager.get_tool_title("task") == "Subagent");
 }
 
 TEST_CASE("TodoTool validates and writes the agent plan", "[session][todos][tools]") {

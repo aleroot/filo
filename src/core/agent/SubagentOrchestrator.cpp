@@ -174,6 +174,7 @@ core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
     core::llm::Tool tool;
     tool.type = "function";
     tool.function.name = std::string(kTaskToolName);
+    tool.function.title = std::string(core::tools::names::kTaskTitle);
     tool.function.description = build_task_description();
     tool.function.parameters = {
         {

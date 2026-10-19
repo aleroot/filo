@@ -4,6 +4,7 @@
 #include "LandrunToolPolicy.hpp"
 #include "ToolPolicy.hpp"
 #include "ToolSchema.hpp"
+#include "ToolNames.hpp"
 #include "../context/SessionContext.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include <algorithm>
@@ -164,7 +165,12 @@ public:
     get_tool_title(const std::string& name) const {
         std::lock_guard lock(mutex_);
         const auto* registered = find_tool_unlocked(name);
-        if (!registered || registered->title.empty()) return std::nullopt;
+        if (!registered) {
+            const auto agent_title = names::agent_tool_title(name);
+            if (agent_title.empty()) return std::nullopt;
+            return std::string(agent_title);
+        }
+        if (registered->title.empty()) return std::nullopt;
         return registered->title;
     }
 

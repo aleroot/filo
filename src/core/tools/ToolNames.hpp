@@ -34,6 +34,21 @@ inline constexpr std::string_view kConversation = "conversation";
 inline constexpr std::string_view kTask = "task";
 inline constexpr std::string_view kDelegateTask = "delegate_task";
 
+// Display titles of the tools the Agent serves itself. They are never
+// registered in ToolManager, so its title lookup falls back to
+// agent_tool_title(); their definitions use the same constants.
+inline constexpr std::string_view kWriteTodosTitle = "Plan";
+inline constexpr std::string_view kReadToolResultTitle = "Read Tool Result";
+inline constexpr std::string_view kTaskTitle = "Subagent";
+
+[[nodiscard]] constexpr std::string_view
+agent_tool_title(std::string_view tool_name) noexcept {
+    if (tool_name == kWriteTodos) return kWriteTodosTitle;
+    if (tool_name == kReadToolResult) return kReadToolResultTitle;
+    if (tool_name == kTask) return kTaskTitle;
+    return {};
+}
+
 inline constexpr std::array<std::string_view, 8> kExploreAllowedTools{
     kRead,
     kConversation,

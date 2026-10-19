@@ -16,7 +16,7 @@ ReadToolResultTool::ReadToolResultTool(core::agent::ToolResultStore& store) noex
 ToolDefinition ReadToolResultTool::get_definition() const {
     return {
         .name = std::string(names::kReadToolResult),
-        .title = "Read Tool Result",
+        .title = std::string(names::kReadToolResultTitle),
         .description =
             "Reads a byte range from a complete oversized tool result previously offloaded by "
             "Filo. Use the opaque reference returned in the original tool response and paginate "
