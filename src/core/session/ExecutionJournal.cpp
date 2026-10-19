@@ -24,10 +24,9 @@ std::filesystem::path ExecutionJournal::path_for(std::string_view id) const {
 
 bool ExecutionJournal::remove(std::string_view id, std::string* error) const {
     const auto target = path_for(id);
-    if (target.empty()) {
-        if (error) *error = "Invalid execution journal session ID.";
-        return false;
-    }
+    // No journal can exist under an ID that cannot name one, so there is
+    // nothing to remove; failing here would block deleting the session itself.
+    if (target.empty()) return true;
     std::error_code ec;
     if (!std::filesystem::exists(target, ec)) return !ec;
     auto lock = core::utils::InterprocessFileLock::acquire(core::utils::lock_path_for(target), error);

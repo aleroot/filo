@@ -4,6 +4,7 @@
 #include "tui/HistoryComponent.hpp"
 #include "tui/Conversation.hpp"
 #include "tui/KeyInput.hpp"
+#include "core/tools/ToolManager.hpp"
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/mouse.hpp>
@@ -524,10 +525,15 @@ TEST_CASE("HistoryComponent toggles a tool result by mouse click",
         tick,
         [&options]() { return options; });
 
+    // The header shows the registered tool title, or the raw name when no test
+    // has registered the built-in read tool in this process (ctest runs each
+    // case alone). Toggling must work either way.
+    const auto label = core::tools::ToolManager::get_instance()
+        .get_tool_title("read").value_or("read");
     const auto collapsed = render_history_text(history);
-    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("▶ Read"));
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("▶ " + label));
     REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("hidden source line"));
-    const auto chevron = rendered_cell_of(collapsed, "▶ Read");
+    const auto chevron = rendered_cell_of(collapsed, "▶ " + label);
     REQUIRE(chevron.row >= 0);
 
     ftxui::Mouse mouse;
@@ -538,7 +544,7 @@ TEST_CASE("HistoryComponent toggles a tool result by mouse click",
     REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
 
     const auto expanded = render_history_text(history);
-    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("▼ Read"));
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("▼ " + label));
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("hidden source line"));
 }
 

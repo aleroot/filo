@@ -164,12 +164,13 @@ TurnRunner::Response AgentTurnRunner::run(const Request& request) {
     // prompts and makes latency grow with unrelated chat state. Keep the
     // session's system/tool configuration, but give the unit a clean history;
     // the original transcript is restored after the turn below.
-    agent_->load_history({}, "", mode);
+    agent_->load_history({}, "", mode, core::agent::Agent::HistoryLoad::Detach);
     // Restore the host transcript from the completion callback itself. The
     // callback runs after Agent releases turn_in_progress, so a timeout can
     // safely return without racing a late provider/tool completion.
     auto restore_history = [agent = agent_, history, summary, mode]() mutable {
-        agent->load_history(std::move(history), summary, mode);
+        agent->load_history(std::move(history), summary, mode,
+                            core::agent::Agent::HistoryLoad::Reattach);
     };
     agent_->send_message(
         request.prompt,

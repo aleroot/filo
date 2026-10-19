@@ -706,6 +706,26 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return "Responses API stream failed.";
 }
 
+/// Error class of a failure event, from the same shapes parse_failed_message
+/// accepts: `response.error`, a nested `error`, or a flat `error` event whose
+/// own `code` carries it. A flat event's `type` names the event, not the error.
+[[nodiscard]] std::string_view parse_failed_code(simdjson::dom::element doc) {
+    const auto field = [](simdjson::dom::object object, std::string_view key) {
+        std::string_view value;
+        if (object[key].get(value) != simdjson::SUCCESS) return std::string_view{};
+        return value;
+    };
+    simdjson::dom::object error;
+    if (doc["response"]["error"].get(error) == simdjson::SUCCESS
+        || doc["error"].get(error) == simdjson::SUCCESS) {
+        const auto code = field(error, "code");
+        return code.empty() ? field(error, "type") : code;
+    }
+    simdjson::dom::object event;
+    if (doc.get(event) != simdjson::SUCCESS) return {};
+    return field(event, "code");
+}
+
 [[nodiscard]] std::string parse_incomplete_reason(simdjson::dom::element doc) {
     simdjson::dom::object response_obj;
     if (doc["response"].get(response_obj) != simdjson::SUCCESS) return {};
@@ -1599,13 +1619,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (event_type == "response.failed" || event_type == "error") {
         const std::string message = parse_failed_message(doc);
-        simdjson::dom::element error;
-        if (doc["response"]["error"].get(error) != simdjson::SUCCESS) {
-            (void)doc["error"].get(error);
-        }
-        std::string_view code;
-        (void)error["code"].get(code);
-        if (code.empty()) (void)error["type"].get(code);
+        const std::string_view code = parse_failed_code(doc);
         result.stream_error = true;
         result.stream_error_type = std::string(code);
         result.stream_error_message = message;

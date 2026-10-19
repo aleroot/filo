@@ -262,10 +262,25 @@ public:
     /// Append a message to conversation history without starting a model turn.
     void append_history_message(core::llm::Message message);
 
+    /// How load_history records the replacement in the execution journal.
+    enum class HistoryLoad {
+        /// The messages come from outside this agent (resume, rewind, handoff):
+        /// journal a full snapshot so the journal can be read without the session.
+        Resume,
+        /// Set the conversation aside (pass no messages) for an independent
+        /// request such as a review unit. The set-aside messages are already
+        /// journaled, so only a marker is.
+        Detach,
+        /// Bring back the conversation a Detach set aside. The caller passes the
+        /// same messages; they are already journaled, so only a marker is.
+        Reattach,
+    };
+
     /// Restore history from a saved session.  Regenerates the system prompt.
     void load_history(std::vector<core::llm::Message> messages,
                       const std::string& context_summary,
-                      const std::string& mode);
+                      const std::string& mode,
+                      HistoryLoad kind = HistoryLoad::Resume);
 
     [[nodiscard]] std::string get_mode() const;
     [[nodiscard]] std::string get_context_summary() const;

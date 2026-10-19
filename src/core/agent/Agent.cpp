@@ -3195,7 +3195,8 @@ void Agent::append_history_message(core::llm::Message message) {
 
 void Agent::load_history(std::vector<core::llm::Message> messages,
                          const std::string &context_summary,
-                         const std::string &mode) {
+                         const std::string &mode,
+                         HistoryLoad kind) {
   // Normalize the caller-owned snapshot before taking the history lock. The
   // input is local to this call, so JSON parsing does not need shared state.
   for (auto& message : messages) sanitize_tool_arguments(message);
@@ -3242,7 +3243,19 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
         invalid->message_index, invalid->reason);
     messages.resize(invalid->message_index);
   }
-  if (execution_journal_) {
+  if (execution_journal_ && kind != HistoryLoad::Resume) {
+    // A review unit swaps the conversation out and back once per group. The
+    // swapped messages are already in the journal, so copying them on every
+    // swap only multiplied its size; markers keep the sequence readable.
+    core::utils::JsonWriter event;
+    {
+      auto object = event.object();
+      event.kv_num("messages_before", std::ranges::count_if(history_,
+          [](const core::llm::Message& m) { return m.role != "system"; })).comma();
+      event.kv_num("messages_after", messages.size());
+    }
+    journal_unlocked(kind == HistoryLoad::Detach ? "detach" : "reattach", event.view());
+  } else if (execution_journal_) {
     core::utils::JsonWriter event;
     {
       auto object = event.object();

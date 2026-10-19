@@ -1004,6 +1004,29 @@ TEST_CASE("Responses require completion and classify transient stream failures",
     protocol.reset_state();
     CHECK(protocol.parse_event(
         R"({"type":"error","error":{"code":"server_error","message":"recover"}})").retryable_stream_error);
+
+    // The HTTP stream reports errors flat: the event's own "code" is the error
+    // class and its "type" is the event name. This shape used to index an
+    // unbound simdjson element and crash.
+    const auto flat = protocol.parse_event(
+        R"({"type":"error","code":"server_error","message":"flat retry","param":null,"sequence_number":3})");
+    CHECK(flat.stream_error);
+    CHECK(flat.stream_error_type == "server_error");
+    CHECK(flat.stream_error_message == "flat retry");
+    CHECK(flat.retryable_stream_error);
+    const auto flat_permanent = protocol.parse_event(
+        R"({"type":"error","code":"invalid_prompt","message":"flat stop","param":null})");
+    CHECK(flat_permanent.stream_error_type == "invalid_prompt");
+    CHECK_FALSE(flat_permanent.retryable_stream_error);
+    for (const auto* event : {R"({"type":"error","message":"no code"})",
+                              R"({"type":"response.failed","response":{"status":"failed"}})",
+                              R"({"type":"response.failed","response":{"error":null}})"}) {
+        const auto bare = protocol.parse_event(event);
+        CHECK(bare.stream_error);
+        CHECK(bare.stream_error_type.empty());
+        CHECK_FALSE(bare.retryable_stream_error);
+        CHECK(bare.done);
+    }
 }
 
 TEST_CASE("Codex replay preserves phases and interleaved encrypted reasoning",

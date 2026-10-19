@@ -153,6 +153,43 @@ TEST_CASE("Agent compaction rewind clear and resume never replace execution hist
         CHECK_THAT(full, Catch::Matchers::ContainsSubstring(expected));
 }
 
+TEST_CASE("Setting the conversation aside journals markers, not copies", "[journal][agent]") {
+    // A review swaps the conversation out and back once per group. Each swap
+    // used to append a full snapshot, so a long review multiplied the journal.
+    JournalFixture fixture;
+    auto& tools = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(nullptr, tools, fixture.context(), fixture.root / "results");
+    auto journal = fixture.journal();
+    agent->set_execution_journal(journal);
+    const std::string large = "LARGE_TRANSCRIPT_" + std::string(50'000, 'x');
+    agent->append_history_message({.role = "user", .content = large});
+    agent->append_history_message({.role = "assistant", .content = "answer"});
+    const auto history = agent->get_history();
+    using Load = core::agent::Agent::HistoryLoad;
+    constexpr int kGroups = 5;
+    for (int group = 0; group < kGroups; ++group) {
+        agent->load_history({}, "", "BUILD", Load::Detach);
+        CHECK(agent->get_history().empty());
+        agent->load_history(history, "", "BUILD", Load::Reattach);
+    }
+    const auto restored = agent->get_history();
+    REQUIRE(restored.size() == history.size());
+    CHECK(restored.front().content == large);
+
+    const auto events = lines(journal->path_for("journal-test"));
+    const auto count = [&](std::string_view needle) {
+        return std::ranges::count_if(events, [&](const std::string& line) {
+            return line.find(needle) != std::string::npos;
+        });
+    };
+    CHECK(count("LARGE_TRANSCRIPT_") == 1);
+    CHECK(count(R"("event":"detach")") == kGroups);
+    CHECK(count(R"("event":"reattach")") == kGroups);
+    CHECK(count(R"("messages_before":2,"messages_after":0)") == kGroups);
+    CHECK(count(R"("messages_before":0,"messages_after":2)") == kGroups);
+    CHECK(count("resume_snapshot") == 0);
+}
+
 TEST_CASE("Agent journal keeps full tool output and usage before context compression", "[journal][agent]") {
     JournalFixture fixture;
     auto& tools = core::tools::ToolManager::get_instance();
@@ -213,6 +250,20 @@ TEST_CASE("Deleting a saved session also deletes its execution journal", "[journ
     REQUIRE(store.remove(data.session_id));
     CHECK_FALSE(std::filesystem::exists(journal->path_for(data.session_id)));
     CHECK_FALSE(store.load_by_id(data.session_id));
+}
+
+TEST_CASE("A session whose ID cannot name a journal can still be deleted", "[journal][session]") {
+    // Session files predating journals may carry IDs the journal rejects
+    // (here "old.v1"). They have no journal, so deletion must not depend on one.
+    JournalFixture fixture;
+    const auto file = fixture.root / "20240101-old.v1.json";
+    REQUIRE(core::utils::atomic_write_file(file, "{}"));
+    REQUIRE(fixture.journal()->path_for("old.v1").empty());
+    core::session::SessionStore store(fixture.root);
+    std::string error;
+    CHECK(store.remove("old.v1", &error));
+    CHECK(error.empty());
+    CHECK_FALSE(std::filesystem::exists(file));
 }
 
 TEST_CASE("Execution journal coordinates separate processes", "[journal]") {
