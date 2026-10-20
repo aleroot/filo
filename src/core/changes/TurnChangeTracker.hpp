@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <istream>
 #include <map>
 #include <memory>
 #include <span>
@@ -33,6 +34,9 @@ class WorkspaceMutationGate;
 /// Unscoped tools get a bounded native workspace inventory before and after
 /// execution. Previously known paths are reconciled too. Excluded paths and
 /// effects outside the observed roots remain explicitly outside coverage.
+/// An inventory sees every file and a turn changes few of them, so a file the
+/// turn's recovery already captured keeps its baseline there, not in memory,
+/// until the file is seen to change.
 ///
 /// Every resource a turn can consume without limit is bounded: how much
 /// content a directory scan retains, how many lines of it are kept as hashes,
@@ -147,9 +151,12 @@ private:
     enum class Observation { Before, After };
 
     struct Snapshot {
-        enum class State { Missing, Text, Opaque };
+        /// `Stored`: the bytes are in the turn's recovery store. Only an
+        /// unchanged file holds it, as both its baseline and its current state.
+        enum class State { Missing, Text, Opaque, Stored };
         State state = State::Missing;
         std::string text;               ///< State::Text only
+        std::string stored;             ///< State::Stored only: recovery hash of the bytes
         FileChangeContent opaque_as = FileChangeContent::Binary;  ///< State::Opaque only
         std::uint64_t fingerprint = 0;  ///< State::Opaque only: identifies content
         /// Lines the file held. Known even when the bytes were not retained,
@@ -176,6 +183,7 @@ private:
                 case State::Text:    return text == other.text;
                 case State::Opaque:  return opaque_as == other.opaque_as
                                         && fingerprint == other.fingerprint;
+                case State::Stored:  return stored == other.stored;
             }
             return false;
         }
@@ -228,11 +236,10 @@ private:
         std::vector<std::uint64_t> line_hashes;
     };
 
-    /// Reads a file far enough to count its lines and tell text from binary,
+    /// Reads content far enough to count its lines and tell text from binary,
     /// retaining nothing. `nullopt` when it cannot be read or is bigger than
     /// `kMaxCountedFileBytes`, where the read would cost more than the number.
-    [[nodiscard]] static std::optional<Scan> scan_without_retaining(
-        const std::filesystem::path& path);
+    [[nodiscard]] static std::optional<Scan> scan_without_retaining(std::istream& in);
 
     [[nodiscard]] static Stat stat_of(const std::filesystem::path& path);
 
@@ -241,6 +248,15 @@ private:
     /// about to release, so it is available to the new read.
     [[nodiscard]] Snapshot read_unlocked(const std::filesystem::path& path,
                                         const Reclaimable& reclaimable);
+    /// Completes `snapshot`, the stamp and mode of a regular file, from `size`
+    /// bytes of its content in `in`, within the same allowances as a read.
+    [[nodiscard]] Snapshot content_unlocked(std::istream& in, std::uint64_t size,
+                                           Snapshot snapshot,
+                                           const Reclaimable& reclaimable);
+    /// A file as an inventory finds it: `Stored` when recovery holds its bytes.
+    [[nodiscard]] Snapshot found_unlocked(const std::filesystem::path& path);
+    /// Reads a `Stored` baseline back from recovery: its file changed.
+    void load_baseline_unlocked(const Key& key);
     /// Content held for `key` that a re-read would release.
     [[nodiscard]] Reclaimable reclaimable_for_unlocked(const Key& key) const;
     /// Text the turn may still retain. Saturates at zero.

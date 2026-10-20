@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -36,6 +37,11 @@ public:
     void finish();
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return store_.directory(); }
     [[nodiscard]] bool partial() const;
+    /// The pre-image held for `path`, when this turn captured its bytes.
+    [[nodiscard]] std::optional<RecoveryImage> captured(const std::filesystem::path& path) const;
+    [[nodiscard]] std::expected<std::string, std::string> original(const RecoveryImage& image) const {
+        return store_.original(image);
+    }
 
     [[nodiscard]] bool can_observe(const std::filesystem::path& path) const { return !store_.is_internal(path); }
     [[nodiscard]] static std::expected<TurnChanges, std::string> reconcile(

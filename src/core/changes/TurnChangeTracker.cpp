@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <sstream>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -140,7 +141,14 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
         return snapshot;
     }
 
-    const auto size = stat.size;
+    std::ifstream in(path, std::ios::binary);
+    return content_unlocked(in, stat.size, std::move(snapshot), reclaimable);
+}
+
+TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in,
+                                                               std::uint64_t size,
+                                                               Snapshot snapshot,
+                                                               const Reclaimable& reclaimable) {
     const bool oversized = size > kMaxToolDiffInputBytes;
     if (oversized || size > remaining_bytes_unlocked() + reclaimable.text) {
         // The bytes are not kept, so this change cannot be diffed: one file is
@@ -149,7 +157,7 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
         // was text at all, so the summary can report the size of a change it
         // cannot show, and name a binary file as binary rather than as a
         // casualty of the budget.
-        const auto scan = scan_without_retaining(path);
+        const auto scan = scan_without_retaining(in);
         snapshot.fingerprint = snapshot.stamp;
         if (scan && !scan->text) {
             // A binary file is not read to the end, so its head cannot identify
@@ -180,7 +188,6 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
         return snapshot;
     }
 
-    std::ifstream in(path, std::ios::binary);
     if (!in) {
         return snapshot;
     }
@@ -196,9 +203,38 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
             .stamp = snapshot.stamp, .mode = snapshot.mode};
 }
 
+TurnChangeTracker::Snapshot TurnChangeTracker::found_unlocked(const fs::path& path) {
+    if (const auto image = recovery_ ? recovery_->captured(path) : std::nullopt) {
+        if (const auto stat = stat_of(path); stat.regular && stat.stamp != 0) {
+            return {.state = Snapshot::State::Stored, .stored = image->hash,
+                    .stamp = stat.stamp, .mode = stat.mode};
+        }
+    }
+    return read_unlocked(path, {});
+}
+
+void TurnChangeTracker::load_baseline_unlocked(const Key& key) {
+    const auto it = baseline_.find(key);
+    if (it == baseline_.end() || it->second.state != Snapshot::State::Stored) {
+        return;
+    }
+    Snapshot found{.state = Snapshot::State::Opaque, .opaque_as = FileChangeContent::BudgetSpent,
+                   .fingerprint = it->second.stamp,
+                   .stamp = it->second.stamp, .mode = it->second.mode};
+    if (auto bytes = recovery_->original({.hash = it->second.stored, .mode = it->second.mode})) {
+        const auto size = bytes->size();
+        std::istringstream in(std::move(*bytes));
+        found = content_unlocked(in, size, std::move(found), {});
+    } else {
+        // The capture is unreadable: the change is still listed, without detail.
+        partial_enumeration_ = true;
+    }
+    charge_unlocked(found);
+    it->second = std::move(found);
+}
+
 std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining(
-    const fs::path& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::istream& in) {
     if (!in) {
         return std::nullopt;
     }
@@ -275,6 +311,9 @@ void TurnChangeTracker::release_unlocked(const Snapshot& snapshot) noexcept {
 }
 
 void TurnChangeTracker::store_current_unlocked(const Key& key, Snapshot snapshot) {
+    if (snapshot.state != Snapshot::State::Stored) {
+        load_baseline_unlocked(key);  // The file is no longer as the turn found it.
+    }
     if (const auto known = current_.find(key); known != current_.end()) {
         release_unlocked(known->second);  // Superseded content is released.
     }
@@ -408,7 +447,7 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
         const auto key = key_for(path);
         if (baseline_.contains(key)) continue;
         if (when == Observation::After && !inventory_complete_) continue;
-        Snapshot current = read_unlocked(path, {});
+        Snapshot current = when == Observation::Before ? found_unlocked(path) : read_unlocked(path, {});
         Snapshot original = when == Observation::Before ? current : Snapshot{};
         charge_unlocked(original);
         baseline_.emplace(key, std::move(original));
@@ -538,6 +577,7 @@ Counts TurnChangeTracker::counted_without_diff(const Snapshot& before,
                 }
                 return std::nullopt;
             case Snapshot::State::Missing:
+            case Snapshot::State::Stored:
                 return std::nullopt;
         }
         return std::nullopt;

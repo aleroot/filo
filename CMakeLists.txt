@@ -347,6 +347,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp
     src/core/utils/FileSystemUtils.cpp
+    src/core/utils/ProcessUtils.cpp
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
     src/core/memory/MemoryStore.cpp

@@ -27,6 +27,13 @@ bool TurnRecovery::partial() const {
     return manifest_.partial;
 }
 
+std::optional<RecoveryImage> TurnRecovery::captured(const fs::path& path) const {
+    std::lock_guard lock(mutex_);
+    const auto it = manifest_.entries.find(normalized(path));
+    if (it == manifest_.entries.end() || it->second.before.hash.empty()) return std::nullopt;
+    return it->second.before;
+}
+
 void TurnRecovery::before(std::span<const fs::path> paths) {
     std::lock_guard lock(mutex_);
     capture_unlocked(paths);

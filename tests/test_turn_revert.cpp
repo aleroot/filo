@@ -7,6 +7,7 @@
 #include "core/changes/TurnRecovery.hpp"
 #include "core/changes/WorkspaceInventory.hpp"
 #include "core/utils/InterprocessFile.hpp"
+#include "core/utils/ProcessUtils.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WriteFileTool.hpp"
@@ -603,6 +604,22 @@ TEST_CASE("Recovery refuses a live recorded process group and a corrupted origin
     CHECK(read(file) == "changed\n");
 }
 
+TEST_CASE("A process group of unreaped zombies is not a live writer",
+          "[changes][recovery][process][regression]") {
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        ::setpgid(0, 0);
+        ::_exit(0);
+    }
+    ::setpgid(child, child);
+    siginfo_t info{};
+    REQUIRE(::waitid(P_PID, static_cast<id_t>(child), &info, WEXITED | WNOWAIT) == 0);
+    CHECK_FALSE(core::utils::process::group_may_exist(child));
+    REQUIRE(::waitpid(child, nullptr, 0) == child);
+    CHECK(core::utils::process::group_may_exist(::getpgrp()));
+}
+
 TEST_CASE("Native inventory respects exclusions symlinks and resource bounds without source control",
           "[changes][inventory]") {
     core::changes::WorkspaceMutationGate mutations;
@@ -704,7 +721,9 @@ TEST_CASE("A revert stops an idle managed shell's background writer before resto
         });
     });
     INFO(result.error.value_or(""));
-    for (const auto& refusal : result.refused) INFO(refusal.reason);
+    std::string refusals;
+    for (const auto& refusal : result.refused) refusals += refusal.path + ": " + refusal.reason + "\n";
+    INFO(refusals);
     REQUIRE(result.reverted());
     std::this_thread::sleep_for(std::chrono::milliseconds(650));
     CHECK(read(file) == "original\n");
@@ -899,4 +918,36 @@ TEST_CASE("A newly created directory is removed from the durable file manifest",
     auto manifest = core::changes::RecoveryStore(recovery.directory()).load(dir.path);
     REQUIRE(manifest);
     CHECK(manifest->entries.empty());
+}
+
+TEST_CASE("A shell edit keeps its diff in a workspace larger than the retention budget",
+          "[changes][recovery][inventory][regression]") {
+    TempDir dir, storage;
+    for (int i = 0; i < 8; ++i) {
+        put(dir.path / "Lampo" / std::format("Source{}.swift", i), std::string(63, 'x') + "\n");
+    }
+    const auto project = dir.path / "Lampo.xcodeproj" / "project.pbxproj";
+    put(project, "settings\n");
+    const auto removed = dir.path / "Lampo" / "Source0.swift";
+    TurnChangeTracker::Limits limits;
+    limits.max_tracked_bytes = 256;  // The edited files fit; the workspace does not.
+    TurnChangeTracker tracker(dir.path, limits);
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(storage.path / "turn", dir.path));
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [&] {
+        put(project, "settings\nbuild phase\n");
+        fs::remove(removed);
+    });
+    const auto edited = dir.path / "Lampo" / "Source1.swift";
+    edit(tracker, scope_of({edited}), [&] { put(edited, "edited\n"); });
+    tracker.settle();
+    const auto changes = tracker.changes();
+    CHECK_FALSE(changes.partial_enumeration);
+    REQUIRE(changes.files.size() == 3);
+    CHECK(changes.files[0].path == "Lampo.xcodeproj/project.pbxproj");
+    CHECK(changes.files[0].content == FileChangeContent::Text);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("+build phase"));
+    CHECK(changes.files[1].path == "Lampo/Source0.swift");
+    CHECK(changes.files[1].kind == FileChangeKind::Deleted);
+    CHECK(changes.files[1].deleted == 1);
+    CHECK_THAT(changes.files[2].diff, ContainsSubstring("+edited"));
 }
