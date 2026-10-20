@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../review/Annotations.hpp"
+
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -46,6 +48,9 @@ struct FileChange {
 /// follows the same rule from the other direction: it drops the whole turn
 /// diff when a patch was not applied exactly.
 struct TurnChanges {
+    /// Identifies the turn after a resume, so what belongs to it, such as
+    /// review comments, finds it again. Empty on older saved conversations.
+    std::string id;
     std::vector<FileChange> files;
     /// A directory in scope held more files than one turn enumerates, or the
     /// turn ran out of diff budget. Files may be missing from `files`, and
@@ -69,6 +74,9 @@ struct TurnChanges {
     /// the display diff was omitted; empty on older saved conversations.
     std::string recovery_path;
     bool workspace_observed = false;
+    /// Review comments on this turn's changes. They belong to the comparison
+    /// they were made in, as comments do in Lampo's own chat.
+    std::vector<core::review::Annotation> annotations;
 
     [[nodiscard]] bool empty() const noexcept { return files.empty(); }
     [[nodiscard]] bool complete() const noexcept {

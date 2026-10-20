@@ -456,6 +456,7 @@ set(FILO_CORE_SOURCES
     src/core/review/Prompt.cpp
     src/core/review/PromptSupport.cpp
     src/core/review/Findings.cpp
+    src/core/review/Annotations.cpp
     src/core/review/TurnRunners.cpp
     src/core/review/Engine.cpp
     src/core/review/ReviewSteering.cpp
@@ -512,6 +513,8 @@ if(APPLE)
         src/tui/lampo/LampoCliSession.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
+    set_source_files_properties(tests/test_lampo_cli_session.cpp
+        PROPERTIES LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 file(GLOB_RECURSE FILO_HEADER_FILES CONFIGURE_DEPENDS
@@ -692,6 +695,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_review.cpp
+    tests/test_review_annotations.cpp
     tests/test_review_card.cpp
     tests/test_history.cpp
     tests/test_history_compaction_planner.cpp
@@ -936,6 +940,7 @@ source_group(
         tests/test_memory_system.cpp
         tests/test_commands.cpp
         tests/test_review.cpp
+        tests/test_review_annotations.cpp
         tests/test_review_card.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp

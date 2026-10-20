@@ -402,6 +402,12 @@ struct TurnComparison {
     std::vector<std::string> caveats;
     /// Nets every turn of the conversation rather than showing one.
     bool whole_conversation = false;
+    /// The turn the comparison belongs to: the one it shows, or the latest
+    /// when it nets the conversation. A reply for a turn that is gone is stale.
+    std::string turn_id = {};
+    /// The turn's review comments on the files in this comparison. Empty for
+    /// the whole conversation: comments made there have no turn to keep them.
+    std::vector<core::review::Annotation> annotations = {};
 };
 
 /// One sentence naming what `comparison` leaves out, or empty when it is the

@@ -7,6 +7,7 @@
 
 #if defined(__APPLE__)
 #include "tui/lampo/LampoCliSession.hpp"
+#include "tui/viewer/LampoDiffViewer.hpp"
 #endif
 
 #include <atomic>
@@ -40,6 +41,8 @@ struct Recorder {
     std::atomic_bool released{false};
     std::atomic_bool complete{false};
     std::string comments;
+    std::vector<core::review::Annotation> received_annotations;
+    std::optional<std::vector<core::review::Annotation>> annotations;
 };
 
 // A backend with no side effects, so the controller can be exercised without
@@ -66,6 +69,7 @@ public:
         recorder_->patch = std::string(context.patch);
         recorder_->session_id = context.session_id;
         recorder_->saw_terminal = static_cast<bool>(context.with_terminal);
+        recorder_->received_annotations.assign(context.annotations.begin(), context.annotations.end());
 
         if (launch_ == ViewerLaunch::Detached) {
             // Stands in for another application taking its time, and for the
@@ -93,6 +97,9 @@ private:
     /// How this backend ends a comparison the test let it finish: reviewed when
     /// the test recorded comments to hand back, plain shown otherwise.
     [[nodiscard]] ViewResult ending() const {
+        if (recorder_->annotations) {
+            return ViewResult::annotated(*recorder_->annotations);
+        }
         return recorder_->comments.empty()
             ? ViewResult::shown()
             : ViewResult::reviewed(recorder_->comments);
@@ -420,6 +427,56 @@ TEST_CASE("A detached review returns its comments once and keeps cancellation si
     }
 }
 
+TEST_CASE("Structured reviews carry a complete snapshot and preserve cancellation", "[diff_comparer]") {
+    const core::review::Annotation original{
+        .id = "820b59ee-fbdf-4779-a80b-34594019bc88",
+        .path = "src/sample.cpp",
+        .side = "new",
+        .start_line = 7,
+        .end_line = 7,
+        .selected_text = "return value;",
+        .comment = "Keep the old format",
+    };
+    auto recorder = std::make_shared<Recorder>();
+    auto catalog = catalog_recording_into(recorder, ViewerLaunch::Detached);
+    ExternalDiffViewerController controller({}, catalog);
+    std::vector annotations{original};
+    REQUIRE_FALSE(controller.open("fake", kPatch, annotations));
+    annotations.clear();
+    for (int attempt = 0; attempt < 2000 && controller.status_label() != "Reviewing in Fake…"; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(controller.status_label() == "Reviewing in Fake…");
+
+    SECTION("sending an empty snapshot removes all comments") {
+        recorder->annotations = std::vector<core::review::Annotation>{};
+        recorder->complete.store(true);
+        const auto outcome = wait_for_outcome(controller);
+        REQUIRE(outcome);
+        REQUIRE(outcome->annotations);
+        CHECK(outcome->annotations->empty());
+        CHECK(recorder->received_annotations == std::vector{original});
+    }
+    SECTION("edited comments retain their stable identity") {
+        auto edited = original;
+        edited.comment = "Keep both formats";
+        recorder->annotations = std::vector{edited};
+        recorder->complete.store(true);
+        const auto outcome = wait_for_outcome(controller);
+        REQUIRE(outcome);
+        REQUIRE(outcome->annotations);
+        CHECK(*outcome->annotations == std::vector{edited});
+        CHECK(recorder->received_annotations == std::vector{original});
+    }
+    SECTION("cancelling does not return a replacement snapshot") {
+        REQUIRE(controller.cancel());
+        const auto outcome = wait_for_outcome(controller);
+        REQUIRE(outcome);
+        CHECK_FALSE(outcome->annotations);
+        CHECK_FALSE(outcome->shown);
+    }
+}
+
 #if defined(__APPLE__)
 
 TEST_CASE("The Lampo protocols keep the shape Lampo publishes", "[diff_comparer][lampo]") {
@@ -437,12 +494,15 @@ TEST_CASE("The Lampo protocols keep the shape Lampo publishes", "[diff_comparer]
     // declares the same value, and answers with `annotating` instead of
     // `viewing` when it accepts.
     CHECK(tui::lampo::kComparerProtocol.reply == "comments");
+    CHECK(tui::lampo::kComparerProtocol.accept == "annotations");
+    CHECK(tui::lampo::state::ready == "ready");
     CHECK(tui::lampo::state::annotating == "annotating");
     CHECK(tui::lampo::state::viewing == "viewing");
     CHECK(tui::lampo::state::saved == "saved");
     CHECK(tui::lampo::state::cancelled == "cancelled");
     CHECK(tui::lampo::state::failed == "failed");
     CHECK(tui::lampo::kPromptEditProtocol.reply.empty());
+    CHECK(tui::lampo::kPromptEditProtocol.accept.empty());
 
     CHECK(tui::lampo::kPromptEditProtocol.directory_prefix == "lampo-prompter-edit-v1-");
     CHECK(tui::lampo::kPromptEditProtocol.pasteboard_prefix
@@ -454,6 +514,28 @@ TEST_CASE("The Lampo protocols keep the shape Lampo publishes", "[diff_comparer]
     CHECK(tui::lampo::bundle_identifier() == "alessio.pollero.Lampo");
     // Lampo shows the client name as the title of a session it did not start.
     CHECK_FALSE(tui::lampo::client_name().empty());
+}
+
+TEST_CASE("Lampo replies use the negotiated format without guessing", "[diff_comparer][lampo]") {
+    const std::string legacy = "{This is a comment, not a JSON response.}\nKeep the old format.";
+    for (const std::string_view reply : {"", "comments"}) {
+        const auto result = decode_lampo_review_reply(legacy, reply);
+        CHECK(result.status() == ViewStatus::Shown);
+        CHECK(result.comments() == legacy);
+        CHECK_FALSE(result.annotations());
+    }
+    const auto empty = decode_lampo_review_reply(R"({"version":1,"annotations":[]})", "annotations");
+    REQUIRE(empty.annotations());
+    CHECK(empty.annotations()->empty());
+    CHECK(empty.comments().empty());
+
+    for (const std::string_view payload : {"not JSON", R"({"version":2,"annotations":[]})"}) {
+        const auto invalid = decode_lampo_review_reply(payload, "annotations");
+        CHECK(invalid.status() == ViewStatus::Failed);
+        CHECK(invalid.comments().empty());
+        CHECK_FALSE(invalid.annotations());
+    }
+    CHECK(decode_lampo_review_reply(legacy, "unknown").status() == ViewStatus::Failed);
 }
 
 #endif // defined(__APPLE__)

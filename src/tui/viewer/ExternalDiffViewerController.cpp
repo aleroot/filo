@@ -31,7 +31,8 @@ ExternalDiffViewerController::~ExternalDiffViewerController() {
 
 std::optional<ViewerOutcome> ExternalDiffViewerController::open(
     std::string_view configured_comparer,
-    std::string_view patch) {
+    std::string_view patch,
+    std::span<const core::review::Annotation> annotations) {
     if (busy()) {
         return std::nullopt;
     }
@@ -58,6 +59,7 @@ std::optional<ViewerOutcome> ExternalDiffViewerController::open(
         .session_id = make_session_id(),
         .viewer = std::move(selection.viewer),
         .label = std::string(descriptor.label),
+        .annotations = {annotations.begin(), annotations.end()},
     });
 
     if (descriptor.launch == ViewerLaunch::Terminal) {
@@ -67,6 +69,7 @@ std::optional<ViewerOutcome> ExternalDiffViewerController::open(
             .cancellation = {},
             .with_terminal = host_.with_terminal,
             .report_viewing = {},
+            .annotations = session->annotations,
         };
         return finish(*session, session->viewer->view(context));
     }
@@ -97,6 +100,7 @@ void ExternalDiffViewerController::run_detached(std::shared_ptr<Session> session
                 }
                 if (host_.wake_ui) { host_.wake_ui(); }
             },
+            .annotations = session->annotations,
         };
         publish(finish(*session, session->viewer->view(context)));
     });
@@ -111,6 +115,7 @@ ViewerOutcome ExternalDiffViewerController::finish(
             return ViewerOutcome{
                 .inline_view = false, .shown = true, .notice = std::nullopt,
                 .comments = result.comments(),
+                .annotations = result.annotations(),
             };
         case ViewStatus::Cancelled:
             // Cancelling is a deliberate, silent user action.

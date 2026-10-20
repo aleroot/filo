@@ -6143,31 +6143,90 @@ RunResult run(RunOptions opts) {
     };
 
     // ── Diff comparer ────────────────────────────────────────────────────────
-    // What the comparison being opened leaves out, reported only once an
-    // external comparer shows it (see ViewerOutcome::shown). UI thread only: it
-    // is set when a comparison opens and consumed when that comparison settles,
-    // and only one comparison runs at a time.
-    std::string pending_comparison_omissions;
+    // What the comparison being opened needs once it settles. UI thread only:
+    // it is set when a comparison opens and consumed when that comparison
+    // settles, and only one comparison runs at a time.
+    struct PendingComparison {
+        /// The conversation that opened it; its draft gets the comments.
+        ThreadRuntime::Ptr runtime;
+        /// The turn it belongs to. A turn that is gone means the conversation
+        /// moved on while the comparer was open, and the answer is stale.
+        std::string turn_id;
+        /// Comments belong to the comparison they were made in, as in Lampo's
+        /// own chat. Comments on the whole conversation have no turn to keep them.
+        bool keeps_comments = false;
+        /// The turn's comments the comparer was shown.
+        std::vector<core::review::Annotation> shown;
+        /// What the comparison leaves out, reported only once an external
+        /// comparer shows it (see ViewerOutcome::shown).
+        std::string omissions;
+    };
+    std::optional<PendingComparison> pending_comparison;
 
     // Applies what a comparison produced once it settled: review comments join
-    // the draft (never sent on their own), and success stays silent unless the
-    // diff on screen is not the whole turn: an external comparer shows only the
-    // patch, so the reviewer learns about the rest here.
+    // the draft of the conversation that opened it (never sent on their own),
+    // and success stays silent unless the diff on screen is not the whole turn:
+    // an external comparer shows only the patch, so the reviewer learns about
+    // the rest here.
     auto apply_comparer_outcome = [&](const viewer::ViewerOutcome& outcome) {
-        const std::string omissions = std::exchange(pending_comparison_omissions, {});
-        if (!outcome.comments.empty()) {
-            std::string comments = normalize_newlines(outcome.comments);
-            if (input_text.empty()) {
-                comments.erase(0, comments.find_first_not_of('\n'));
+        auto pending = std::exchange(pending_comparison, std::nullopt);
+        if (!pending) return;
+        auto runtime = pending->runtime;
+        std::string comments = outcome.comments;
+        if (outcome.annotations) {
+            // The turn as the transcript holds it; it is gone when the
+            // conversation moved on while the comparer was open.
+            const auto with_turn = [&](auto&& use) {
+                std::lock_guard lock(ui_mutex);
+                auto& messages = *runtime->messages();
+                const auto turn = std::ranges::find_if(messages, [&](const UiMessage& message) {
+                    return message.turn_changes.id == pending->turn_id;
+                });
+                return use(turn == messages.end() ? nullptr : &turn->turn_changes);
+            };
+            std::vector<core::review::Annotation> held;
+            const bool current = pending->turn_id.empty() || with_turn([&](auto* turn) {
+                if (turn && pending->keeps_comments) held = turn->annotations;
+                return turn != nullptr;
+            });
+            if (!current) return;
+            // Each comment reaches the prompt once, in the turn it was added.
+            auto review = core::review::merge_review(held, pending->shown, *outcome.annotations);
+            comments += core::review::render_annotation_prompt(review.added);
+            if (pending->keeps_comments
+                && runtime->agent()->set_turn_annotations(pending->turn_id, review.kept)) {
+                with_turn([&](auto* turn) {
+                    if (turn) turn->annotations = std::move(review.kept);
+                    return true;
+                });
+                save_runtime_snapshot(runtime);
             }
-            input_text += comments;
-            input_cursor_position = static_cast<int>(input_text.size());
         }
-        if (outcome.shown && !omissions.empty()) {
-            append_history(std::format("\nℹ  {}\n", omissions));
+        if (!comments.empty()) {
+            comments = normalize_newlines(comments);
+            const auto append = [&](std::string& text, int& cursor) {
+                if (text.empty()) comments.erase(0, comments.find_first_not_of('\n'));
+                else if (text.back() != '\n' && comments.front() != '\n') text += '\n';
+                text += comments;
+                cursor = static_cast<int>(text.size());
+            };
+            if (thread_runtimes.current() == runtime) {
+                append(input_text, input_cursor_position);
+            } else {
+                auto draft = runtime->prompt_draft();
+                append(draft.text, draft.cursor);
+                runtime->set_prompt_draft(std::move(draft));
+            }
+        }
+        const auto notice = [&](std::string text) {
+            std::lock_guard lock(ui_mutex);
+            append_ui_message(*runtime->messages(), make_system_message(std::move(text)));
+        };
+        if (outcome.shown && !pending->omissions.empty()) {
+            notice(std::format("\nℹ  {}\n", pending->omissions));
         }
         if (outcome.notice.has_value()) {
-            append_history(std::format(
+            notice(std::format(
                 "\n{}  {}\n",
                 outcome.notice->success ? "✓" : "✗",
                 outcome.notice->message));
@@ -6181,8 +6240,16 @@ RunResult run(RunOptions opts) {
     // transcript, for the built-in comparer to scroll to.
     auto open_comparison = [&](TurnComparison comparison,
                                std::optional<std::size_t> message_index) {
-        pending_comparison_omissions = comparison_omissions(comparison);
-        if (const auto outcome = diff_comparer.open(config.diff_comparer, comparison.patch)) {
+        if (diff_comparer.busy()) return;
+        pending_comparison = PendingComparison{
+            .runtime = current_runtime,
+            .turn_id = comparison.turn_id,
+            .keeps_comments = !comparison.whole_conversation && !comparison.turn_id.empty(),
+            .shown = comparison.annotations,
+            .omissions = comparison_omissions(comparison),
+        };
+        if (const auto outcome = diff_comparer.open(
+                config.diff_comparer, comparison.patch, comparison.annotations)) {
             if (outcome->inline_view) {
                 // The transcript is the configured comparer, so opening it means
                 // revealing what it already holds, where it holds it.

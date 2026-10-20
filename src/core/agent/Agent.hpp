@@ -245,6 +245,12 @@ public:
     /// mark, which is also the answer for a turn already reverted.
     bool mark_latest_turn_changes_reverted();
 
+    /// Keeps `annotations` as the review comments of the turn with `turn_id`,
+    /// so a resumed session finds them with the changes they are about.
+    /// Returns false when this conversation no longer has that turn.
+    bool set_turn_annotations(std::string_view turn_id,
+                              std::vector<core::review::Annotation> annotations);
+
     // -----------------------------------------------------------------------
     // Session persistence helpers.
     // -----------------------------------------------------------------------

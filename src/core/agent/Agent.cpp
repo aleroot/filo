@@ -670,6 +670,7 @@ core::changes::TurnChanges Agent::publish_turn_changes(
     if (changes.empty()) {
         return {};
     }
+    changes.id = core::utils::random_uuid_v4();
 
     std::lock_guard lock(history_mutex_);
     if (turn_state->conversation_generation != conversation_generation_) {
@@ -703,6 +704,23 @@ bool Agent::mark_latest_turn_changes_reverted() {
         }
         it->turn_changes.reverted = true;
         journal_unlocked("revert", "{}");
+        return true;
+    }
+    return false;
+}
+
+bool Agent::set_turn_annotations(std::string_view turn_id,
+                                 std::vector<core::review::Annotation> annotations) {
+    if (turn_id.empty()) return false;
+    std::lock_guard lock(history_mutex_);
+    for (auto& message : history_) {
+        if (message.turn_changes.id != turn_id) {
+            continue;
+        }
+        message.turn_changes.annotations = std::move(annotations);
+        std::string event;
+        core::changes::append_turn_changes_json(event, message.turn_changes);
+        journal_unlocked("turn_changes", event);
         return true;
     }
     return false;
@@ -3220,6 +3238,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     if (!recovered) {
       messages.push_back({.role = "assistant", .content = "Interrupted workspace recovery requires attention: " + recovered.error()});
     } else for (auto& changes : *recovered) {
+      changes.id = core::utils::random_uuid_v4();
       messages.push_back({.role = "assistant",
           .content = "Recovered the file inventory of an interrupted turn. Review /changes before using /revert. "
                      "These are observed changes; any earlier verification must be run again.",

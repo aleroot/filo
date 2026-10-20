@@ -13,6 +13,10 @@ namespace tui::viewer {
 
 [[nodiscard]] ViewerDescriptor lampo_diff_viewer_descriptor() noexcept;
 
+/// Decode only the format the running Lampo selected. Missing selection is legacy text.
+[[nodiscard]] ViewResult decode_lampo_review_reply(
+    std::string_view payload, std::string_view reply);
+
 // Creates the Lampo comparer. All AppKit dependencies live in the shared Lampo
 // CLI transport (tui/lampo/LampoCliSession.mm); the comparer itself is plain
 // C++ and only writes the protocol's state machine.

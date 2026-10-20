@@ -22,7 +22,12 @@ namespace {
     if (renamed) {
         section += std::format("rename from {}\nrename to {}\n", origin, change.path);
     }
-    return section + std::format("--- a/{}\n+++ b/{}\n", origin, change.path);
+    // Like git, end a path that holds a space with a tab, so a reader keeps
+    // the path exact instead of trimming it as loose spacing.
+    const auto header_path = [](const std::string& path) {
+        return path.find(' ') == std::string::npos ? path : path + '\t';
+    };
+    return section + std::format("--- a/{}\n+++ b/{}\n", header_path(origin), header_path(change.path));
 }
 
 /// The stored diff with its own header pair removed, since headers() wrote the

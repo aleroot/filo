@@ -60,6 +60,13 @@ TEST_CASE("export_patch shapes one change like git diff", "[changes][patch_expor
     CHECK(std::ranges::count(exported.patch, '\n') == 6);
 }
 
+TEST_CASE("export_patch ends a path with spaces with a tab, like git", "[changes][patch_export]") {
+    const std::string path = "src/foo  one.cpp ";
+    const auto exported = export_patch(modified(path, stored_diff(path, kHunk)));
+
+    CHECK_THAT(exported.patch, ContainsSubstring("--- a/" + path + "\t\n+++ b/" + path + "\t\n"));
+}
+
 TEST_CASE("export_patch keeps every change it can, in order", "[changes][patch_export]") {
     const std::vector<FileChange> changes{
         modified("a.cpp", stored_diff("a.cpp", kHunk)),

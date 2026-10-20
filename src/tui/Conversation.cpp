@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <ctime>
 #include <format>
+#include <iterator>
 #include <system_error>
 #include <memory>
 #include <optional>
@@ -2037,6 +2038,8 @@ std::optional<TurnComparison> turn_comparison(const UiMessage& message) {
     comparison.patch = std::move(exported.patch);
     comparison.undiffed = exported.undiffed;
     comparison.caveats = turn_change_caveats(changes);
+    comparison.turn_id = changes.id;
+    comparison.annotations = changes.annotations;
     comparison.disclosure_keys.reserve(exported.files);
     for (const auto& change : changes.files) {
         if (!change.diff.empty()) {
@@ -2055,12 +2058,19 @@ std::optional<TurnComparison> turn_comparison(const UiMessage& message, std::str
         if (exported.empty()) {
             return std::nullopt;
         }
-        return TurnComparison{
+        TurnComparison comparison{
             .patch = std::move(exported.patch),
             .disclosure_keys = {turn_file_change_key(message.id, change.path)},
             .undiffed = exported.undiffed,
             .caveats = {},
+            .turn_id = message.turn_changes.id,
         };
+        std::ranges::copy_if(message.turn_changes.annotations, std::back_inserter(comparison.annotations),
+            [&](const auto& annotation) {
+                return annotation.path == change.path
+                    || (!change.previous_path.empty() && annotation.path == change.previous_path);
+            });
+        return comparison;
     }
     return std::nullopt;
 }
@@ -2101,6 +2111,7 @@ std::expected<TurnComparison, std::string> conversation_comparison(
         .undiffed = exported.undiffed,
         .caveats = turn_change_caveats(net.changes),
         .whole_conversation = true,
+        .turn_id = source.turns.back().id,
     };
     // Naming a couple of files says what kind of gap it is; naming every one
     // of a long conversation would bury the sentence.

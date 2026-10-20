@@ -4,6 +4,9 @@
 
 #include "core/session/SessionStore.hpp"
 #include "tui/lampo/LampoCliSession.hpp"
+#include "tui/viewer/LampoDiffViewer.hpp"
+
+#import <AppKit/AppKit.h>
 
 #include <filesystem>
 #include <fstream>
@@ -29,7 +32,84 @@ using tui::lampo::CliSession;
         std::istreambuf_iterator<char>());
 }
 
+[[nodiscard]] NSPasteboard* session_board(const std::string& id) {
+    return [NSPasteboard pasteboardWithName:[NSString stringWithUTF8String:
+        (std::string(tui::lampo::kComparerProtocol.pasteboard_prefix) + id).c_str()]];
+}
+
+[[nodiscard]] NSPasteboardType comparer_type() {
+    return [NSString stringWithUTF8String:tui::lampo::kComparerProtocol.pasteboard_type.data()];
+}
+
 } // namespace
+
+TEST_CASE("An older Lampo receives the original patch and returns ordinary comments", "[lampo]") {
+    @autoreleasepool {
+        const auto id = make_session_id();
+        constexpr std::string_view patch = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+        auto session = CliSession::create(tui::lampo::kComparerProtocol, id, patch);
+        REQUIRE(session);
+        NSPasteboard* board = session_board(id);
+        NSDictionary* request = [board propertyListForType:comparer_type()];
+        REQUIRE([request[@"reply"] isEqualToString:@"comments"]);
+        CHECK([request[@"accept"] isEqualToString:@"annotations"]);
+        CHECK(read_file(session->file()) == patch);
+
+        const std::string comments = "File: x\nKeep the old format.\n";
+        { std::ofstream output(session->file()); output << comments; }
+        [board clearContents];
+        [board setPropertyList:@{@"version": @"1", @"session": [NSString stringWithUTF8String:id.c_str()],
+                                 @"state": @"saved"} forType:comparer_type()];
+        const auto reply = session->poll();
+        REQUIRE(reply);
+        CHECK(reply->reply.empty());
+        const auto result = tui::viewer::decode_lampo_review_reply(read_file(session->file()), reply->reply);
+        CHECK(result.comments() == comments);
+        CHECK_FALSE(result.annotations());
+    }
+}
+
+TEST_CASE("A negotiated Lampo request reuses the granted file and ignores its own announcement", "[lampo]") {
+    @autoreleasepool {
+        const auto id = make_session_id();
+        auto created = CliSession::create(tui::lampo::kComparerProtocol, id, "plain patch");
+        REQUIRE(created);
+        const auto file = created->file();
+        CliSession session = std::move(*created);
+        NSPasteboard* board = session_board(id);
+        CHECK_FALSE(session.poll());
+        [board clearContents];
+        // A peer publishes in two calls. An empty board between them is not
+        // a consumed answer, even if setting its data keeps the same count.
+        CHECK_FALSE(session.poll());
+        [board setPropertyList:@{@"version": @"1", @"session": [NSString stringWithUTF8String:id.c_str()],
+                                 @"state": @"ready", @"reply": @"annotations"} forType:comparer_type()];
+        const auto ready = session.poll();
+        REQUIRE(ready);
+        CHECK(ready->reply == "annotations");
+        constexpr std::string_view document = R"({"version":1,"patch":"plain patch","annotations":[]})";
+        REQUIRE(session.update_request(ready->reply, document));
+        CHECK(session.file() == file);
+        CHECK(read_file(file) == document);
+        NSDictionary* request = [board propertyListForType:comparer_type()];
+        CHECK([request[@"state"] isEqualToString:@"request"]);
+        CHECK([request[@"reply"] isEqualToString:@"annotations"]);
+        CHECK(request[@"accept"] == nil);
+        CHECK_FALSE(session.poll());
+        CHECK_FALSE(session.update_request("annotations", "duplicate"));
+        CHECK(read_file(file) == document);
+
+        { std::ofstream output(file); output << R"({"version":1,"annotations":[]})"; }
+        [board clearContents];
+        [board setPropertyList:@{@"version": @"1", @"session": [NSString stringWithUTF8String:id.c_str()],
+                                 @"state": @"saved", @"reply": @"annotations"} forType:comparer_type()];
+        const auto saved = session.poll();
+        REQUIRE(saved);
+        const auto result = tui::viewer::decode_lampo_review_reply(read_file(file), saved->reply);
+        REQUIRE(result.annotations());
+        CHECK(result.annotations()->empty());
+    }
+}
 
 TEST_CASE("A Lampo session puts its payload exactly where Lampo looks", "[lampo]") {
     const std::string session_id = make_session_id();

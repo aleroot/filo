@@ -446,6 +446,9 @@ Every agent turn ends with the net changes it made, listed under its answer. Fil
 - Press **`Ctrl+Shift+X`** or run **`/changes all`** to open everything the conversation changed: one net diff per file, from before the first turn touched it to now. `Ctrl+Shift+X` needs a terminal that reports Shift with Ctrl (kitty keyboard protocol or modifyOtherKeys: kitty, Ghostty, WezTerm, iTerm2 with CSI u); macOS Terminal sends the same key for both, so use `/changes all` there. A file edited outside Filo over lines a turn wrote is named instead of being folded into the diff
 - Each file in a change box also carries a **`↗`** affordance that opens just that file
 - Lampo opens one window with a tab per file, reconstructed from the turn’s unified diff
+- Add comments in Lampo, then choose **Send Comments** to return them to Filo's prompt draft. As in Lampo's own chat, a comment belongs to the comparison it was made in: Filo keeps it with that turn, shows it again when you reopen the turn or one of its files, and saves it with the conversation. Each comment reaches the prompt once; later sends add only new comments, while edits and removals update what the turn keeps. Comments made in `/changes all` reach the prompt but are not kept, because the whole conversation has no single turn to hold them.
+- Filo negotiates structured annotations with the running Lampo. Older Lampo versions keep the existing Markdown comments workflow.
+- Closing the Lampo window without sending keeps the turn's comments unchanged.
 - A turn that changed nothing, or whose changes carry no diff (binary files, or a file beyond a size budget), says so instead of opening an empty window
 
 > The comparer is opt-in. `Built in` keeps every diff in the transcript, and `Terminal` pages it through `$PAGER` — on any platform.

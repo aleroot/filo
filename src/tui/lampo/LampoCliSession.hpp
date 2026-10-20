@@ -28,7 +28,7 @@ namespace tui::lampo {
 ///
 /// Every protocol has the same shape — a private session directory holding
 /// exactly one payload file, announced on a private pasteboard — and differs
-/// only in these four strings. Filo is one client of a public protocol; Lampo
+/// only in the payload location and reply formats. Filo is one client of a public protocol; Lampo
 /// knows nothing about Filo.
 struct CliProtocol {
     std::string_view directory_prefix;   ///< Session directory name prefix.
@@ -36,6 +36,7 @@ struct CliProtocol {
     std::string_view pasteboard_type;    ///< Property-list type on that pasteboard.
     std::string_view file_name;          ///< The one payload file Lampo reads.
     std::string_view reply = {};         ///< The `reply` value sent with the request.
+    std::string_view accept = {};        ///< An optional reply format the client can negotiate.
 };
 
 // The protocols Lampo publishes, declared together because they are one wire
@@ -59,6 +60,7 @@ inline constexpr CliProtocol kComparerProtocol{
     .pasteboard_type = "alessio.pollero.Lampo.comparer-view.v1",
     .file_name = "changes.patch",
     .reply = "comments",
+    .accept = "annotations",
 };
 
 /// The states a Lampo CLI protocol speaks. `request` is the client's; the rest
@@ -66,6 +68,7 @@ inline constexpr CliProtocol kComparerProtocol{
 /// business.
 namespace state {
 inline constexpr std::string_view request = "request";
+inline constexpr std::string_view ready = "ready";
 inline constexpr std::string_view editing = "editing";
 inline constexpr std::string_view viewing = "viewing";
 /// A comparer session whose comments go back to the client, in place of
@@ -80,6 +83,7 @@ inline constexpr std::string_view failed = "failed";
 struct CliMessage {
     std::string state;
     std::string error;  ///< Set only when Lampo reported a failure reason.
+    std::string reply;  ///< The reply format Lampo explicitly selected, when present.
 };
 
 /// The client half of one Lampo CLI session.
@@ -124,6 +128,10 @@ public:
     /// exact instance that answered so its liveness can be checked afterwards.
     [[nodiscard]] std::expected<void, std::string> launch(std::stop_token cancellation);
 
+    /// Replace the same granted file after Lampo selects an offered reply format.
+    [[nodiscard]] std::expected<void, std::string> update_request(
+        std::string_view reply, std::string_view content);
+
     /// The next message Lampo published, or nullopt when nothing new has
     /// arrived. Callers poll; the interval is theirs to choose.
     [[nodiscard]] std::optional<CliMessage> poll();
@@ -155,8 +163,8 @@ private:
     [[nodiscard]] std::expected<void, std::string> write_text(std::string_view content);
     [[nodiscard]] std::expected<void, std::string> write_copy_of(
         const std::filesystem::path& source);
-    /// Publishes the request and records the change count, so the client's own
-    /// announcement is never mistaken for Lampo's answer.
+    /// Records the change count before publishing. poll() ignores our request
+    /// without overlooking an immediate answer from a waiting Lampo.
     void announce();
     void publish(std::string_view state, std::string_view error = {});
     [[nodiscard]] std::expected<void, std::string> secure_payload();
@@ -168,6 +176,7 @@ private:
     std::string pasteboard_name_;
     std::string pasteboard_type_;
     std::string reply_;
+    std::string accept_;
     long observed_change_count_ = 0;
     std::shared_ptr<Launch> launch_;
 };

@@ -1,7 +1,11 @@
 #pragma once
 
+#include "core/review/Annotations.hpp"
+
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -50,6 +54,12 @@ public:
         return ViewResult{ViewStatus::Shown, {}, std::move(comments)};
     }
 
+    [[nodiscard]] static ViewResult annotated(std::vector<core::review::Annotation> annotations) {
+        auto result = shown();
+        result.annotations_ = std::move(annotations);
+        return result;
+    }
+
     [[nodiscard]] static ViewResult cancelled() noexcept {
         return ViewResult{ViewStatus::Cancelled, {}, {}};
     }
@@ -62,6 +72,10 @@ public:
     [[nodiscard]] const std::string& error() const noexcept { return error_; }
     /// What a reviewer returned. Empty for every backend that cannot review.
     [[nodiscard]] const std::string& comments() const noexcept { return comments_; }
+    /// An empty snapshot deletes the last comment; no snapshot leaves review state alone.
+    [[nodiscard]] const std::optional<std::vector<core::review::Annotation>>& annotations() const noexcept {
+        return annotations_;
+    }
 
 private:
     ViewResult(ViewStatus status, std::string error, std::string comments)
@@ -70,6 +84,7 @@ private:
     ViewStatus status_ = ViewStatus::Cancelled;
     std::string error_;
     std::string comments_;
+    std::optional<std::vector<core::review::Annotation>> annotations_;
 };
 
 // Everything a backend is allowed to touch during one comparison. The host
@@ -89,6 +104,7 @@ struct ViewContext {
     /// A detached backend calls this once the diff is on screen and it is
     /// waiting for the reviewer, so the host can say so. May be empty.
     std::function<void()> report_viewing;
+    std::span<const core::review::Annotation> annotations = {};
 };
 
 /// A backend able to present a diff outside the transcript.

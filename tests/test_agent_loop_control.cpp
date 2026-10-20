@@ -2388,6 +2388,44 @@ TEST_CASE("Marking a turn reverted stamps the newest summary, and only once",
     CHECK_FALSE(agent.mark_latest_turn_changes_reverted());
 }
 
+TEST_CASE("Review comments are kept with the turn they belong to",
+          "[agent][changes]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto provider = std::make_shared<FileEditingProvider>(std::vector<std::string>{});
+    core::agent::Agent agent(
+        provider, tool_manager,
+        test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+            .primary = std::filesystem::temp_directory_path(),
+            .enforce = true,
+            .version = 1,
+        }));
+
+    core::llm::Message answer{.role = "assistant", .content = "done"};
+    answer.turn_changes.id = "turn-1";
+    answer.turn_changes.files = {core::changes::FileChange{.path = "notes.txt", .diff = "@@ -1 +1 @@\n-a\n+b\n"}};
+    agent.append_history_message(core::llm::Message{.role = "user", .content = "edit"});
+    agent.append_history_message(answer);
+
+    const std::vector<core::review::Annotation> comments{{
+        .id = "15319332-3c51-4bd8-a391-30de79a90551",
+        .path = "notes.txt",
+        .side = "new",
+        .start_line = 1,
+        .end_line = 1,
+        .selected_text = "b",
+        .comment = "Keep a.",
+        .revision = "revision-1",
+    }};
+    CHECK(agent.set_turn_annotations("turn-1", comments));
+    const auto history = agent.get_history();
+    CHECK(history.back().turn_changes.annotations == comments);
+    CHECK(history.back().turn_changes.files == answer.turn_changes.files);
+
+    // A turn the conversation no longer has, or one saved before turns had an id.
+    CHECK_FALSE(agent.set_turn_annotations("turn-2", comments));
+    CHECK_FALSE(agent.set_turn_annotations("", comments));
+}
+
 TEST_CASE("A delegated worker records into the tracker it inherited and publishes nothing",
           "[agent][changes]") {
     const auto temp_path =

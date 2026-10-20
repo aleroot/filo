@@ -164,6 +164,7 @@ CliSession& CliSession::operator=(CliSession&& other) noexcept {
         pasteboard_name_ = std::exchange(other.pasteboard_name_, {});
         pasteboard_type_ = std::exchange(other.pasteboard_type_, {});
         reply_ = std::exchange(other.reply_, {});
+        accept_ = std::exchange(other.accept_, {});
         observed_change_count_ = std::exchange(other.observed_change_count_, 0);
         launch_ = std::move(other.launch_);
     }
@@ -205,6 +206,7 @@ std::expected<CliSession, std::string> CliSession::begin(
         std::string(protocol.pasteboard_prefix) + std::string(session_id);
     session.pasteboard_type_ = protocol.pasteboard_type;
     session.reply_ = protocol.reply;
+    session.accept_ = protocol.accept;
     return session;
 }
 
@@ -244,10 +246,10 @@ std::expected<void, std::string> CliSession::secure_payload() {
 }
 
 void CliSession::announce() {
-    publish(state::request);
     @autoreleasepool {
         observed_change_count_ = static_cast<long>(pasteboard(pasteboard_name_).changeCount);
     }
+    publish(state::request);
 }
 
 void CliSession::publish(std::string_view published_state, std::string_view error) {
@@ -267,6 +269,9 @@ void CliSession::publish(std::string_view published_state, std::string_view erro
             message[@"client"] = to_ns(kClientName);
             if (!reply_.empty()) {
                 message[@"reply"] = to_ns(reply_);
+            }
+            if (!accept_.empty() && reply_ != accept_) {
+                message[@"accept"] = to_ns(accept_);
             }
         }
 
@@ -308,6 +313,20 @@ std::expected<void, std::string> CliSession::launch(std::stop_token cancellation
     }
 }
 
+std::expected<void, std::string> CliSession::update_request(
+    std::string_view reply, std::string_view content) {
+    if (accept_.empty() || reply != accept_ || reply_ == accept_) {
+        return std::unexpected("Lampo selected an unsupported reply format.");
+    }
+    if (auto written = write_text(content); !written) {
+        cancel();
+        return std::unexpected(std::move(written.error()));
+    }
+    reply_ = reply;
+    announce();
+    return {};
+}
+
 std::optional<CliMessage> CliSession::poll() {
     @autoreleasepool {
         NSPasteboard* board = pasteboard(pasteboard_name_);
@@ -315,9 +334,12 @@ std::optional<CliMessage> CliSession::poll() {
         if (current == observed_change_count_) {
             return std::nullopt;
         }
-        observed_change_count_ = current;
-
         id value = [board propertyListForType:NSPasteboardType(to_ns(pasteboard_type_))];
+        // The peer can answer while this read is in flight. Retry a changing
+        // board instead of consuming one message under another's change count.
+        if (static_cast<long>(board.changeCount) != current) {
+            return std::nullopt;
+        }
         if (![value isKindOfClass:NSDictionary.class]) {
             return std::nullopt;
         }
@@ -332,10 +354,17 @@ std::optional<CliMessage> CliSession::poll() {
             || ![session isEqualToString:to_ns(session_id_)]) {
             return std::nullopt;
         }
+        observed_change_count_ = current;
+        if ([published_state isEqualToString:to_ns(state::request)]) {
+            return std::nullopt;
+        }
 
         CliMessage result{.state = to_std(published_state)};
         if (NSString* error = message[@"error"]; [error isKindOfClass:NSString.class]) {
             result.error = to_std(error);
+        }
+        if (NSString* reply = message[@"reply"]; [reply isKindOfClass:NSString.class]) {
+            result.reply = to_std(reply);
         }
         return result;
     }

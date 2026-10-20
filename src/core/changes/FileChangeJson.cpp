@@ -107,6 +107,10 @@ std::vector<FileChange> parse_files(simdjson::dom::array array) {
 void append_turn_changes_json(std::string& out, const TurnChanges& changes) {
     out += "{\"files\":";
     append_files(out, changes.files);
+    if (!changes.id.empty()) {
+        out += ',';
+        append_string_field(out, "id", changes.id);
+    }
     if (changes.partial_enumeration) {
         append_bool_field(out, "partial_enumeration", true);
     }
@@ -125,6 +129,10 @@ void append_turn_changes_json(std::string& out, const TurnChanges& changes) {
         append_string_field(out, "recovery_path", changes.recovery_path);
     }
     if (changes.workspace_observed) append_bool_field(out, "workspace_observed", true);
+    if (!changes.annotations.empty()) {
+        out += ",\"annotations\":";
+        core::review::append_annotations_json(out, changes.annotations);
+    }
     out += '}';
 }
 
@@ -150,6 +158,8 @@ TurnChanges parse_turn_changes_json(simdjson::dom::object object) {
     changes.reverted = core::utils::json::bool_field(object, "reverted");
     changes.workspace_observed = core::utils::json::bool_field(object, "workspace_observed");
     if (std::string_view path; !object["recovery_path"].get(path)) changes.recovery_path = path;
+    if (std::string_view id; !object["id"].get(id)) changes.id = id;
+    changes.annotations = core::review::parse_saved_annotations(object);
     return changes;
 }
 

@@ -4,6 +4,9 @@
 #include "tui/Conversation.hpp"
 #include "tui/SessionReplay.hpp"
 #include "core/changes/TurnChangeTracker.hpp"
+#include "core/changes/FileChangeJson.hpp"
+
+#include <simdjson.h>
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
@@ -316,6 +319,49 @@ TEST_CASE("A turn exports one patch for the comparer", "[tui][turn_file_changes]
     REQUIRE(comparison->disclosure_keys.size() == 2);
     CHECK(comparison->disclosure_keys[0] == turn_file_change_key(answer.id, "src/app.cpp"));
     CHECK(comparison->disclosure_keys[1] == turn_file_change_key(answer.id, "docs/guide.md"));
+}
+
+TEST_CASE("A turn comparison carries its turn and only the shown files' comments",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+    answer.turn_changes.id = "turn-1";
+    const core::review::Annotation on_app{.id = "app", .path = "src/app.cpp", .comment = "App."};
+    const core::review::Annotation on_guide{.id = "guide", .path = "docs/guide.md", .comment = "Guide."};
+    answer.turn_changes.annotations = {on_app, on_guide};
+
+    const auto turn = turn_comparison(answer);
+    REQUIRE(turn.has_value());
+    CHECK(turn->turn_id == "turn-1");
+    CHECK(turn->annotations == answer.turn_changes.annotations);
+
+    const auto file = turn_comparison(answer, "docs/guide.md");
+    REQUIRE(file.has_value());
+    CHECK(file->turn_id == "turn-1");
+    CHECK(file->annotations == std::vector{on_guide});
+}
+
+TEST_CASE("A turn's id and review comments survive a resume", "[tui][turn_file_changes]") {
+    core::changes::TurnChanges changes;
+    changes.id = "turn-1";
+    changes.files = sample_changes();
+    changes.annotations = {{
+        .id = "15319332-3c51-4bd8-a391-30de79a90551",
+        .path = "src/app.cpp",
+        .side = "new",
+        .start_line = 2,
+        .end_line = 2,
+        .selected_text = "new-app-line",
+        .comment = "Keep the old line.",
+        .revision = "revision-1",
+    }};
+    std::string json;
+    core::changes::append_turn_changes_json(json, changes);
+
+    simdjson::dom::parser parser;
+    simdjson::dom::object object;
+    REQUIRE(parser.parse(json).get(object) == simdjson::SUCCESS);
+    CHECK(core::changes::parse_turn_changes_json(object) == changes);
 }
 
 TEST_CASE("One file exports on its own", "[tui][turn_file_changes][diff_comparer]") {

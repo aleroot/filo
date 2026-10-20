@@ -34,6 +34,7 @@ struct ViewerOutcome {
     // What a reviewer returned, for the host's prompt draft. Empty when the
     // backend cannot review, or when nothing came back.
     std::string comments;
+    std::optional<std::vector<core::review::Annotation>> annotations;
 };
 
 // Drives one comparison at a time, whichever backend is configured.
@@ -67,7 +68,8 @@ public:
     // take_outcome() once the other application has answered.
     [[nodiscard]] std::optional<ViewerOutcome> open(
         std::string_view configured_comparer,
-        std::string_view patch);
+        std::string_view patch,
+        std::span<const core::review::Annotation> annotations = {});
 
     // True while a detached session holds the diff.
     [[nodiscard]] bool busy() const;
@@ -87,6 +89,7 @@ private:
         std::string session_id;
         std::unique_ptr<DiffViewer> viewer;
         std::string label;
+        std::vector<core::review::Annotation> annotations;
     };
 
     void run_detached(std::shared_ptr<Session> session);
