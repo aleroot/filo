@@ -346,6 +346,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/Base64.cpp
     src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp
+    src/core/utils/FileStamp.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/utils/ProcessUtils.cpp
     src/core/hooks/HookManager.cpp

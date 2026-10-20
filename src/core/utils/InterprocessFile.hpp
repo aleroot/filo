@@ -1,11 +1,14 @@
 #pragma once
 
+#include "FileStamp.hpp"
+
 #include <cstddef>
 #include <filesystem>
 #include <expected>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -74,11 +77,43 @@ inline constexpr std::filesystem::perms kPrivateFilePermissions =
 struct RegularFileContents {
     std::string bytes;
     std::optional<std::filesystem::perms> permissions; // nullopt means absent.
+    FileStamp stamp; // Of exactly these bytes; Missing when absent.
 };
 
-// Reads one regular file without following the final symlink or blocking on a
-// special file. Refuses oversized files and identity/metadata changes during
-// the read. Absence is a successful result, distinct from an unreadable file.
+// Streams one regular file without following the final symlink or blocking on
+// a special file, in chunks of bounded size: memory does not grow with the
+// file. Refuses oversized files, and `finish` refuses identity/metadata
+// changes during the read, so the chunks seen are exactly the stamped bytes.
+// Absence is a successful open, distinct from an unreadable file.
+class RegularFileReader {
+public:
+    static constexpr std::size_t kChunkBytes = 64 * 1024;
+
+    [[nodiscard]] static std::expected<RegularFileReader, std::string> open(
+        const std::filesystem::path& path, std::size_t max_bytes);
+    RegularFileReader(RegularFileReader&& other) noexcept;
+    RegularFileReader& operator=(RegularFileReader&&) = delete;
+    ~RegularFileReader();
+
+    /// Missing when the file is absent; otherwise as it was opened.
+    [[nodiscard]] const FileStamp& stamp() const noexcept { return stamp_; }
+    /// The next bytes, valid until the next call; empty at the end.
+    [[nodiscard]] std::expected<std::span<const char>, std::string> next();
+    /// After the last chunk: proves the file is still the one stamped.
+    [[nodiscard]] std::expected<void, std::string> finish() const;
+    /// Whether the path still names the file as it was stamped.
+    [[nodiscard]] bool unchanged() const noexcept { return FileStamp::of(path_) == stamp_; }
+
+private:
+    RegularFileReader(std::filesystem::path path, int fd) noexcept;
+    std::filesystem::path path_;
+    int fd_ = -1;
+    FileStamp stamp_;
+    std::uint64_t remaining_ = 0;
+    std::unique_ptr<char[]> buffer_;
+};
+
+// Reads one regular file whole, under the rules of RegularFileReader.
 [[nodiscard]] std::expected<RegularFileContents, std::string> read_regular_file(
     const std::filesystem::path& path, std::size_t max_bytes);
 

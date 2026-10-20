@@ -53,6 +53,25 @@ namespace core::utils::path {
     return relative;
 }
 
+/// Orders normalized paths by their native string: for them the same
+/// equality as path comparison, without parsing both into components on every
+/// comparison. Transparent, so a string key needs no path built to find it.
+struct NativeLess {
+    using is_transparent = void;
+    [[nodiscard]] static std::string_view view(const std::filesystem::path& path) noexcept { return path.native(); }
+    [[nodiscard]] static std::string_view view(std::string_view path) noexcept { return path; }
+    [[nodiscard]] bool operator()(const auto& lhs, const auto& rhs) const noexcept { return view(lhs) < view(rhs); }
+};
+
+/// relative_within for paths already normalized: a string prefix test, where
+/// relative_within parses both paths whole.
+[[nodiscard]] inline bool normalized_within(const std::filesystem::path& path,
+                                            const std::filesystem::path& base) noexcept {
+    const std::string_view text = path.native(), root = base.native();
+    if (root.empty() || !text.starts_with(root)) return false;
+    return text.size() == root.size() || root.ends_with('/') || text[root.size()] == '/';
+}
+
 [[nodiscard]] inline bool overlaps(const std::filesystem::path& a, const std::filesystem::path& b) {
     return relative_within(a, b).has_value() || relative_within(b, a).has_value();
 }

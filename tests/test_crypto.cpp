@@ -78,6 +78,34 @@ TEST_CASE("SHA-256 span and string_view overloads agree", "[crypto][sha256]") {
 // X25519 — RFC 7748
 // ─────────────────────────────────────────────────────────────────────────────
 
+TEST_CASE("Incremental SHA-256 agrees with one-shot hashing across every split",
+          "[crypto][sha256]") {
+    // Lengths straddle the 55/56/64-byte padding boundaries; every split point
+    // and a byte-at-a-time feed must give the one-shot digest.
+    std::string message;
+    for (std::size_t length = 0; length <= 130; ++length) {
+        const auto expected = sha256(std::string_view{message});
+        for (std::size_t split = 0; split <= length; ++split) {
+            Sha256 hash;
+            hash.update(std::string_view{message}.substr(0, split));
+            hash.update(std::string_view{message}.substr(split));
+            REQUIRE(hash.finish() == expected);
+        }
+        Sha256 bytewise;
+        for (const char byte : message) bytewise.update(std::string_view{&byte, 1});
+        REQUIRE(bytewise.finish() == expected);
+        message.push_back(static_cast<char>('a' + length % 26));
+    }
+    // FIPS 180-4: one million 'a', fed in uneven chunks.
+    Sha256 million;
+    const std::string chunk(997, 'a');
+    std::size_t fed = 0;
+    for (; fed + chunk.size() <= 1'000'000; fed += chunk.size()) million.update(chunk);
+    million.update(std::string(1'000'000 - fed, 'a'));
+    CHECK(core::utils::hex_encode(million.finish())
+          == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
 TEST_CASE("X25519 matches the RFC 7748 section 5.2 vectors", "[crypto][x25519]") {
     CHECK(to_hex(x25519(
               array_from_hex<32>(

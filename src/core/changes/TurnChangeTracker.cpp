@@ -4,12 +4,14 @@
 #include "WorkspaceMutationGate.hpp"
 
 #include "../tools/ToolDiffUtils.hpp"
+#include "../utils/FileStamp.hpp"
 #include "../utils/PathUtils.hpp"
 
 #include <algorithm>
 #include <array>
 #include <fstream>
 #include <iterator>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <span>
@@ -73,7 +75,7 @@ void TurnChangeTracker::set_workspace_roots(std::vector<fs::path> roots) {
     std::lock_guard lock(mutex_);
     workspace_roots_ = std::move(roots);
 }
-void TurnChangeTracker::set_observation_filter(std::function<bool(const fs::path&)> filter) {
+void TurnChangeTracker::set_observation_filter(ObservationFilter filter) {
     std::lock_guard lock(mutex_);
     observation_filter_ = std::move(filter);
 }
@@ -92,24 +94,9 @@ void TurnChangeTracker::finish_recovery() {
 }
 
 TurnChangeTracker::Stat TurnChangeTracker::stat_of(const fs::path& path) {
-    std::error_code ec;
-    const auto status = fs::symlink_status(path, ec);
-    if (ec || !fs::exists(status)) {
-        return {};  // Absent, or gone before it could be examined.
-    }
-    if (!fs::is_regular_file(status)) {
-        return {.exists = true};
-    }
-    Stat stat{.exists = true, .regular = true};
-    stat.mode = static_cast<unsigned>(status.permissions() & fs::perms::mask);
-    stat.size = fs::file_size(path, ec);
-    if (!ec) {
-        std::error_code time_ec;
-        const auto modified = static_cast<long long>(
-            fs::last_write_time(path, time_ec).time_since_epoch().count());
-        stat.stamp = fnv1a(std::to_string(stat.size) + ':' + std::to_string(modified) + ':' + std::to_string(stat.mode));
-    }
-    return stat;
+    const auto stamp = core::utils::FileStamp::of(path);
+    return {.exists = stamp.exists(), .regular = stamp.regular(), .size = stamp.size,
+            .stamp = stamp.identity, .mode = stamp.mode & 0777};
 }
 
 std::size_t TurnChangeTracker::remaining_bytes_unlocked() const {
@@ -204,24 +191,24 @@ TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in
 }
 
 TurnChangeTracker::Snapshot TurnChangeTracker::found_unlocked(const fs::path& path) {
-    if (const auto image = recovery_ ? recovery_->captured(path) : std::nullopt) {
+    if (recovery_ && recovery_->captured(path)) {
         if (const auto stat = stat_of(path); stat.regular && stat.stamp != 0) {
-            return {.state = Snapshot::State::Stored, .stored = image->hash,
-                    .stamp = stat.stamp, .mode = stat.mode};
+            return {.state = Snapshot::State::Stored, .stamp = stat.stamp, .mode = stat.mode};
         }
     }
     return read_unlocked(path, {});
 }
 
-void TurnChangeTracker::load_baseline_unlocked(const Key& key) {
-    const auto it = baseline_.find(key);
-    if (it == baseline_.end() || it->second.state != Snapshot::State::Stored) {
+void TurnChangeTracker::load_baseline_unlocked(Snapshot& baseline, const Key& key) {
+    if (baseline.state != Snapshot::State::Stored) {
         return;
     }
     Snapshot found{.state = Snapshot::State::Opaque, .opaque_as = FileChangeContent::BudgetSpent,
-                   .fingerprint = it->second.stamp,
-                   .stamp = it->second.stamp, .mode = it->second.mode};
-    if (auto bytes = recovery_->original({.hash = it->second.stored, .mode = it->second.mode})) {
+                   .fingerprint = baseline.stamp,
+                   .stamp = baseline.stamp, .mode = baseline.mode};
+    const auto image = recovery_->captured(key);
+    if (auto bytes = image ? recovery_->original(*image)
+                           : std::expected<std::string, std::string>(std::unexpect, "not captured")) {
         const auto size = bytes->size();
         std::istringstream in(std::move(*bytes));
         found = content_unlocked(in, size, std::move(found), {});
@@ -230,7 +217,7 @@ void TurnChangeTracker::load_baseline_unlocked(const Key& key) {
         partial_enumeration_ = true;
     }
     charge_unlocked(found);
-    it->second = std::move(found);
+    baseline = std::move(found);
 }
 
 std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining(
@@ -290,10 +277,10 @@ std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining
 
 TurnChangeTracker::Reclaimable TurnChangeTracker::reclaimable_for_unlocked(
     const Key& key) const {
-    const auto known = current_.find(key);
-    return known == current_.end()
+    const auto known = files_.find(key);
+    return known == files_.end()
         ? Reclaimable{}
-        : Reclaimable{.text = known->second.text.size(), .hashes = hash_bytes(known->second)};
+        : Reclaimable{.text = known->second.current.text.size(), .hashes = hash_bytes(known->second.current)};
 }
 
 std::size_t TurnChangeTracker::hash_bytes(const Snapshot& snapshot) noexcept {
@@ -311,14 +298,13 @@ void TurnChangeTracker::release_unlocked(const Snapshot& snapshot) noexcept {
 }
 
 void TurnChangeTracker::store_current_unlocked(const Key& key, Snapshot snapshot) {
+    auto& file = files_.at(key);  // Every observed path has its baseline first.
     if (snapshot.state != Snapshot::State::Stored) {
-        load_baseline_unlocked(key);  // The file is no longer as the turn found it.
+        load_baseline_unlocked(file.baseline, key);  // The file is no longer as the turn found it.
     }
-    if (const auto known = current_.find(key); known != current_.end()) {
-        release_unlocked(known->second);  // Superseded content is released.
-    }
+    release_unlocked(file.current);  // Superseded content is released.
     charge_unlocked(snapshot);
-    current_[key] = std::move(snapshot);
+    file.current = std::move(snapshot);
 }
 
 TurnChangeTracker::Key TurnChangeTracker::key_for(const fs::path& path) const {
@@ -351,8 +337,8 @@ TurnChangeTracker::Expansion TurnChangeTracker::expand_unlocked(const Key& root)
 
     // Files seen earlier under a directory that is now gone or changed.
     const std::string prefix = root + '/';
-    for (auto it = current_.lower_bound(prefix);
-         it != current_.end() && it->first.starts_with(prefix);
+    for (auto it = files_.lower_bound(prefix);
+         it != files_.end() && it->first.starts_with(prefix);
          ++it) {
         expansion.keys.push_back(it->first);
     }
@@ -363,14 +349,10 @@ TurnChangeTracker::Expansion TurnChangeTracker::expand_unlocked(const Key& root)
 }
 
 void TurnChangeTracker::reconcile_known_unlocked() {
-    std::vector<Key> keys;
-    keys.reserve(current_.size());
-    for (const auto& [key, snapshot] : current_) {
-        keys.push_back(key);
-    }
-    for (const auto& key : keys) {
-        // Metadata only: a path whose size and mtime did not move is not read.
-        if (stat_of(key).stamp == current_.at(key).stamp) {
+    // Nothing is inserted or erased below, so iterating in place is safe.
+    for (const auto& [key, file] : files_) {
+        // Metadata only: a path whose stamp did not move is not read.
+        if (stat_of(key).stamp == file.current.stamp) {
             continue;
         }
         store_current_unlocked(
@@ -393,7 +375,8 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
     for (const auto& path : scope.paths) {
         const Key root = key_for(path);
         auto expansion = expand_unlocked(root);
-        std::erase_if(expansion.keys, [&](const auto& path) { return !observable_unlocked(path); });
+        // Expansion follows a symlinked file to list it: resolve every key.
+        std::erase_if(expansion.keys, [&](const auto& path) { return !observable_unlocked(path, false); });
         partial_enumeration_ |= !expansion.complete;
         if (recovery_) {
             std::vector<fs::path> paths(expansion.keys.begin(), expansion.keys.end());
@@ -401,13 +384,13 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
             else {
                 std::vector<fs::path> created;
                 if (expansion.complete) for (const auto& path : paths)
-                    if (!baseline_.contains(path.generic_string())) created.push_back(path);
+                    if (!files_.contains(path.generic_string())) created.push_back(path);
                 recovery_->after(paths, created);
             }
         }
         for (const auto& key : expansion.keys) {
             Snapshot snapshot = read_unlocked(key, reclaimable_for_unlocked(key));
-            if (!baseline_.contains(key)) {
+            if (!files_.contains(key)) {
                 // A path met for the first time after the mutation was not seen
                 // before it, so what it held then is unknown: an empty baseline
                 // reports it as the change it is, and lets a move pair it with
@@ -415,7 +398,7 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
                 // is the pre-image.
                 Snapshot baseline = when == Observation::After ? Snapshot{} : snapshot;
                 charge_unlocked(baseline);
-                baseline_.emplace(key, std::move(baseline));
+                files_.try_emplace(key, Tracked{.baseline = std::move(baseline)});
             }
             store_current_unlocked(key, std::move(snapshot));
         }
@@ -433,7 +416,7 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
         return;
     }
     auto inventory = workspace_inventory(workspace_roots_, limits_.max_files_per_directory,
-        [&](const auto& path) { return observable_unlocked(path); });
+        [&](const auto& path) { return observable_unlocked(path, true); });
     partial_enumeration_ |= !inventory.complete;
     if (when == Observation::Before) {
         workspace_observed_ = true;
@@ -444,28 +427,28 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
     }
     std::vector<fs::path> created;
     for (const auto& path : inventory.paths) {
-        const auto key = key_for(path);
-        if (baseline_.contains(key)) continue;
+        const Key key = path.generic_string();  // Canonical already.
+        if (files_.contains(key)) continue;
         if (when == Observation::After && !inventory_complete_) continue;
         Snapshot current = when == Observation::Before ? found_unlocked(path) : read_unlocked(path, {});
         Snapshot original = when == Observation::Before ? current : Snapshot{};
         charge_unlocked(original);
-        baseline_.emplace(key, std::move(original));
+        files_.try_emplace(key, Tracked{.baseline = std::move(original)});
         store_current_unlocked(key, std::move(current));
         if (when == Observation::After) created.push_back(path);
     }
     if (when == Observation::After) checkpoint_current_unlocked(created);
 }
 
-bool TurnChangeTracker::observable_unlocked(const fs::path& path) const {
-    return (!recovery_ || recovery_->can_observe(path)) && (!observation_filter_ || observation_filter_(path));
+bool TurnChangeTracker::observable_unlocked(const fs::path& path, bool canonical) const {
+    return (!recovery_ || recovery_->can_observe(path)) && (!observation_filter_ || observation_filter_(path, canonical));
 }
 
 void TurnChangeTracker::checkpoint_current_unlocked(std::span<const fs::path> created) {
     if (!recovery_) return;
     std::vector<fs::path> paths;
-    paths.reserve(current_.size());
-    for (const auto& [path, _] : current_) paths.emplace_back(path);
+    paths.reserve(files_.size());
+    for (const auto& key : files_ | std::views::keys) paths.emplace_back(key);
     recovery_->after(paths, created);
 }
 
@@ -503,11 +486,11 @@ void TurnChangeTracker::note_unscoped_tool_unlocked(std::string_view tool) {
 
 void TurnChangeTracker::record_move_unlocked(const Key& source, const Key& destination) {
     const auto link = [this](const Key& from, const Key& to) {
-        const auto from_now = current_.find(from);
-        const auto to_now = current_.find(to);
-        if (from_now == current_.end() || to_now == current_.end()
-            || from_now->second.state != Snapshot::State::Missing
-            || to_now->second.state == Snapshot::State::Missing) {
+        const auto from_now = files_.find(from);
+        const auto to_now = files_.find(to);
+        if (from_now == files_.end() || to_now == files_.end()
+            || from_now->second.current.state != Snapshot::State::Missing
+            || to_now->second.current.state == Snapshot::State::Missing) {
             return;  // The move did not happen (yet).
         }
         Key origin = from;
@@ -520,8 +503,8 @@ void TurnChangeTracker::record_move_unlocked(const Key& source, const Key& desti
 
     link(source, destination);
     const std::string prefix = source + '/';
-    for (auto it = current_.lower_bound(prefix);
-         it != current_.end() && it->first.starts_with(prefix);
+    for (auto it = files_.lower_bound(prefix);
+         it != files_.end() && it->first.starts_with(prefix);
          ++it) {
         link(it->first, destination + it->first.substr(source.size()));
     }
@@ -596,8 +579,8 @@ FileChange TurnChangeTracker::describe(FileChangeKind kind,
                                        const Key& from,
                                        const Key& to,
                                        ReportBudget& budget) const {
-    const Snapshot& before = baseline_.at(from);
-    const Snapshot& after = current_.at(to);
+    const Snapshot& before = files_.at(from).baseline;
+    const Snapshot& after = files_.at(to).current;
 
     FileChange change{.kind = kind, .path = display_path(to)};
     if (kind == FileChangeKind::Renamed) {
@@ -692,8 +675,8 @@ TurnChanges TurnChangeTracker::changes() const {
     };
     for (const auto& [destination, origin] : origin_) {
         if (destination == origin
-            || !missing(current_.at(origin)) || missing(current_.at(destination))
-            || missing(baseline_.at(origin)) || !missing(baseline_.at(destination))) {
+            || !missing(files_.at(origin).current) || missing(files_.at(destination).current)
+            || missing(files_.at(origin).baseline) || !missing(files_.at(destination).baseline)) {
             continue;
         }
         result.files.push_back(
@@ -702,8 +685,9 @@ TurnChanges TurnChangeTracker::changes() const {
         reported.insert(destination);
     }
 
-    for (const auto& [key, before] : baseline_) {
-        const Snapshot& after = current_.at(key);
+    for (const auto& [key, file] : files_) {
+        const Snapshot& before = file.baseline;
+        const Snapshot& after = file.current;
         if (reported.contains(key) || before.same_content_as(after)) {
             continue;
         }

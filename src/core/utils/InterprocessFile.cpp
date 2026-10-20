@@ -2,6 +2,9 @@
 
 #include "Uuid.hpp"
 
+#include <algorithm>
+#include <memory>
+#include <utility>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -259,45 +262,77 @@ std::optional<std::string> read_file(const std::filesystem::path& path) {
     return content;
 }
 
-std::expected<RegularFileContents, std::string> read_regular_file(
+RegularFileReader::RegularFileReader(std::filesystem::path path, int fd) noexcept
+    : path_(std::move(path)), fd_(fd) {}
+
+RegularFileReader::RegularFileReader(RegularFileReader&& other) noexcept
+    : path_(std::move(other.path_)), fd_(std::exchange(other.fd_, -1)), stamp_(other.stamp_),
+      remaining_(other.remaining_), buffer_(std::move(other.buffer_)) {}
+
+RegularFileReader::~RegularFileReader() {
+    if (fd_ >= 0) ::close(fd_);
+}
+
+std::expected<RegularFileReader, std::string> RegularFileReader::open(
     const std::filesystem::path& path, std::size_t max_bytes) {
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
-        if (errno == ENOENT || errno == ENOTDIR) return RegularFileContents{};
+        if (errno == ENOENT || errno == ENOTDIR) return RegularFileReader(path, -1);
         return std::unexpected("Cannot read file: " + path.string());
     }
-    struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
-    struct stat stat{};
-    if (::fstat(fd, &stat) != 0 || !S_ISREG(stat.st_mode) || stat.st_size < 0 ||
-        static_cast<std::uintmax_t>(stat.st_size) > max_bytes)
+    RegularFileReader reader(path, fd);
+    struct stat status{};
+    if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) || status.st_size < 0 ||
+        static_cast<std::uintmax_t>(status.st_size) > max_bytes)
         return std::unexpected("Path is not a supported regular file or exceeds the read limit: " + path.string());
-    RegularFileContents result;
-    result.bytes.resize(static_cast<std::size_t>(stat.st_size));
-    std::size_t offset = 0;
-    while (offset < result.bytes.size()) {
-        const auto n = ::read(fd, result.bytes.data() + offset, result.bytes.size() - offset);
+    reader.stamp_ = FileStamp::from(status);
+    reader.remaining_ = reader.stamp_.size;
+    return reader;
+}
+
+std::expected<std::span<const char>, std::string> RegularFileReader::next() {
+    if (remaining_ == 0) return std::span<const char>{};
+    if (!buffer_) buffer_ = std::make_unique_for_overwrite<char[]>(kChunkBytes);
+    const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining_, kChunkBytes));
+    std::size_t got = 0;
+    while (got < want) {
+        const auto n = ::read(fd_, buffer_.get() + got, want - got);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return std::unexpected("File changed while reading: " + path.string());
-        offset += static_cast<std::size_t>(n);
+        if (n <= 0) return std::unexpected("File changed while reading: " + path_.string());
+        got += static_cast<std::size_t>(n);
     }
+    remaining_ -= got;
+    return std::span<const char>{buffer_.get(), got};
+}
+
+std::expected<void, std::string> RegularFileReader::finish() const {
+    if (!stamp_.exists()) return {};
     char extra;
-    if (::read(fd, &extra, 1) != 0)
-        return std::unexpected("File grew while reading: " + path.string());
-    struct stat current{};
-    if (::lstat(path.c_str(), &current) != 0 || stat.st_dev != current.st_dev ||
-        stat.st_ino != current.st_ino || stat.st_size != current.st_size || stat.st_mode != current.st_mode)
-        return std::unexpected("File changed while reading: " + path.string());
-#if defined(__APPLE__)
-    const auto modified = stat.st_mtimespec, now_modified = current.st_mtimespec;
-    const auto changed = stat.st_ctimespec, now_changed = current.st_ctimespec;
-#else
-    const auto modified = stat.st_mtim, now_modified = current.st_mtim;
-    const auto changed = stat.st_ctim, now_changed = current.st_ctim;
-#endif
-    if (modified.tv_sec != now_modified.tv_sec || modified.tv_nsec != now_modified.tv_nsec ||
-        changed.tv_sec != now_changed.tv_sec || changed.tv_nsec != now_changed.tv_nsec)
-        return std::unexpected("File changed while reading: " + path.string());
-    result.permissions = static_cast<std::filesystem::perms>(stat.st_mode & 0777);
+    if (remaining_ != 0 || ::read(fd_, &extra, 1) != 0)
+        return std::unexpected("File grew while reading: " + path_.string());
+    // Identity covers device, inode, size, mode, mtime and ctime: any write or
+    // replacement since the open moved it.
+    if (!unchanged())
+        return std::unexpected("File changed while reading: " + path_.string());
+    return {};
+}
+
+std::expected<RegularFileContents, std::string> read_regular_file(
+    const std::filesystem::path& path, std::size_t max_bytes) {
+    auto reader = RegularFileReader::open(path, max_bytes);
+    if (!reader) return std::unexpected(reader.error());
+    RegularFileContents result;
+    if (!reader->stamp().exists()) return result;
+    result.bytes.reserve(static_cast<std::size_t>(reader->stamp().size));
+    for (;;) {
+        const auto chunk = reader->next();
+        if (!chunk) return std::unexpected(chunk.error());
+        if (chunk->empty()) break;
+        result.bytes.append(chunk->data(), chunk->size());
+    }
+    if (auto done = reader->finish(); !done) return std::unexpected(done.error());
+    result.permissions = static_cast<std::filesystem::perms>(reader->stamp().mode & 0777);
+    result.stamp = reader->stamp();
     return result;
 }
 

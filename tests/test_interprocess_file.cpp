@@ -2,8 +2,11 @@
 
 #include "core/utils/InterprocessFile.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <thread>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -140,4 +143,74 @@ TEST_CASE("Bounded regular file reads distinguish absence, empty files and unsaf
     CHECK_FALSE(core::utils::read_regular_file(temp.path, 4));
     REQUIRE(::mkfifo((temp.path / "pipe").c_str(), 0600) == 0);
     CHECK_FALSE(core::utils::read_regular_file(temp.path / "pipe", 4));
+}
+
+TEST_CASE("A streamed regular file arrives in bounded chunks of exactly its stamped bytes",
+          "[file][recovery]") {
+    TempDir temp;
+    const auto path = temp.path / "large";
+    std::string content(core::utils::RegularFileReader::kChunkBytes * 2 + 123, '\0');
+    for (std::size_t i = 0; i < content.size(); ++i) content[i] = static_cast<char>(i * 31);
+    REQUIRE(core::utils::atomic_write_file(path, content));
+
+    auto reader = core::utils::RegularFileReader::open(path, content.size());
+    REQUIRE(reader);
+    CHECK(reader->stamp().regular());
+    CHECK(reader->stamp().size == content.size());
+    std::string streamed;
+    for (;;) {
+        const auto chunk = reader->next();
+        REQUIRE(chunk);
+        if (chunk->empty()) break;
+        CHECK(chunk->size() <= core::utils::RegularFileReader::kChunkBytes);
+        streamed.append(chunk->data(), chunk->size());
+    }
+    CHECK(reader->finish());
+    CHECK(streamed == content);
+    CHECK(reader->stamp() == core::utils::FileStamp::of(path));
+
+    // A write between the open and the end is caught, whatever it changed.
+    auto changed = core::utils::RegularFileReader::open(path, content.size());
+    REQUIRE(changed);
+    REQUIRE(changed->next());
+    std::ofstream(path, std::ios::in | std::ios::out | std::ios::binary).put('x');
+    // Kernels may stamp from a coarse clock; a moved mtime is unambiguous.
+    std::filesystem::last_write_time(path, std::filesystem::last_write_time(path) - std::chrono::hours(1));
+    while (true) {
+        const auto chunk = changed->next();
+        if (!chunk || chunk->empty()) break;
+    }
+    CHECK_FALSE(changed->finish());
+
+    auto missing = core::utils::RegularFileReader::open(temp.path / "missing", 1);
+    REQUIRE(missing);
+    CHECK_FALSE(missing->stamp().exists());
+}
+
+TEST_CASE("A file stamp moves with every write and is trusted only once settled",
+          "[file][recovery]") {
+    TempDir temp;
+    const auto path = temp.path / "stamped";
+    REQUIRE(core::utils::atomic_write_file(path, "abc"));
+    const auto first = core::utils::FileStamp::of(path);
+    REQUIRE(first.regular());
+    CHECK(first.identity != 0);
+    CHECK(core::utils::FileStamp::of(path) == first);
+
+    // Same size, mtime put back: only ctime still tells the write apart. The
+    // pause outlasts a coarse kernel clock tick, so ctime can move at all.
+    const auto modified = std::filesystem::last_write_time(path);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::ofstream(path, std::ios::in | std::ios::out | std::ios::binary).put('x');
+    std::filesystem::last_write_time(path, modified);
+    CHECK(core::utils::FileStamp::of(path).identity != first.identity);
+
+    // Just written: a later write in the same clock tick could leave it as is.
+    const auto now = std::chrono::system_clock::now();
+    CHECK(first.settled_identity(now) == 0);
+    CHECK(first.settled_identity(now + core::utils::FileStamp::kSettleTime * 2) == first.identity);
+
+    CHECK_FALSE(core::utils::FileStamp::of(temp.path / "missing").exists());
+    CHECK(core::utils::FileStamp::of(temp.path).kind == core::utils::FileStamp::Kind::Other);
+    CHECK(core::utils::FileStamp::of(temp.path).identity == 0);
 }

@@ -6,6 +6,8 @@
 #include "core/changes/WorkspaceMutationGate.hpp"
 #include "core/changes/TurnRecovery.hpp"
 #include "core/changes/WorkspaceInventory.hpp"
+#include "core/changes/RecoveryStore.hpp"
+#include "core/utils/FileStamp.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/ProcessUtils.hpp"
 #include "core/tools/ShellTool.hpp"
@@ -17,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -596,7 +599,7 @@ TEST_CASE("Recovery refuses a live recorded process group and a corrupted origin
     CHECK_FALSE(core::changes::TurnRecovery::reconcile(checkpoint, dir.path, mutations));
     recovery.after(paths);
     recovery.finish();
-    for (const auto& blob : fs::directory_iterator(checkpoint / "objects")) put(blob.path(), "corrupted");
+    for (const auto& blob : fs::directory_iterator(checkpoint.parent_path() / "objects")) put(blob.path(), "corrupted");
     TurnChanges changes;
     changes.files.push_back({.path = "app.cpp"});
     changes.recovery_path = checkpoint.string();
@@ -766,7 +769,12 @@ TEST_CASE("Completed recovery storage retains only the configured number of turn
         checkpoint.after(paths);
         checkpoint.finish();
     }
-    CHECK(static_cast<std::size_t>(std::distance(fs::directory_iterator(storage.path), fs::directory_iterator{}))
+    const auto turns = core::changes::RecoveryStore::turn_directories(storage.path);
+    REQUIRE(turns);
+    CHECK(turns->size() == core::changes::TurnRecovery::kRetainedTurns);
+    // The shared store keeps exactly what the retained turns refer to: each
+    // turn's distinct original.
+    CHECK(static_cast<std::size_t>(std::distance(fs::directory_iterator(storage.path / "objects"), fs::directory_iterator{}))
         == core::changes::TurnRecovery::kRetainedTurns);
 }
 
@@ -855,7 +863,7 @@ TEST_CASE("A failed post-observation is reported once without retrying the check
     tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(checkpoint, dir.path));
     bool mutated = false;
     int post_observations = 0;
-    tracker.set_observation_filter([&](const auto&) {
+    tracker.set_observation_filter([&](const auto&, bool) {
         if (mutated) ++post_observations;
         return true;
     });
@@ -950,4 +958,133 @@ TEST_CASE("A shell edit keeps its diff in a workspace larger than the retention 
     CHECK(changes.files[1].kind == FileChangeKind::Deleted);
     CHECK(changes.files[1].deleted == 1);
     CHECK_THAT(changes.files[2].diff, ContainsSubstring("+edited"));
+}
+
+TEST_CASE("A later turn shares the originals of files it did not change",
+          "[changes][recovery][store]") {
+    core::changes::WorkspaceMutationGate mutations;
+    TempDir dir, storage;
+    const auto kept = dir.path / "kept.cpp";
+    const auto edited = dir.path / "edited.cpp";
+    put(kept, "kept\n");
+    put(edited, "first\n");
+    const std::vector<fs::path> paths{kept, edited};
+    const auto objects = [&] {
+        return static_cast<std::size_t>(std::distance(
+            fs::directory_iterator(storage.path / "objects"), fs::directory_iterator{}));
+    };
+    const auto entries = [&](const fs::path& turn) {
+        auto manifest = core::changes::RecoveryStore(turn).load(dir.path);
+        REQUIRE(manifest);
+        return manifest->entries;
+    };
+    // A stamp is trusted only once its file has settled.
+    std::this_thread::sleep_for(core::utils::FileStamp::kSettleTime + std::chrono::milliseconds(200));
+
+    const auto first = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        core::changes::TurnRecovery turn(first, dir.path);
+        turn.before(paths);
+        put(edited, "second\n");
+        turn.after(paths);
+        turn.finish();
+    }
+    CHECK(objects() == 2);
+    CHECK(entries(first).at(kept).before_stamp != 0);
+
+    const auto second = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        core::changes::TurnRecovery turn(second, dir.path);
+        turn.before(paths);
+        put(kept, "changed in the second turn\n");
+        turn.after(paths);
+        turn.finish();
+    }
+    // The unchanged file shares the first turn's object; the one the first turn
+    // edited was written too recently to trust its stamp, so its new content is
+    // stored, once.
+    CHECK(objects() == 3);
+    CHECK(entries(second).at(kept).before == entries(first).at(kept).before);
+    CHECK(entries(second).at(edited).before == entries(first).at(edited).after);
+    CHECK(fs::directory_iterator(second) != fs::directory_iterator{});
+    CHECK_FALSE(fs::exists(second / "objects"));
+
+    // Reverting the second turn restores from the object it shared.
+    TurnChanges changes;
+    changes.files.push_back({.path = "kept.cpp"});
+    changes.recovery_path = second.string();
+    REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(kept) == "kept\n");
+}
+
+TEST_CASE("A turn recorded with its own object store still reverts",
+          "[changes][recovery][store]") {
+    core::changes::WorkspaceMutationGate mutations;
+    TempDir dir, storage;
+    const auto file = dir.path / "legacy.cpp";
+    put(file, "original\n");
+    const std::vector<fs::path> paths{file};
+    const auto turn_directory = storage.path / "turn";
+    {
+        core::changes::TurnRecovery turn(turn_directory, dir.path);
+        turn.before(paths);
+        put(file, "changed\n");
+        turn.after(paths);
+        turn.finish();
+    }
+    // The layout before the session-wide store: objects inside the turn.
+    fs::rename(storage.path / "objects", turn_directory / "objects");
+    CHECK_FALSE(core::changes::RecoveryStore(turn_directory).shares_objects());
+    TurnChanges changes;
+    changes.files.push_back({.path = "legacy.cpp"});
+    changes.recovery_path = turn_directory.string();
+    REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(file) == "original\n");
+}
+
+TEST_CASE("Only paths an inventory found are offered to the filter as canonical",
+          "[changes][inventory][regression]") {
+    TempDir dir, outside;
+    const auto file = dir.path / "inside.txt";
+    put(file, "inside\n");
+    put(outside.path / "secret.txt", "secret\n");
+    // Scope expansion lists this link by its in-workspace name: the filter
+    // must resolve it, or it would read the file it points to.
+    fs::create_symlink(outside.path / "secret.txt", dir.path / "link.txt");
+    TurnChangeTracker tracker(dir.path);
+    std::vector<std::pair<std::string, bool>> offered;
+    tracker.set_observation_filter([&](const fs::path& path, bool canonical) {
+        offered.emplace_back(path.filename().string(), canonical);
+        return true;
+    });
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [] {});
+    CHECK(std::ranges::contains(offered, std::pair<std::string, bool>{"inside.txt", true}));
+    CHECK_FALSE(std::ranges::contains(offered, std::pair<std::string, bool>{"link.txt", true}));
+    offered.clear();
+    edit(tracker, scope_of({dir.path}), [] {});
+    CHECK(std::ranges::contains(offered, std::pair<std::string, bool>{"link.txt", false}));
+    CHECK(std::ranges::none_of(offered, [](const auto& entry) { return entry.second; }));
+}
+
+TEST_CASE("A turn still recording keeps the shared store from being swept",
+          "[changes][recovery][store]") {
+    TempDir dir, storage;
+    const auto file = dir.path / "source.cpp";
+    put(file, "original\n");
+    const std::vector<fs::path> paths{file};
+    // An object stored by a turn whose manifest does not list it yet.
+    const auto in_flight = storage.path / "objects" / std::string(64, 'a');
+    core::changes::TurnRecovery running(core::changes::RecoveryStore::new_directory(storage.path), dir.path);
+    running.before(paths);
+    put(in_flight, "not yet listed");
+    {
+        core::changes::TurnRecovery other(core::changes::RecoveryStore::new_directory(storage.path), dir.path);
+        other.before(paths);
+        other.after(paths);
+        other.finish();
+    }
+    CHECK(fs::exists(in_flight));
+    running.after(paths);
+    running.finish();
+    CHECK_FALSE(fs::exists(in_flight));
 }

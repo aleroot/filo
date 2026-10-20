@@ -36,69 +36,95 @@ constexpr std::array<std::uint32_t, 64> kSha256RoundConstants{
     return (value >> count) | (value << (32u - count));
 }
 
-[[nodiscard]] std::array<std::uint8_t, 32> sha256_bytes(
-    std::span<const std::uint8_t> message) {
-    std::array<std::uint32_t, 8> hash{
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
-    };
+} // namespace
 
-    std::vector<std::uint8_t> data(message.begin(), message.end());
-    const std::uint64_t bit_length = static_cast<std::uint64_t>(message.size()) * 8u;
-    data.push_back(0x80u);
-    while (data.size() % 64u != 56u) data.push_back(0x00u);
-    for (int i = 7; i >= 0; --i) {
-        data.push_back(static_cast<std::uint8_t>((bit_length >> (i * 8)) & 0xffu));
+void Sha256::compress(std::span<const std::uint8_t, 64> block) noexcept {
+    std::array<std::uint32_t, 64> words{};
+    for (std::size_t i = 0; i < 16; ++i) {
+        words[i] = (std::uint32_t(block[i * 4u]) << 24u)
+                 | (std::uint32_t(block[i * 4u + 1u]) << 16u)
+                 | (std::uint32_t(block[i * 4u + 2u]) << 8u)
+                 | std::uint32_t(block[i * 4u + 3u]);
+    }
+    for (std::size_t i = 16; i < words.size(); ++i) {
+        const auto s0 = rotate_right(words[i - 15], 7u)
+                      ^ rotate_right(words[i - 15], 18u)
+                      ^ (words[i - 15] >> 3u);
+        const auto s1 = rotate_right(words[i - 2], 17u)
+                      ^ rotate_right(words[i - 2], 19u)
+                      ^ (words[i - 2] >> 10u);
+        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
     }
 
-    for (std::size_t offset = 0; offset < data.size(); offset += 64u) {
-        std::array<std::uint32_t, 64> words{};
-        for (std::size_t i = 0; i < 16; ++i) {
-            words[i] = (std::uint32_t(data[offset + i * 4u]) << 24u)
-                     | (std::uint32_t(data[offset + i * 4u + 1u]) << 16u)
-                     | (std::uint32_t(data[offset + i * 4u + 2u]) << 8u)
-                     | std::uint32_t(data[offset + i * 4u + 3u]);
-        }
-        for (std::size_t i = 16; i < words.size(); ++i) {
-            const auto s0 = rotate_right(words[i - 15], 7u)
-                          ^ rotate_right(words[i - 15], 18u)
-                          ^ (words[i - 15] >> 3u);
-            const auto s1 = rotate_right(words[i - 2], 17u)
-                          ^ rotate_right(words[i - 2], 19u)
-                          ^ (words[i - 2] >> 10u);
-            words[i] = words[i - 16] + s0 + words[i - 7] + s1;
-        }
-
-        auto a = hash[0]; auto b = hash[1]; auto c = hash[2]; auto d = hash[3];
-        auto e = hash[4]; auto f = hash[5]; auto g = hash[6]; auto h = hash[7];
-        for (std::size_t i = 0; i < words.size(); ++i) {
-            const auto upper_sigma1 = rotate_right(e, 6u)
-                                    ^ rotate_right(e, 11u)
-                                    ^ rotate_right(e, 25u);
-            const auto choose = (e & f) ^ (~e & g);
-            const auto temp1 = h + upper_sigma1 + choose
-                             + kSha256RoundConstants[i] + words[i];
-            const auto upper_sigma0 = rotate_right(a, 2u)
-                                    ^ rotate_right(a, 13u)
-                                    ^ rotate_right(a, 22u);
-            const auto majority = (a & b) ^ (a & c) ^ (b & c);
-            const auto temp2 = upper_sigma0 + majority;
-            h = g; g = f; f = e; e = d + temp1;
-            d = c; c = b; b = a; a = temp1 + temp2;
-        }
-        hash[0] += a; hash[1] += b; hash[2] += c; hash[3] += d;
-        hash[4] += e; hash[5] += f; hash[6] += g; hash[7] += h;
+    auto a = state_[0]; auto b = state_[1]; auto c = state_[2]; auto d = state_[3];
+    auto e = state_[4]; auto f = state_[5]; auto g = state_[6]; auto h = state_[7];
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        const auto upper_sigma1 = rotate_right(e, 6u)
+                                ^ rotate_right(e, 11u)
+                                ^ rotate_right(e, 25u);
+        const auto choose = (e & f) ^ (~e & g);
+        const auto temp1 = h + upper_sigma1 + choose
+                         + kSha256RoundConstants[i] + words[i];
+        const auto upper_sigma0 = rotate_right(a, 2u)
+                                ^ rotate_right(a, 13u)
+                                ^ rotate_right(a, 22u);
+        const auto majority = (a & b) ^ (a & c) ^ (b & c);
+        const auto temp2 = upper_sigma0 + majority;
+        h = g; g = f; f = e; e = d + temp1;
+        d = c; c = b; b = a; a = temp1 + temp2;
     }
+    state_[0] += a; state_[1] += b; state_[2] += c; state_[3] += d;
+    state_[4] += e; state_[5] += f; state_[6] += g; state_[7] += h;
+}
+
+Sha256& Sha256::update(std::span<const std::uint8_t> data) noexcept {
+    length_ += data.size();
+    if (buffered_ != 0) {
+        const auto take = std::min(data.size(), block_.size() - buffered_);
+        std::ranges::copy(data.first(take), block_.begin() + static_cast<std::ptrdiff_t>(buffered_));
+        buffered_ += take;
+        data = data.subspan(take);
+        if (buffered_ < block_.size()) return *this;
+        compress(block_);
+        buffered_ = 0;
+    }
+    // Whole blocks straight from the input: nothing is copied.
+    for (; data.size() >= 64; data = data.subspan(64)) compress(data.first<64>());
+    std::ranges::copy(data, block_.begin());
+    buffered_ = data.size();
+    return *this;
+}
+
+Sha256& Sha256::update(std::string_view data) noexcept {
+    return update(std::as_bytes(std::span{data}));
+}
+
+Sha256& Sha256::update(std::span<const std::byte> data) noexcept {
+    return update(std::span{reinterpret_cast<const std::uint8_t*>(data.data()), data.size()});
+}
+
+std::array<std::uint8_t, 32> Sha256::finish() noexcept {
+    const std::uint64_t bit_length = length_ * 8u;
+    std::array<std::uint8_t, 72> padding{0x80u};
+    // One 0x80 byte, zeros up to 56 mod 64, then the length: 9 to 72 bytes.
+    const std::size_t zeros = (block_.size() + 55u - buffered_) % block_.size();
+    for (int i = 0; i < 8; ++i) {
+        padding[1 + zeros + static_cast<std::size_t>(i)] =
+            static_cast<std::uint8_t>(bit_length >> (56 - i * 8));
+    }
+    update(std::span{padding}.first(1 + zeros + 8));
 
     std::array<std::uint8_t, 32> digest{};
-    for (std::size_t i = 0; i < hash.size(); ++i) {
-        digest[i * 4u] = static_cast<std::uint8_t>((hash[i] >> 24u) & 0xffu);
-        digest[i * 4u + 1u] = static_cast<std::uint8_t>((hash[i] >> 16u) & 0xffu);
-        digest[i * 4u + 2u] = static_cast<std::uint8_t>((hash[i] >> 8u) & 0xffu);
-        digest[i * 4u + 3u] = static_cast<std::uint8_t>(hash[i] & 0xffu);
+    for (std::size_t i = 0; i < state_.size(); ++i) {
+        digest[i * 4u] = static_cast<std::uint8_t>((state_[i] >> 24u) & 0xffu);
+        digest[i * 4u + 1u] = static_cast<std::uint8_t>((state_[i] >> 16u) & 0xffu);
+        digest[i * 4u + 2u] = static_cast<std::uint8_t>((state_[i] >> 8u) & 0xffu);
+        digest[i * 4u + 3u] = static_cast<std::uint8_t>(state_[i] & 0xffu);
     }
     return digest;
 }
+
+namespace {
 
 // ---------------------------------------------------------------------------
 // GF(2^255 - 19) field arithmetic for X25519 (RFC 7748 §5)
@@ -520,12 +546,11 @@ std::string sha256_hex(std::string_view data) {
 }
 
 std::array<std::uint8_t, 32> sha256(std::span<const std::uint8_t> data) {
-    return sha256_bytes(data);
+    return Sha256{}.update(data).finish();
 }
 
 std::array<std::uint8_t, 32> sha256(std::string_view data) {
-    return sha256_bytes(std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+    return Sha256{}.update(data).finish();
 }
 
 std::array<std::uint8_t, 32> x25519(std::span<const std::uint8_t, 32> scalar,

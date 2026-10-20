@@ -7,6 +7,8 @@
 #include "../utils/ProcessUtils.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <ranges>
 #include <stdexcept>
 
 namespace core::changes {
@@ -29,56 +31,119 @@ bool TurnRecovery::partial() const {
 
 std::optional<RecoveryImage> TurnRecovery::captured(const fs::path& path) const {
     std::lock_guard lock(mutex_);
-    const auto it = manifest_.entries.find(normalized(path));
+    auto it = manifest_.entries.find(path);
+    if (it == manifest_.entries.end()) it = manifest_.entries.find(normalized(path));
     if (it == manifest_.entries.end() || it->second.before.hash.empty()) return std::nullopt;
     return it->second.before;
 }
 
 void TurnRecovery::before(std::span<const fs::path> paths) {
     std::lock_guard lock(mutex_);
-    capture_unlocked(paths);
+    capture_unlocked(paths, false);
     if (!paths.empty()) store_.save(manifest_); // Retry an earlier failed commit, too.
 }
 
-void TurnRecovery::capture_unlocked(std::span<const fs::path> paths) {
+void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canonical) {
+    // Taken before any read, so a stamp is trusted only if the file had
+    // settled before its bytes were looked at.
+    const auto observed = std::chrono::system_clock::now();
+    bool stored = false;
     for (const auto& requested : paths) {
-        const auto path = normalized(requested);
+        const auto path = canonical ? requested : normalized(requested);
         if (manifest_.entries.contains(path) || manifest_.uncaptured.contains(path)) continue;
         if (manifest_.entries.size() + manifest_.uncaptured.size() >= kMaxFiles) {
             manifest_.partial = true;
             continue;
         }
-        auto original = RecoveryStore::read(path);
-        if (!original || original->bytes.size() > kMaxBytes - bytes_) {
+        if (adopt_unchanged_unlocked(path)) continue;
+        if (!manifest_saved_) {
+            // A Recording manifest on disk before the first object: another
+            // turn's `retain` then leaves the store alone.
+            store_.save(manifest_);
+            manifest_saved_ = true;
+        }
+        auto original = store_.store_original(path, kMaxBytes - bytes_);
+        if (!original) {
             manifest_.uncaptured.insert(path);
             manifest_.partial = true;
             continue;
         }
-        store_.put_original(*original);
-        bytes_ += original->bytes.size();
-        manifest_.entries.emplace(path, RecoveryEntry{.before = original->image});
+        stored = true;
+        bytes_ += original->stamp.size;
+        manifest_.entries.emplace(path, RecoveryEntry{
+            .before = std::move(original->image),
+            .before_stamp = original->stamp.settled_identity(observed)});
     }
+    // Before any manifest refers to them.
+    if (stored) store_.sync_objects();
+}
+
+bool TurnRecovery::adopt_unchanged_unlocked(const fs::path& path) {
+    if (!previous_entries_) previous_entries_ = previous_turn_entries();
+    const auto previous = previous_entries_->find(path);
+    if (previous == previous_entries_->end()) return false;
+    const auto stamp = previous->second.latest_stamp();
+    // A stamp is never 0 for a file it witnessed, and identity is 0 for
+    // anything but a regular file, so equality also proves the file is there.
+    // Its object is in the session's store, kept alive by the earlier turn.
+    if (stamp == 0 || core::utils::FileStamp::of(path).identity != stamp) return false;
+    // The earlier turn's node moves over whole: no path or hash is copied.
+    auto node = previous_entries_->extract(previous);
+    auto& entry = node.mapped();
+    entry = RecoveryEntry{.before = std::move(entry.after_known ? entry.after : entry.before), .before_stamp = stamp};
+    manifest_.entries.insert(std::move(node));
+    return true;
+}
+
+RecoveryEntries TurnRecovery::previous_turn_entries() const {
+    // Turn directories sort by creation time: the latest earlier turn of this
+    // session is the last one below this one.
+    const auto& self = store_.directory();
+    auto turns = RecoveryStore::turn_directories(self.parent_path()).value_or(std::vector<fs::path>{});
+    std::erase_if(turns, [&](const fs::path& turn) { return turn.filename() >= self.filename(); });
+    for (const auto& directory : turns | std::views::reverse) {
+        const RecoveryStore earlier(directory);
+        auto manifest = earlier.load(manifest_.workspace);
+        if (!manifest) continue;
+        // A turn with a store of its own shares nothing with this one.
+        if (!earlier.shares_objects()) return {};
+        return std::move(manifest->entries);
+    }
+    return {};
 }
 
 void TurnRecovery::after(std::span<const fs::path> paths, std::span<const fs::path> created) {
     std::lock_guard lock(mutex_);
+    const auto observed = std::chrono::system_clock::now();
     record_absent_unlocked(created);
     for (const auto& path : paths) {
-        const auto it = manifest_.entries.find(normalized(path));
+        auto it = manifest_.entries.find(path);
+        if (it == manifest_.entries.end()) it = manifest_.entries.find(normalized(path));
         if (it == manifest_.entries.end()) continue;
+        auto& entry = it->second;
+        const auto stamp = core::utils::FileStamp::of(it->first);
         std::error_code ec;
-        if (it->second.before.hash.empty() && fs::is_directory(fs::symlink_status(path, ec))) {
+        if (entry.before.hash.empty() && stamp.kind == core::utils::FileStamp::Kind::Other &&
+            fs::is_directory(fs::symlink_status(it->first, ec))) {
             manifest_.entries.erase(it);
             continue;
         }
-        auto current = RecoveryStore::read(path);
-        if (!current) {
-            manifest_.partial = true;
-            it->second.after_known = false;
+        if (stamp.identity != 0 && stamp.identity == entry.latest_stamp()) {
+            // Still the bytes it last held: nothing to read or hash.
+            entry.after = entry.latest();
+            entry.after_stamp = stamp.identity;
+            entry.after_known = true;
             continue;
         }
-        it->second.after = current->image;
-        it->second.after_known = true;
+        auto current = RecoveryStore::identify(it->first);
+        if (!current) {
+            manifest_.partial = true;
+            entry.after_known = false;
+            continue;
+        }
+        entry.after = std::move(current->image);
+        entry.after_stamp = current->stamp.settled_identity(observed);
+        entry.after_known = true;
     }
     if (!paths.empty() || !created.empty()) store_.save(manifest_);
 }
@@ -98,7 +163,7 @@ void TurnRecovery::record_absent_unlocked(std::span<const fs::path> paths) {
 void TurnRecovery::before_workspace(std::span<const fs::path> paths,
                                    std::span<const fs::path> roots, bool complete) {
     std::lock_guard lock(mutex_);
-    capture_unlocked(paths);
+    capture_unlocked(paths, true);  // An inventory lists canonical paths.
     manifest_.roots.assign(roots.begin(), roots.end());
     manifest_.inventory_complete = complete;
     manifest_.partial |= !complete;
@@ -197,16 +262,12 @@ std::expected<std::vector<TurnChanges>, std::string> TurnRecovery::pending(
     const fs::path& root, const fs::path& workspace, WorkspaceMutationGate& mutations,
     std::span<const std::string> attached,
     const std::function<bool(const fs::path&)>& observable) {
-    std::vector<fs::path> paths;
     std::error_code ec;
     if (root.empty() || !fs::exists(root, ec)) return std::vector<TurnChanges>{};
-    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
-        if (it->is_directory(ec) && !it->is_symlink(ec)) paths.push_back(normalized(it->path()));
-    }
-    if (ec) return std::unexpected(ec.message());
-    std::ranges::sort(paths);
+    const auto paths = RecoveryStore::turn_directories(root);
+    if (!paths) return std::unexpected(paths.error());
     std::vector<TurnChanges> changes;
-    for (const auto& path : paths) {
+    for (const auto& path : *paths) {
         if (fs::exists(path / "attached", ec) || std::ranges::contains(attached, path.string())) continue;
         RecoveryStore store(path);
         auto loaded = store.load(workspace);

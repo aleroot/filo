@@ -59,11 +59,20 @@ private:
     [[nodiscard]] std::expected<TurnChanges, std::string> reconcile(
         WorkspaceMutationGate& mutations,
         const std::function<bool(const std::filesystem::path&)>& observable);
-    void capture_unlocked(std::span<const std::filesystem::path> paths);
+    /// `canonical`: the paths are already normalized, as an inventory's are.
+    void capture_unlocked(std::span<const std::filesystem::path> paths, bool canonical);
+    /// Takes over the previous turn's entry for a file that has not changed
+    /// since: its image is shared instead of being read and stored again.
+    [[nodiscard]] bool adopt_unchanged_unlocked(const std::filesystem::path& path);
+    /// The entries of the latest earlier turn of this session that shares
+    /// this one's object store; empty when there is none.
+    [[nodiscard]] RecoveryEntries previous_turn_entries() const;
     void record_absent_unlocked(std::span<const std::filesystem::path> paths);
     RecoveryStore store_;
     RecoveryManifest manifest_;
-    std::size_t bytes_ = 0;
+    std::size_t bytes_ = 0;  ///< Written by this turn; shared objects cost nothing.
+    std::optional<RecoveryEntries> previous_entries_;  ///< Looked up on the first capture.
+    bool manifest_saved_ = false;  ///< Must precede the first stored object.
     mutable std::mutex mutex_;
 };
 

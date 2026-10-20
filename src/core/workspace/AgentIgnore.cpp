@@ -9,6 +9,8 @@
 #include <fstream>
 #include <format>
 #include <optional>
+#include <ranges>
+#include <span>
 #include <string_view>
 
 namespace core::workspace {
@@ -157,9 +159,20 @@ bool unescape_leading_marker(std::string& line) {
     return true;
 }
 
+/// Segments of a path, viewing the string they were split from.
+using Segments = std::span<const std::string_view>;
+
+/// Splits once; empty segments (doubled or edge slashes) are dropped.
+[[nodiscard]] std::vector<std::string_view> split_views(std::string_view path) {
+    return path | std::views::split('/')
+        | std::views::filter([](auto segment) { return !segment.empty(); })
+        | std::views::transform([](auto segment) { return std::string_view(segment); })
+        | std::ranges::to<std::vector>();
+}
+
 [[nodiscard]] bool match_segments(const std::vector<std::string>& pattern,
                                   std::size_t pattern_index,
-                                  const std::vector<std::string>& path,
+                                  Segments path,
                                   std::size_t path_index) {
     if (pattern_index == pattern.size()) {
         return path_index == path.size();
@@ -186,13 +199,12 @@ bool unescape_leading_marker(std::string& line) {
 
 [[nodiscard]] bool match_rule_against_candidate(
     const detail::AgentIgnoreRule& rule,
-    std::string_view candidate,
+    Segments candidate_segments,
     bool candidate_is_directory) {
     if (rule.directory_only && !candidate_is_directory) {
         return false;
     }
 
-    const std::vector<std::string> candidate_segments = split_segments(candidate);
     if (candidate_segments.empty()) {
         return false;
     }
@@ -256,31 +268,18 @@ bool unescape_leading_marker(std::string& line) {
         0);
 }
 
-struct CandidatePath {
-    std::string path;
-    bool is_directory = false;
-};
-
-[[nodiscard]] std::vector<CandidatePath> candidate_paths(std::string_view relative_path,
-                                                         AgentIgnorePathKind kind) {
-    const std::vector<std::string> segments = split_segments(relative_path);
-    std::vector<CandidatePath> candidates;
-    candidates.reserve(segments.size());
-
-    std::string current;
-    for (std::size_t i = 0; i < segments.size(); ++i) {
-        if (!current.empty()) {
-            current += '/';
+/// Whether `rule` matches the path or any of its ancestors: candidate n is
+/// the first n segments, a directory unless it is the path itself.
+[[nodiscard]] bool rule_matches(const detail::AgentIgnoreRule& rule,
+                                Segments segments,
+                                AgentIgnorePathKind kind) {
+    for (std::size_t n = 1; n <= segments.size(); ++n) {
+        const bool directory = n < segments.size() || kind == AgentIgnorePathKind::Directory;
+        if (match_rule_against_candidate(rule, segments.first(n), directory)) {
+            return true;
         }
-        current += segments[i];
-        candidates.push_back(CandidatePath{
-            .path = current,
-            .is_directory = i + 1 < segments.size()
-                || kind == AgentIgnorePathKind::Directory,
-        });
     }
-
-    return candidates;
+    return false;
 }
 
 [[nodiscard]] bool path_has_prefix(std::filesystem::path root,
@@ -300,14 +299,11 @@ struct CandidatePath {
     return true;
 }
 
+/// Both paths are normalized already, so this is lexical: resolving them
+/// again would cost a realpath per checked path.
 [[nodiscard]] std::string relative_generic_path(const std::filesystem::path& file,
                                                 const std::filesystem::path& root) {
-    std::error_code ec;
-    const auto relative = std::filesystem::relative(file, root, ec);
-    if (!ec) {
-        return relative.generic_string();
-    }
-    return {};
+    return file.lexically_normal().lexically_relative(root.lexically_normal()).generic_string();
 }
 
 [[nodiscard]] std::vector<detail::AgentIgnoreRule> load_rules(
@@ -424,17 +420,9 @@ bool AgentIgnoreMatcher::is_ignored_normalized(const std::filesystem::path& norm
         }
 
         bool ignored = false;
-        const auto candidates = candidate_paths(relative_path, kind);
+        const auto segments = split_views(relative_path);
         for (const auto& rule : policy.rules) {
-            const bool matched = std::ranges::any_of(
-                candidates,
-                [&](const CandidatePath& candidate) {
-                    return match_rule_against_candidate(
-                        rule,
-                        candidate.path,
-                        candidate.is_directory);
-                });
-            if (matched) {
+            if (rule_matches(rule, segments, kind)) {
                 ignored = !rule.negated;
             }
         }
@@ -449,8 +437,14 @@ bool AgentIgnoreMatcher::can_prune_directory(
     if (policies_.empty() || path.empty()) {
         return false;
     }
+    return can_prune_normalized_directory(SessionWorkspace::normalize_path(path));
+}
 
-    const auto normalized = SessionWorkspace::normalize_path(path);
+bool AgentIgnoreMatcher::can_prune_normalized_directory(
+    const std::filesystem::path& normalized) const {
+    if (policies_.empty() || normalized.empty()) {
+        return false;
+    }
     for (const auto& policy : policies_) {
         if (!path_has_prefix(policy.root, normalized)) {
             continue;
@@ -463,20 +457,10 @@ bool AgentIgnoreMatcher::can_prune_directory(
 
         bool ignored = false;
         std::optional<std::size_t> last_match;
-        const auto candidates = candidate_paths(
-            relative_path,
-            AgentIgnorePathKind::Directory);
+        const auto segments = split_views(relative_path);
         for (std::size_t i = 0; i < policy.rules.size(); ++i) {
             const auto& rule = policy.rules[i];
-            const bool matched = std::ranges::any_of(
-                candidates,
-                [&](const CandidatePath& candidate) {
-                    return match_rule_against_candidate(
-                        rule,
-                        candidate.path,
-                        candidate.is_directory);
-                });
-            if (matched) {
+            if (rule_matches(rule, segments, AgentIgnorePathKind::Directory)) {
                 ignored = !rule.negated;
                 last_match = i;
             }

@@ -99,7 +99,11 @@ public:
         std::shared_ptr<WorkspaceMutationGate> mutations = {});
     void set_recovery(std::shared_ptr<TurnRecovery> recovery);
     void set_workspace_roots(std::vector<std::filesystem::path> roots);
-    void set_observation_filter(std::function<bool(const std::filesystem::path&)> filter);
+    /// Decides whether a path may be observed. `canonical` is true only for a
+    /// path an inventory found: an entry under a canonical root, reached
+    /// without following a symlink, so the filter need not resolve it again.
+    using ObservationFilter = std::function<bool(const std::filesystem::path& path, bool canonical)>;
+    void set_observation_filter(ObservationFilter filter);
     void note_process_group(int group);
     void finish_recovery();
 
@@ -151,12 +155,12 @@ private:
     enum class Observation { Before, After };
 
     struct Snapshot {
-        /// `Stored`: the bytes are in the turn's recovery store. Only an
-        /// unchanged file holds it, as both its baseline and its current state.
+        /// `Stored`: the bytes are this turn's recovery capture of the path,
+        /// looked up there when needed. Only an unchanged file holds it, as both
+        /// its baseline and its current state.
         enum class State { Missing, Text, Opaque, Stored };
         State state = State::Missing;
         std::string text;               ///< State::Text only
-        std::string stored;             ///< State::Stored only: recovery hash of the bytes
         FileChangeContent opaque_as = FileChangeContent::Binary;  ///< State::Opaque only
         std::uint64_t fingerprint = 0;  ///< State::Opaque only: identifies content
         /// Lines the file held. Known even when the bytes were not retained,
@@ -166,7 +170,7 @@ private:
         /// bytes are gone but each line still identifies itself, so a
         /// modification can be counted without being diffed.
         std::optional<std::vector<std::uint64_t>> line_hashes;
-        /// Cheap size+mtime identity of the file this came from; 0 when absent.
+        /// FileStamp identity of the file this came from; 0 when absent.
         /// Lets an unscoped mutation be reconciled with one stat per known
         /// path instead of a read.
         std::uint64_t stamp = 0;
@@ -183,7 +187,8 @@ private:
                 case State::Text:    return text == other.text;
                 case State::Opaque:  return opaque_as == other.opaque_as
                                         && fingerprint == other.fingerprint;
-                case State::Stored:  return stored == other.stored;
+                // Both name the path's one capture in this turn's recovery.
+                case State::Stored:  return true;
             }
             return false;
         }
@@ -220,7 +225,7 @@ private:
         bool exists = false;
         bool regular = false;
         std::uint64_t size = 0;
-        std::uint64_t stamp = 0;  ///< size+mtime identity; 0 when unavailable
+        std::uint64_t stamp = 0;  ///< FileStamp identity; 0 unless a regular file
         unsigned mode = 0;
     };
 
@@ -256,7 +261,7 @@ private:
     /// A file as an inventory finds it: `Stored` when recovery holds its bytes.
     [[nodiscard]] Snapshot found_unlocked(const std::filesystem::path& path);
     /// Reads a `Stored` baseline back from recovery: its file changed.
-    void load_baseline_unlocked(const Key& key);
+    void load_baseline_unlocked(Snapshot& baseline, const Key& key);
     /// Content held for `key` that a re-read would release.
     [[nodiscard]] Reclaimable reclaimable_for_unlocked(const Key& key) const;
     /// Text the turn may still retain. Saturates at zero.
@@ -297,11 +302,16 @@ private:
     std::filesystem::path display_root_;
     Limits limits_;
     mutable std::mutex mutex_;
-    std::map<Key, Snapshot> baseline_;
-    std::map<Key, Snapshot> current_;
+    /// A path as the turn first found it, and as it is now. One node holds
+    /// both: every observed path has both, from its first observation on.
+    struct Tracked {
+        Snapshot baseline;
+        Snapshot current;
+    };
+    std::map<Key, Tracked> files_;
     std::map<Key, Key> origin_;  // destination -> baseline path it was moved from
-    std::size_t tracked_bytes_ = 0;  ///< Text retained across baseline_ and current_
-    std::size_t hashed_bytes_ = 0;   ///< Line hashes retained across both maps
+    std::size_t tracked_bytes_ = 0;  ///< Text retained across baselines and current states
+    std::size_t hashed_bytes_ = 0;   ///< Line hashes retained across both states
     bool partial_enumeration_ = false;
     bool unscoped_mutations_ = false;
     std::vector<std::string> unscoped_tools_;  ///< Distinct, in first-run order
@@ -309,9 +319,9 @@ private:
     std::vector<std::filesystem::path> workspace_roots_;
     bool workspace_observed_ = false;
     bool inventory_complete_ = false;
-    std::function<bool(const std::filesystem::path&)> observation_filter_;
+    ObservationFilter observation_filter_;
     void observe_workspace_unlocked(Observation when);
-    [[nodiscard]] bool observable_unlocked(const std::filesystem::path& path) const;
+    [[nodiscard]] bool observable_unlocked(const std::filesystem::path& path, bool canonical) const;
     void checkpoint_current_unlocked(std::span<const std::filesystem::path> created = {});
 };
 

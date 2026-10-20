@@ -637,8 +637,9 @@ std::shared_ptr<core::changes::TurnChangeTracker> Agent::make_change_tracker(
     auto tracker = std::make_shared<core::changes::TurnChangeTracker>(
         session_context.workspace_view().primary(), skill_manager_.mutation_gate());
     tracker->set_workspace_roots(session_context.workspace_view().ordered_roots());
-    tracker->set_observation_filter([session_context](const std::filesystem::path& path) {
-        return !core::tools::detail::check_workspace_access(path, path.string(), session_context);
+    tracker->set_observation_filter([session_context](const std::filesystem::path& path, bool canonical) {
+        return !core::tools::detail::check_workspace_access(
+            path, path.string(), session_context, nullptr, {}, canonical);
     });
     if (execution_journal_) {
         const auto root = core::changes::RecoveryStore::session_root(

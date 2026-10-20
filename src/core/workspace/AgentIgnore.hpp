@@ -62,6 +62,9 @@ public:
 
     [[nodiscard]] bool can_prune_directory(
         const std::filesystem::path& path) const;
+    /// @p normalized is already symlink-free, as in is_ignored_normalized.
+    [[nodiscard]] bool can_prune_normalized_directory(
+        const std::filesystem::path& normalized) const;
 
 private:
     explicit AgentIgnoreMatcher(std::vector<detail::AgentIgnoreRootPolicy> policies);
