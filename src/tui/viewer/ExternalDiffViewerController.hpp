@@ -23,10 +23,8 @@ struct ViewerOutcome {
     // The configured comparer is the transcript itself, so the host shows the
     // diff instead of waiting for an application.
     bool inline_view = false;
-    // An external comparer put the diff on screen. The host attaches what it
-    // knows about the comparison (such as files the patch could not carry)
-    // only then, so a failed or cancelled open never talks about a diff the
-    // user is not looking at.
+    // An external comparer completed after showing the diff. A detached review
+    // may stay open until its window closes, so this is not a launch event.
     bool shown = false;
     // User-facing message, if any. Success is silent: the diff on screen is the
     // confirmation.

@@ -1065,6 +1065,155 @@ TEST_CASE("A later turn stores the content an earlier turn's edit left behind",
     CHECK(read(edited) == "second\n");
 }
 
+TEST_CASE("A settled post-image is captured before a later turn reuses it",
+          "[changes][recovery][store][regression]") {
+    TempDir dir, storage;
+    const auto file = dir.path / "source.swift";
+    const std::vector<fs::path> paths{file};
+    put(file, "original\n");
+    const auto first = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        core::changes::TurnRecovery turn(first, dir.path);
+        turn.before(paths);
+        put(file, "second\n");
+        // A long-running build lets the edited file settle before the final
+        // observation. Its post-image has a trusted stamp, but only a hash:
+        // after() does not store the bytes.
+        std::this_thread::sleep_for(core::utils::FileStamp::kSettleTime + std::chrono::milliseconds(200));
+        turn.after(paths);
+        turn.finish();
+    }
+    const auto previous = core::changes::RecoveryStore(first).load(dir.path);
+    REQUIRE(previous);
+    REQUIRE(previous->entries.at(file).after_stamp != 0);
+    REQUIRE_FALSE(core::changes::RecoveryStore(first).original(previous->entries.at(file).after));
+
+    // An intervening read-only turn must capture the missing bytes instead
+    // of forwarding a reference to an object that was never stored.
+    const auto second = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        TurnChangeTracker tracker(dir.path);
+        tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(second, dir.path));
+        edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [] {});
+        CHECK(tracker.changes().empty());
+        tracker.finish_recovery();
+    }
+    const auto captured = core::changes::RecoveryStore(second).load(dir.path);
+    REQUIRE(captured);
+    const auto bytes = core::changes::RecoveryStore(second).original(captured->entries.at(file).before);
+    REQUIRE(bytes);
+    CHECK(*bytes == "second\n");
+
+    const auto third = core::changes::RecoveryStore::new_directory(storage.path);
+    TurnChangeTracker tracker(dir.path);
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(third, dir.path));
+    MutationScope scope;
+    SECTION("shell mutation") { scope = {.unbounded = true, .tool = "run_terminal_command"}; }
+    SECTION("file tool mutation") { scope = scope_of({file}); }
+    edit(tracker, scope, [&] { put(file, "third\n"); });
+    tracker.finish_recovery();
+    const auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK_FALSE(changes.partial_enumeration);
+    CHECK(changes.files[0].content == FileChangeContent::Text);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("-second"));
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("+third"));
+    core::changes::WorkspaceMutationGate mutations;
+    REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(file) == "second\n");
+}
+
+TEST_CASE("Missing or replaced shared objects cannot become a later turn's baseline",
+          "[changes][recovery][store][regression]") {
+    TempDir dir, storage;
+    const auto file = dir.path / "source.cpp";
+    const auto unrelated = storage.path / "unrelated.txt";
+    put(file, "before\n");
+    put(unrelated, "leave alone\n");
+    const std::vector<fs::path> paths{file};
+    std::this_thread::sleep_for(core::utils::FileStamp::kSettleTime + std::chrono::milliseconds(200));
+    const auto first = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        core::changes::TurnRecovery turn(first, dir.path);
+        turn.before(paths);
+        turn.after(paths);
+        turn.finish();
+    }
+    const core::changes::RecoveryStore previous(first);
+    const auto manifest = previous.load(dir.path);
+    REQUIRE(manifest);
+    REQUIRE(manifest->entries.at(file).latest_stamp() != 0);
+    const auto image = manifest->entries.at(file).before;
+    const auto object = storage.path / "objects" / image.hash;
+    REQUIRE(fs::remove(object));
+    bool blocked = false;
+    SECTION("missing object is captured again") {}
+    SECTION("a symlink is replaced without following it") { fs::create_symlink(unrelated, object); }
+    SECTION("a directory blocks mutation before the tool runs") {
+        fs::create_directory(object);
+        blocked = true;
+    }
+    CHECK_FALSE(previous.has_object(image));
+    const auto second = core::changes::RecoveryStore::new_directory(storage.path);
+    TurnChangeTracker tracker(dir.path);
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(second, dir.path));
+    bool ran = false;
+    const auto mutate = [&] {
+        edit(tracker, scope_of({file}), [&] { ran = true; put(file, "after\n"); });
+    };
+    if (blocked) {
+        REQUIRE_THROWS_WITH(mutate(), ContainsSubstring("Cannot persist recovery contents"));
+        CHECK_FALSE(ran);
+        CHECK(read(file) == "before\n");
+    } else {
+        mutate();
+        tracker.finish_recovery();
+        CHECK(ran);
+        const auto changes = tracker.changes();
+        REQUIRE(changes.files.size() == 1);
+        CHECK(changes.files[0].content == FileChangeContent::Text);
+        CHECK_THAT(changes.files[0].diff, ContainsSubstring("-before\n+after\n"));
+        CHECK(previous.has_object(image));
+        core::changes::WorkspaceMutationGate mutations;
+        REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+        CHECK(read(file) == "before\n");
+    }
+    CHECK(read(unrelated) == "leave alone\n");
+}
+
+TEST_CASE("Shared baselines survive pruning their original checkpoint",
+          "[changes][recovery][store][limits][regression]") {
+    TempDir dir, storage;
+    const auto file = dir.path / "shared.swift";
+    put(file, "original\n");
+    std::this_thread::sleep_for(core::utils::FileStamp::kSettleTime + std::chrono::milliseconds(200));
+    fs::path first;
+    for (std::size_t i = 0; i <= core::changes::TurnRecovery::kRetainedTurns; ++i) {
+        const auto directory = core::changes::RecoveryStore::new_directory(storage.path);
+        if (first.empty()) first = directory;
+        TurnChangeTracker tracker(dir.path);
+        tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(directory, dir.path));
+        edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [] {});
+        tracker.finish_recovery();
+        CHECK(tracker.changes().empty());
+        CHECK_FALSE(tracker.changes().partial_enumeration);
+    }
+    CHECK_FALSE(fs::exists(first));
+    CHECK(std::distance(fs::directory_iterator(storage.path / "objects"), fs::directory_iterator{}) == 1);
+    TurnChangeTracker tracker(dir.path);
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(
+        core::changes::RecoveryStore::new_directory(storage.path), dir.path));
+    edit(tracker, scope_of({file}), [&] { put(file, "edited\n"); });
+    tracker.finish_recovery();
+    const auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK(changes.files[0].content == FileChangeContent::Text);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("-original\n+edited\n"));
+    core::changes::WorkspaceMutationGate mutations;
+    REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(file) == "original\n");
+}
+
 TEST_CASE("A turn recorded with its own object store still reverts",
           "[changes][recovery][store]") {
     core::changes::WorkspaceMutationGate mutations;

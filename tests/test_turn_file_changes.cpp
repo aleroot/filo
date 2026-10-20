@@ -4,6 +4,7 @@
 #include "tui/Conversation.hpp"
 #include "tui/SessionReplay.hpp"
 #include "core/changes/TurnChangeTracker.hpp"
+#include "core/changes/TurnRecovery.hpp"
 #include "core/changes/FileChangeJson.hpp"
 
 #include <simdjson.h>
@@ -12,11 +13,13 @@
 #include <ftxui/screen/screen.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <random>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 using namespace tui;
@@ -319,6 +322,83 @@ TEST_CASE("A turn exports one patch for the comparer", "[tui][turn_file_changes]
     REQUIRE(comparison->disclosure_keys.size() == 2);
     CHECK(comparison->disclosure_keys[0] == turn_file_change_key(answer.id, "src/app.cpp"));
     CHECK(comparison->disclosure_keys[1] == turn_file_change_key(answer.id, "docs/guide.md"));
+}
+
+TEST_CASE("A resumed multi-file review keeps every diff across long-running turns",
+          "[changes][recovery][tui][turn_file_changes][diff_comparer][regression]") {
+    namespace fs = std::filesystem;
+    using core::changes::MutationScope;
+    using core::changes::TurnChangeTracker;
+    using core::changes::TurnRecovery;
+    const auto temporary = fs::temp_directory_path()
+        / std::format("filo_multifile_review_{}", std::random_device{}());
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{temporary};
+    const auto root = temporary / "workspace";
+    const auto storage = temporary / "checkpoints";
+    fs::create_directories(root);
+    const auto put = [&](const std::string& name, const std::string& text) {
+        std::ofstream(root / name) << text;
+    };
+    constexpr int changed_files = 7;
+    for (int i = 0; i < changed_files; ++i) put(std::format("source{}.swift", i), "original\n");
+    for (int i = 0; i < 40; ++i) put(std::format("untouched{}.swift", i), std::string(255, 'x') + "\n");
+    TurnChangeTracker::Limits limits;
+    limits.max_tracked_bytes = 1024; // Changes fit, the entire workspace does not.
+    const auto run = [&](std::string_view text, bool wait_for_build) {
+        TurnChangeTracker tracker(root, limits);
+        tracker.set_recovery(std::make_shared<TurnRecovery>(
+            core::changes::RecoveryStore::new_directory(storage), root));
+        tracker.track(MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [&] {
+            for (int i = 0; i < changed_files; ++i) put(std::format("source{}.swift", i), std::string(text));
+            if (wait_for_build) {
+                std::this_thread::sleep_for(core::utils::FileStamp::kSettleTime + std::chrono::milliseconds(200));
+            }
+            return 0;
+        });
+        tracker.settle();
+        tracker.finish_recovery();
+        return tracker.changes();
+    };
+    core::llm::Message first{.role = "assistant", .content = "First build finished."};
+    first.turn_changes = run("intermediate\n", true);
+    core::llm::Message last{.role = "assistant", .content = "Second build finished."};
+    last.turn_changes = run("final\n", false);
+    last.turn_changes.id = "second-turn";
+    REQUIRE(last.turn_changes.files.size() == changed_files);
+    CHECK_FALSE(last.turn_changes.partial_enumeration);
+
+    // Exercise the saved representation before rebuilding the transcript.
+    std::string json;
+    core::changes::append_turn_changes_json(json, last.turn_changes);
+    simdjson::dom::parser parser;
+    simdjson::dom::object object;
+    REQUIRE(parser.parse(json).get(object) == simdjson::SUCCESS);
+    last.turn_changes = core::changes::parse_turn_changes_json(object);
+    core::session::SessionData data;
+    data.messages = {first, last};
+    const auto messages = build_resumed_ui_messages(data);
+    const auto latest = latest_turn_with_changes(messages);
+    REQUIRE(latest.message);
+    const auto comparison = turn_comparison(*latest.message);
+    REQUIRE(comparison);
+    CHECK(comparison->turn_id == "second-turn");
+    CHECK(comparison->undiffed == 0);
+    CHECK(comparison->disclosure_keys.size() == changed_files);
+    for (int i = 0; i < changed_files; ++i) {
+        CHECK_THAT(comparison->patch, ContainsSubstring(std::format(
+            "diff --git a/source{0}.swift b/source{0}.swift", i)));
+    }
+    CHECK_THAT(comparison->patch, ContainsSubstring("-intermediate\n+final\n"));
+    CHECK(comparison->patch.find("untouched") == std::string::npos);
+    const auto all = conversation_comparison(conversation_turns(messages), root);
+    REQUIRE(all);
+    CHECK(all->undiffed == 0);
+    CHECK_THAT(all->patch, ContainsSubstring("-original\n+final\n"));
+    CHECK(all->patch.find("untouched") == std::string::npos);
+    CHECK(comparison_omissions(*all).find("outside the observed workspace") != std::string::npos);
 }
 
 TEST_CASE("A turn comparison carries its turn and only the shown files' comments",

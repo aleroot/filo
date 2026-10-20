@@ -88,9 +88,10 @@ bool TurnRecovery::adopt_unchanged_unlocked(const fs::path& path) {
     // A stamp is never 0 for a file it witnessed, and identity is 0 for
     // anything but a regular file, so equality also proves the file is there.
     if (stamp == 0 || core::utils::FileStamp::of(path).identity != stamp) return false;
-    // A file the earlier turn changed has an after image that was only
-    // hashed, never stored: adopting it would leave this turn a baseline it
-    // cannot read back, so such a file is captured afresh.
+    // after() identifies edited bytes without storing them. A matching stamp
+    // proves what the file holds, not that its post-image is in the store.
+    // Capture it normally if there is no object to share (also repairs missing
+    // references forwarded by earlier versions).
     if (!store_.has_object(previous->second.latest())) return false;
     // The earlier turn's node moves over whole: no path or hash is copied.
     auto node = previous_entries_->extract(previous);

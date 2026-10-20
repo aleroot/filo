@@ -266,3 +266,24 @@ TEST_CASE("The conversation keeps every caveat any of its turns declared",
     CHECK(net.changes.unscoped_tools
           == std::vector<std::string>{"run_terminal_command", "python"});
 }
+
+TEST_CASE("Conversation coverage requires an inventory for every unscoped turn",
+          "[changes][conversation][regression]") {
+    TempDir dir;
+    std::vector<TurnChanges> turns(3);
+    turns[0].unscoped_mutations = true;
+    turns[0].workspace_observed = true;
+    turns[2].unscoped_mutations = true;
+    turns[2].workspace_observed = true;
+    bool covered = true;
+    SECTION("all shell turns observed, with a scoped turn in between") {}
+    SECTION("an earlier turn lacked an inventory") { turns[0].workspace_observed = false; covered = false; }
+    SECTION("a later turn lacked an inventory") { turns[2].workspace_observed = false; covered = false; }
+    SECTION("a reverted turn does not weaken coverage") {
+        turns[1].unscoped_mutations = true;
+        turns[1].reverted = true;
+    }
+    const auto net = conversation_changes(turns, dir.path);
+    CHECK(net.changes.unscoped_mutations);
+    CHECK(net.changes.workspace_observed == covered);
+}

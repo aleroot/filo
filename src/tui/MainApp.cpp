@@ -6177,17 +6177,13 @@ RunResult run(RunOptions opts) {
         bool keeps_comments = false;
         /// The turn's comments the comparer was shown.
         std::vector<core::review::Annotation> shown;
-        /// What the comparison leaves out, reported only once an external
-        /// comparer shows it (see ViewerOutcome::shown).
-        std::string omissions;
     };
     std::optional<PendingComparison> pending_comparison;
 
     // Applies what a comparison produced once it settled: review comments join
     // the draft of the conversation that opened it (never sent on their own),
-    // and success stays silent unless the diff on screen is not the whole turn:
-    // an external comparer shows only the patch, so the reviewer learns about
-    // the rest here.
+    // and success stays silent. Omissions are reported when the review opens,
+    // before a detached comparer can hold the session until its window closes.
     auto apply_comparer_outcome = [&](const viewer::ViewerOutcome& outcome) {
         auto pending = std::exchange(pending_comparison, std::nullopt);
         if (!pending) return;
@@ -6242,9 +6238,6 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             append_ui_message(*runtime->messages(), make_system_message(std::move(text)));
         };
-        if (outcome.shown && !pending->omissions.empty()) {
-            notice(std::format("\nℹ  {}\n", pending->omissions));
-        }
         if (outcome.notice.has_value()) {
             notice(std::format(
                 "\n{}  {}\n",
@@ -6261,12 +6254,16 @@ RunResult run(RunOptions opts) {
     auto open_comparison = [&](TurnComparison comparison,
                                std::optional<std::size_t> message_index) {
         if (diff_comparer.busy()) return;
+        if (diff_comparer_is_external) {
+            if (const auto omissions = comparison_omissions(comparison); !omissions.empty()) {
+                append_history(std::format("\nℹ  {}\n", omissions));
+            }
+        }
         pending_comparison = PendingComparison{
             .runtime = current_runtime,
             .turn_id = comparison.turn_id,
             .keeps_comments = !comparison.whole_conversation && !comparison.turn_id.empty(),
             .shown = comparison.annotations,
-            .omissions = comparison_omissions(comparison),
         };
         if (const auto outcome = diff_comparer.open(
                 config.diff_comparer, comparison.patch, comparison.annotations)) {

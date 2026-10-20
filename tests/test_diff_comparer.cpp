@@ -341,7 +341,7 @@ TEST_CASE("A terminal backend completes inline and receives the patch", "[diff_c
 
     REQUIRE(outcome.has_value());
     REQUIRE_FALSE(outcome->inline_view);
-    // The host attaches what the patch leaves out only to a shown diff.
+    // A successful external display is distinct from an inline fallback.
     REQUIRE(outcome->shown);
     // Success stays silent: the diff on screen is the confirmation.
     REQUIRE_FALSE(outcome->notice.has_value());

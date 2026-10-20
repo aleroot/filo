@@ -131,6 +131,13 @@ void unwind(Lineage& lineage, const FileChange& change) {
 
 void merge_flags(TurnChanges& into, const TurnChanges& turn) {
     into.partial_enumeration = into.partial_enumeration || turn.partial_enumeration;
+    if (turn.unscoped_mutations) {
+        // Workspace coverage holds only if every unscoped turn had an
+        // inventory. Scoped-only turns do not weaken that coverage.
+        into.workspace_observed = into.unscoped_mutations
+            ? into.workspace_observed && turn.workspace_observed
+            : turn.workspace_observed;
+    }
     into.unscoped_mutations = into.unscoped_mutations || turn.unscoped_mutations;
     for (const auto& tool : turn.unscoped_tools) {
         if (std::ranges::find(into.unscoped_tools, tool) == into.unscoped_tools.end()) {

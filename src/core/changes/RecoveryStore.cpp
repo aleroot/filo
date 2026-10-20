@@ -213,8 +213,7 @@ std::expected<std::string, std::string> RecoveryStore::original(const RecoveryIm
 }
 
 bool RecoveryStore::has_object(const RecoveryImage& image) const {
-    std::error_code ec;
-    return !image.hash.empty() && fs::is_regular_file(object_path(image.hash), ec);
+    return !image.hash.empty() && core::utils::FileStamp::of(object_path(image.hash)).regular();
 }
 
 void RecoveryStore::save(const RecoveryManifest& manifest) const {
