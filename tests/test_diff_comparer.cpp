@@ -266,6 +266,40 @@ TEST_CASE("A pager reads the patch on standard input, pipelines included", "[dif
     std::filesystem::remove(received);
 }
 
+TEST_CASE("Overlapping pagers with the same session keep their own patches", "[diff_comparer][regression]") {
+    const auto received = std::filesystem::temp_directory_path()
+        / std::format("filo-pager-overlap-{}.patch", ::getpid());
+    const std::function<void(const std::function<void()>&)> direct_terminal =
+        [](const std::function<void()>& body) { body(); };
+    const ViewContext other_context{
+        .patch = "another comparison\n",
+        .session_id = "0123456789abcdef",
+        .with_terminal = direct_terminal,
+    };
+    // The outer view has written its scratch file when it restores the terminal.
+    // Finish another view before opening that file, forcing overlapping lifetimes
+    // without sleeps or depending on the test runner's scheduling.
+    const std::function<void(const std::function<void()>&)> with_terminal =
+        [&](const std::function<void()>& body) {
+            TerminalDiffViewer other("true");
+            REQUIRE(other.view(other_context).status() == ViewStatus::Shown);
+            body();
+        };
+    const ViewContext context{
+        .patch = kPatch,
+        .session_id = other_context.session_id,
+        .with_terminal = with_terminal,
+    };
+    TerminalDiffViewer viewer(std::format("cat > '{}'", received.string()));
+    const auto result = viewer.view(context);
+    std::ifstream input(received, std::ios::binary);
+    const std::string patch(std::istreambuf_iterator<char>(input), {});
+    std::filesystem::remove(received);
+
+    REQUIRE(result.status() == ViewStatus::Shown);
+    CHECK(patch == kPatch);
+}
+
 TEST_CASE("A terminal backend fails cleanly without a terminal", "[diff_comparer]") {
     TerminalDiffViewer viewer("false");
     const ViewContext context{.patch = kPatch, .session_id = "0123456789abcdef"};

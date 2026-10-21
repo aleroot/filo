@@ -3,14 +3,16 @@
 #include "core/tools/shell/ShellUtils.hpp"
 #include "tui/CommandLookup.hpp"
 
+#include <cerrno>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <format>
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
+
+#include <unistd.h>
 
 namespace tui::viewer {
 namespace {
@@ -23,43 +25,37 @@ constexpr std::string_view kDefaultPager = "less";
 constexpr std::string_view kLastResortPager = "more";
 
 // The patch a pager reads, in a private file that lives exactly as long as the
-// comparison. The session id in its name keeps concurrent Filo instances apart;
-// owner-only permissions keep everybody else out.
+// comparison. Each invocation owns a unique, atomically created file, even when
+// sessions overlap or reuse an id. It is owner-only from the moment it exists.
 class PatchScratch {
 public:
     [[nodiscard]] static std::expected<PatchScratch, std::string> create(
-        std::string_view patch,
-        std::string_view session_id) {
+        std::string_view patch) {
         std::error_code ec;
         const fs::path root = fs::temp_directory_path(ec);
         if (ec) {
             return std::unexpected(std::format(
                 "Could not locate the temporary directory: {}", ec.message()));
         }
-        const fs::path file = root / std::format("{}{}{}", kFilePrefix, session_id, kFileSuffix);
-
-        {
-            std::ofstream output(file, std::ios::binary | std::ios::trunc);
-            if (!output) {
+        std::string pattern = (root / std::format("{}XXXXXX{}", kFilePrefix, kFileSuffix)).string();
+        const int fd = ::mkstemps(pattern.data(), static_cast<int>(kFileSuffix.size()));
+        if (fd < 0) {
+            return std::unexpected("Could not create the patch for the pager.");
+        }
+        PatchScratch scratch{fs::path(pattern)};
+        while (!patch.empty()) {
+            const auto written = ::write(fd, patch.data(), patch.size());
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                ::close(fd);
                 return std::unexpected("Could not write the patch for the pager.");
             }
-            output << patch;
-            if (!output) {
-                fs::remove(file, ec);
-                return std::unexpected("Could not write the patch for the pager.");
-            }
+            patch.remove_prefix(static_cast<std::size_t>(written));
         }
-
-        fs::permissions(
-            file,
-            fs::perms::owner_read | fs::perms::owner_write,
-            fs::perm_options::replace,
-            ec);
-        if (ec) {
-            fs::remove(file, ec);
-            return std::unexpected("Could not secure the patch for the pager.");
+        if (::close(fd) != 0) {
+            return std::unexpected("Could not finish the patch for the pager.");
         }
-        return PatchScratch(file);
+        return scratch;
     }
 
     ~PatchScratch() {
@@ -141,7 +137,7 @@ ViewResult TerminalDiffViewer::view(const ViewContext& context) {
         return ViewResult::cancelled();
     }
 
-    auto scratch = PatchScratch::create(context.patch, context.session_id);
+    auto scratch = PatchScratch::create(context.patch);
     if (!scratch) {
         return ViewResult::failed(std::move(scratch.error()));
     }
