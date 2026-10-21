@@ -74,10 +74,21 @@ struct ConversationSearchHit {
     std::string snippet;
 };
 
+/// Lifecycle of an assistant turn as shown by the footer and the thread tabs.
+enum class TurnActivityState {
+    Idle,       ///< No turn activity to report: renders nothing.
+    Active,     ///< A turn is running: animated quadrant-filling circle.
+    Completed,  ///< The last turn finished successfully.
+    Failed,     ///< The last turn was cancelled or errored.
+};
+
 struct ThreadTab {
     std::string label;
     bool active = false;
-    bool running = false;
+    /// Active spins the same circle as the tool rows on every tab. Completed
+    /// and Failed mean a finished turn the user has not looked at yet: a
+    /// hidden tab shows a filled dot coloured by the outcome until selected.
+    TurnActivityState activity = TurnActivityState::Idle;
     /// True when a hidden thread is waiting on a question or permission.
     bool waiting = false;
 };
@@ -123,21 +134,13 @@ enum class ReviewPickerMode {
     const core::llm::TokenUsage& usage,
     bool has_usage_windows);
 
-/// Lifecycle of the compact footer signal for the assistant turn.
-enum class TurnActivityState {
-    Idle,       ///< No turn activity to report: renders nothing.
-    Active,     ///< A turn is running: animated quadrant-filling circle.
-    Completed,  ///< The last turn finished successfully: static success tick.
-    Failed,     ///< The last turn was cancelled or errored: static cross.
-};
-
 /// Compact footer signal for the assistant turn. While a turn runs it shows
 /// the same quadrant-filling circle animation as the tool call rows; once the
 /// work is finished it settles on a static outcome glyph, mirroring a
 /// completed subagent: a tick on success, a cross when the turn was cancelled
 /// or ended with an error. Returns an empty element when there is no turn
-/// activity to report. When animation is disabled an active turn shows a
-/// static dot.
+/// activity to report. When animation is disabled an active turn shows the
+/// tool rows' static executing glyph.
 ftxui::Element render_turn_activity_indicator(TurnActivityState state,
                                               bool animate,
                                               std::size_t tick);
@@ -186,7 +189,9 @@ ftxui::Element render_startup_banner_panel(std::string_view provider_name,
                                            std::string_view clock_label = {},
                                            const std::vector<ThreadTab>& thread_tabs = {},
                                            std::vector<ftxui::Box>* thread_tab_hitboxes = nullptr,
-                                           ftxui::Box* context_sources_hitbox = nullptr);
+                                           ftxui::Box* context_sources_hitbox = nullptr,
+                                           bool animate = false,
+                                           std::size_t tick = 0);
 
 ftxui::Element render_model_selection_panel(int selected_index,
                                             std::string_view manual_description,

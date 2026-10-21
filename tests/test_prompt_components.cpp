@@ -184,7 +184,7 @@ TEST_CASE("render_startup_banner_panel shows tabs only for multiple threads",
         "provider", "model", 0, "AGENTS.md", {}, "12:34:56",
         {
             {.label = "filo", .active = true},
-            {.label = "filo 2", .running = true},
+            {.label = "filo 2", .activity = TurnActivityState::Active},
         },
         &tab_hitboxes);
     auto multiple_screen = ftxui::Screen::Create(
@@ -358,6 +358,55 @@ TEST_CASE("workspace status uses a lock only for an enabled sandbox",
     CHECK(format_workspace_status_label("", true).empty());
 }
 
+TEST_CASE("thread tabs spin while working and flag unseen finished work",
+          "[tui][banner][threads][attention]") {
+    const auto render_tabs = [](std::vector<ThreadTab> tabs,
+                                bool animate,
+                                std::size_t tick) {
+        auto panel = render_startup_banner_panel(
+            "provider", "model", 0, {}, {}, "12:34:56", tabs,
+            nullptr, nullptr, animate, tick);
+        auto screen = ftxui::Screen::Create(
+            ftxui::Dimension::Fixed(140), ftxui::Dimension::Fit(panel));
+        ftxui::Render(screen, panel);
+        return strip_ansi(screen.ToString());
+    };
+    const std::vector<ThreadTab> tabs{
+        {.label = "main", .active = true, .activity = TurnActivityState::Active},
+        {.label = "busy", .activity = TurnActivityState::Active},
+        {.label = "done", .activity = TurnActivityState::Completed},
+        {.label = "broke", .activity = TurnActivityState::Failed},
+        {.label = "quiet"},
+        {.label = "asks", .activity = TurnActivityState::Active, .waiting = true},
+    };
+
+    // Every running tab, the visible one included, spins the tool-row circle
+    // in lockstep.
+    const auto frame_1 = render_tabs(tabs, true, 1);
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring("◔ main"));
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring("◔ busy"));
+    CHECK_THAT(render_tabs(tabs, true, 2),
+               Catch::Matchers::ContainsSubstring("◑ busy"));
+    CHECK_THAT(render_tabs(tabs, false, 2),
+               Catch::Matchers::ContainsSubstring("◐ busy"));
+    // Finished work nobody has looked at settles on a filled dot.
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring("● done"));
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring("● broke"));
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring(" quiet "));
+    // A pending question outranks the running signal.
+    CHECK_THAT(frame_1, Catch::Matchers::ContainsSubstring("? asks"));
+
+    // The visible tab never asks for attention: its outcome is on screen.
+    const auto visible_done = render_tabs(
+        {
+            {.label = "main", .active = true, .activity = TurnActivityState::Completed},
+            {.label = "other"},
+        },
+        true, 0);
+    CHECK_THAT(visible_done, Catch::Matchers::ContainsSubstring(" main "));
+    CHECK_THAT(visible_done, !Catch::Matchers::ContainsSubstring("●"));
+}
+
 TEST_CASE("turn activity indicator mirrors the tool rows and settles on an outcome glyph",
           "[tui][status-bar][activity]") {
     const auto render_indicator = [](TurnActivityState state,
@@ -387,7 +436,7 @@ TEST_CASE("turn activity indicator mirrors the tool rows and settles on an outco
     CHECK(active_frame_1.find("◔") != std::string::npos);
     CHECK(active_frame_2.find("◑") != std::string::npos);
     CHECK(active_frame_3.find("◕") != std::string::npos);
-    CHECK(static_active.find("●") != std::string::npos);
+    CHECK(static_active.find("◐") != std::string::npos);
     // Successfully finished work settles on the same tick glyph as a
     // completed subagent.
     CHECK(completed.find("✓") != std::string::npos);

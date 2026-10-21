@@ -628,6 +628,57 @@ Element render_picker_panel(std::string_view tag,
         FillYellowDark);
 }
 
+// The running signal shared by the footer and the thread tabs: the tool rows'
+// quadrant-filling circle, or their static executing glyph when animation is
+// off, so every live activity in the UI looks and moves the same.
+std::string_view running_signal_glyph(bool animate, std::size_t tick) {
+    return animate ? tool_status_spinner(tick)
+                   : tool_status_icon(ToolActivity::Status::Executing);
+}
+
+// Outcome of a settled turn expressed as the tool status that styles it.
+ToolActivity::Status settled_tool_status(TurnActivityState state) {
+    return state == TurnActivityState::Completed
+        ? ToolActivity::Status::Succeeded
+        : ToolActivity::Status::Failed;
+}
+
+Element single_cell(std::string_view glyph) {
+    return text(std::string(glyph)) | size(WIDTH, EQUAL, 1);
+}
+
+// One thread tab. Its leading marker, by priority: a question or permission
+// the user must answer, live work, then a finished turn nobody has looked at
+// yet. The selected tab never asks for attention: its outcome is on screen.
+Element render_thread_tab(const ThreadTab& tab, bool animate, std::size_t tick) {
+    Color label_color = tab.active ? Color::Black
+                                   : static_cast<Color>(ColorYellowBright);
+    Elements parts{text(" ")};
+    const auto add_marker = [&parts](Element glyph) {
+        parts.push_back(std::move(glyph));
+        parts.push_back(text(" "));
+    };
+    if (!tab.active && tab.waiting) {
+        label_color = ColorQuestionCyan;
+        add_marker(single_cell("?") | color(label_color));
+    } else if (tab.activity == TurnActivityState::Active) {
+        add_marker(single_cell(running_signal_glyph(animate, tick)) | color(label_color));
+    } else if (!tab.active && tab.activity != TurnActivityState::Idle) {
+        // Finished work wears the tab's own colour; only a failure stands out.
+        const Color dot_color = tab.activity == TurnActivityState::Failed
+            ? tool_status_color(ToolActivity::Status::Failed)
+            : label_color;
+        add_marker(single_cell("●") | color(dot_color) | ftxui::bold);
+    }
+    parts.push_back(
+        text(std::format("{} ", fit_column(tab.label, 16))) | color(label_color));
+    auto rendered = hbox(std::move(parts));
+    if (tab.active) {
+        rendered = std::move(rendered) | ftxui::bold | bgcolor(FillYellowDark);
+    }
+    return rendered;
+}
+
 } // namespace
 
 std::string format_workspace_status_label(std::string_view workspace_path,
@@ -729,9 +780,7 @@ Element render_turn_activity_indicator(TurnActivityState state,
     // calls and subagents: a tick on success, a cross when the turn was
     // cancelled or ended with an error.
     if (state == TurnActivityState::Completed || state == TurnActivityState::Failed) {
-        const auto status = state == TurnActivityState::Completed
-            ? ToolActivity::Status::Succeeded
-            : ToolActivity::Status::Failed;
+        const auto status = settled_tool_status(state);
         return hbox({
             text(" "),
             text(std::string(tool_status_icon(status)))
@@ -743,15 +792,11 @@ Element render_turn_activity_indicator(TurnActivityState state,
 
     // While the turn runs, spin the same quadrant-filling circle as the tool
     // call rows so every activity glyph in the UI moves in lockstep.
-    Element signal = animate
-        ? text(std::string(tool_status_spinner(tick)))
-        : text("●");
     return hbox({
         text(" "),
-        std::move(signal)
+        single_cell(running_signal_glyph(animate, tick))
             | color(ColorYellowBright)
-            | ftxui::bold
-            | size(WIDTH, EQUAL, 1),
+            | ftxui::bold,
     });
 }
 
@@ -763,7 +808,9 @@ Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view clock_label,
                                     const std::vector<ThreadTab>& thread_tabs,
                                     std::vector<Box>* thread_tab_hitboxes,
-                                    Box* context_sources_hitbox) {
+                                    Box* context_sources_hitbox,
+                                    bool animate,
+                                    std::size_t tick) {
     if (context_sources_hitbox) {
         *context_sources_hitbox = {0, -1, 0, -1};
     }
@@ -807,21 +854,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
     if (show_thread_tabs) {
         Elements tabs;
         for (std::size_t i = 0; i < thread_tabs.size(); ++i) {
-            const auto& tab = thread_tabs[i];
-            std::string marker;
-            Color tab_color = tab.active ? Color::Black
-                                         : static_cast<Color>(ColorYellowBright);
-            if (!tab.active && tab.waiting) {
-                marker = "? ";
-                tab_color = ColorQuestionCyan;
-            } else if (!tab.active && tab.running) {
-                marker = "● ";
-            }
-            auto rendered = text(std::format(" {}{} ", marker, fit_column(tab.label, 16)))
-                | color(tab_color);
-            if (tab.active) {
-                rendered = rendered | ftxui::bold | bgcolor(FillYellowDark);
-            }
+            auto rendered = render_thread_tab(thread_tabs[i], animate, tick);
             if (thread_tab_hitboxes) {
                 rendered = std::move(rendered) | reflect((*thread_tab_hitboxes)[i]);
             }

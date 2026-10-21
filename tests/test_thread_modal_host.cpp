@@ -431,7 +431,7 @@ TEST_CASE("startup banner marks a waiting hidden thread with a question mark",
     auto panel = render_startup_banner_panel(
         "provider", "model", 0, {}, {}, "12:34:56",
         {
-            {.label = "main", .active = true, .running = true},
+            {.label = "main", .active = true, .activity = TurnActivityState::Active},
             {.label = "work", .waiting = true},
         },
         &tab_hitboxes);

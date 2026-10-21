@@ -658,6 +658,21 @@ void insert_token_with_spacing(std::string& text, int& cursor, std::string_view 
     return held;
 }
 
+/// What a thread's turn signal shows: live work wins, otherwise the outcome
+/// of the given settled turn (None renders nothing).
+[[nodiscard]] TurnActivityState turn_activity_state(bool running,
+                                                    TurnCompletionStatus settled) {
+    if (running) {
+        return TurnActivityState::Active;
+    }
+    switch (settled) {
+        case TurnCompletionStatus::Succeeded: return TurnActivityState::Completed;
+        case TurnCompletionStatus::Failed:    return TurnActivityState::Failed;
+        case TurnCompletionStatus::None:      break;
+    }
+    return TurnActivityState::Idle;
+}
+
 } // namespace
 
 RunResult run(RunOptions opts) {
@@ -2107,7 +2122,12 @@ RunResult run(RunOptions opts) {
         const bool conversation_animation_active =
             direct_shell_animation_count.load(std::memory_order_relaxed) > 0
             || remote_activity_active;
-        bool fallback_animation_active = conversation_animation_active;
+        // Banner thread tabs spin for every running thread, hidden ones too.
+        const bool thread_tabs_animating = ui_show_banner
+            && thread_runtimes.size() > 1
+            && !thread_runtimes.running_session_ids().empty();
+        bool fallback_animation_active =
+            conversation_animation_active || thread_tabs_animating;
         if (!assistant_active && !review_active && !fallback_animation_active) {
             // Defensive fallback for restored or externally-updated activity
             // cards that are not owned by the normal assistant/shell counters.
@@ -10198,7 +10218,9 @@ RunResult run(RunOptions opts) {
                 thread_tabs.push_back(ThreadTab{
                     .label = std::move(label),
                     .active = item.runtime == selected_runtime,
-                    .running = item.runtime->turn_active(),
+                    .activity = turn_activity_state(
+                        item.runtime->turn_active(),
+                        item.runtime->unseen_completion()),
                     .waiting = thread_modals.waiting(item.metadata.session_id),
                 });
                 thread_tab_session_ids.push_back(item.metadata.session_id);
@@ -10220,7 +10242,9 @@ RunResult run(RunOptions opts) {
                 current_time_str(),
                 thread_tabs,
                 &thread_tab_hitboxes,
-                &agents_status_box);
+                &agents_status_box,
+                ui_show_spinner.load(std::memory_order_relaxed),
+                animation_tick.load(std::memory_order_relaxed));
         } else {
             agents_status_box = {0, -1, 0, -1};
             thread_tab_hitboxes.clear();
@@ -10730,23 +10754,9 @@ RunResult run(RunOptions opts) {
         left_items.push_back(usage_dashboard_el);
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
-        TurnActivityState turn_activity_state = TurnActivityState::Idle;
-        if (response_in_progress) {
-            turn_activity_state = TurnActivityState::Active;
-        } else {
-            switch (current_runtime->completion_status()) {
-                case TurnCompletionStatus::Succeeded:
-                    turn_activity_state = TurnActivityState::Completed;
-                    break;
-                case TurnCompletionStatus::Failed:
-                    turn_activity_state = TurnActivityState::Failed;
-                    break;
-                case TurnCompletionStatus::None:
-                    break;
-            }
-        }
         left_items.push_back(render_turn_activity_indicator(
-            turn_activity_state,
+            turn_activity_state(response_in_progress,
+                                current_runtime->completion_status()),
             ui_show_spinner.load(std::memory_order_relaxed),
             tick));
         // The inbound MCP server status is a standalone affordance: instead of

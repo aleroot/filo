@@ -95,6 +95,7 @@ bool ThreadRuntime::begin_turn() {
     }
     turn_active_.store(true, std::memory_order_release);
     completion_status_.store(TurnCompletionStatus::None, std::memory_order_release);
+    completion_unseen_.store(false, std::memory_order_release);
     touch();
     return true;
 }
@@ -108,6 +109,7 @@ bool ThreadRuntime::begin_or_queue(PendingAgentTurn& turn) {
     }
     turn_active_.store(true, std::memory_order_release);
     completion_status_.store(TurnCompletionStatus::None, std::memory_order_release);
+    completion_unseen_.store(false, std::memory_order_release);
     touch();
     return true;
 }
@@ -129,6 +131,7 @@ std::optional<PendingAgentTurn> ThreadRuntime::finish_turn(bool succeeded) {
     completion_status_.store(
         succeeded ? TurnCompletionStatus::Succeeded : TurnCompletionStatus::Failed,
         std::memory_order_release);
+    completion_unseen_.store(true, std::memory_order_release);
     turn_active_.store(false, std::memory_order_release);
     lock.unlock();
     idle_cv_.notify_all();
@@ -170,6 +173,16 @@ TurnCompletionStatus ThreadRuntime::completion_status() const noexcept {
     return completion_status_.load(std::memory_order_acquire);
 }
 
+TurnCompletionStatus ThreadRuntime::unseen_completion() const noexcept {
+    return completion_unseen_.load(std::memory_order_acquire)
+        ? completion_status()
+        : TurnCompletionStatus::None;
+}
+
+void ThreadRuntime::acknowledge_completion() noexcept {
+    completion_unseen_.store(false, std::memory_order_release);
+}
+
 std::size_t ThreadRuntime::queued_turn_count() const {
     std::lock_guard lock(queue_mutex_);
     return queued_turns_.size();
@@ -180,6 +193,7 @@ void ThreadRuntime::reset_turn_state() {
         std::lock_guard lock(queue_mutex_);
         queued_turns_.clear();
         completion_status_.store(TurnCompletionStatus::None, std::memory_order_release);
+        completion_unseen_.store(false, std::memory_order_release);
         turn_active_.store(false, std::memory_order_release);
     }
     activity_timers_.clear();
@@ -261,6 +275,11 @@ ThreadRuntime::Ptr ThreadRuntimeRegistry::select(std::string_view session_id) {
     if (it == runtimes_.end()) {
         return nullptr;
     }
+    if (const auto previous = runtimes_.find(current_session_id_);
+        previous != runtimes_.end()) {
+        previous->second->acknowledge_completion();
+    }
+    it->second->acknowledge_completion();
     current_session_id_ = it->first;
     return it->second;
 }

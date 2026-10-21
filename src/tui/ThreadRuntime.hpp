@@ -144,6 +144,12 @@ public:
     [[nodiscard]] std::optional<PendingAgentTurn> finish_turn(bool succeeded);
     [[nodiscard]] bool turn_active() const noexcept;
     [[nodiscard]] TurnCompletionStatus completion_status() const noexcept;
+    /// Outcome of the last finished turn until the user has looked at this
+    /// thread; None once acknowledged or while no finished turn is pending.
+    [[nodiscard]] TurnCompletionStatus unseen_completion() const noexcept;
+    /// Marks the last finished turn as seen. ThreadRuntimeRegistry::select()
+    /// calls it for both the thread being left and the one being shown.
+    void acknowledge_completion() noexcept;
     [[nodiscard]] std::size_t queued_turn_count() const;
     void reset_turn_state();
 
@@ -188,6 +194,7 @@ private:
 
     std::atomic_bool turn_active_{false};
     std::atomic<TurnCompletionStatus> completion_status_{TurnCompletionStatus::None};
+    std::atomic_bool completion_unseen_{false};
     mutable std::mutex queue_mutex_;
     std::deque<PendingAgentTurn> queued_turns_;
     std::size_t workers_in_flight_ = 0;
@@ -212,6 +219,9 @@ class ThreadRuntimeRegistry final {
 public:
     [[nodiscard]] bool insert(ThreadRuntime::Ptr runtime);
     [[nodiscard]] ThreadRuntime::Ptr find(std::string_view session_id) const;
+    /// Shows @p session_id. Finished turns of the thread being left and of
+    /// the thread being shown are acknowledged: both were (or are now) on
+    /// screen, so neither needs the tab's attention marker.
     [[nodiscard]] ThreadRuntime::Ptr select(std::string_view session_id);
     [[nodiscard]] bool rekey(std::string_view old_session_id,
                              std::string_view new_session_id);

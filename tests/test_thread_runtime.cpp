@@ -47,6 +47,59 @@ TEST_CASE("ThreadRuntime keeps turn admission and steering isolated",
     CHECK(first->completion_status() == tui::TurnCompletionStatus::Succeeded);
 }
 
+TEST_CASE("ThreadRuntime keeps a finished turn unseen until acknowledged",
+          "[tui][thread_runtime][attention]") {
+    auto runtime = make_runtime("aaaa1111");
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::None);
+
+    // A queued steering turn is not a finish: the thread keeps working.
+    tui::PendingAgentTurn turn{.text = "first"};
+    REQUIRE(runtime->begin_or_queue(turn));
+    runtime->queue_turn({.text = "steer"});
+    REQUIRE(runtime->finish_turn(true).has_value());
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::None);
+
+    CHECK_FALSE(runtime->finish_turn(false).has_value());
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::Failed);
+    runtime->acknowledge_completion();
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::None);
+    // The footer still reports the outcome of the acknowledged turn.
+    CHECK(runtime->completion_status() == tui::TurnCompletionStatus::Failed);
+
+    // Starting new work supersedes an outcome nobody has looked at.
+    CHECK_FALSE(runtime->finish_turn(true).has_value());
+    REQUIRE(runtime->begin_turn());
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::None);
+    CHECK_FALSE(runtime->finish_turn(true).has_value());
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::Succeeded);
+    runtime->reset_turn_state();
+    CHECK(runtime->unseen_completion() == tui::TurnCompletionStatus::None);
+}
+
+TEST_CASE("ThreadRuntimeRegistry selection acknowledges both shown threads",
+          "[tui][thread_runtime][attention]") {
+    tui::ThreadRuntimeRegistry registry;
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+    auto third = make_runtime("cccc3333");
+    REQUIRE(registry.insert(first));
+    REQUIRE(registry.insert(second));
+    REQUIRE(registry.insert(third));
+    REQUIRE(registry.select(first->session_id()));
+
+    for (const auto& runtime : {first, second, third}) {
+        REQUIRE(runtime->begin_turn());
+        CHECK_FALSE(runtime->finish_turn(true).has_value());
+    }
+
+    // Leaving `first` acknowledges what finished while it was on screen;
+    // showing `second` acknowledges it; `third` was never looked at.
+    REQUIRE(registry.select(second->session_id()));
+    CHECK(first->unseen_completion() == tui::TurnCompletionStatus::None);
+    CHECK(second->unseen_completion() == tui::TurnCompletionStatus::None);
+    CHECK(third->unseen_completion() == tui::TurnCompletionStatus::Succeeded);
+}
+
 TEST_CASE("ThreadRuntime keeps thread and session names independent",
           "[tui][thread_runtime][identity]") {
     auto runtime = std::make_shared<tui::ThreadRuntime>(
