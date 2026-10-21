@@ -219,6 +219,8 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
             .provider = "openai",
             .kind = "reasoning",
             .payload = R"({"type":"reasoning","encrypted_content":"secret"})",
+            .origin_model = "glm-5.3",
+            .origin_service = "zai-coding|https://api.z.ai/api/anthropic",
         }},
         .reasoning_protocol = "zai",
     });
@@ -231,6 +233,8 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
     CHECK(loaded->messages[2].reasoning_protocol == "zai");
     CHECK(loaded->messages[2].reasoning_elapsed == "7s");
     REQUIRE(loaded->messages[2].continuation_items.size() == 1);
+    CHECK(loaded->messages[2].continuation_items[0].origin_model == "glm-5.3");
+    CHECK(loaded->messages[2].continuation_items[0].origin_service == "zai-coding|https://api.z.ai/api/anthropic");
     CHECK(loaded->messages[2].continuation_items[0].payload
           == R"({"type":"reasoning","encrypted_content":"secret"})");
 }

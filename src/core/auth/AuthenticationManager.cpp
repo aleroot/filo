@@ -341,6 +341,38 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
     manager.register_strategy(std::make_shared<XaiOAuthStrategy>());
     manager.register_strategy(make_mimo_authentication_strategy());
+    auto minimax_plan = std::make_shared<ApiKeyPromptStrategy>(ApiKeyPromptStrategySpec{
+        .login_provider = "minimax",
+        .login_aliases = {"minimax-m-plan"},
+        .display_name = "MiniMax M Plan",
+        .instructions =
+            "Copy your M Plan Subscription Key from https://www.minimax.io/m-plan. "
+            "This key uses subscription quota and available credit packs.",
+        .profiles = {ApiKeyLoginProfile{
+            .provider_name = "minimax-m-plan",
+            .default_model = "MiniMax-M3.1-Flash",
+            .key_prompt = "Subscription Key:",
+            .rejected_key_prefixes = {"sk-api-"},
+            .invalid_key_message = "Use the M Plan Subscription Key; this is a pay-as-you-go key.",
+        }},
+        .env_var = "MINIMAX_M_PLAN_API_KEY",
+        .docs_hint = "MINIMAX_SUBSCRIPTION_KEY is also accepted. Usage: https://www.minimax.io/m-plan",
+    });
+    auto minimax_api = std::make_shared<ApiKeyPromptStrategy>(ApiKeyPromptStrategySpec{
+        .login_provider = "minimax-api",
+        .display_name = "MiniMax API",
+        .profiles = {ApiKeyLoginProfile{
+            .provider_name = "minimax",
+            .default_model = "MiniMax-M3.1-Flash",
+            .rejected_key_prefixes = {"sk-cp-"},
+            .invalid_key_message = "Use filo --auth minimax for a Subscription Key.",
+        }},
+        .env_var = "MINIMAX_API_KEY",
+        .docs_hint =
+            "Uses pay-as-you-go account balance. For M Plan use filo --auth minimax.",
+    });
+    manager.register_strategy(minimax_plan);
+    manager.register_strategy(minimax_api);
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         ApiKeyPromptStrategySpec{
             .login_provider = "qwen",

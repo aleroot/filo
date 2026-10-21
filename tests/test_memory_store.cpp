@@ -9,7 +9,7 @@
 #include "core/tools/ToolSchema.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 
 #include <simdjson.h>
 
@@ -994,7 +994,7 @@ TEST_CASE("Claude memory schema and streamed tool calls round trip through persi
     request.model = "claude-opus-5";
     request.tools.push_back({.type = "function", .function = tool.get_definition()});
     request.messages.push_back({.role = "user", .content = "Remember this project's formatter."});
-    const auto payload = core::llm::protocols::AnthropicSerializer::serialize(request);
+    const auto payload = core::llm::protocols::ClaudeSerializer::serialize(request);
     simdjson::dom::parser parser;
     const auto doc = parser.parse(payload);
     CHECK(doc["tools"].at(0)["name"].get_string().value() == "memory");
@@ -1023,7 +1023,7 @@ TEST_CASE("Claude memory schema and streamed tool calls round trip through persi
 
     request.messages.push_back({.role = "assistant", .tool_calls = {call}});
     request.messages.push_back({.role = "tool", .content = result, .tool_call_id = call.id});
-    const auto reply = core::llm::protocols::AnthropicSerializer::serialize(request);
+    const auto reply = core::llm::protocols::ClaudeSerializer::serialize(request);
     const auto reply_doc = parser.parse(reply);
     CHECK(reply_doc["messages"].at(2)["content"].at(0)["type"].get_string().value() == "tool_result");
     CHECK(reply_doc["messages"].at(2)["content"].at(0)["tool_use_id"].get_string().value() == call.id);

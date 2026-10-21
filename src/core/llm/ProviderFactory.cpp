@@ -17,7 +17,9 @@
 #include "protocols/KimiProtocol.hpp"
 #include "protocols/GrokProtocol.hpp"
 #include "protocols/DashScopeProtocol.hpp"
-#include "protocols/AnthropicProtocol.hpp"
+#include "protocols/ClaudeProtocol.hpp"
+#include "providers/MiniMaxProvider.hpp"
+#include "MiniMaxModelTraits.hpp"
 #include "protocols/GeminiProtocol.hpp"
 #include "protocols/GeminiAntigravityProtocol.hpp"
 #include "protocols/OllamaProtocol.hpp"
@@ -292,6 +294,25 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         }
     }
 
+    if (builtin && builtin->registry_provider == "minimax") {
+        if (api_type != ApiType::Anthropic) {
+            core::logging::warn("MiniMax built-in providers require api_type anthropic; use a custom provider for another wire format.");
+            return nullptr;
+        }
+        // Normalize once for generation, model discovery, usage scope and saved
+        // continuation provenance, using the wire protocol's URL construction.
+        base_url = protocols::AnthropicProtocol().build_url(base_url, {});
+        base_url.resize(base_url.size() - std::string_view("/v1/messages").size());
+        return std::make_shared<providers::MiniMaxProvider>(providers::MiniMaxProvider::Options{
+            .base_url = base_url,
+            .credentials = std::move(cred),
+            .model = config.model.empty() ? std::string(kMiniMaxDefaultModel) : config.model,
+            .provider_name = std::string(name),
+            .subscription = billing_kind == core::auth::BillingKind::Subscription,
+            .default_effort = config.reasoning_effort,
+            .context_window = config.context_window > 0 ? config.context_window : kMiniMaxContextWindow,
+        });
+    }
     // Build protocol based on api_type (and provider-specific extensions).
     std::unique_ptr<protocols::ApiProtocolBase> protocol;
     switch (api_type) {
@@ -365,12 +386,19 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             protocol = std::make_unique<protocols::ZaiCodingProtocol>();
             break;
         }
-        protocols::AnthropicThinkingConfig thinking;
+        protocols::ClaudeThinkingConfig thinking;
         if (config.thinking_budget > 0) {
             thinking.enabled       = true;
             thinking.budget_tokens = config.thinking_budget;
         }
-        protocol = std::make_unique<protocols::AnthropicProtocol>(thinking);
+        const auto host = core::utils::uri::extract_http_host(base_url);
+        if ((builtin && builtin->registry_provider == "anthropic")
+            || normalized_auth_type == "oauth_claude"
+            || (host && core::utils::ascii::iequals(*host, "api.anthropic.com"))) {
+            protocol = std::make_unique<protocols::ClaudeProtocol>(thinking);
+        } else {
+            protocol = std::make_unique<protocols::AnthropicProtocol>();
+        }
         break;
     }
     case ApiType::Gemini:

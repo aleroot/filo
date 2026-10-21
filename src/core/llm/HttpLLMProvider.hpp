@@ -155,6 +155,11 @@ public:
     void discover_models(
         const ModelCatalogDiscoveryOptions& options = {}) const override;
 
+protected:
+    /// Live endpoint metadata only; lets provider policy distinguish a serving
+    /// limit from conservative registry defaults without initiating discovery.
+    [[nodiscard]] std::optional<ModelInfo> provider_model_info(std::string_view model) const;
+
 private:
     [[nodiscard]] std::string_view catalog_id() const noexcept;
 

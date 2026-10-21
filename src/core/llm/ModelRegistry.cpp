@@ -1,7 +1,8 @@
 #include "ModelRegistry.hpp"
+#include "MiniMaxModelTraits.hpp"
 #include "ModelMetadata.hpp"
 #include "Models.hpp"
-#include "AnthropicCompatibility.hpp"
+#include "ClaudeModelTraits.hpp"
 
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -291,8 +292,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("fable-5-1")->reasoning(),
-            .wire = anthropic::model_policy("fable-5-1")->wire,
+            .reasoning = claude::model_policy("fable-5-1")->reasoning(),
+            .wire = claude::model_policy("fable-5-1")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 0.25, 12.5},
             .knowledge_cutoff = "2026-06",
@@ -312,8 +313,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("fable-5")->reasoning(),
-            .wire = anthropic::model_policy("fable-5")->wire,
+            .reasoning = claude::model_policy("fable-5")->reasoning(),
+            .wire = claude::model_policy("fable-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 1.0, 12.5},
             .knowledge_cutoff = "2026-01",
@@ -338,8 +339,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
-            .reasoning = anthropic::model_policy("opus-5")->reasoning(),
-            .wire = anthropic::model_policy("opus-5")->wire,
+            .reasoning = claude::model_policy("opus-5")->reasoning(),
+            .wire = claude::model_policy("opus-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-05",
@@ -364,8 +365,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
-            .reasoning = anthropic::model_policy("opus-5-5")->reasoning(),
-            .wire = anthropic::model_policy("opus-5-5")->wire,
+            .reasoning = claude::model_policy("opus-5-5")->reasoning(),
+            .wire = claude::model_policy("opus-5-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {4.0, 20.0, 0.20, 5.0},
             .knowledge_cutoff = "2026-06",
@@ -385,8 +386,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("sonnet-5")->reasoning(),
-            .wire = anthropic::model_policy("sonnet-5")->wire,
+            .reasoning = claude::model_policy("sonnet-5")->reasoning(),
+            .wire = claude::model_policy("sonnet-5")->wire,
             .tier = ModelTier::Balanced,
             // Introductory launch pricing is effective through 2026-08-31.
             .pricing = {2.0, 10.0, 0.20, 2.5},
@@ -405,8 +406,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("sonnet-5-5")->reasoning(),
-            .wire = anthropic::model_policy("sonnet-5-5")->wire,
+            .reasoning = claude::model_policy("sonnet-5-5")->reasoning(),
+            .wire = claude::model_policy("sonnet-5-5")->wire,
             .tier = ModelTier::Balanced,
             .pricing = {2.0, 10.0, 0.10, 2.5},
             .knowledge_cutoff = "2026-06",
@@ -424,8 +425,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("haiku-5-5")->reasoning(),
-            .wire = anthropic::model_policy("haiku-5-5")->wire,
+            .reasoning = claude::model_policy("haiku-5-5")->reasoning(),
+            .wire = claude::model_policy("haiku-5-5")->wire,
             .tier = ModelTier::Fast,
             .pricing = {0.10, 0.50, 0.01, 0.125, ModelPricing::LongContext{100000, 0.50, 2.50, 0.05, 0.625}},
             .knowledge_cutoff = "2026-06",
@@ -465,8 +466,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = anthropic::model_policy("opus-4-8")->reasoning(),
-            .wire = anthropic::model_policy("opus-4-8")->wire,
+            .reasoning = claude::model_policy("opus-4-8")->reasoning(),
+            .wire = claude::model_policy("opus-4-8")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-03",
@@ -1788,6 +1789,9 @@ void ModelRegistry::load_defaults() {
     register_all(build_grok_catalog());
     register_all(build_qwen_catalog());
     register_all(build_local_catalog());
+    for (const auto id : {"MiniMax-M3.1-Flash", "MiniMax-M3"}) {
+        if (auto model = minimax_model_info(id)) register_model(std::move(*model));
+    }
 }
 
 void ModelRegistry::register_model(ModelInfo info) {
@@ -2448,22 +2452,22 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
     // Same alias targets the Anthropic protocol resolves before a request, so
     // the context window is always measured for the model that gets called.
     if (lowered == "sonnet") {
-        return std::string(anthropic::kDefaultSonnet);
+        return std::string(claude::kDefaultSonnet);
     }
-    if (anthropic::is_fable_alias(lowered)) {
-        return std::string(anthropic::kDefaultFable);
+    if (claude::is_fable_alias(lowered)) {
+        return std::string(claude::kDefaultFable);
     }
     if (lowered == "haiku") {
-        return std::string(anthropic::kDefaultHaiku);
+        return std::string(claude::kDefaultHaiku);
     }
     if (lowered == "opusplan") {
-        return std::string(anthropic::kDefaultSonnet);
+        return std::string(claude::kDefaultSonnet);
     }
     if (lowered == "opus") {
-        return std::string(anthropic::kDefaultOpus);
+        return std::string(claude::kDefaultOpus);
     }
-    if (anthropic::is_opus_55_alias(lowered)) {
-        return std::string(anthropic::kDefaultOpus55);
+    if (claude::is_opus_55_alias(lowered)) {
+        return std::string(claude::kDefaultOpus55);
     }
     return normalized;
 }

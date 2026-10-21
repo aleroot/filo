@@ -8,7 +8,7 @@
 #include "core/context/SessionContext.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/memory/MemoryStore.hpp"
 #include "core/memory/MemorySystem.hpp"
 #include "core/memory/ToolRecoveryMemory.hpp"
@@ -1260,7 +1260,7 @@ TEST_CASE("Loading a legacy transcript removes nameless calls without truncating
     core::llm::ChatRequest claude_request;
     claude_request.model = "claude-opus-5";
     claude_request.messages = restored;
-    const auto payload = core::llm::protocols::AnthropicSerializer::serialize(claude_request);
+    const auto payload = core::llm::protocols::ClaudeSerializer::serialize(claude_request);
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("name":"")"));
 }
 
@@ -1744,11 +1744,11 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
     }
 
     const auto first_payload =
-        core::llm::protocols::AnthropicSerializer::serialize(requests[0]);
+        core::llm::protocols::ClaudeSerializer::serialize(requests[0]);
     const auto second_payload =
-        core::llm::protocols::AnthropicSerializer::serialize(requests[1]);
+        core::llm::protocols::ClaudeSerializer::serialize(requests[1]);
     const auto third_payload =
-        core::llm::protocols::AnthropicSerializer::serialize(requests[2]);
+        core::llm::protocols::ClaudeSerializer::serialize(requests[2]);
     const auto first_messages = first_payload.find(R"(,"messages":[)");
     const auto second_messages = second_payload.find(R"(,"messages":[)");
     const auto third_messages = third_payload.find(R"(,"messages":[)");

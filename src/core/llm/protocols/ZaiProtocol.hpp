@@ -95,6 +95,7 @@ private:
 class ZaiCodingProtocol final : public AnthropicProtocol {
 public:
     ZaiCodingProtocol() = default;
+    bool accepts_legacy_continuation() const noexcept override { return true; }
 
     void prepare_request(ChatRequest& req) override;
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;

@@ -201,6 +201,14 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
         source.registry_model_filter = mimo_pay_as_you_go_filter();
         source.api_model_filter = source.registry_model_filter;
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
+    } else if (group_name == "minimax") {
+        const bool plan = definition && definition->billing_kind == core::auth::BillingKind::Subscription;
+        source.category_label = plan ? "M Plan subscription." : "MiniMax API.";
+        if (plan) {
+            source.registry_model_filter = {ProviderCatalogModelRule::Include, {"MiniMax-M3.1-Flash"}};
+            source.api_model_filter = source.registry_model_filter;
+        }
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();

@@ -75,7 +75,7 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
             check(provider, {"api_type", "api_key", "model", "base_url", "auth_type", "reasoning_effort",
                               "wire_api", "service_tier", "model_path", "chat_template"}, string, "a string");
             check(provider, {"stream_usage", "use_mmap", "use_mlock"}, boolean, "a boolean");
-            check(provider, {"thinking_budget", "top_k", "seed", "context_size", "batch_size",
+            check(provider, {"thinking_budget", "context_window", "top_k", "seed", "context_size", "batch_size",
                               "threads", "threads_batch", "gpu_layers"}, integer, "an integer");
             check(provider, {"temperature", "top_p"}, [](const auto& v) { return v.is_number(); }, "a number");
             check(provider, {"llamacpp"}, object, "an object");

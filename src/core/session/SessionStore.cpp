@@ -251,7 +251,18 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
             core::utils::append_escaped(out, item.kind);
             out += "\",\"payload\":\"";
             core::utils::append_escaped(out, item.payload);
-            out += "\"}";
+            out += "\"";
+            if (!item.origin_model.empty()) {
+                out += ",\"origin_model\":\"";
+                core::utils::append_escaped(out, item.origin_model);
+                out += '\"';
+            }
+            if (!item.origin_service.empty()) {
+                out += ",\"origin_service\":\"";
+                core::utils::append_escaped(out, item.origin_service);
+                out += '\"';
+            }
+            out += '}';
         }
         out += ']';
     }
@@ -404,6 +415,8 @@ void append_goal_graph_json(std::string& out,
             if (item_el["payload"].get(sv) == simdjson::SUCCESS) {
                 item.payload = std::string(sv);
             }
+            if (item_el["origin_model"].get(sv) == simdjson::SUCCESS) item.origin_model = std::string(sv);
+            if (item_el["origin_service"].get(sv) == simdjson::SUCCESS) item.origin_service = std::string(sv);
             if (!item.payload.empty()) {
                 msg.continuation_items.push_back(std::move(item));
             }

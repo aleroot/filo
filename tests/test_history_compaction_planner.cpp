@@ -2,7 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/HistoryCompactionPlanner.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
@@ -211,7 +211,7 @@ TEST_CASE("Provider wire families serialize compaction input without protocol st
         std::make_unique<core::llm::protocols::DashScopeProtocol>(),
         std::make_unique<core::llm::protocols::DashScopeResponsesProtocol>(),
         std::make_unique<core::llm::protocols::DashScopeTokenPlanProtocol>(),
-        std::make_unique<core::llm::protocols::AnthropicProtocol>(),
+        std::make_unique<core::llm::protocols::ClaudeProtocol>(),
         std::make_unique<core::llm::protocols::GeminiProtocol>(),
         std::make_unique<core::llm::protocols::GeminiCodeAssistProtocol>(),
         std::make_unique<core::llm::protocols::OllamaProtocol>(),

@@ -18,7 +18,7 @@
 #include "core/llm/ToolCallAssembly.hpp"
 #include "core/llm/transport/CurlWebSocketTransport.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
@@ -729,7 +729,7 @@ TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recover
         "https://example.invalid",
         std::make_shared<ReauthenticationCredentialSource>(),
         "claude-sonnet-4-6",
-        std::make_unique<AnthropicProtocol>());
+        std::make_unique<ClaudeProtocol>());
 
     std::vector<StreamChunk> chunks;
     provider->stream_response(
@@ -1062,7 +1062,7 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
     auto provider = std::make_shared<HttpLLMProvider>(
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
-        "fable", std::make_unique<AnthropicProtocol>());
+        "fable", std::make_unique<ClaudeProtocol>());
 
     auto request = make_claude_request("fable");
     request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Read the file."});
@@ -1169,7 +1169,7 @@ TEST_CASE("HttpLLMProvider forwards a live output limit to the Anthropic wire re
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
         std::string(model_id),
-        std::make_unique<AnthropicProtocol>(),
+        std::make_unique<ClaudeProtocol>(),
         core::config::ApiType::Anthropic,
         std::string(provider_name));
 
@@ -1243,7 +1243,7 @@ TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
         "claude-sonnet-4-6",
-        std::make_unique<AnthropicProtocol>());
+        std::make_unique<ClaudeProtocol>());
 
     std::vector<StreamChunk> chunks;
     provider->stream_response(make_claude_request(), [&](const StreamChunk& chunk) {
@@ -1296,7 +1296,7 @@ TEST_CASE("HttpLLMProvider - does not retry Anthropic stream error after output"
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
         "claude-sonnet-4-6",
-        std::make_unique<AnthropicProtocol>());
+        std::make_unique<ClaudeProtocol>());
 
     std::vector<StreamChunk> chunks;
     provider->stream_response(make_claude_request(), [&](const StreamChunk& chunk) {
@@ -1522,7 +1522,7 @@ TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization id fallba
 }
 
 namespace {
-class FastClaudeProtocol final : public AnthropicProtocol {
+class FastClaudeProtocol final : public ClaudeProtocol {
 public:
     std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<FastClaudeProtocol>();
@@ -1721,7 +1721,7 @@ TEST_CASE("Agent stops a long Claude 429 retry after switching to Grok",
     const std::string base = std::format("http://127.0.0.1:{}", port);
     auto credentials = core::auth::ApiKeyCredentialSource::as_bearer("test-key");
     auto claude = std::make_shared<HttpLLMProvider>(
-        base, credentials, "claude-sonnet-4-6", std::make_unique<AnthropicProtocol>());
+        base, credentials, "claude-sonnet-4-6", std::make_unique<ClaudeProtocol>());
     auto grok = std::make_shared<HttpLLMProvider>(
         base + "/v1", credentials, "grok-4.7", std::make_unique<GrokResponsesProtocol>());
     auto agent = std::make_shared<core::agent::Agent>(

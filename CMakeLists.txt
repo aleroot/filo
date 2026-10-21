@@ -236,6 +236,8 @@ set(FILO_CORE_SOURCES
     src/core/llm/providers/QwenModelCatalogSelector.cpp
     src/core/llm/providers/QwenProvider.cpp
     src/core/llm/providers/QwenRequestBudget.cpp
+    src/core/llm/providers/MiniMaxProvider.cpp
+    src/core/llm/providers/MiniMaxRequestBudget.cpp
     src/core/llm/KimiModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/ZaiModelTraits.cpp
@@ -246,6 +248,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelMetadata.cpp
     src/core/llm/ReasoningEffortResolution.cpp
     src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
+    src/core/llm/catalog/MiniMaxModelCatalogProvider.cpp
     src/core/llm/catalog/CodeAssistModelCatalogProvider.cpp
     src/core/llm/catalog/CompatibleModelMetadata.cpp
     src/core/llm/catalog/CodexModelCatalogProvider.cpp
@@ -276,6 +279,10 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/GrokProtocol.cpp
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
+    src/core/llm/protocols/ClaudeProtocol.cpp
+    src/core/llm/protocols/MiniMaxProtocol.cpp
+    src/core/llm/MiniMaxModelTraits.cpp
+    src/core/llm/MiniMaxUsageClient.cpp
     src/core/llm/protocols/GeminiProtocol.cpp
     src/core/llm/protocols/GeminiCodeAssistProtocol.cpp
     src/core/llm/protocols/GeminiAntigravityProtocol.cpp
@@ -726,6 +733,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_claude_provider.cpp
     tests/test_mistral_provider.cpp
     tests/test_mimo_provider.cpp
+    tests/test_minimax_provider.cpp
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
@@ -818,6 +826,7 @@ set(FILO_INTEGRATION_TEST_SOURCES
     tests/test_integration_prompt_input.cpp
     tests/test_integration_provider_http.cpp
     tests/test_integration_qwen.cpp
+    tests/test_integration_minimax.cpp
     tests/test_integration_shell_tool.cpp
     tests/test_integration_web_tools.cpp
     tests/test_curl_websocket_transport.cpp
@@ -964,6 +973,7 @@ source_group(
         tests/test_claude_provider.cpp
         tests/test_mistral_provider.cpp
         tests/test_mimo_provider.cpp
+        tests/test_minimax_provider.cpp
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp
         tests/test_qwen_oauth.cpp
@@ -1022,6 +1032,7 @@ source_group(
         tests/test_integration_prompt_input.cpp
         tests/test_integration_provider_http.cpp
         tests/test_integration_qwen.cpp
+        tests/test_integration_minimax.cpp
         tests/test_integration_shell_tool.cpp
         tests/test_integration_web_tools.cpp
         tests/test_curl_websocket_transport.cpp

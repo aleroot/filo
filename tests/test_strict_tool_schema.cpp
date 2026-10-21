@@ -4,7 +4,7 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/StrictToolPolicy.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/tools/ReadTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/StrictToolSchema.hpp"
@@ -281,7 +281,7 @@ TEST_CASE("the Anthropic wire claims strictness only where it is documented",
     core::llm::ChatRequest request;
     request.tools.push_back(core::llm::Tool{.function = edit_tool()});
 
-    core::llm::protocols::AnthropicProtocol protocol;
+    core::llm::protocols::ClaudeProtocol protocol;
 
     request.model = "claude-opus-5";
     const std::string supported = protocol.serialize(request);
@@ -298,7 +298,7 @@ TEST_CASE("strict schemas stay off until the switch is set",
     request.model = "claude-opus-5";
     request.tools.push_back(core::llm::Tool{.function = edit_tool()});
 
-    core::llm::protocols::AnthropicProtocol protocol;
+    core::llm::protocols::ClaudeProtocol protocol;
     CHECK_THAT(protocol.serialize(request), !ContainsSubstring(R"("strict")"));
 }
 
@@ -334,7 +334,7 @@ TEST_CASE("Anthropic strict schemas respect the combined provider grammar budget
         tool.function.input_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false})";
         request.tools.push_back(tool);
     }
-    const auto payload = core::llm::protocols::AnthropicSerializer::serialize(request);
+    const auto payload = core::llm::protocols::ClaudeSerializer::serialize(request);
     simdjson::dom::parser parser;
     const auto doc = parser.parse(payload);
     int strict_count = 0;
@@ -347,7 +347,7 @@ TEST_CASE("Anthropic strict schemas respect the combined provider grammar budget
     // The output schema uses five of the optional parameter slots.
     request.response_format = {.type = core::llm::ResponseFormat::Type::JsonSchema,
         .schema = R"({"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string"},"d":{"type":"string"},"e":{"type":"string"}},"additionalProperties":false})"};
-    const auto combined = core::llm::protocols::AnthropicSerializer::serialize(request);
+    const auto combined = core::llm::protocols::ClaudeSerializer::serialize(request);
     const auto combined_doc = parser.parse(combined);
     strict_count = 0;
     for (const auto tool : combined_doc["tools"].get_array().value()) {

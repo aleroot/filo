@@ -1,0 +1,450 @@
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+#include <simdjson.h>
+#include <cstdlib>
+#include <chrono>
+#include <fstream>
+#include <atomic>
+#include <future>
+#include "core/tools/WebBackendAdapters.hpp"
+#include "TestSessionContext.hpp"
+#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
+#include "core/llm/protocols/MiniMaxProtocol.hpp"
+#include "core/llm/MiniMaxModelTraits.hpp"
+#include "core/llm/MiniMaxUsageClient.hpp"
+#include "core/llm/ProviderDefinition.hpp"
+#include "core/llm/ProviderFactory.hpp"
+#include "core/llm/ProviderCatalogGrouping.hpp"
+#include "core/llm/ModelCatalogProvider.hpp"
+#include "core/auth/AuthenticationManager.hpp"
+#include "core/budget/TokenAccounting.hpp"
+#include "core/llm/providers/MiniMaxProvider.hpp"
+#include "core/llm/providers/MiniMaxRequestBudget.hpp"
+#include "core/commands/SkillTurnResolver.hpp"
+#include "core/auth/ApiKeyPromptStrategy.hpp"
+
+using namespace core::llm;
+using namespace core::llm::protocols;
+using Catch::Matchers::ContainsSubstring;
+
+namespace {
+struct MiniMaxEnv {
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+    MiniMaxEnv() {
+        for (const auto name : {"MINIMAX_API_KEY", "MINIMAX_M_PLAN_API_KEY", "MINIMAX_SUBSCRIPTION_KEY"}) {
+            const char* value = std::getenv(name);
+            saved.push_back({name, value ? std::optional<std::string>{value} : std::nullopt});
+            unsetenv(name);
+        }
+    }
+    ~MiniMaxEnv() {
+        for (const auto& [name, value] : saved) {
+            if (value) setenv(name.c_str(), value->c_str(), 1); else unsetenv(name.c_str());
+        }
+    }
+};
+ChatRequest request(std::string model = "MiniMax-M3.1-Flash") {
+    ChatRequest req;
+    req.model = std::move(model);
+    req.messages = {{.role = "system", .content = "Project instructions"}, {.role = "user", .content = "Hello"}};
+    return req;
+}
+void valid_json(std::string_view payload) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(payload);
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(padded).get(doc) == simdjson::SUCCESS);
+}
+class UsageFixture final : public IMiniMaxUsageSource {
+public:
+    int reads = 0;
+    std::optional<RateLimitInfo> read(std::string_view, const cpr::Header&) override {
+        ++reads;
+        RateLimitInfo info;
+        info.usage_windows.push_back({"5h", 0.25F, 100});
+        return info;
+    }
+};
+}
+
+TEST_CASE("Messages defaults are neutral even when a Claude model is named", "[anthropic-neutral][minimax]") {
+    AnthropicProtocol protocol;
+    auto req = request("sonnet[1m]");
+    req.effort = "max";
+    protocol.prepare_request(req);
+    CHECK(req.model == "sonnet[1m]");
+    const auto payload = protocol.serialize(req);
+    valid_json(payload);
+    CHECK_THAT(payload, ContainsSubstring("Project instructions"));
+    for (const auto field : {"billing", "claude-code", "cache_control", "thinking", "output_config"}) CHECK_THAT(payload, !ContainsSubstring(field));
+    core::auth::AuthInfo auth;
+    auth.headers["x-api-key"] = "neutral-key";
+    auth.properties["oauth"] = "1";
+    const auto headers = protocol.build_headers(auth);
+    CHECK(headers.at("x-api-key") == "neutral-key");
+    CHECK_FALSE(headers.contains("x-anthropic-billing-header"));
+    CHECK_FALSE(headers.contains("anthropic-beta"));
+    CHECK(protocol.reasoning_capabilities("claude-opus-5").empty());
+    CHECK_FALSE(protocol.accepts_legacy_continuation());
+    CHECK(protocol.build_url("https://example.test/anthropic/v1/", {}) == "https://example.test/anthropic/v1/messages");
+    CHECK(protocol.build_url("https://example.test/anthropic/v1/messages", {}) == "https://example.test/anthropic/v1/messages");
+    CHECK(dynamic_cast<ClaudeProtocol*>(protocol.clone().get()) == nullptr);
+}
+
+TEST_CASE("Provider factory selects vendor policy independently of Messages wire type", "[minimax][factory]") {
+    core::config::ProviderConfig config;
+    config.api_key = "fixture-key";
+    auto plan = ProviderFactory::create_provider("minimax-m-plan", config);
+    auto api = ProviderFactory::create_provider("minimax", config);
+    REQUIRE(plan); REQUIRE(api);
+    CHECK_FALSE(plan->should_estimate_cost());
+    CHECK(api->should_estimate_cost());
+    CHECK(plan->max_context_size() == kMiniMaxContextWindow);
+    CHECK(plan->reasoning_capabilities(kMiniMaxDefaultModel).supports(ReasoningCapability::Required));
+    const auto fork = plan->fork_for_parallel_request();
+    REQUIRE(fork);
+    CHECK_FALSE(fork->should_estimate_cost());
+    CHECK(fork->reasoning_capabilities(kMiniMaxDefaultModel).supports(ReasoningCapability::Required));
+    const auto* definition = find_builtin_provider_definition("minimax-m-plan-work");
+    REQUIRE(definition);
+    CHECK(definition->billing_kind == core::auth::BillingKind::Subscription);
+    CHECK(definition->env_vars[0] == "MINIMAX_M_PLAN_API_KEY");
+    CHECK(definition->env_vars[1] == "MINIMAX_SUBSCRIPTION_KEY");
+    CHECK_FALSE(find_builtin_provider_definition("minimaximum"));
+}
+
+TEST_CASE("Claude routing recognizes native hosts independently of URL path and case", "[claude][factory]") {
+    core::config::ProviderConfig config;
+    config.api_key = "fixture";
+    config.api_type = core::config::ApiType::Anthropic;
+    constexpr auto model = "claude-opus-4-7-20990101";
+    for (const auto url : {"https://api.anthropic.com/", "https://api.anthropic.com/v1",
+                           "https://API.ANTHROPIC.COM/v1/messages"}) {
+        CAPTURE(url);
+        config.base_url = url;
+        const auto provider = ProviderFactory::create_provider("custom-claude", config);
+        REQUIRE(provider);
+        CHECK_FALSE(provider->reasoning_capabilities(model).empty());
+    }
+    config.base_url = "https://api.anthropic.com.example.test/v1";
+    const auto generic = ProviderFactory::create_provider("custom-messages", config);
+    REQUIRE(generic);
+    CHECK(generic->reasoning_capabilities(model).empty());
+}
+
+TEST_CASE("MiniMax keeps required thinking and all supported effort levels", "[minimax][reasoning]") {
+    MiniMaxProtocol protocol(true);
+    for (const auto effort : {"low", "medium", "high", "xhigh", "max", "none", "off", "auto", ""}) {
+        CAPTURE(effort);
+        auto req = request(); req.effort = effort;
+        protocol.prepare_request(req);
+        const auto payload = protocol.serialize(req);
+        valid_json(payload);
+        CHECK_THAT(payload, ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+        const std::string expected = std::string(effort) == "off" || std::string(effort) == "none" ? "low"
+            : std::string(effort).empty() || std::string(effort) == "auto" ? "max" : effort;
+        CHECK_THAT(payload, ContainsSubstring("\"effort\":\"" + expected + "\""));
+        for (const auto field : {"billing", "temperature", "budget_tokens", "block_binding", "display", "cache_control", "service_tier"}) CHECK_THAT(payload, !ContainsSubstring(field));
+    }
+    auto m3 = request("MiniMax-M3");
+    MiniMaxProtocol api;
+    api.prepare_request(m3);
+    CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
+    m3.effort = "high";
+    CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("type":"adaptive")"));
+    CHECK_THAT(api.serialize(m3), !ContainsSubstring("output_config"));
+    for (const auto effort : {"auto", "default", "unset", " OFF ", " disabled "}) {
+        m3.effort = effort;
+        CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
+    }
+    CHECK_THROWS(protocol.prepare_request(m3));
+}
+
+TEST_CASE("MiniMax rejects mismatched key types and leaves unknown formats usable", "[minimax][auth]") {
+    MiniMaxProtocol plan(true), api;
+    core::auth::AuthInfo auth;
+    auth.headers["x-api-key"] = "sk-api-fixture";
+    CHECK_THROWS(plan.build_headers(auth));
+    CHECK_NOTHROW(api.build_headers(auth));
+    auth.headers["x-api-key"] = "sk-cp-fixture";
+    CHECK_THROWS(api.build_headers(auth));
+    CHECK_NOTHROW(plan.build_headers(auth));
+    auth.headers["x-api-key"] = "future-format-fixture";
+    CHECK_NOTHROW(plan.build_headers(auth));
+    auto manager = core::auth::AuthenticationManager::create_with_defaults("/tmp");
+    const auto logins = manager.available_login_providers();
+    for (const auto name : {"minimax", "minimax-api"}) CHECK(std::ranges::find(logins, name) != logins.end());
+}
+
+TEST_CASE("MiniMax subscription credentials never fall back to a metered key", "[minimax][auth]") {
+    MiniMaxEnv environment;
+    setenv("MINIMAX_API_KEY", "metered-fixture", 1);
+    core::config::ProviderConfig config;
+    auto plan = ProviderFactory::create_provider("minimax-m-plan", config); REQUIRE(plan);
+    REQUIRE(plan->metadata());
+    CHECK(plan->metadata()->credential_source->availability() == core::auth::CredentialAvailability::Missing);
+    setenv("MINIMAX_SUBSCRIPTION_KEY", "alias-fixture", 1);
+    plan = ProviderFactory::create_provider("minimax-m-plan", config);
+    CHECK(plan->metadata()->credential_source->get_auth().headers.at("x-api-key") == "alias-fixture");
+    setenv("MINIMAX_M_PLAN_API_KEY", "canonical-fixture", 1);
+    plan = ProviderFactory::create_provider("minimax-m-plan", config);
+    CHECK(plan->metadata()->credential_source->get_auth().headers.at("x-api-key") == "canonical-fixture");
+    config.api_key = "configured-fixture";
+    plan = ProviderFactory::create_provider("minimax-m-plan", config);
+    CHECK(plan->metadata()->credential_source->get_auth().headers.at("x-api-key") == "configured-fixture");
+    CHECK_FALSE(core::tools::web::make_anthropic_web_search_backend()->supports({.session_context = test_support::make_workspace_session_context(), .provider = plan}));
+    config.base_url = "https://api.minimax.io/anthropic/v1/messages/";
+    plan = ProviderFactory::create_provider("minimax-m-plan", config);
+    CHECK(plan->metadata()->base_url == kMiniMaxBaseUrl);
+}
+
+TEST_CASE("MiniMax sparse discovery preserves curated limits and separate plan identity", "[minimax][catalog]") {
+    MiniMaxProtocol plan(true), api;
+    const auto catalog = plan.model_catalog("minimax-m-plan");
+    const auto result = catalog->parse_models_response(R"({"data":[{"id":"MiniMax-M3.1-Flash"},{"id":"MiniMax-M3.1-Flash-Preview"},{"id":"MiniMax-M3"},{"id":"MiniMax-M2.7"}]})");
+    REQUIRE(result.ok()); REQUIRE(result.models.size() == 1);
+    CHECK(result.models.front().context_window == kMiniMaxContextWindow);
+    CHECK(result.models.front().max_output_tokens == kMiniMaxOutputLimit);
+    CHECK(result.models.front().provider == "minimax-m-plan");
+    CHECK(result.models.front().supports(ModelCapability::Vision));
+    CHECK_FALSE(result.models.front().supports(ModelCapability::JsonMode));
+    const std::vector<std::string> providers{"minimax", "minimax-m-plan"};
+    const auto group = provider_catalog_group_for("minimax-m-plan", providers);
+    REQUIRE(group.sources.size() == 2);
+    const auto* source = group.find_source("minimax-m-plan"); REQUIRE(source);
+    CHECK(source->includes_registry_model("MiniMax-M3.1-Flash"));
+    CHECK_FALSE(source->includes_registry_model("MiniMax-M3"));
+    CHECK(provider_catalog_selection_key("minimax", kMiniMaxDefaultModel)
+          != provider_catalog_selection_key("minimax-m-plan", kMiniMaxDefaultModel));
+}
+
+TEST_CASE("MiniMax budgets complete context and refuses overfull history", "[minimax][budget]") {
+    MiniMaxProtocol protocol(true);
+    auto req = request();
+    req.max_tokens = 999999;
+    protocol.prepare_request(req);
+    CHECK(req.max_tokens == kMiniMaxOutputLimit);
+    req.messages.back().content = std::string(800000, 'a');
+    protocol.prepare_request(req);
+    providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow);
+    REQUIRE(req.max_tokens.has_value());
+    CHECK(*req.max_tokens < kMiniMaxOutputLimit);
+    req.messages.back().content = std::string(1100000, 'a');
+    CHECK_THROWS(providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow));
+    req = request(); req.response_format.type = ResponseFormat::Type::JsonSchema;
+    CHECK_THROWS(protocol.prepare_request(req));
+}
+
+TEST_CASE("MiniMax image input supports pinned data and native URL sources", "[minimax][vision]") {
+    MiniMaxProtocol protocol(true);
+    auto req = request();
+    req.messages.back().content_parts = {
+        ContentPart::make_image_url("data:image/png;base64,cG5nLWJ5dGVz"),
+        ContentPart::make_image_url("https://example.test/screenshot.png")};
+    protocol.prepare_request(req);
+    const auto payload = protocol.serialize(req); valid_json(payload);
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"base64","media_type":"image/png","data":"cG5nLWJ5dGVz")"));
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"url","url":"https://example.test/screenshot.png")"));
+    CHECK(providers::MiniMaxRequestBudget::estimate_request(req) >= 30000);
+    // The last base64 quartet distinguishes exactly 10 MiB from one byte over.
+    constexpr std::size_t image_limit = 10 * 1024 * 1024;
+    auto data = "data:image/png;base64," + std::string((image_limit + 2) / 3 * 4, 'A');
+    data.replace(data.size() - 2, 2, "==");
+    req.messages.back().content_parts = {ContentPart::make_image_url(data)};
+    CHECK_NOTHROW(protocol.prepare_request(req));
+    data[data.size() - 2] = 'A';
+    req.messages.back().content_parts = {ContentPart::make_image_url(std::move(data))};
+    CHECK_THROWS(protocol.prepare_request(req));
+    const auto path = std::filesystem::temp_directory_path() / ("filo-minimax-image-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".png");
+    { std::ofstream file(path); file << 'A'; }
+    std::filesystem::resize_file(path, image_limit + 1);
+    auto pinned = ContentPart::make_image_url("data:image/png;base64,cG5nLWJ5dGVz");
+    pinned.path = path.string();
+    req.messages.back().content_parts = {pinned};
+    CHECK_NOTHROW(protocol.prepare_request(req));
+    req.messages.back().content_parts.front().url.clear();
+    CHECK_THROWS(protocol.prepare_request(req));
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MiniMax context configuration survives forks and supplies compaction estimates", "[minimax][budget]") {
+    core::config::ProviderConfig config;
+    config.context_window = 1000000;
+    config.api_key = "fixture";
+    const auto provider = ProviderFactory::create_provider("minimax-m-plan", config);
+    REQUIRE(provider);
+    CHECK(provider->max_context_size() == 1000000);
+    const auto fork = provider->fork_for_parallel_request(); REQUIRE(fork);
+    CHECK(fork->max_context_size() == 1000000);
+    const auto estimator = dynamic_cast<const ContextTokenEstimator*>(fork.get()); REQUIRE(estimator);
+    CHECK(estimator->estimate_context_tokens(request().messages)
+        == providers::MiniMaxRequestBudget::estimate_history(request().messages));
+    CHECK(core::budget::context_window_for_model("MiniMax-M3.1-Flash") == kMiniMaxContextWindow);
+    config.context_window = 999999;
+    CHECK_THROWS(ProviderFactory::create_provider("minimax-m-plan", config));
+    config.api_type = core::config::ApiType::Anthropic;
+    CHECK(core::commands::detail::provider_family_key("minimax-m-plan", config) == "minimax");
+    CHECK(core::commands::detail::provider_family_key("claude", config) == "anthropic");
+}
+
+TEST_CASE("MiniMax login profiles reject the other commercial key before saving", "[minimax][auth]") {
+    const core::auth::ApiKeyLoginProfile profile{
+        .provider_name = "minimax-m-plan", .default_model = "MiniMax-M3.1-Flash",
+        .rejected_key_prefixes = {"sk-api-"}};
+    CHECK_THROWS(core::auth::save_api_key_profile("/tmp/filo-minimax-rejected-profile", profile, "sk-api-fixture"));
+}
+
+TEST_CASE("MiniMax preserves ordered reasoning and tools with cache-aware usage", "[minimax][sse]") {
+    MiniMaxProtocol protocol(true);
+    std::vector<ContinuationItem> continuation;
+    const std::vector<std::string> events{
+        R"({"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100}}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Reason"}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}})",
+        R"({"type":"content_block_stop","index":0})",
+        R"({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call","name":"read","input":{}}})",
+        R"({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\"}"}})",
+        R"({"type":"content_block_stop","index":1})",
+        R"({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}})",
+        R"({"type":"message_stop"})"};
+    ParseResult final;
+    for (const auto& event : events) {
+        auto result = protocol.parse_event("data: " + event);
+        REQUIRE_FALSE(result.stream_error);
+        for (const auto& chunk : result.chunks) for (const auto& item : chunk.continuation_items) continuation.push_back(item);
+        if (result.done) final = result;
+    }
+    CHECK(final.done); CHECK(final.prompt_tokens == 110); CHECK(final.cached_prompt_tokens == 100);
+    CHECK(final.completion_tokens == 20); CHECK(final.stop_reason == "tool_use");
+    auto req = request();
+    Message assistant{.role = "assistant"}; assistant.continuation_items = continuation;
+    assistant.tool_calls.push_back({.id = "call", .type = "function", .function = {.name = "read", .arguments = R"({"path":"a"})"}});
+    req.messages.push_back(assistant);
+    req.messages.push_back({.role = "tool", .content = "File content", .tool_call_id = "call"});
+    const auto payload = protocol.serialize(req); valid_json(payload);
+    CHECK_THAT(payload, ContainsSubstring(R"("thinking":"Reason","signature":"signed")"));
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"tool_result","tool_use_id":"call")"));
+    CHECK(payload.find("Reason") < payload.find("\"type\":\"tool_use\""));
+}
+
+TEST_CASE("MiniMax business errors distinguish exhaustion from transient rate limits", "[minimax][errors]") {
+    MiniMaxProtocol protocol(true);
+    const cpr::Header headers;
+    for (const auto code : {2056, 2057, 2061, 2067, 2068, 2069, 2013, 2049}) {
+        const auto body = "{\"error\":{\"code\":" + std::to_string(code) + ",\"message\":\"fixture\"}}";
+        CHECK_FALSE(protocol.is_retryable({429, body, headers}));
+        const auto event = protocol.parse_event("event: error\ndata: " + body);
+        CHECK(event.stream_error); CHECK_FALSE(event.retryable_stream_error);
+    }
+    const std::string body = R"JSON({"error":{"type":"rate_limit_error","message":"M Plan rate limit reached (2062)"}})JSON";
+    CHECK(protocol.is_retryable({429, body, headers}));
+    CHECK(protocol.parse_event("event: error\ndata: " + body).retryable_stream_error);
+    CHECK_FALSE(protocol.is_retryable({503, {}, {{"x-should-retry", "false"}}}));
+    protocol.on_response({429, {}, {{"Retry-After", "1.5"}}});
+    CHECK(protocol.last_rate_limit().retry_after == 2);
+    CHECK(protocol.last_rate_limit().is_rate_limited);
+    CHECK_FALSE(protocol.is_retryable({429,
+        R"({"error":{"code":2056,"message":"Exhausted"},"base_resp":{"status_code":0,"status_msg":"success"}})", headers}));
+    CHECK_THAT(protocol.format_error_message({429,
+        R"JSON({"error":{"message":"Rate limit reached (2062garbage)"}})JSON", headers}),
+        ContainsSubstring("MiniMax error 429"));
+    CHECK_FALSE(protocol.is_retryable({429,
+        R"({"base_resp":{"status_code":"2056","status_msg":"Exhausted"}})", headers}));
+}
+
+TEST_CASE("MiniMax quota uses explicit remaining percentages and validates unknown data", "[minimax][quota]") {
+    const auto info = parse_minimax_quota(R"({"base_resp":{"status_code":0},"model_remains":[{"model_name":"general","current_interval_remaining_percent":75.5,"current_interval_usage_count":999,"end_time":1790000000000,"current_weekly_remaining_percent":0,"weekly_end_time":1790100000000}]})");
+    REQUIRE(info); REQUIRE(info->usage_windows.size() == 2);
+    CHECK(info->usage_windows[0].utilization > 0.244F);
+    CHECK(info->usage_windows[0].utilization < 0.246F);
+    CHECK(info->usage_windows[0].resets_at == 1790000000);
+    CHECK(info->is_rate_limited);
+    CHECK_FALSE(parse_minimax_quota(R"({"model_remains":[]})"));
+    CHECK_FALSE(parse_minimax_quota("invalid"));
+    CHECK_FALSE(parse_minimax_quota(std::string(256 * 1024 + 1, ' ')));
+    CHECK_FALSE(parse_minimax_quota(R"({"base_resp":{"status_code":2062},"current_interval_remaining_percent":50})"));
+    CHECK_FALSE(parse_minimax_quota(R"({"current_interval_remaining_percent":-1})"));
+    CHECK_FALSE(parse_minimax_quota(R"({"current_interval_remaining_percent":101})"));
+    CHECK_FALSE(parse_minimax_quota(R"({"current_interval_remaining_percent":"invalid","current_interval_total_count":100,"current_interval_usage_count":100})"));
+    const auto huge_reset = parse_minimax_quota(R"({"current_interval_remaining_percent":50,"end_time":1e100})");
+    REQUIRE(huge_reset);
+    CHECK(huge_reset->usage_windows.front().resets_at == 0);
+    const auto legacy = parse_minimax_quota(R"({"model_remains":[{"model_name":"MiniMax-M*","current_interval_total_count":100,"current_interval_usage_count":75}]})");
+    REQUIRE(legacy); CHECK(legacy->usage_windows.front().utilization == 0.25F);
+    CHECK_FALSE(parse_minimax_quota(R"({"current_interval_total_count":0,"current_interval_usage_count":0})"));
+    CHECK_FALSE(parse_minimax_quota(R"({"current_interval_status":3,"current_interval_remaining_percent":0})"));
+    MiniMaxProtocol protocol;
+    const cpr::Header headers;
+    CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"code":"2056","message":"usage exhausted"}})", headers}));
+}
+
+TEST_CASE("MiniMax usage enrichment is subscription-only and shared across clones", "[minimax][quota]") {
+    auto usage = std::make_shared<UsageFixture>();
+    MiniMaxProtocol plan(true, "max", usage), api(false, {}, usage);
+    const cpr::Header headers;
+    api.enrich_rate_limit({}, headers, {200, {}, headers});
+    CHECK(usage->reads == 0);
+    auto clone = plan.clone();
+    clone->enrich_rate_limit({}, headers, {200, {}, headers});
+    CHECK(usage->reads == 1);
+    REQUIRE(clone->last_rate_limit().usage_windows.size() == 1);
+    CHECK(plan.last_rate_limit().usage_windows.empty());
+    clone->reset_state();
+    CHECK(clone->last_rate_limit().usage_windows.empty());
+    CHECK_FALSE(make_minimax_usage_source()->read("https://proxy.example/anthropic", {{"x-api-key", "fixture"}}));
+}
+
+TEST_CASE("MiniMax quota reads coalesce per account without blocking other accounts", "[minimax][quota][parallel]") {
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto released = release.get_future().share();
+    std::atomic<int> reads_a{0}, reads_b{0};
+    const auto source = make_minimax_usage_source([&](std::string_view key) -> std::optional<RateLimitInfo> {
+        if (key == "account-a") {
+            if (reads_a.fetch_add(1) == 0) entered.set_value();
+            released.wait();
+        } else {
+            ++reads_b;
+        }
+        RateLimitInfo info;
+        info.subscription.tier_label = std::string(key);
+        return info;
+    });
+    const auto read = [&](std::string_view account) {
+        return source->read(kMiniMaxBaseUrl, {{"x-api-key", std::string(account)}});
+    };
+    auto first = std::async(std::launch::async, [&] { return read("account-a"); });
+    CHECK(entered_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    auto same_account = std::async(std::launch::async, [&] { return read("account-a"); });
+    auto other_account = std::async(std::launch::async, [&] { return read("account-b"); });
+    const bool independent = other_account.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    release.set_value(); // Always unblock workers before assertions can end the test.
+    CHECK(independent);
+    const auto a = first.get(), a_again = same_account.get(), b = other_account.get();
+    REQUIRE(a); REQUIRE(a_again); REQUIRE(b);
+    CHECK(a->subscription.tier_label == "account-a");
+    CHECK(a_again->subscription.tier_label == "account-a");
+    CHECK(b->subscription.tier_label == "account-b");
+    CHECK(read("account-a").has_value());
+    CHECK(reads_a == 1);
+    CHECK(reads_b == 1);
+    CHECK_FALSE(source->read("https://proxy.example/anthropic", {{"x-api-key", "account-c"}}));
+    CHECK(reads_b == 1);
+}
+
+TEST_CASE("MiniMax quota failures stay unknown and are cached", "[minimax][quota]") {
+    int reads = 0;
+    const auto source = make_minimax_usage_source([&](std::string_view) -> std::optional<RateLimitInfo> {
+        ++reads;
+        throw std::runtime_error("Quota unavailable");
+    });
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        CHECK_FALSE(source->read(kMiniMaxBaseUrl, {{"x-api-key", "account"}}));
+    }
+    CHECK(reads == 1);
+    CHECK_FALSE(source->read(kMiniMaxBaseUrl, {}));
+    CHECK(reads == 1);
+}

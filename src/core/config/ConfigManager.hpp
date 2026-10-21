@@ -180,6 +180,7 @@ struct ProviderConfig {
     std::string reasoning_effort{}; ///< Provider effort, e.g. low/high/xhigh/max/ultra
     std::string wire_api{};         ///< "chat_completions" / "responses" for OpenAI APIs
     std::string service_tier{};     ///< Responses API service_tier (e.g. "priority", "flex")
+    int         context_window    = 0;     ///< Explicit endpoint working limit; 0 uses vendor default
     int         thinking_budget   = 0;     ///< >0 enables extended thinking (Anthropic)
     bool        stream_usage      = false; ///< Append stream_options (OpenAI)
 

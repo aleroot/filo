@@ -14,7 +14,7 @@
 #include "core/tools/WebSearchTool.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/protocols/OllamaProtocol.hpp"
 #include "core/agent/Agent.hpp"
@@ -903,7 +903,7 @@ TEST_CASE("referenced text survives save reload and every provider wire format",
     using namespace core::llm::protocols;
     const std::vector<std::string> payloads{
         OpenAIProtocol{}.serialize(request), OpenAIResponsesProtocol{}.serialize(request),
-        AnthropicProtocol{}.serialize(request), GeminiProtocol{}.serialize(request),
+        ClaudeProtocol{}.serialize(request), GeminiProtocol{}.serialize(request),
         OllamaProtocol{}.serialize(request),
     };
     for (const auto& payload : payloads) {

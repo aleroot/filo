@@ -507,6 +507,10 @@ public:
      */
     virtual void prepare_request([[maybe_unused]] ChatRequest& request) {}
 
+    /// Legacy opaque state predates provenance. Adapters must opt out where
+    /// sharing a wire format does not imply compatible continuation state.
+    [[nodiscard]] virtual bool accepts_legacy_continuation() const noexcept { return true; }
+
     /**
      * @brief Whether this protocol can upload local video files and replace
      *        them with provider file references before serialization.
@@ -529,6 +533,13 @@ public:
     virtual void prepare_media_uploads([[maybe_unused]] ChatRequest& request,
                                        [[maybe_unused]] std::string_view base_url,
                                        [[maybe_unused]] const core::auth::AuthInfo& auth) {}
+
+    /// Optional endpoint context admission/counting, after media preparation
+    /// and before serialization. Network work must be bounded and cancellable.
+    virtual void prepare_context([[maybe_unused]] ChatRequest& request,
+                                 [[maybe_unused]] std::string_view base_url,
+                                 [[maybe_unused]] const core::auth::AuthInfo& auth,
+                                 [[maybe_unused]] const std::function<bool()>& cancelled) {}
 
     /**
      * @brief Mutate HTTP headers after auth/protocol headers are built.

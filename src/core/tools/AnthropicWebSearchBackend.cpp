@@ -2,8 +2,10 @@
 
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
-#include "../llm/AnthropicCompatibility.hpp"
-#include "../llm/protocols/AnthropicProtocol.hpp"
+#include "../llm/ClaudeModelTraits.hpp"
+#include "../llm/ProviderDefinition.hpp"
+#include "../utils/UriUtils.hpp"
+#include "../llm/protocols/ClaudeProtocol.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <cpr/cpr.h>
@@ -26,12 +28,15 @@ constexpr int kMaxSearchUses = 8;
 
 constexpr std::string_view kWebSearchBeta = "web-search-2025-03-05";
 constexpr std::string_view kBillingHeader =
-    core::llm::anthropic::kBillingHeader;
+    core::llm::claude::kBillingHeader;
 
 [[nodiscard]] bool is_anthropic_endpoint(
     const core::llm::ProviderMetadata& metadata) {
+    const auto* definition = core::llm::find_builtin_provider_definition(metadata.provider_name);
+    const auto host = core::utils::uri::extract_http_host(metadata.base_url);
     return metadata.api_type == core::config::ApiType::Anthropic
-        && !metadata.base_url.empty();
+        && ((definition && definition->registry_provider == "anthropic")
+            || (host && core::utils::ascii::iequals(*host, "api.anthropic.com")));
 }
 
 void write_string_array(core::utils::JsonWriter& writer,
@@ -95,7 +100,7 @@ void write_string_array(core::utils::JsonWriter& writer,
         writer.comma().key("tool_choice");
         {
             auto _choice = writer.object();
-            if (core::llm::protocols::anthropic_wire_policy(model)
+            if (core::llm::protocols::claude_wire_policy(model)
                     .forced_tool_choice_rejected) {
                 writer.kv_str("type", "auto");
             } else {
@@ -109,7 +114,7 @@ void write_string_array(core::utils::JsonWriter& writer,
 
 [[nodiscard]] cpr::Header anthropic_headers(
     core::auth::AuthInfo auth,
-    const core::llm::protocols::AnthropicProtocol& protocol) {
+    const core::llm::protocols::ClaudeProtocol& protocol) {
     auto& beta = auth.headers["anthropic-beta"];
     if (!beta.empty()) beta += ',';
     beta += kWebSearchBeta;
@@ -221,7 +226,7 @@ public:
 
         core::llm::ChatRequest normalized;
         normalized.model = std::move(model);
-        core::llm::protocols::AnthropicProtocol protocol;
+        core::llm::protocols::ClaudeProtocol protocol;
         protocol.prepare_request(normalized);
         model = std::move(normalized.model);
 

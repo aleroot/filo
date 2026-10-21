@@ -477,6 +477,8 @@ struct ContinuationItem {
     std::string provider = {}; ///< Wire-protocol owner (for example "openai" or "anthropic").
     std::string kind = {};     ///< Provider item/block type; informational and forward-compatible.
     std::string payload = {};  ///< Complete provider JSON item, replayed without interpretation.
+    std::string origin_model = {}; ///< Canonical producer model; empty in legacy sessions.
+    std::string origin_service = {}; ///< Configured provider and endpoint; never a credential.
 };
 
 [[nodiscard]] inline bool has_valid_continuation_payload(
@@ -633,6 +635,8 @@ struct ChatRequest {
     /// copies `max_tokens`) to let a serializer honor a model the registry has
     /// never seen. Empty when the provider reported no capability catalog.
     std::optional<ModelReasoningProfile> catalog_reasoning = {};
+    /// Serving endpoint's context limit, when its live catalog supplied one.
+    std::optional<int> catalog_context_window = {};
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

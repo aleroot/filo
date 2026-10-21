@@ -7,11 +7,11 @@
  *  - The **default** hook implementations in ApiProtocolBase produce the
  *    correct generic behaviour (no-op `on_response`, generic error string,
  *    `is_retryable` → false).
- *  - `AnthropicProtocol` overrides all three hooks with Anthropic-specific
+ *  - `ClaudeProtocol` overrides all three hooks with Anthropic-specific
  *    logic and stores rate-limit metadata in `last_rate_limit()`.
  *
  * These tests exercise the lifecycle contract through the public interface
- * (via `OpenAIProtocol` for defaults, `AnthropicProtocol` for overrides) so
+ * (via `OpenAIProtocol` for defaults, `ClaudeProtocol` for overrides) so
  * they remain valid regardless of internal implementation changes.
  */
 
@@ -21,7 +21,7 @@
 
 #include "core/llm/protocols/ApiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 
 using namespace core::llm::protocols;
 using Catch::Matchers::ContainsSubstring;
@@ -115,11 +115,11 @@ TEST_CASE("OpenAIProtocol is_retryable follows transient HTTP semantics",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AnthropicProtocol::on_response — rate-limit header extraction
+// ClaudeProtocol::on_response — rate-limit header extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicProtocol::on_response - populates last_rate_limit from headers", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - populates last_rate_limit from headers", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-requests-limit",     "100"},
         {"anthropic-ratelimit-requests-remaining", "42"},
@@ -137,8 +137,8 @@ TEST_CASE("AnthropicProtocol::on_response - populates last_rate_limit from heade
     REQUIRE(info.tokens_remaining   == 12345);
 }
 
-TEST_CASE("AnthropicProtocol::on_response - parses headers case-insensitively", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - parses headers case-insensitively", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"Anthropic-Ratelimit-Requests-Limit",     "100"},
         {"Anthropic-Ratelimit-Requests-Remaining", "42"},
@@ -155,8 +155,8 @@ TEST_CASE("AnthropicProtocol::on_response - parses headers case-insensitively", 
     REQUIRE(info.is_rate_limited == true);
 }
 
-TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from retry-after header", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - detects rate-limited from retry-after header", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"retry-after", "30"},
     });
@@ -169,8 +169,8 @@ TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from retry-afte
     REQUIRE(info.is_rate_limited == true);
 }
 
-TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from unified-status header", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - detects rate-limited from unified-status header", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-status", "rate_limited"},
     });
@@ -182,8 +182,8 @@ TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from unified-st
     REQUIRE(protocol.last_rate_limit().unified_status  == "rate_limited");
 }
 
-TEST_CASE("AnthropicProtocol::on_response - treats unified-status rejected as rate-limited", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - treats unified-status rejected as rate-limited", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-status", "rejected"},
     });
@@ -195,8 +195,8 @@ TEST_CASE("AnthropicProtocol::on_response - treats unified-status rejected as ra
     REQUIRE(protocol.last_rate_limit().unified_status  == "rejected");
 }
 
-TEST_CASE("AnthropicProtocol::on_response - parses overage and fallback headers", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - parses overage and fallback headers", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-overage-status", "allowed_warning"},
         {"anthropic-ratelimit-unified-overage-reset", "1743590400"},
@@ -214,8 +214,8 @@ TEST_CASE("AnthropicProtocol::on_response - parses overage and fallback headers"
     REQUIRE(info.unified_fallback_available == true);
 }
 
-TEST_CASE("AnthropicProtocol::on_response - keeps zero utilization windows and parses overage utilization", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - keeps zero utilization windows and parses overage utilization", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-5h-utilization", "0"},
         {"anthropic-ratelimit-unified-7d-utilization", "0.72"},
@@ -241,8 +241,8 @@ TEST_CASE("AnthropicProtocol::on_response - keeps zero utilization windows and p
     REQUIRE(find_window(info, "overage") == Catch::Approx(0.33f));
 }
 
-TEST_CASE("AnthropicProtocol::on_response - parses Claude model-specific weekly windows", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - parses Claude model-specific weekly windows", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-seven_day_opus-utilization", "0.61"},
         {"anthropic-ratelimit-unified-seven_day_sonnet-utilization", "0.24"},
@@ -256,8 +256,8 @@ TEST_CASE("AnthropicProtocol::on_response - parses Claude model-specific weekly 
     REQUIRE(find_window(info, "sonnet") == Catch::Approx(0.24f));
 }
 
-TEST_CASE("AnthropicProtocol::on_response - empty headers yield zeroed RateLimitInfo", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - empty headers yield zeroed RateLimitInfo", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const HttpResponse resp{200, "", headers};
 
@@ -268,8 +268,8 @@ TEST_CASE("AnthropicProtocol::on_response - empty headers yield zeroed RateLimit
     REQUIRE(info.is_rate_limited == false);
 }
 
-TEST_CASE("AnthropicProtocol::on_response - fresh clone has empty rate limit", "[lifecycle][anthropic]") {
-    AnthropicProtocol original;
+TEST_CASE("ClaudeProtocol::on_response - fresh clone has empty rate limit", "[lifecycle][anthropic]") {
+    ClaudeProtocol original;
     const cpr::Header headers = make_headers({{"retry-after", "5"}});
     const HttpResponse resp{429, "", headers};
 
@@ -278,18 +278,18 @@ TEST_CASE("AnthropicProtocol::on_response - fresh clone has empty rate limit", "
 
     // A clone produced before on_response must start with clean state.
     auto clone = original.clone();
-    auto* typed = dynamic_cast<AnthropicProtocol*>(clone.get());
+    auto* typed = dynamic_cast<ClaudeProtocol*>(clone.get());
     REQUIRE(typed != nullptr);
     REQUIRE(typed->last_rate_limit().retry_after     == 0);
     REQUIRE(typed->last_rate_limit().is_rate_limited == false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AnthropicProtocol::format_error_message — provider-specific guidance
+// ClaudeProtocol::format_error_message — provider-specific guidance
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicProtocol::format_error_message - 400 mentions invalid request", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - 400 mentions invalid request", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({400, "", headers});
 
@@ -297,16 +297,16 @@ TEST_CASE("AnthropicProtocol::format_error_message - 400 mentions invalid reques
     REQUIRE_THAT(msg, ContainsSubstring("Invalid request"));
 }
 
-TEST_CASE("AnthropicProtocol preserves actionable invalid request details", "[lifecycle][anthropic][fable51]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol preserves actionable invalid request details", "[lifecycle][anthropic][fable51]") {
+    ClaudeProtocol protocol;
     const auto message = protocol.format_error_message({400,
         R"({"error":{"type":"invalid_request_error","message":"Claude Code 2.1.78 does not support this model; version 2.1.280 or newer is required."}})", {}});
     CHECK_THAT(message, ContainsSubstring("version 2.1.280 or newer is required"));
     CHECK_THAT(protocol.format_error_message({400, "not JSON", {}}), ContainsSubstring("Invalid request"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 401 mentions authentication", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - 401 mentions authentication", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({401, "", headers});
 
@@ -314,8 +314,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - 401 mentions authentication
     REQUIRE_THAT(msg, ContainsSubstring("Authentication"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 429 mentions rate limit", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - 429 mentions rate limit", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({429, "error body", headers});
 
@@ -323,9 +323,9 @@ TEST_CASE("AnthropicProtocol::format_error_message - 429 mentions rate limit", "
     REQUIRE_THAT(msg, ContainsSubstring("Rate limit"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 429 omits model fallback",
+TEST_CASE("ClaudeProtocol::format_error_message - 429 omits model fallback",
           "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     core::llm::ChatRequest req;
     req.model = "claude-sonnet-4-6";
     protocol.prepare_request(req);
@@ -336,8 +336,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - 429 omits model fallback",
     REQUIRE_THAT(msg, !ContainsSubstring("/model claude"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 529 is distinct from 429", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - 529 is distinct from 429", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
 
     const std::string msg_429 = protocol.format_error_message({429, "", headers});
@@ -349,8 +349,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - 529 is distinct from 429", 
     REQUIRE(msg_429 != msg_529);
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 500 mentions server error", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - 500 mentions server error", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({500, "", headers});
 
@@ -358,8 +358,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - 500 mentions server error",
     REQUIRE_THAT(msg, ContainsSubstring("server error"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - unknown 5xx mentions retry", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - unknown 5xx mentions retry", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({599, "", headers});
 
@@ -367,8 +367,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - unknown 5xx mentions retry"
     REQUIRE_THAT(msg, ContainsSubstring("retry"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - result has no leading newline", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::format_error_message - result has no leading newline", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
 
     // HttpLLMProvider prepends "\n"; the returned string must not include it.
@@ -381,11 +381,11 @@ TEST_CASE("AnthropicProtocol::format_error_message - result has no leading newli
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AnthropicProtocol::is_retryable — transient vs permanent errors
+// ClaudeProtocol::is_retryable — transient vs permanent errors
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicProtocol::is_retryable - retryable status codes", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::is_retryable - retryable status codes", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
 
     for (const int code : {429, 500, 502, 503, 504, 529}) {
@@ -395,8 +395,8 @@ TEST_CASE("AnthropicProtocol::is_retryable - retryable status codes", "[lifecycl
     }
 }
 
-TEST_CASE("AnthropicProtocol::is_retryable - non-retryable status codes", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::is_retryable - non-retryable status codes", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers;
 
     for (const int code : {400, 401, 403, 404, 422}) {
@@ -406,8 +406,8 @@ TEST_CASE("AnthropicProtocol::is_retryable - non-retryable status codes", "[life
     }
 }
 
-TEST_CASE("AnthropicProtocol::on_response - parses 5h and 7d utilization windows", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - parses 5h and 7d utilization windows", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-5h-utilization", "0.63"},
         {"anthropic-ratelimit-unified-7d-utilization", "0.12"},
@@ -424,8 +424,8 @@ TEST_CASE("AnthropicProtocol::on_response - parses 5h and 7d utilization windows
     REQUIRE(info.max_window_utilization() == Catch::Approx(0.63f).epsilon(0.001f));
 }
 
-TEST_CASE("AnthropicProtocol::on_response - only 7d window present when 5h absent", "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::on_response - only 7d window present when 5h absent", "[lifecycle][anthropic]") {
+    ClaudeProtocol protocol;
     const cpr::Header headers = make_headers({
         {"anthropic-ratelimit-unified-7d-utilization", "0.08"},
     });
@@ -526,7 +526,7 @@ TEST_CASE("OpenAIProtocol::on_response - fresh clone has empty rate limit", "[li
 }
 
 TEST_CASE("Anthropic errors preserve diagnostics and distinguish permanent quota from throttling", "[lifecycle][anthropic][hardening]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     const cpr::Header headers{{"Request-Id", "req-test"}};
     const auto message = protocol.format_error_message({403,
         R"({"error":{"type":"permission_error","message":"Workspace access denied"}})", headers});

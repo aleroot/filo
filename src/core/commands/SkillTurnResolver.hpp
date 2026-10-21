@@ -5,6 +5,7 @@
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/ModelCatalogDiscovery.hpp"
 #include "../llm/ProviderCatalogGrouping.hpp"
+#include "../llm/ProviderDefinition.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -40,6 +41,9 @@ inline std::string provider_family_key(
     const core::config::ProviderConfig& provider_config) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(provider_name));
 
+    if (const auto* definition = core::llm::find_builtin_provider_definition(lowered)) {
+        return std::string(definition->registry_provider);
+    }
     switch (provider_config.api_type) {
         case core::config::ApiType::Anthropic:
             return "anthropic";
@@ -57,6 +61,7 @@ inline std::string provider_family_key(
             if (lowered.starts_with("grok")) return "grok";
             if (lowered.starts_with("mistral")) return "mistral";
             if (lowered.starts_with("mimo")) return "mimo";
+            if (lowered.starts_with("minimax")) return "minimax";
             return "openai";
         case core::config::ApiType::Unknown:
             break;
@@ -72,6 +77,7 @@ inline std::string provider_family_key(
     if (lowered == "local" || lowered.starts_with("llama")) return "local";
     if (lowered.starts_with("mistral")) return "mistral";
     if (lowered.starts_with("mimo")) return "mimo";
+    if (lowered.starts_with("minimax")) return "minimax";
     return {};
 }
 
@@ -84,6 +90,7 @@ inline std::string model_family_key(std::string_view model_hint) {
     if (lowered.starts_with("qwen")) return "qwen";
     if (lowered.starts_with("mistral") || lowered.starts_with("devstral")) return "mistral";
     if (lowered.starts_with("mimo")) return "mimo";
+    if (lowered.starts_with("minimax")) return "minimax";
     if (lowered.starts_with("gpt") || lowered.starts_with("o1")
         || lowered.starts_with("o3") || lowered.starts_with("o4")) {
         return "openai";

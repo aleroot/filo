@@ -1251,6 +1251,30 @@ TEST_CASE("AuthenticationManager login(qwen) configures Token Plan API key",
         != std::string::npos);
 }
 
+TEST_CASE("MiniMax auth directly configures the selected billing relationship",
+          "[AuthenticationManager][minimax][auth]") {
+    for (const auto command : {"minimax", "minimax-m-plan", "minimax-api"}) {
+        CAPTURE(command);
+        TempDir tmp;
+        auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+        const bool api = std::string_view(command) == "minimax-api";
+        std::istringstream input(api ? "sk-api-fixture\n" : "sk-cp-fixture\n");
+        ScopedCinRedirect redirect(input);
+        const auto result = manager.login(command);
+        CHECK(result.login_provider == (api ? "minimax-api" : "minimax"));
+        CHECK(result.provider == (api ? "MiniMax API" : "MiniMax M Plan"));
+        std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const auto overlay = buffer.str();
+        CHECK_THAT(overlay, Catch::Matchers::ContainsSubstring(api
+            ? R"("default_provider":"minimax")" : R"("default_provider":"minimax-m-plan")"));
+        CHECK_THAT(overlay, Catch::Matchers::ContainsSubstring(api
+            ? R"("api_key":"sk-api-fixture")" : R"("api_key":"sk-cp-fixture")"));
+        CHECK_THAT(overlay, Catch::Matchers::ContainsSubstring(R"("model":"MiniMax-M3.1-Flash")"));
+    }
+}
+
 TEST_CASE("AuthenticationManager saves an existing MiMo Token Plan key for its region",
           "[AuthenticationManager][mimo][token-plan]") {
     TempDir tmp;

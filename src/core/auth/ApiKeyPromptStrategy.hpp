@@ -32,6 +32,7 @@ struct ApiKeyLoginProfile {
     std::vector<ApiKeyProviderSeed> additional_provider_seeds = {};
     std::string key_prompt = "API key:";
     std::vector<std::string> accepted_key_prefixes = {};
+    std::vector<std::string> rejected_key_prefixes = {};
     std::string invalid_key_message = {};
 };
 

@@ -255,6 +255,7 @@ ProviderConfig merge_provider(std::string_view name, const ProviderConfig& base,
     if (!overlay.reasoning_effort.empty()) merged.reasoning_effort = overlay.reasoning_effort;
     if (!overlay.wire_api.empty())         merged.wire_api = overlay.wire_api;
     if (!overlay.service_tier.empty())     merged.service_tier = overlay.service_tier;
+    if (overlay.context_window > 0) merged.context_window = overlay.context_window;
     if (overlay.thinking_budget > 0)       merged.thinking_budget = overlay.thinking_budget;
     if (overlay.stream_usage)              merged.stream_usage = overlay.stream_usage;
     if (!overlay.auth_type.empty())        merged.auth_type = overlay.auth_type;
@@ -355,6 +356,12 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .auth_type = "oauth_kimi",
             .default_model = "k3",
         };
+    }
+    if (normalized == "minimax" || normalized == "minimax-m-plan") {
+        return LoginProfileMapping{.provider_name = "minimax-m-plan", .auth_type = "", .default_model = "MiniMax-M3.1-Flash"};
+    }
+    if (normalized == "minimax-api") {
+        return LoginProfileMapping{.provider_name = "minimax", .auth_type = "", .default_model = "MiniMax-M3.1-Flash"};
     }
     if (normalized == "qwen") {
         return LoginProfileMapping{
@@ -602,6 +609,8 @@ AppConfig make_default_config() {
     add_provider("qwen-token-plan", {}, "high");
     add_provider("zai",            "glm-5.1");
     add_provider("zai-coding",     "glm-5.3");
+    add_provider("minimax", "MiniMax-M3.1-Flash", "max");
+    add_provider("minimax-m-plan", "MiniMax-M3.1-Flash", "max");
     add_provider("mimo",                "mimo-v2.6-pro");
     add_provider("mimo-token-plan",     "mimo-v2.6-pro");
     add_provider("mimo-token-plan-sgp", "mimo-v2.6-pro");
@@ -681,6 +690,8 @@ std::string default_config_json() {
         "qwen":           { "model": "qwen3-max", "reasoning_effort": "high" },
         "qwen-coding":    { "model": "qwen3-coder-plus", "reasoning_effort": "high" },
         "qwen-token-plan":{ "reasoning_effort": "high" },
+        "minimax":        { "model": "MiniMax-M3.1-Flash", "reasoning_effort": "max" },
+        "minimax-m-plan": { "model": "MiniMax-M3.1-Flash", "reasoning_effort": "max" },
         "zai":            { "model": "glm-5.1" },
         "zai-coding":     { "model": "glm-5.3" },
         "mimo":                { "model": "mimo-v2.6-pro" },
@@ -789,6 +800,11 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj, ProviderConfig
     }
     if (!provider_obj["service_tier"].get(value)) {
         provider.service_tier = std::string(value);
+    }
+    int64_t context_window = 0;
+    if (!provider_obj["context_window"].get(context_window)) {
+        if (context_window < 0 || context_window > 100000000) throw std::invalid_argument("Invalid provider context_window");
+        provider.context_window = static_cast<int>(context_window);
     }
     int64_t thinking_budget = 0;
     if (!provider_obj["thinking_budget"].get(thinking_budget)) {

@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/transport/StreamResilience.hpp"
 
@@ -109,6 +109,6 @@ TEST_CASE("Terminal-event requirements are protocol capabilities",
           "[http][resilience][protocol]") {
     CHECK_FALSE(core::llm::protocols::OpenAIProtocol{}
                     .requires_terminal_event());
-    CHECK(core::llm::protocols::AnthropicProtocol{}
+    CHECK(core::llm::protocols::ClaudeProtocol{}
               .requires_terminal_event());
 }

@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-namespace core::llm::anthropic {
+namespace core::llm::claude {
 
 inline constexpr std::string_view kBillingHeader = "cc_version=2.1.280.13b; cc_entrypoint=cli; cch=0;";
 inline constexpr std::string_view kThinkingBindingBeta =
@@ -146,4 +146,4 @@ inline constexpr std::string_view kCurrentFableToken = "fable-5-1";
     return nullptr;
 }
 
-} // namespace core::llm::anthropic
+} // namespace core::llm::claude

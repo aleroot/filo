@@ -65,7 +65,8 @@ namespace {
         std::string_view default_model,
         std::string_view base_url,
         const std::shared_ptr<core::auth::ICredentialSource>& cred_source,
-        const protocols::ApiProtocolBase& protocol_template) {
+        const protocols::ApiProtocolBase& protocol_template,
+        const std::atomic_bool& cancelled) {
         PreparedHttpStreamRequest prepared;
         prepared.protocol = protocol_template.clone();
 
@@ -80,6 +81,8 @@ namespace {
         req.auth_properties = auth.properties;
         prepared.protocol->prepare_request(req);
         prepared.protocol->prepare_media_uploads(req, base_url, auth);
+        prepared.protocol->prepare_context(req, base_url, auth,
+            [&] { return cancelled.load(std::memory_order_acquire); });
         prepared.model = req.model;
         // The WebSocket path serializes its own frame. Avoid holding a second
         // complete encoded history for an HTTP fallback that may never run.
@@ -328,6 +331,11 @@ std::optional<ModelInfo> HttpLLMProvider::resolved_model_info(
     return resolved.model;
 }
 
+std::optional<ModelInfo> HttpLLMProvider::provider_model_info(std::string_view model) const {
+    const auto snapshot = ModelCatalogAvailability::instance().snapshot(catalog_id());
+    return resolve_model_metadata(model, snapshot.models, nullptr).model;
+}
+
 std::optional<ModelReasoningProfile> HttpLLMProvider::resolved_reasoning_profile(
     std::string_view model) const {
     if (protocol_ && protocol_->uses_provider_reasoning_catalog()) {
@@ -560,8 +568,18 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 ? std::string_view(effective_default_model)
                 : std::string_view(effective_request.model),
             protocol_.get());
+        const std::string continuation_service = provider_name_ + "|" + base_url_;
+        for (auto& message : effective_request.messages) {
+            std::erase_if(message.continuation_items, [&](const auto& item) {
+                if (item.origin_model.empty() || item.origin_service.empty()) return !protocol_->accepts_legacy_continuation();
+                return item.origin_model != metadata_model || item.origin_service != continuation_service;
+            });
+        }
         ensure_model_metadata(metadata_model);
         const auto metadata_info = resolved_model_info(metadata_model);
+        if (const auto live = provider_model_info(metadata_model); live && live->context_window > 0) {
+            effective_request.catalog_context_window = live->context_window;
+        }
         // Model discovery is intentionally provider-scoped: a model ID exposed
         // by one configured endpoint must not overwrite the global registry
         // card for another endpoint. Copy its concrete output limit onto this
@@ -605,7 +623,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         }
 
         prepared = prepare_stream_request(
-            std::move(effective_request), effective_default_model, base_url_, cred_source_, *protocol_);
+            std::move(effective_request), effective_default_model, base_url_, cred_source_, *protocol_, cancel_requested_);
+        if (cancel_requested_.load(std::memory_order_acquire)) {
+            callback(StreamChunk::make_final());
+            return;
+        }
         {
             std::lock_guard lock(state_mutex_);
             last_model_ = prepared.model;
@@ -626,6 +648,19 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         callback(StreamChunk::make_error("\n[Failed to start request: unknown exception]"));
         return;
     }
+
+    const std::string continuation_service = provider_name_ + "|" + base_url_;
+    const std::string continuation_model = prepared.model;
+    auto downstream = std::move(callback);
+    callback = [downstream = std::move(downstream), continuation_service, continuation_model](const StreamChunk& chunk) {
+        if (chunk.continuation_items.empty()) { downstream(chunk); return; }
+        auto scoped = chunk;
+        for (auto& item : scoped.continuation_items) {
+            item.origin_model = continuation_model;
+            item.origin_service = continuation_service;
+        }
+        downstream(scoped);
+    };
 
     [self      = std::move(keepalive),
      url       = std::move(prepared.url),

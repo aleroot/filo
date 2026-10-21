@@ -2,7 +2,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "core/llm/ModelRegistry.hpp"
-#include "core/llm/AnthropicCompatibility.hpp"
+#include "core/llm/ClaudeModelTraits.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
@@ -843,26 +843,26 @@ TEST_CASE("Claude alias predicates agree with the registered cards",
     // predicate lists and the card aliases must not drift apart.
     for (const auto* alias : {"fable", "best", "claude-fable", "fable-5-1"}) {
         CAPTURE(alias);
-        CHECK(core::llm::anthropic::is_fable_alias(alias));
+        CHECK(core::llm::claude::is_fable_alias(alias));
         const auto card = registry.lookup(alias);
         REQUIRE(card);
         CHECK(card->canonical_id
-              == std::string(core::llm::anthropic::kDefaultFable));
+              == std::string(core::llm::claude::kDefaultFable));
     }
     for (const auto* alias : {"opus-5-5", "opus-5.5", "claude-opus-5.5"}) {
         CAPTURE(alias);
-        CHECK(core::llm::anthropic::is_opus_55_alias(alias));
+        CHECK(core::llm::claude::is_opus_55_alias(alias));
         const auto card = registry.lookup(alias);
         REQUIRE(card);
         CHECK(card->canonical_id
-              == std::string(core::llm::anthropic::kDefaultOpus55));
+              == std::string(core::llm::claude::kDefaultOpus55));
     }
 
     // Bare `opus` staying on Claude Opus 5 is deliberate, so pin it.
     const auto opus = registry.lookup("opus");
     REQUIRE(opus);
     CHECK(opus->canonical_id
-          == std::string(core::llm::anthropic::kDefaultOpus));
+          == std::string(core::llm::claude::kDefaultOpus));
 }
 
 TEST_CASE("ModelRegistry carries Claude wire constraints", "[llm][registry][wire]") {

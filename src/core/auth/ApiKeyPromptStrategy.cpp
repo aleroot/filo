@@ -191,6 +191,11 @@ void write_api_key_overlay(std::string_view config_dir,
 
 void validate_key_for_profile(const ApiKeyLoginProfile& profile,
                               std::string_view api_key) {
+    for (const auto& prefix : profile.rejected_key_prefixes) {
+        if (!prefix.empty() && api_key.starts_with(prefix)) {
+            throw std::invalid_argument(profile.invalid_key_message.empty() ? "Key type does not match this login profile." : profile.invalid_key_message);
+        }
+    }
     if (profile.accepted_key_prefixes.empty()) return;
 
     for (const std::string& prefix : profile.accepted_key_prefixes) {
@@ -234,6 +239,7 @@ void validate_key_for_profile(const ApiKeyLoginProfile& profile,
 void save_api_key_profile(std::string_view config_dir,
                           const ApiKeyLoginProfile& profile,
                           std::string_view api_key) {
+    validate_key_for_profile(profile, api_key);
     auto seeds = profile.additional_provider_seeds;
     seeds.insert(seeds.begin(), ApiKeyProviderSeed{
         .provider_name = profile.provider_name,

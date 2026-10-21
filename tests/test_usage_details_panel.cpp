@@ -1,5 +1,5 @@
 #include "core/utils/TimeUtils.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/GrokBillingUsage.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
@@ -150,7 +150,7 @@ TEST_CASE("UsageDetailsPanel: helpers", "[usage_details_panel]") {
 
 TEST_CASE("Protocol reset parsing: Anthropic, Kimi, Grok, Zai, OpenAI", "[protocol_resets]") {
     SECTION("Anthropic on_response parses resets_at from headers") {
-        core::llm::protocols::AnthropicProtocol protocol;
+        core::llm::protocols::ClaudeProtocol protocol;
         cpr::Header h;
         h["anthropic-ratelimit-unified-5h-utilization"] = "0.45";
         h["anthropic-ratelimit-unified-5h-resets-at"] = "2026-08-17T18:30:00Z";

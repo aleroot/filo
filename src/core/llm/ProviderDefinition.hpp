@@ -73,6 +73,18 @@ struct BuiltinProviderDefinition {
 
 inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
+        "minimax-m-plan", "minimax", "minimax", config::ApiType::Anthropic,
+        "https://api.minimax.io/anthropic",
+        {"MINIMAX_M_PLAN_API_KEY", "MINIMAX_SUBSCRIPTION_KEY"},
+        ProviderAuthStyle::XApiKey, {}, core::auth::BillingKind::Subscription,
+        "https://www.minimax.io/m-plan",
+    },
+    BuiltinProviderDefinition{
+        "minimax", "minimax", "minimax", config::ApiType::Anthropic,
+        "https://api.minimax.io/anthropic", {"MINIMAX_API_KEY"},
+        ProviderAuthStyle::XApiKey, {},
+    },
+    BuiltinProviderDefinition{
         "zai-coding", "zai", "zai", config::ApiType::Anthropic,
         "https://api.z.ai/api/anthropic",
         { "ZAI_CODING_API_KEY", "ZAI_API_KEY" },

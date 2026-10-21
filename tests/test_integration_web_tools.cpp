@@ -9,8 +9,8 @@
 #include "core/tools/WebBackendAdapters.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
-#include "core/llm/AnthropicCompatibility.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
+#include "core/llm/ClaudeModelTraits.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/tools/ReadTool.hpp"
 #include <atomic>
@@ -94,7 +94,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
             std::format("http://127.0.0.1:{}", port),
             core::auth::ApiKeyCredentialSource::as_bearer(
                 "test-oauth-token", core::auth::BillingKind::Subscription),
-            model, std::make_unique<core::llm::protocols::AnthropicProtocol>(),
+            model, std::make_unique<core::llm::protocols::ClaudeProtocol>(),
             core::config::ApiType::Anthropic, "claude");
         const auto response = backend->search(web::SearchRequest{.query = "reference \"quoted\""},
             ToolInvocationContext{.session_context = test_support::make_workspace_session_context(),
@@ -113,7 +113,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
         const auto doc = parser.parse(actual.body);
         const auto choice = doc["tool_choice"]["type"].get_string().value();
         const bool expect_auto =
-            core::llm::protocols::anthropic_wire_policy(models[i])
+            core::llm::protocols::claude_wire_policy(models[i])
                 .forced_tool_choice_rejected;
         CHECK(choice == (expect_auto ? "auto" : "tool"));
         if (expect_auto) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
@@ -159,7 +159,7 @@ TEST_CASE("Claude web search distinguishes missing search and tool errors from e
     auto provider = std::make_shared<core::llm::HttpLLMProvider>(
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
-        "claude-fable-5-1", std::make_unique<core::llm::protocols::AnthropicProtocol>(),
+        "claude-fable-5-1", std::make_unique<core::llm::protocols::ClaudeProtocol>(),
         core::config::ApiType::Anthropic, "claude");
     const auto response = web::make_anthropic_web_search_backend()->search(
         web::SearchRequest{.query = "a test query"},

@@ -93,6 +93,9 @@ namespace core::budget {
     if (model.find("gemini-pro-latest") != std::string_view::npos) return 1'048'576;
     if (model.find("auto-gemini-3")    != std::string_view::npos) return 1'048'576;
     if (model.find("auto-gemini-2.5")  != std::string_view::npos) return 1'048'576;
+    try {
+        if (const auto info = core::llm::ModelRegistry::instance().lookup(model); info && info->context_window > 0) return info->context_window;
+    } catch (...) {}
     return 128'000;
 }
 

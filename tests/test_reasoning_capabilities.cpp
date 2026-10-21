@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/MistralProtocol.hpp"
@@ -113,7 +113,7 @@ TEST_CASE("DashScope protocols own endpoint-specific model reasoning policy", "[
 
 TEST_CASE("Anthropic protocol reports per-family effort levels",
           "[llm][effort][anthropic]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     for (const auto model : {"claude-fable-5", "claude-mythos-1", "claude-sonnet-5",
                              "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
                              "claude-sonnet-4-6"}) {

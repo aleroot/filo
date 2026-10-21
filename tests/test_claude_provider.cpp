@@ -1,8 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include "core/llm/protocols/AnthropicProtocol.hpp"
-#include "core/llm/AnthropicCompatibility.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
+#include "core/llm/ClaudeModelTraits.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
@@ -75,7 +75,7 @@ TEST_CASE("Anthropic serializer replaces malformed tool input with an object",
             }},
         });
 
-        const std::string payload = AnthropicSerializer::serialize(request);
+        const std::string payload = ClaudeSerializer::serialize(request);
         require_valid_json(payload);
         simdjson::dom::parser parser;
         const auto document = parser.parse(payload);
@@ -92,7 +92,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
                               "fable-5-1", "fable[1m]"}) {
         for (const auto* effort : {"", "low", "medium", "high", "xhigh", "max", "off"}) {
             CAPTURE(model, effort);
-            AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+            ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
             auto request = make_simple_request(model);
             request.effort = effort;
             protocol.prepare_request(request);
@@ -117,7 +117,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
             CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(headers.at("x-anthropic-billing-header")));
             CHECK(headers.at("Authorization") == "Bearer test-token");
             const auto& beta = headers.at("anthropic-beta");
-            const auto binding = std::string(anthropic::kThinkingBindingBeta);
+            const auto binding = std::string(claude::kThinkingBindingBeta);
             REQUIRE(beta.find(binding) != std::string::npos);
             CHECK(beta.find(binding, beta.find(binding) + binding.size()) == std::string::npos);
             CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
@@ -129,7 +129,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
 
 TEST_CASE("Fable 5.1 binding controls do not leak to other models",
           "[claude][fable51][headers][serializer]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     auto request = make_simple_request("fable");
     protocol.prepare_request(request);
     for (const auto* model : {"claude-fable-5", "claude-sonnet-4-6", "claude-opus-5",
@@ -140,7 +140,7 @@ TEST_CASE("Fable 5.1 binding controls do not leak to other models",
         CHECK(request.model == model);
         CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring("block_binding"));
         CHECK_THAT(protocol.build_headers({}).at("anthropic-beta"),
-                   !Catch::Matchers::ContainsSubstring(std::string(anthropic::kThinkingBindingBeta)));
+                   !Catch::Matchers::ContainsSubstring(std::string(claude::kThinkingBindingBeta)));
     }
 }
 
@@ -162,7 +162,7 @@ TEST_CASE("Fable 5.1 preserves empty signed thinking when history is edited",
     // or discard signed blocks. The server validates them with drop_block.
     request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Updated goal."});
     request.messages[1].content = "Edited earlier turn.";
-    const auto payload = AnthropicSerializer::serialize(request);
+    const auto payload = ClaudeSerializer::serialize(request);
     simdjson::dom::parser json;
     const auto doc = json.parse(payload);
     CHECK(doc["messages"].at(1)["content"].at(0)["thinking"].get_string().value().empty());
@@ -203,24 +203,24 @@ static core::tools::ToolParameter make_param(std::string name,
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - model is serialized correctly", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-8"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-opus-4-8"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"claude-opus-4-8")"));
 }
 
 TEST_CASE("ClaudeSerializer - stream true is included", "[claude][serializer]") {
     auto req = make_simple_request();
     req.stream = true;
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("stream":true)"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("stream":true)"));
 }
 
 TEST_CASE("ClaudeSerializer - stream false is included", "[claude][serializer]") {
     auto req = make_simple_request();
     req.stream = false;
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("stream":false)"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("stream":false)"));
 }
 
 TEST_CASE("ClaudeSerializer - user message content appears in payload", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", "Tell me a joke"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-sonnet-4-6", "Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"user")"));
 }
@@ -239,7 +239,7 @@ TEST_CASE("ClaudeSerializer - user image content becomes image blocks", "[claude
         },
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image","source":{"type":"base64","media_type":"image/png")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"Describe this screenshot.")"));
 }
@@ -266,7 +266,7 @@ TEST_CASE("ClaudeSerializer - pinned screenshot data URLs become base64 image bl
         },
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5nLWJ5dGVz"})"));
@@ -286,7 +286,7 @@ TEST_CASE("ClaudeSerializer - remote image URLs are not sent as base64 blocks",
         },
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"image")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("[Attached image unavailable: https://example.com/shot.png]"));
@@ -304,7 +304,7 @@ TEST_CASE("ClaudeSerializer - image/jpg is sent as image/jpeg",
         },
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("media_type":"image/jpeg")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
@@ -312,14 +312,14 @@ TEST_CASE("ClaudeSerializer - image/jpg is sent as image/jpeg",
 }
 
 TEST_CASE("ClaudeSerializer - max_tokens uses registered model output limit by default", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-fable-5"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-fable-5"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
 }
 
 TEST_CASE("ClaudeSerializer - Opus 5 does not fall back to the unknown-model budget",
           "[claude][serializer][regression]") {
     const auto payload =
-        AnthropicSerializer::serialize(make_simple_request("claude-opus-5"));
+        ClaudeSerializer::serialize(make_simple_request("claude-opus-5"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("max_tokens":8096)"));
 }
@@ -329,7 +329,7 @@ TEST_CASE("ClaudeSerializer - Opus 5.5 has the full response budget",
     auto request = make_simple_request("claude-opus-5-5");
     request.effort = "max";
 
-    const auto payload = AnthropicSerializer::serialize(request);
+    const auto payload = ClaudeSerializer::serialize(request);
     simdjson::dom::parser parser;
     const auto document = parser.parse(payload);
 
@@ -344,7 +344,7 @@ TEST_CASE("ClaudeSerializer - Opus 5.5 has the full response budget",
 
 TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
           "[claude][opus55][serializer][headers]") {
-    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+    ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
     for (const auto* model : {"claude-opus-5-5", "opus-5.5", "opus-5-5",
                                "claude-opus-5.5"}) {
         CAPTURE(model);
@@ -369,7 +369,7 @@ TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
         const auto headers = protocol.build_headers({});
         const auto beta = headers.at("anthropic-beta");
         CHECK_THAT(beta, Catch::Matchers::ContainsSubstring(
-            std::string(anthropic::kThinkingBindingBeta)));
+            std::string(claude::kThinkingBindingBeta)));
         CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
     }
 
@@ -378,7 +378,7 @@ TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
     auto opus5 = make_simple_request("claude-opus-5");
     opus5.temperature = 0.2f;
     opus5.effort = "high";
-    const auto opus5_payload = AnthropicSerializer::serialize(opus5);
+    const auto opus5_payload = ClaudeSerializer::serialize(opus5);
     CHECK_THAT(opus5_payload, !Catch::Matchers::ContainsSubstring("block_binding"));
     CHECK_THAT(opus5_payload, Catch::Matchers::ContainsSubstring(
         R"("thinking":{"type":"adaptive","display":"summarized"})"));
@@ -388,13 +388,13 @@ TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
     // configured temperature still goes on the wire.
     auto sonnet46 = make_simple_request("claude-sonnet-4-6");
     sonnet46.temperature = 0.2f;
-    const auto sonnet46_payload = AnthropicSerializer::serialize(sonnet46);
+    const auto sonnet46_payload = ClaudeSerializer::serialize(sonnet46);
     CHECK_THAT(sonnet46_payload, !Catch::Matchers::ContainsSubstring("\"display\""));
     CHECK_THAT(sonnet46_payload, Catch::Matchers::ContainsSubstring("\"temperature\""));
-    CHECK(anthropic_wire_policy("claude-opus-5-5").forced_tool_choice_rejected);
-    CHECK_FALSE(anthropic_wire_policy("claude-opus-5").forced_tool_choice_rejected);
-    CHECK(anthropic_wire_policy("claude-opus-5-5").thinking_always_on);
-    CHECK_FALSE(anthropic_wire_policy("claude-opus-5").thinking_always_on);
+    CHECK(claude_wire_policy("claude-opus-5-5").forced_tool_choice_rejected);
+    CHECK_FALSE(claude_wire_policy("claude-opus-5").forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-opus-5-5").thinking_always_on);
+    CHECK_FALSE(claude_wire_policy("claude-opus-5").thinking_always_on);
 }
 
 TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
@@ -403,7 +403,7 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     for (const auto* alias : {"claude-opus-5-5", "opus-5-5", "opus-5.5",
                               "claude-opus-5.5", "claude-opus-5-5[1m]"}) {
         CAPTURE(alias);
-        const auto policy = anthropic_wire_policy(alias);
+        const auto policy = claude_wire_policy(alias);
         CHECK(policy.known);
         CHECK(policy.thinking_always_on);
         CHECK(policy.reasoning_text_hidden);
@@ -417,12 +417,12 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     }
 
     // Fable 5.1 shares the bound-thinking wire, reached through its alias.
-    const auto fable = anthropic_wire_policy("fable");
+    const auto fable = claude_wire_policy("fable");
     CHECK(fable.thinking_always_on);
     CHECK(fable.reasoning_bound_to_prefix);
 
     // Opus 5 is adaptive but keeps forced tool choice and an unbound prefix.
-    const auto opus5 = anthropic_wire_policy("claude-opus-5");
+    const auto opus5 = claude_wire_policy("claude-opus-5");
     CHECK(opus5.known);
     CHECK(opus5.reasoning_text_hidden);
     CHECK(opus5.fixed_sampling);
@@ -431,41 +431,41 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     CHECK_FALSE(opus5.forced_tool_choice_rejected);
 
     // Manual-budget generations keep sampling and show reasoning by default.
-    const auto sonnet46 = anthropic_wire_policy("claude-sonnet-4-6");
+    const auto sonnet46 = claude_wire_policy("claude-sonnet-4-6");
     CHECK(sonnet46.manual_thinking);
     CHECK_FALSE(sonnet46.rejects_manual_thinking());
     CHECK_FALSE(sonnet46.fixed_sampling);
     CHECK_FALSE(sonnet46.reasoning_text_hidden);
 
-    const auto haiku = anthropic_wire_policy("claude-haiku-4-5");
+    const auto haiku = claude_wire_policy("claude-haiku-4-5");
     CHECK(haiku.known);
     CHECK(haiku.manual_thinking);
     CHECK_FALSE(haiku.effort.supports_effort());
 
     // Ids with no card fall back to their generation.
-    const auto opus47 = anthropic_wire_policy("claude-opus-4-7");
+    const auto opus47 = claude_wire_policy("claude-opus-4-7");
     CHECK(opus47.known);
     CHECK(opus47.adaptive_thinking);
     CHECK(opus47.fixed_sampling);
     CHECK_FALSE(opus47.reasoning_bound_to_prefix);
 
-    const auto mythos51 = anthropic_wire_policy("claude-mythos-5-1");
+    const auto mythos51 = claude_wire_policy("claude-mythos-5-1");
     CHECK(mythos51.known);
     CHECK(mythos51.forced_tool_choice_rejected);
     CHECK_FALSE(mythos51.reasoning_bound_to_prefix);
 
     // A later Fable 5.10 must not inherit Fable 5.1's binding.
-    CHECK_FALSE(anthropic_wire_policy("claude-fable-5-10").reasoning_bound_to_prefix);
+    CHECK_FALSE(claude_wire_policy("claude-fable-5-10").reasoning_bound_to_prefix);
 
     // Unrecognized ids stay permissive so an older deployment keeps working.
-    const auto custom = anthropic_wire_policy("custom-deployment");
+    const auto custom = claude_wire_policy("custom-deployment");
     CHECK_FALSE(custom.known);
     CHECK_FALSE(custom.rejects_manual_thinking());
     CHECK_FALSE(custom.effort.supports_effort());
 
     // A generation Filo has never seen degrades the same way: the request
     // stays valid and the server's own defaults apply.
-    const auto future = anthropic_wire_policy("claude-opus-6");
+    const auto future = claude_wire_policy("claude-opus-6");
     CHECK_FALSE(future.known);
     CHECK_FALSE(future.effort.supports_effort());
     CHECK_FALSE(future.fixed_sampling);
@@ -479,7 +479,7 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     live.adaptive_thinking = true;
     live.manual_thinking = false;
     live.complete = true;
-    const auto live_policy = anthropic_wire_policy("claude-opus-6", &live);
+    const auto live_policy = claude_wire_policy("claude-opus-6", &live);
     CHECK(live_policy.known);
     CHECK(live_policy.effort.supports(ReasoningCapability::XHighEffort));
     CHECK_FALSE(live_policy.effort.supports(ReasoningCapability::MaxEffort));
@@ -492,7 +492,7 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     // An incomplete catalog report changes nothing.
     ModelReasoningProfile partial = live;
     partial.complete = false;
-    CHECK_FALSE(anthropic_wire_policy("claude-opus-6", &partial).known);
+    CHECK_FALSE(claude_wire_policy("claude-opus-6", &partial).known);
 
     // Curated constraints still win over inference for a known model, and the
     // live catalog narrows what the card advertised.
@@ -501,7 +501,7 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     narrowed.adaptive_thinking = true;
     narrowed.manual_thinking = false;
     narrowed.complete = true;
-    const auto opus55_live = anthropic_wire_policy("claude-opus-5-5", &narrowed);
+    const auto opus55_live = claude_wire_policy("claude-opus-5-5", &narrowed);
     CHECK_FALSE(opus55_live.effort.supports(ReasoningCapability::XHighEffort));
     CHECK(opus55_live.reasoning_bound_to_prefix);
     CHECK(opus55_live.thinking_always_on);
@@ -520,7 +520,7 @@ TEST_CASE("Claude requests honor a live catalog for a model Filo has no card for
     request.temperature = 0.2f;
     request.catalog_reasoning = live;
 
-    const auto payload = AnthropicSerializer::serialize(request);
+    const auto payload = ClaudeSerializer::serialize(request);
     simdjson::dom::parser parser;
     const auto doc = parser.parse(payload);
     REQUIRE(doc["output_config"]["effort"].get_string().value() == "xhigh");
@@ -534,12 +534,12 @@ TEST_CASE("Claude requests honor a live catalog for a model Filo has no card for
     auto clamped = make_simple_request("claude-opus-6");
     clamped.effort = "max";
     clamped.catalog_reasoning = live;
-    CHECK_THAT(AnthropicSerializer::serialize(clamped),
+    CHECK_THAT(ClaudeSerializer::serialize(clamped),
                Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
 
     // Without catalog data the same id stays permissive.
     const auto bare =
-        AnthropicSerializer::serialize(make_simple_request("claude-opus-6"));
+        ClaudeSerializer::serialize(make_simple_request("claude-opus-6"));
     CHECK_THAT(bare, !Catch::Matchers::ContainsSubstring("output_config"));
     CHECK_THAT(bare, !Catch::Matchers::ContainsSubstring("\"thinking\""));
 }
@@ -547,17 +547,17 @@ TEST_CASE("Claude requests honor a live catalog for a model Filo has no card for
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {
     auto req = make_simple_request();
     req.max_tokens = 2048;
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("max_tokens":2048)"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("max_tokens":2048)"));
 }
 
 TEST_CASE("ClaudeSerializer - custom default_max_tokens respected for unknown models", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-custom-model"), 4096);
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-custom-model"), 4096);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":4096)"));
 }
 
 TEST_CASE("ClaudeSerializer - automatic prompt caching stays off for simple one-shot requests",
           "[claude][serializer][cache]") {
-    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    const auto payload = ClaudeSerializer::serialize(make_simple_request());
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("cache_control":)"));
 }
 
@@ -568,7 +568,7 @@ TEST_CASE("ClaudeSerializer - automatic prompt caching enabled for tool-capable 
     t.function.name = "read";
     req.tools.push_back(t);
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("cache_control":{"type":"ephemeral"})"));
 }
@@ -601,7 +601,7 @@ TEST_CASE("ClaudeSerializer - caches the stable prompt-plan prefix explicitly",
         .content = "dynamic project facts",
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     require_valid_json(payload);
     const auto system_begin = payload.find(R"("system":[)");
     const auto tools_begin = payload.find(R"(,"tools":[)");
@@ -632,7 +632,7 @@ TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
     last.function.name = "write_file";
     req.tools = {first, last};
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     require_valid_json(payload);
     const auto tools_begin = payload.find(R"("tools":[)");
     const auto messages_begin = payload.find(R"(,"messages":[)");
@@ -656,19 +656,19 @@ TEST_CASE("ClaudeSerializer - temperature omitted when not set", "[claude][seria
     // With effort off there is no thinking block, so temperature is not forced.
     auto req = make_simple_request();
     req.effort = "off";
-    REQUIRE_THAT(AnthropicSerializer::serialize(req),
+    REQUIRE_THAT(ClaudeSerializer::serialize(req),
                  !Catch::Matchers::ContainsSubstring("temperature"));
 }
 
 TEST_CASE("ClaudeSerializer - effort omitted when not set", "[claude][serializer][effort]") {
-    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    const auto payload = ClaudeSerializer::serialize(make_simple_request());
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("output_config")"));
 }
 
 TEST_CASE("ClaudeSerializer - effort serialized via output_config", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-4-6");
     req.effort = "medium";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"medium"})"));
 }
@@ -676,7 +676,7 @@ TEST_CASE("ClaudeSerializer - effort serialized via output_config", "[claude][se
 TEST_CASE("ClaudeSerializer - effort serialized for Sonnet 5", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-5");
     req.effort = "medium";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"medium"})"));
 }
@@ -684,7 +684,7 @@ TEST_CASE("ClaudeSerializer - effort serialized for Sonnet 5", "[claude][seriali
 TEST_CASE("ClaudeSerializer - effort serialized for Fable 5", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-fable-5");
     req.effort = "medium";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"medium"})"));
 }
@@ -692,7 +692,7 @@ TEST_CASE("ClaudeSerializer - effort serialized for Fable 5", "[claude][serializ
 TEST_CASE("ClaudeSerializer - xhigh effort serialized for Fable 5", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-fable-5");
     req.effort = "xhigh";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"xhigh"})"));
 }
@@ -700,7 +700,7 @@ TEST_CASE("ClaudeSerializer - xhigh effort serialized for Fable 5", "[claude][se
 TEST_CASE("ClaudeSerializer - effort auto/unset is treated as omitted", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-4-6");
     req.effort = "auto";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("output_config")"));
 }
 
@@ -708,7 +708,7 @@ TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 4.6",
           "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-4-6");
     req.effort = "max";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"max"})"));
 }
@@ -717,7 +717,7 @@ TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 5",
           "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-5");
     req.effort = "max";
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"max"})"));
 }
@@ -725,7 +725,7 @@ TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 5",
 TEST_CASE("ClaudeSerializer - temperature present when set", "[claude][serializer]") {
     auto req = make_simple_request();
     req.temperature = 0.7f;
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("temperature")"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("temperature")"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -737,7 +737,7 @@ TEST_CASE("ClaudeSerializer - system message becomes top-level field", "[claude]
     req.model = "claude-sonnet-4-6";
     req.messages.push_back(Message{.role = "system", .content = "You are helpful."});
     req.messages.push_back(Message{.role = "user",   .content = "Hi"});
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
 
     const auto system_pos = payload.find(R"("system":")");
     REQUIRE(system_pos != std::string::npos);
@@ -746,12 +746,28 @@ TEST_CASE("ClaudeSerializer - system message becomes top-level field", "[claude]
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("You are helpful."));
 }
 
+TEST_CASE("Claude attribution preserves all supplied system instructions", "[claude][serializer][system]") {
+    ChatRequest req;
+    req.model = "claude-sonnet-4-6";
+    req.messages = {
+        {.role = "system", .content = "Earlier project instructions."},
+        {.role = "system", .content = "x-anthropic-billing-header: prefilled;"},
+        {.role = "system", .content = "Later session instructions."},
+        {.role = "user", .content = "Hi"}};
+    const auto payload = ClaudeSerializer::serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Earlier project instructions."));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Later session instructions."));
+    const auto marker = payload.find("x-anthropic-billing-header:");
+    REQUIRE(marker != std::string::npos);
+    CHECK(payload.find("x-anthropic-billing-header:", marker + 1) == std::string::npos);
+}
+
 TEST_CASE("ClaudeSerializer - system message is NOT in messages array", "[claude][serializer][system]") {
     ChatRequest req;
     req.model = "claude-sonnet-4-6";
     req.messages.push_back(Message{.role = "system", .content = "You are helpful."});
     req.messages.push_back(Message{.role = "user",   .content = "Hi"});
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     // Only one system occurrence should appear (in top-level field, not in messages array)
     auto first = payload.find(R"("system":)");
     REQUIRE(first != std::string::npos);
@@ -763,7 +779,7 @@ TEST_CASE("ClaudeSerializer - system message is NOT in messages array", "[claude
 }
 
 TEST_CASE("ClaudeSerializer - system field always present with attribution marker", "[claude][serializer][system]") {
-    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    const auto payload = ClaudeSerializer::serialize(make_simple_request());
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("system":"x-anthropic-billing-header:)"));
 }
 
@@ -776,7 +792,7 @@ TEST_CASE("ClaudeSerializer - existing attribution in system message is not dupl
     });
     req.messages.push_back(Message{.role = "user", .content = "Hi"});
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("system":"x-anthropic-billing-header: prefilled;)"));
 
     const auto marker = payload.find("x-anthropic-billing-header:");
@@ -789,7 +805,7 @@ TEST_CASE("ClaudeSerializer - system message with special chars is escaped", "[c
     req.model = "claude-sonnet-4-6";
     req.messages.push_back(Message{.role = "system", .content = "Say \"hello\"."});
     req.messages.push_back(Message{.role = "user",   .content = "Hi"});
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(\"hello\")"));
 }
 
@@ -799,10 +815,10 @@ TEST_CASE("ClaudeSerializer - system message with special chars is escaped", "[c
 
 TEST_CASE("ClaudeSerializer - thinking omitted when effort is off", "[claude][serializer][thinking]") {
     // With config thinking disabled AND effort explicitly off, no thinking block.
-    AnthropicThinkingConfig cfg{.enabled = false};
+    ClaudeThinkingConfig cfg{.enabled = false};
     auto req = make_simple_request("claude-sonnet-4-6");
     req.effort = "off";
-    REQUIRE_THAT(AnthropicSerializer::serialize(req, 8096, cfg),
+    REQUIRE_THAT(ClaudeSerializer::serialize(req, 8096, cfg),
                  !Catch::Matchers::ContainsSubstring("thinking"));
 }
 
@@ -811,12 +827,12 @@ TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
     // The user's single control is /effort: auto (empty) or any positive level
     // streams reasoning for effort-capable Claude models, without needing a
     // config thinking_budget. Opus uses adaptive thinking.
-    AnthropicThinkingConfig cfg{.enabled = false};  // thinking_budget == 0
+    ClaudeThinkingConfig cfg{.enabled = false};  // thinking_budget == 0
 
     // auto (empty effort) → thinking on for Sonnet 4.6 (manual thinking model).
     {
         auto req = make_simple_request("claude-sonnet-4-6");
-        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        const auto payload = ClaudeSerializer::serialize(req, 8096, cfg);
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
             R"("thinking":{"type":"enabled")"));
     }
@@ -825,7 +841,7 @@ TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
     {
         auto req = make_simple_request("claude-opus-4-8");
         req.effort = "high";
-        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        const auto payload = ClaudeSerializer::serialize(req, 8096, cfg);
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
             R"("thinking":{"type":"adaptive","display":"summarized"})"));
     }
@@ -833,34 +849,34 @@ TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
     {
         auto req = make_simple_request("claude-opus-4-8");
         req.effort = "off";
-        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        const auto payload = ClaudeSerializer::serialize(req, 8096, cfg);
         REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
     }
 }
 
 TEST_CASE("ClaudeSerializer - thinking enabled emits type enabled", "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 10000};
-    auto payload = AnthropicSerializer::serialize(make_simple_request(), 8096, cfg);
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 10000};
+    auto payload = ClaudeSerializer::serialize(make_simple_request(), 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled","budget_tokens":8095})"));
 }
 
 TEST_CASE("ClaudeSerializer - thinking budget_tokens is correct", "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
-    auto payload = AnthropicSerializer::serialize(make_simple_request(), 8096, cfg);
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = ClaudeSerializer::serialize(make_simple_request(), 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("5000"));
 }
 
 TEST_CASE("ClaudeSerializer - Fable 5 omits rejected manual thinking config", "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-fable-5"), 8096, cfg);
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-fable-5"), 8096, cfg);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
 }
 
 TEST_CASE("ClaudeSerializer - Opus 4.8 converts thinking budget intent to adaptive thinking",
           "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-8"), 8096, cfg);
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-opus-4-8"), 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("thinking":{"type":"adaptive","display":"summarized"})"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled")"));
@@ -871,7 +887,7 @@ TEST_CASE("ClaudeSerializer - Opus 4.8 converts thinking budget intent to adapti
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - tools absent when no tools", "[claude][serializer][tools]") {
-    REQUIRE_THAT(AnthropicSerializer::serialize(make_simple_request()),
+    REQUIRE_THAT(ClaudeSerializer::serialize(make_simple_request()),
                  !Catch::Matchers::ContainsSubstring(R"("tools")"));
 }
 
@@ -882,7 +898,7 @@ TEST_CASE("ClaudeSerializer - tool uses input_schema not parameters", "[claude][
     t.function.description = "Get the weather";
     t.function.parameters.push_back(make_param("location", "string", "City name"));
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("input_schema")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("parameters")"));
 }
@@ -893,7 +909,7 @@ TEST_CASE("ClaudeSerializer - tool name and description appear", "[claude][seria
     t.function.name        = "read";
     t.function.description = "Read a file from disk";
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("description":"Read a file from disk")"));
 }
@@ -905,7 +921,7 @@ TEST_CASE("ClaudeSerializer - tool required parameters listed", "[claude][serial
     t.function.parameters.push_back(make_param("command", "string", "Shell command", true));
     t.function.parameters.push_back(make_param("timeout", "integer", "Timeout seconds", false));
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("required":["command"])"));
 }
 
@@ -915,7 +931,7 @@ TEST_CASE("ClaudeSerializer - tool with no required params has empty required ar
     t.function.name = "ping";
     t.function.parameters.push_back(make_param("host", "string", "Host", false));
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("required":[])"));
 }
 
@@ -925,7 +941,7 @@ TEST_CASE("ClaudeSerializer - multiple tools no trailing comma", "[claude][seria
     Tool t2; t2.function.name = "tool_b";
     req.tools.push_back(t1);
     req.tools.push_back(t2);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",]"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",}"));
 }
@@ -949,7 +965,7 @@ TEST_CASE("ClaudeSerializer - tool role becomes user message with tool_result", 
         .content      = "12:00 UTC",
         .tool_call_id = "tc_001"
     });
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"tool_result")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("tool_use_id":"tc_001")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("12:00 UTC"));
@@ -959,7 +975,7 @@ TEST_CASE("ClaudeSerializer - tool role maps to user role in output", "[claude][
     ChatRequest req;
     req.model = "claude-sonnet-4-6";
     req.messages.push_back(Message{.role = "tool", .content = "result", .tool_call_id = "id1"});
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     // The wrapper object should have role:user
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"user")"));
     // The original tool role should not appear
@@ -997,7 +1013,7 @@ TEST_CASE("ClaudeSerializer - parallel tool results share the immediately follow
         .tool_call_id = "tc_b",
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(
         payload,
         Catch::Matchers::ContainsSubstring(
@@ -1020,7 +1036,7 @@ TEST_CASE("ClaudeSerializer - assistant tool_calls become tool_use content block
         .tool_calls = {ToolCall{.id = "toolu_01", .type = "function",
                                  .function = {.name = "shell", .arguments = R"({"command":"ls"})"}}}
     });
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"tool_use")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("id":"toolu_01")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"shell")"));
@@ -1032,7 +1048,7 @@ TEST_CASE("ClaudeSerializer - tool_use input is raw JSON not string", "[claude][
         .role       = "assistant",
         .tool_calls = {ToolCall{.id = "tc", .function = {.name = "f", .arguments = R"({"k":"v"})"}}}
     });
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     // The JSON object must be embedded directly, not as a quoted string
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("input":{"k":"v"})"));
 }
@@ -1043,7 +1059,7 @@ TEST_CASE("ClaudeSerializer - empty tool call arguments become empty object", "[
         .role       = "assistant",
         .tool_calls = {ToolCall{.id = "tc", .function = {.name = "noop", .arguments = ""}}}
     });
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("input":{})"));
 }
 
@@ -1054,7 +1070,7 @@ TEST_CASE("ClaudeSerializer - assistant text + tool_call both appear", "[claude]
         .content    = "I will call the tool.",
         .tool_calls = {ToolCall{.id = "tc", .function = {.name = "f", .arguments = "{}"}}}
     });
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("I will call the tool."));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"tool_use")"));
@@ -1065,22 +1081,22 @@ TEST_CASE("ClaudeSerializer - assistant text + tool_call both appear", "[claude]
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - newlines in content are escaped", "[claude][serializer][escape]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", "line1\nline2"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-sonnet-4-6", "line1\nline2"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(line1\nline2)"));
 }
 
 TEST_CASE("ClaudeSerializer - tabs in content are escaped", "[claude][serializer][escape]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", "col1\tcol2"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-sonnet-4-6", "col1\tcol2"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(col1\tcol2)"));
 }
 
 TEST_CASE("ClaudeSerializer - quotes in content are escaped", "[claude][serializer][escape]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", R"(say "hi")"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-sonnet-4-6", R"(say "hi")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(say \"hi\")"));
 }
 
 TEST_CASE("ClaudeSerializer - backslash in content is escaped", "[claude][serializer][escape]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", R"(C:\path)"));
+    auto payload = ClaudeSerializer::serialize(make_simple_request("claude-sonnet-4-6", R"(C:\path)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(C:\\path)"));
 }
 
@@ -1101,7 +1117,7 @@ TEST_CASE("ClaudeSerializer - malformed tool results cannot poison request JSON"
         .tool_call_id = "tool_1",
     });
 
-    const auto payload = AnthropicSerializer::serialize(req);
+    const auto payload = ClaudeSerializer::serialize(req);
 
     REQUIRE(simdjson::validate_utf8(payload));
     REQUIRE_THAT(payload,
@@ -1114,7 +1130,7 @@ TEST_CASE("ClaudeSerializer - malformed tool results cannot poison request JSON"
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - payload starts with { and ends with }", "[claude][serializer][structure]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request());
+    auto payload = ClaudeSerializer::serialize(make_simple_request());
     REQUIRE(payload.front() == '{');
     REQUIRE(payload.back() == '}');
 }
@@ -1122,13 +1138,13 @@ TEST_CASE("ClaudeSerializer - payload starts with { and ends with }", "[claude][
 TEST_CASE("ClaudeSerializer - messages array always present", "[claude][serializer][structure]") {
     ChatRequest req;
     req.model = "claude-sonnet-4-6";
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("messages":[)"));
 }
 
 TEST_CASE("ClaudeSerializer - empty messages produce valid messages array", "[claude][serializer][structure]") {
     ChatRequest req;
     req.model = "claude-sonnet-4-6";
-    REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("messages":[])"));
+    REQUIRE_THAT(ClaudeSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("messages":[])"));
 }
 
 TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][serializer][structure]") {
@@ -1137,7 +1153,7 @@ TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][se
     req.messages.push_back(Message{.role = "user", .content = "A"});
     req.messages.push_back(Message{.role = "assistant", .content = "B"});
     req.messages.push_back(Message{.role = "user", .content = "C"});
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",]"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",}"));
 }
@@ -1146,17 +1162,17 @@ TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][s
     for (const auto* model : {"claude-opus-5", "claude-opus-4-8", "claude-sonnet-4-6",
                                "claude-sonnet-5", "claude-fable-5",
                                "claude-haiku-4-5"}) {
-        auto payload = AnthropicSerializer::serialize(make_simple_request(model));
+        auto payload = ClaudeSerializer::serialize(make_simple_request(model));
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(model));
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AnthropicProtocol headers — OAuth beta and merge behavior
+// ClaudeProtocol headers — OAuth beta and merge behavior
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicProtocol::build_headers adds oauth beta when oauth auth property is set", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::build_headers adds oauth beta when oauth auth property is set", "[claude][headers]") {
+    ClaudeProtocol protocol;
     core::auth::AuthInfo auth;
     auth.properties["oauth"] = "1";
     auth.headers["Authorization"] = "Bearer oauth-token";
@@ -1168,8 +1184,8 @@ TEST_CASE("AnthropicProtocol::build_headers adds oauth beta when oauth auth prop
     REQUIRE(headers.at("Authorization") == "Bearer oauth-token");
 }
 
-TEST_CASE("AnthropicProtocol::build_headers always includes claude-code beta header", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::build_headers always includes claude-code beta header", "[claude][headers]") {
+    ClaudeProtocol protocol;
     core::auth::AuthInfo auth;
 
     auto headers = protocol.build_headers(auth);
@@ -1177,8 +1193,8 @@ TEST_CASE("AnthropicProtocol::build_headers always includes claude-code beta hea
     REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("claude-code-20250219"));
 }
 
-TEST_CASE("AnthropicProtocol::build_headers merges caller anthropic-beta with internal betas", "[claude][headers]") {
-    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 10000});
+TEST_CASE("ClaudeProtocol::build_headers merges caller anthropic-beta with internal betas", "[claude][headers]") {
+    ClaudeProtocol protocol({.enabled = true, .budget_tokens = 10000});
     core::auth::AuthInfo auth;
     auth.properties["oauth"] = "1";
     auth.headers["anthropic-beta"] = "custom-beta-1";
@@ -1192,8 +1208,8 @@ TEST_CASE("AnthropicProtocol::build_headers merges caller anthropic-beta with in
     REQUIRE_THAT(merged, Catch::Matchers::ContainsSubstring("custom-beta-1"));
 }
 
-TEST_CASE("AnthropicProtocol::build_headers de-duplicates repeated beta names", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::build_headers de-duplicates repeated beta names", "[claude][headers]") {
+    ClaudeProtocol protocol;
     core::auth::AuthInfo auth;
     auth.properties["oauth"] = "1";
     auth.headers["anthropic-beta"] = "oauth-2025-04-20, oauth-2025-04-20";
@@ -1211,8 +1227,8 @@ TEST_CASE("AnthropicProtocol::build_headers de-duplicates repeated beta names", 
     REQUIRE(hits == 1);
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request strips [1m] suffix and adds context beta", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request strips [1m] suffix and adds context beta", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("claude-sonnet-4-6[1m]");
     protocol.prepare_request(req);
 
@@ -1224,8 +1240,8 @@ TEST_CASE("AnthropicProtocol::prepare_request strips [1m] suffix and adds contex
     REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Claude alias + [1m]", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request resolves Claude alias + [1m]", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("sonnet[1m]");
     protocol.prepare_request(req);
 
@@ -1237,34 +1253,34 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Claude alias + [1m]", "[c
     REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Opus alias to current Opus", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request resolves Opus alias to current Opus", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("opus");
     protocol.prepare_request(req);
 
     REQUIRE(req.model == "claude-opus-5");
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5.1", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request resolves Fable alias to Fable 5.1", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("fable");
     protocol.prepare_request(req);
 
     REQUIRE(req.model == "claude-fable-5-1");
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 5.5",
+TEST_CASE("ClaudeProtocol::prepare_request resolves Haiku alias to Haiku 5.5",
           "[claude][headers]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("haiku");
     protocol.prepare_request(req);
 
     REQUIRE(req.model == "claude-haiku-5-5");
 }
 
-TEST_CASE("AnthropicProtocol::build_headers omits legacy thinking beta for Fable 5",
+TEST_CASE("ClaudeProtocol::build_headers omits legacy thinking beta for Fable 5",
           "[claude][headers][thinking]") {
-    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+    ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
     ChatRequest req = make_simple_request("claude-fable-5");
     protocol.prepare_request(req);
 
@@ -1275,8 +1291,8 @@ TEST_CASE("AnthropicProtocol::build_headers omits legacy thinking beta for Fable
                  !Catch::Matchers::ContainsSubstring("interleaved-thinking-2025-05-14"));
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("MyAzureDeployment[1M]");
     protocol.prepare_request(req);
     REQUIRE(req.model == "MyAzureDeployment");
@@ -1287,8 +1303,8 @@ TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while remo
     REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request does not add context beta without [1m]", "[claude][headers]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol::prepare_request does not add context beta without [1m]", "[claude][headers]") {
+    ClaudeProtocol protocol;
     ChatRequest req = make_simple_request("sonnet");
     protocol.prepare_request(req);
     REQUIRE(req.model == "claude-sonnet-5");
@@ -1471,14 +1487,14 @@ TEST_CASE("AnthropicSSEParser preserves thinking signatures for replay",
         .role = "assistant",
         .continuation_items = {item},
     });
-    const std::string payload = AnthropicSerializer::serialize(request);
+    const std::string payload = ClaudeSerializer::serialize(request);
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"thinking")"));
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("signature":"signed-state")"));
 }
 
-TEST_CASE("AnthropicProtocol - thinking streams as reasoning chunks while replay stays signed",
+TEST_CASE("ClaudeProtocol - thinking streams as reasoning chunks while replay stays signed",
           "[claude][sse][thinking][reasoning][integration]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
 
     [[maybe_unused]] auto begin = protocol.parse_event(
         "event: content_block_start\n"
@@ -1676,8 +1692,8 @@ TEST_CASE("AnthropicSSEParser - full text streaming sequence", "[claude][sse][in
     REQUIRE(done.done);
 }
 
-TEST_CASE("AnthropicProtocol - final usage includes cached input token fields", "[claude][sse][integration]") {
-    AnthropicProtocol protocol;
+TEST_CASE("ClaudeProtocol - final usage includes cached input token fields", "[claude][sse][integration]") {
+    ClaudeProtocol protocol;
 
     auto start = protocol.parse_event(
         "event: message_start\n"
@@ -1701,9 +1717,9 @@ TEST_CASE("AnthropicProtocol - final usage includes cached input token fields", 
     REQUIRE(stop.completion_tokens == 42);
 }
 
-TEST_CASE("AnthropicProtocol - final event carries stop reason from message_delta",
+TEST_CASE("ClaudeProtocol - final event carries stop reason from message_delta",
           "[claude][sse][integration]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
 
     auto delta = protocol.parse_event(
         "event: message_delta\n"
@@ -1719,9 +1735,9 @@ TEST_CASE("AnthropicProtocol - final event carries stop reason from message_delt
     REQUIRE(stop.completion_tokens == 8096);
 }
 
-TEST_CASE("AnthropicProtocol surfaces a classifier refusal explanation",
+TEST_CASE("ClaudeProtocol surfaces a classifier refusal explanation",
           "[claude][sse][refusal]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     auto delta = protocol.parse_event(
         "event: message_delta\n"
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\","
@@ -1738,7 +1754,7 @@ TEST_CASE("AnthropicProtocol surfaces a classifier refusal explanation",
     REQUIRE(stop.done);
     CHECK(stop.stop_reason == "refusal");
 
-    AnthropicProtocol category_only;
+    ClaudeProtocol category_only;
     auto category = category_only.parse_event(
         "event: message_delta\n"
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\","
@@ -1748,9 +1764,9 @@ TEST_CASE("AnthropicProtocol surfaces a classifier refusal explanation",
     CHECK(category.chunks[0].content == "Request declined (cyber).");
 }
 
-TEST_CASE("AnthropicProtocol - final event reports incomplete tool call",
+TEST_CASE("ClaudeProtocol - final event reports incomplete tool call",
           "[claude][sse][integration]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
 
     [[maybe_unused]] auto start = protocol.parse_event(
         "event: content_block_start\n"
@@ -1775,9 +1791,9 @@ TEST_CASE("AnthropicProtocol - final event reports incomplete tool call",
     REQUIRE(stop.chunks.empty());
 }
 
-TEST_CASE("AnthropicProtocol - parse_event accepts no-space SSE field separators",
+TEST_CASE("ClaudeProtocol - parse_event accepts no-space SSE field separators",
           "[claude][sse][parser]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     const auto result = protocol.parse_event(
         "event:content_block_delta\n"
         "data:{\"type\":\"content_block_delta\",\"index\":0,"
@@ -1788,9 +1804,9 @@ TEST_CASE("AnthropicProtocol - parse_event accepts no-space SSE field separators
     REQUIRE(result.chunks[0].content == "NoSpace");
 }
 
-TEST_CASE("AnthropicProtocol - parse_event accepts CRLF framing",
+TEST_CASE("ClaudeProtocol - parse_event accepts CRLF framing",
           "[claude][sse][parser]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     const auto result = protocol.parse_event(
         "event: content_block_delta\r\n"
         "data: {\"type\":\"content_block_delta\",\"index\":0,"
@@ -1801,9 +1817,9 @@ TEST_CASE("AnthropicProtocol - parse_event accepts CRLF framing",
     REQUIRE(result.chunks[0].content == "CRLF");
 }
 
-TEST_CASE("AnthropicProtocol - parse_event falls back to payload type when event line missing",
+TEST_CASE("ClaudeProtocol - parse_event falls back to payload type when event line missing",
           "[claude][sse][parser]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     const auto result = protocol.parse_event(
         "data: {\"type\":\"content_block_delta\",\"index\":0,"
         "\"delta\":{\"type\":\"text_delta\",\"text\":\"TypeFallback\"}}\n");
@@ -1818,18 +1834,18 @@ TEST_CASE("AnthropicProtocol - parse_event falls back to payload type when event
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - thinking forces temperature to 1 when request sets other value", "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 10000};
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 10000};
     auto req = make_simple_request();
     req.temperature = 0.7f;
-    auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+    auto payload = ClaudeSerializer::serialize(req, 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
     // The caller-supplied 0.7 must not appear in any form.
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("0.7"));
 }
 
 TEST_CASE("ClaudeSerializer - thinking with no temperature still emits temperature 1", "[claude][serializer][thinking]") {
-    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
-    auto payload = AnthropicSerializer::serialize(make_simple_request(), 8096, cfg);
+    ClaudeThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = ClaudeSerializer::serialize(make_simple_request(), 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
 }
 
@@ -1837,7 +1853,7 @@ TEST_CASE("ClaudeSerializer - temperature without thinking is passed through unc
     auto req = make_simple_request();
     req.effort = "off";  // no thinking block → temperature not forced to 1
     req.temperature = 0.5f;
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     // Not forced to 1.
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
     // But temperature must still be present.
@@ -1848,8 +1864,8 @@ TEST_CASE("ClaudeSerializer - temperature without thinking is passed through unc
 // Bug-fix: Bug 2 — ISO 8601 rate-limit reset timestamps are parsed correctly
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicProtocol - ISO 8601 requests_reset parses to nonzero unix timestamp", "[claude][ratelimit]") {
-    AnthropicProtocol p;
+TEST_CASE("ClaudeProtocol - ISO 8601 requests_reset parses to nonzero unix timestamp", "[claude][ratelimit]") {
+    ClaudeProtocol p;
     cpr::Header hdrs{
         {"anthropic-ratelimit-requests-limit",     "100"},
         {"anthropic-ratelimit-requests-remaining", "80"},
@@ -1863,8 +1879,8 @@ TEST_CASE("AnthropicProtocol - ISO 8601 requests_reset parses to nonzero unix ti
     REQUIRE(rl.requests_reset > 0);
 }
 
-TEST_CASE("AnthropicProtocol - ISO 8601 tokens_reset parses to nonzero unix timestamp", "[claude][ratelimit]") {
-    AnthropicProtocol p;
+TEST_CASE("ClaudeProtocol - ISO 8601 tokens_reset parses to nonzero unix timestamp", "[claude][ratelimit]") {
+    ClaudeProtocol p;
     cpr::Header hdrs{
         {"anthropic-ratelimit-tokens-limit",     "50000"},
         {"anthropic-ratelimit-tokens-remaining", "40000"},
@@ -1934,7 +1950,7 @@ TEST_CASE("ClaudeSerializer - array tool parameter emits items schema", "[claude
     p.items_schema = R"({"type":"string"})";
     t.function.parameters.push_back(std::move(p));
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"array")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("items":{"type":"string"})"));
 }
@@ -1945,7 +1961,7 @@ TEST_CASE("ClaudeSerializer - non-array parameter without items_schema emits no 
     t.function.name = "get_value";
     t.function.parameters.push_back(make_param("key", "string", "The key"));
     req.tools.push_back(t);
-    auto payload = AnthropicSerializer::serialize(req);
+    auto payload = ClaudeSerializer::serialize(req);
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("items")"));
 }
 
@@ -1968,7 +1984,7 @@ TEST_CASE("Claude 5.5 policies are valid without discovery and keep their distin
             auto request = make_simple_request(model);
             request.effort = effort;
             request.temperature = 0.2;
-            AnthropicProtocol protocol({.enabled = true, .budget_tokens = 10000});
+            ClaudeProtocol protocol({.enabled = true, .budget_tokens = 10000});
             protocol.prepare_request(request);
             const auto payload = protocol.serialize(request);
             simdjson::dom::parser parser;
@@ -1993,18 +2009,18 @@ TEST_CASE("Claude 5.5 policies are valid without discovery and keep their distin
             CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
         }
     }
-    CHECK(anthropic_wire_policy("claude-sonnet-5-5").forced_tool_choice_rejected);
-    CHECK_FALSE(anthropic_wire_policy("claude-haiku-5-5").forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-sonnet-5-5").forced_tool_choice_rejected);
+    CHECK_FALSE(claude_wire_policy("claude-haiku-5-5").forced_tool_choice_rejected);
     for (const auto* alias : {"haiku", "haiku-5.5", "claude-haiku", "sonnet-5.5"}) {
         auto request = make_simple_request(alias);
-        AnthropicProtocol protocol;
+        ClaudeProtocol protocol;
         protocol.prepare_request(request);
         CHECK(request.model == (std::string_view(alias).starts_with("sonnet")
             ? "claude-sonnet-5-5" : "claude-haiku-5-5"));
     }
-    CHECK(anthropic_wire_policy("claude-haiku-5-5-20261007").reasoning_bound_to_prefix);
-    CHECK(anthropic_wire_policy("claude-sonnet-5-5[1m]").between_tools_thinking);
-    CHECK_FALSE(anthropic_wire_policy("claude-haiku-4-5").adaptive_thinking);
+    CHECK(claude_wire_policy("claude-haiku-5-5-20261007").reasoning_bound_to_prefix);
+    CHECK(claude_wire_policy("claude-sonnet-5-5[1m]").between_tools_thinking);
+    CHECK_FALSE(claude_wire_policy("claude-haiku-4-5").adaptive_thinking);
 }
 
 TEST_CASE("Claude replay preserves interleaved native blocks and survives edited histories",
@@ -2029,23 +2045,23 @@ TEST_CASE("Claude replay preserves interleaved native blocks and survives edited
         .tool_calls = call.completed_tools, .continuation_items = items});
     request.messages.push_back(Message{.role = "tool", .content = "file", .tool_call_id = "call"});
     simdjson::dom::parser json;
-    const auto payload = AnthropicSerializer::serialize(request);
+    const auto payload = ClaudeSerializer::serialize(request);
     const auto doc = json.parse(payload);
     CHECK(doc["messages"].at(1)["content"].at(0)["type"].get_string().value() == "text");
     CHECK(doc["messages"].at(1)["content"].at(1)["signature"].get_string().value() == "signed");
     CHECK(doc["messages"].at(1)["content"].at(2)["type"].get_string().value() == "tool_use");
     request.messages[1].content = "Edited.";
-    const auto edited = AnthropicSerializer::serialize(request);
+    const auto edited = ClaudeSerializer::serialize(request);
     CHECK_THAT(edited, Catch::Matchers::ContainsSubstring("Edited."));
     CHECK_THAT(edited, !Catch::Matchers::ContainsSubstring("First."));
     request.effort = "off";
-    const auto disabled = AnthropicSerializer::serialize(request);
+    const auto disabled = ClaudeSerializer::serialize(request);
     CHECK_THAT(disabled, !Catch::Matchers::ContainsSubstring("signed"));
     CHECK_THAT(disabled, Catch::Matchers::ContainsSubstring("tool_use"));
 }
 
 TEST_CASE("Claude parser keeps cache accounting and clears it between attempts", "[claude][hardening][usage]") {
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     (void)protocol.parse_event("event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":200}}}\n\n");
     (void)protocol.parse_event("event: message_delta\ndata: {\"usage\":{\"output_tokens\":42}}\n\n");
     const auto complete = protocol.parse_event("event: message_stop\ndata: {}\n\n");
@@ -2079,16 +2095,16 @@ TEST_CASE("Claude structured outputs share output_config with effort and reject 
     request.effort = "medium";
     request.response_format = {.type = ResponseFormat::Type::JsonSchema,
         .schema = R"({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false})"};
-    const auto payload = AnthropicSerializer::serialize(request);
+    const auto payload = ClaudeSerializer::serialize(request);
     simdjson::dom::parser parser;
     const auto doc = parser.parse(payload);
     CHECK(doc["output_config"]["effort"].get_string().value() == "medium");
     CHECK(doc["output_config"]["format"]["type"].get_string().value() == "json_schema");
     CHECK(doc["output_config"]["format"]["schema"]["properties"]["ok"]["type"].get_string().value() == "boolean");
     request.response_format.schema = "broken";
-    CHECK_THROWS_AS(AnthropicSerializer::serialize(request), std::invalid_argument);
+    CHECK_THROWS_AS(ClaudeSerializer::serialize(request), std::invalid_argument);
     request.response_format = {};
-    AnthropicProtocol protocol;
+    ClaudeProtocol protocol;
     protocol.prepare_request(request);
     core::auth::AuthInfo auth;
     auth.headers["Anthropic-Beta"] = "custom-beta";

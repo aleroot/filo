@@ -8,7 +8,7 @@
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelCatalogProvider.hpp"
 #include "core/llm/ModelMetadata.hpp"
-#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
@@ -1074,7 +1074,7 @@ TEST_CASE("A newly released Claude model is data-driven end to end",
     request.effort = "xhigh";
     request.messages.push_back({.role = "user", .content = "Hello"});
     const std::string payload =
-        protocols::AnthropicSerializer::serialize(request);
+        protocols::ClaudeSerializer::serialize(request);
 
     CHECK(payload.find(R"("max_tokens":192000)") != std::string::npos);
     CHECK(payload.find(R"("output_config":{"effort":"xhigh"})")
@@ -1216,7 +1216,7 @@ TEST_CASE("Remote model discovery skips quietly without credentials",
         nullptr,
         kimi_protocol).attempted);
 
-    core::llm::protocols::AnthropicProtocol anthropic;
+    core::llm::protocols::ClaudeProtocol anthropic;
     CHECK_FALSE(discover_and_register_models(
         "claude",
         ApiType::Anthropic,
@@ -1570,13 +1570,13 @@ TEST_CASE("A live catalog supplies effort support the protocol does not know",
         "https://example.invalid/v1",
         core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
         std::string(model_id),
-        std::make_unique<protocols::AnthropicProtocol>(),
+        std::make_unique<protocols::ClaudeProtocol>(),
         core::config::ApiType::Anthropic,
         std::string(provider_name));
 
     // The protocol has neither a card nor a generation row for this id, so the
     // catalog is what makes /effort work on a model released after this build.
-    CHECK(protocols::AnthropicProtocol{}.reasoning_capabilities(model_id).empty());
+    CHECK(protocols::ClaudeProtocol{}.reasoning_capabilities(model_id).empty());
     const auto capabilities = provider.reasoning_capabilities(model_id);
     CHECK(capabilities.supports_effort());
     CHECK(capabilities.supports(ReasoningCapability::XHighEffort));
@@ -1622,7 +1622,7 @@ TEST_CASE("A live Anthropic catalog keeps Opus 5.5 on its curated wire",
 
     // Discovery is provider-scoped: it never writes to the global registry, so
     // the request shape still resolves from the curated card.
-    const auto policy = protocols::anthropic_wire_policy("claude-opus-5-5");
+    const auto policy = protocols::claude_wire_policy("claude-opus-5-5");
     CHECK(policy.known);
     CHECK(policy.adaptive_thinking);
     CHECK_FALSE(policy.manual_thinking);

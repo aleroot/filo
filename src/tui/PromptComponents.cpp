@@ -732,6 +732,9 @@ std::string format_provider_setup_hint(std::string_view provider_name,
                "Get a key at: console.x.ai  (sign up → API Keys)\n"
                "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
     }
+    if (provider_name.starts_with("minimax-m-plan") && api_key.empty()) {
+        return "Run `filo --auth minimax` and paste your dedicated Subscription Key.\nUsage: https://www.minimax.io/m-plan\n";
+    }
     if (provider_name.starts_with("qwen-token-plan") && api_key.empty()) {
         return "Run `filo --auth qwen` and paste your dedicated Token Plan API key.\n"
                "Alternatively set QWEN_TOKEN_PLAN_API_KEY. Do not use a pay-as-you-go or Coding Plan key.\n"

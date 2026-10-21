@@ -1,26 +1,4 @@
 #pragma once
-
-/**
- * @file AnthropicProtocol.hpp
- * @brief Anthropic Messages API wire protocol.
- *
- * The Anthropic API differs structurally from OpenAI Chat Completions in
- * several significant ways:
- *   - `system` prompt is a top-level field, not a message with role "system".
- *   - Tool definitions use `input_schema` (not `parameters`).
- *   - Tool call results are `user` messages with `tool_result` content blocks.
- *   - `max_tokens` is **mandatory**.
- *   - SSE events carry a named `event:` line before the `data:` line.
- *   - Tool call arguments are streamed as `input_json_delta` fragments and
- *     must be accumulated until `content_block_stop`.
- *   - Usage is split: input tokens in `message_start`, output tokens in
- *     `message_delta`. With prompt caching enabled, `message_start` usage
- *     may also include cache creation/read token fields that contribute to
- *     effective prompt footprint.
- *   - Extended/adaptive thinking uses provider-specific request fields on
- *     models that support them.
- */
-
 #include "ApiProtocol.hpp"
 #include <functional>
 #include <optional>
@@ -28,92 +6,18 @@
 #include <vector>
 
 namespace core::llm::protocols {
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Data structures
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * @brief Extended thinking configuration for Claude models.
- *
- * When enabled, Claude uses chain-of-thought reasoning before responding.
- * `budget_tokens` caps the thinking token budget (min 1024 per Anthropic docs).
- * Requires a model that supports Anthropic's explicit extended thinking block.
- */
-struct AnthropicThinkingConfig {
-    bool enabled      = false;
-    int  budget_tokens = 10000;
-};
-
-/**
- * @brief State for a tool_use content block being reassembled across SSE events.
- *
- * Claude streams tool arguments incrementally via `input_json_delta` events.
- * This struct accumulates the pieces until `content_block_stop`.
- */
 struct AnthropicToolBlockState {
-    int         index            = -1;
-    std::string id;
-    std::string name;
-    std::string accumulated_args; ///< Built up from `input_json_delta` chunks.
-    std::string initial_args;
+    int index = -1;
+    std::string id, name, accumulated_args, initial_args;
 };
-
 struct AnthropicContinuationBlockState {
     int index = -1;
-    std::string type;
-    std::string thinking;
-    std::string signature;
-    std::string initial_payload;
+    std::string type, thinking, signature, initial_payload;
 };
-
-/**
- * @brief Resolved request-shape policy for one Claude model id or alias.
- *
- * Claude generations differ in which request fields they reject, and the
- * Models API does not advertise those rejections. Filo therefore curates them
- * on the model card and resolves them once here, so the serializer, the header
- * builder, and the hosted-tool backends all read the same flags instead of
- * matching model names.
- *
- * Resolution order for reasoning controls: the provider's live catalog when it
- * reported a capability set, then the registry card, then a generation table
- * for ids that match neither. Wire constraints come from the card or the
- * generation table; for a model that matches neither, an adaptive-only profile
- * implies the two constraints every adaptive generation has shared so far.
- */
-struct AnthropicWirePolicy {
-    ReasoningCapabilities effort;             ///< Effort levels the model accepts.
-    bool known = false;                       ///< False when no card or generation matched.
-    bool adaptive_thinking = false;           ///< `thinking.type=adaptive` is the wire mode.
-    bool manual_thinking = false;             ///< `thinking.type=enabled` with a budget is accepted.
-    bool thinking_always_on = false;          ///< Reasoning cannot be disabled; effort is the control.
-    bool reasoning_text_hidden = false;       ///< Reasoning text is empty unless `display` is requested.
-    bool reasoning_bound_to_prefix = false;   ///< Replayed reasoning is validated against the prefix.
-    bool fixed_sampling = false;              ///< Non-default sampling parameters are rejected.
-    bool forced_tool_choice_rejected = false; ///< `tool_choice` `any`/`tool` are rejected.
-    bool between_tools_thinking = false;
-    bool disabled_thinking = false;
-
-    /// Manual budgets are refused by every known adaptive-only model, but an
-    /// unrecognized id keeps the permissive historical behavior.
-    [[nodiscard]] constexpr bool rejects_manual_thinking() const noexcept {
-        return known && !manual_thinking;
-    }
-};
-
-/// Resolve the wire policy for a model id, alias, or `[1m]`-suffixed variant.
-/// @p live carries the provider catalog's reasoning profile when it reported
-/// one, and wins over the registry card because it describes the endpoint
-/// actually serving the request.
-[[nodiscard]] AnthropicWirePolicy anthropic_wire_policy(
-    std::string_view model,
-    const ModelReasoningProfile* live = nullptr);
-
 /**
  * @brief Stateful SSE event parser for the Anthropic streaming Messages API.
  *
- * Claude's SSE format differs from OpenAI's: each event has an `"event:"` type
+ * Messages SSE differs from OpenAI's: each event has an `"event:"` type
  * line plus a `"data:"` JSON line.  Tool calls are spread across multiple events
  * (`content_block_start` → N×`content_block_delta` → `content_block_stop`).
  *
@@ -175,167 +79,48 @@ private:
     int64_t cache_creation_input_ = 0;
 };
 
-/**
- * @brief Serializer for the Anthropic Messages API.
- *
- * Converts the shared OpenAI-style ChatRequest into the Anthropic format:
- *   - `system` role messages → top-level `"system"` field.
- *   - Assistant messages with tool_calls → `content` blocks (type `"tool_use"`).
- *   - Tool role messages → user messages with `tool_result` content blocks.
- *   - Tools → `"input_schema"` (vs OpenAI `"parameters"`).
- *   - `max_tokens` is always emitted (mandatory in the Anthropic API).
- *
- * Fully testable without network or I/O.
- */
-/**
- * Vendor extension seam for the reasoning/sampling envelope of a serialized
- * Anthropic-style request. Derived protocols whose reasoning contract differs
- * from the built-in Claude envelope return an emitter from
- * `AnthropicProtocol::reasoning_emitter()`; it fully replaces the Claude
- * reasoning block. An empty emitter keeps the generic Claude behavior, so the
- * generic serializer never branches on model families.
- */
-using AnthropicReasoningEmitter = std::function<void(std::string& payload, const ChatRequest& req)>;
+using AnthropicReasoningEmitter = std::function<void(std::string&, const ChatRequest&)>;
 
+/// Opt-in endpoint policy. The Messages encoder makes no vendor/model decisions.
+struct AnthropicSerializationOptions {
+    std::string system_prefix;
+    bool system_as_text = false;
+    bool cache_control = false;
+    bool image_urls = false;
+    std::optional<core::tools::schema::StrictDialect> tool_schema_dialect;
+    std::function<bool(std::string_view)> admit_strict_tool;
+    bool omit_historical_thinking = false;
+    AnthropicReasoningEmitter extra_fields;
+};
 struct AnthropicSerializer {
-    static std::string serialize(
-        const ChatRequest& req,
-        int default_max_tokens          = 8096,
-        const AnthropicThinkingConfig& thinking = {},
-        const AnthropicReasoningEmitter& reasoning_emitter = {});
+    static int max_tokens(const ChatRequest& req, int fallback);
+    static std::string serialize(const ChatRequest& req, int default_max_tokens = 8096,
+                                const AnthropicSerializationOptions& options = {});
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AnthropicProtocol
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * @brief Anthropic Messages API protocol (used by Claude models).
- *
- * **Request**: `POST {base_url}/v1/messages` with a JSON body serialised by
- * `AnthropicSerializer::serialize()`.  `max_tokens` is always emitted; known
- * models default to the registered output limit and unknown models use the
- * constructor fallback.
- *
- * **Response**: named SSE events (`event: {type}\ndata: {json}\n\n`).
- * Tool calls are reassembled across `content_block_start` →
- * N×`content_block_delta` → `content_block_stop` events by `AnthropicSSEParser`.
- *
- * **Auth**: `x-api-key: <key>` header (not Bearer) for API-key auth;
- * supports OAuth via ICredentialSource.
- *
- * **Stateful parsing**: `AnthropicSSEParser` tracks in-progress tool blocks
- * across events.  `HttpLLMProvider` calls `clone()` per stream so each session
- * gets a fresh parser instance.
- */
+/// Anthropic Messages wire format: encoding, SSE assembly and usage accounting.
+/// Vendor policy belongs in a concrete adapter, never in this class.
 class AnthropicProtocol : public ApiProtocolBase {
 public:
-    /**
-     * @param thinking           Extended-thinking configuration.  When enabled
-     *                           and supported by the requested model, the
-     *                           protocol emits the provider-specific thinking
-     *                           request fields.
-     * @param default_max_tokens Fallback for unknown models when
-     *                           `ChatRequest::max_tokens` is unset.
-     */
-    explicit AnthropicProtocol(AnthropicThinkingConfig thinking          = {},
-                               int                    default_max_tokens = 8096)
-        : thinking_(thinking)
-        , default_max_tokens_(default_max_tokens) {}
-
-    void prepare_request(ChatRequest& request) override;
-    [[nodiscard]] std::string  serialize(const ChatRequest& req) const override;
-    [[nodiscard]] cpr::Header  build_headers(const core::auth::AuthInfo& auth) const override;
-    [[nodiscard]] std::string  build_url(std::string_view base_url,
-                                         std::string_view model) const override;
-
-    [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
-    [[nodiscard]] bool requires_terminal_event() const noexcept override {
-        return true;
-    }
-    [[nodiscard]] ParseResult      parse_event(std::string_view raw_event) override;
-    [[nodiscard]] std::string_view name()  const noexcept override { return "anthropic"; }
-    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
-        std::string_view model) const noexcept override;
-
-    /// Clone with a fresh AnthropicSSEParser and cleared rate-limit state.
-    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override;
-
-    // ── Response lifecycle hooks ─────────────────────────────────────────────
-
-    /**
-     * @brief Extracts and caches Anthropic rate-limit metadata from response headers.
-     *
-     * Parses the following Anthropic-specific headers into `last_rate_limit_`:
-     * - `anthropic-ratelimit-requests-{limit,remaining,reset}`
-     * - `anthropic-ratelimit-tokens-{limit,remaining,reset}`
-     * - `retry-after` (present on 429 responses)
-     * - `anthropic-ratelimit-unified-*` (OAuth / subscription accounts)
-     *
-     * The cached value is accessible via `last_rate_limit()` and is scoped to
-     * the lifetime of this clone (see `ApiProtocolBase::on_response`).
-     */
-    void on_response(const HttpResponse& response) override;
-    void enrich_rate_limit(std::string_view base_url,
-                           const cpr::Header& request_headers,
-                           const HttpResponse& response) override;
-
-    /**
-     * @brief Returns a provider-specific, actionable error message.
-     *
-     * Maps Anthropic status codes to descriptive guidance:
-     * - **400** — malformed request
-     * - **401** — authentication failure (bad API key)
-     * - **403** — permission denied (model/feature access)
-     * - **429** — rate limit exceeded (back off and retry)
-     * - **500** — internal server error
-     * - **529** — server overloaded (distinct from 429; always retryable)
-     */
-    [[nodiscard]] std::string format_error_message(const HttpResponse& response) const override;
-
-    /**
-     * @brief Returns `true` for Anthropic status codes that warrant backoff retry.
-     *
-     * Retryable: 429, 500, 502, 503, 504, 529.
-     * Non-retryable: 400, 401, 403, 404, and all other 4xx.
-     */
-    [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
-
-    /**
-     * @brief Returns the rate-limit info captured by the most recent `on_response()` call.
-     *
-     * Always returns a zero-initialised `RateLimitInfo` on a freshly cloned
-     * instance.  Populated after the HTTP response arrives.  Useful for
-     * quota dashboards and adaptive back-off strategies.
-     */
-    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
+    explicit AnthropicProtocol(int default_max_tokens = 8096) : default_max_tokens_(default_max_tokens) {}
+    std::string serialize(const ChatRequest& req) const override;
+    cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
+    std::string build_url(std::string_view base_url, std::string_view model) const override;
+    std::string_view event_delimiter() const noexcept override { return "\n\n"; }
+    bool requires_terminal_event() const noexcept override { return true; }
+    ParseResult parse_event(std::string_view raw_event) override;
+    std::string_view name() const noexcept override { return "anthropic"; }
+    std::unique_ptr<ApiProtocolBase> clone() const override;
     void reset_state() override;
-
+    bool accepts_legacy_continuation() const noexcept override { return false; }
 protected:
-    /**
-     * @brief Vendor reasoning emitter for serialized requests.
-     *
-     * Template-method seam: the generic serializer emits the built-in Claude
-     * reasoning envelope unless a derived protocol overrides this and returns
-     * its own emitter. Derived vendor protocols override it instead of
-     * branching the generic implementation on model families.
-     */
-    [[nodiscard]] virtual AnthropicReasoningEmitter reasoning_emitter() const;
-    /// Gateways that rewrite signed histories must use normalized replay.
-    [[nodiscard]] virtual bool preserves_native_assistant_content() const noexcept { return true; }
-
+    virtual AnthropicReasoningEmitter reasoning_emitter() const;
+    virtual bool preserves_native_assistant_content() const noexcept { return true; }
+    int default_max_tokens_;
 private:
-    AnthropicThinkingConfig thinking_;
-    int                     default_max_tokens_;
-    bool                    request_uses_context_1m_ = false; ///< Set in prepare_request() from `[1m]` suffix.
-    std::string             last_requested_model_;    ///< Normalized in prepare_request(); used for better 429 hints.
-    AnthropicSSEParser      sse_parser_;          ///< Stateful; reset on clone().
-    int32_t                 accumulated_input_  = 0;
-    int32_t                 accumulated_output_ = 0;
-    int32_t                 accumulated_cached_input_ = 0;
-    int32_t                 accumulated_cache_creation_ = 0;
-    std::string             last_stop_reason_;
-    RateLimitInfo           last_rate_limit_;     ///< Populated by on_response(); scoped to this clone.
+    AnthropicSSEParser sse_parser_;
+    int32_t accumulated_input_ = 0, accumulated_output_ = 0;
+    int32_t accumulated_cached_input_ = 0, accumulated_cache_creation_ = 0;
+    std::string last_stop_reason_;
 };
-
 } // namespace core::llm::protocols
