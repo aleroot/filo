@@ -3,6 +3,7 @@
 #include "FileChange.hpp"
 #include "RecoveryStore.hpp"
 
+#include <chrono>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -27,7 +28,11 @@ public:
     static constexpr std::size_t kMaxFiles = RecoveryStore::kMaxFiles;
     static constexpr std::size_t kRetainedTurns = RecoveryStore::kRetainedTurns;
 
-    TurnRecovery(std::filesystem::path directory, std::filesystem::path workspace);
+    /// When a file is looked at. A stamp is trusted only for a file that had
+    /// settled by then; tests move it forward instead of sleeping that long.
+    using Clock = std::function<std::chrono::system_clock::time_point()>;
+
+    TurnRecovery(std::filesystem::path directory, std::filesystem::path workspace, Clock clock = {});
     void before(std::span<const std::filesystem::path> paths);
     void before_workspace(std::span<const std::filesystem::path> paths,
                           std::span<const std::filesystem::path> roots, bool complete);
@@ -37,7 +42,9 @@ public:
     void finish();
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return store_.directory(); }
     [[nodiscard]] bool partial() const;
-    /// The pre-image held for `path`, when this turn captured its bytes.
+    /// The pre-image held for `path`, when this turn can give its bytes back:
+    /// a caller may then drop its own copy. An entry whose object is missing
+    /// is never vouched for, whichever way it came to be recorded.
     [[nodiscard]] std::optional<RecoveryImage> captured(const std::filesystem::path& path) const;
     [[nodiscard]] std::expected<std::string, std::string> original(const RecoveryImage& image) const {
         return store_.original(image);
@@ -73,6 +80,7 @@ private:
     std::size_t bytes_ = 0;  ///< Written by this turn; shared objects cost nothing.
     std::optional<RecoveryEntries> previous_entries_;  ///< Looked up on the first capture.
     bool manifest_saved_ = false;  ///< Must precede the first stored object.
+    Clock clock_ = [] { return std::chrono::system_clock::now(); };
     mutable std::mutex mutex_;
 };
 

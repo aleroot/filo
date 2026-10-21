@@ -212,6 +212,11 @@ std::expected<std::string, std::string> RecoveryStore::original(const RecoveryIm
     return std::move(snapshot->bytes);
 }
 
+bool RecoveryStore::has_object(const RecoveryImage& image) const {
+    std::error_code ec;
+    return !image.hash.empty() && fs::is_regular_file(object_path(image.hash), ec);
+}
+
 void RecoveryStore::save(const RecoveryManifest& manifest) const {
     fs::create_directories(directory_);
     fs::permissions(directory_, fs::perms::owner_all);

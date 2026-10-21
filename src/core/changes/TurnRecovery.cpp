@@ -21,8 +21,10 @@ std::string display(const fs::path& root, const fs::path& path) {
 }
 }
 
-TurnRecovery::TurnRecovery(fs::path directory, fs::path workspace)
-    : store_(std::move(directory)), manifest_{.workspace = normalized(workspace)} {}
+TurnRecovery::TurnRecovery(fs::path directory, fs::path workspace, Clock clock)
+    : store_(std::move(directory)), manifest_{.workspace = normalized(workspace)} {
+    if (clock) clock_ = std::move(clock);
+}
 
 bool TurnRecovery::partial() const {
     std::lock_guard lock(mutex_);
@@ -33,7 +35,7 @@ std::optional<RecoveryImage> TurnRecovery::captured(const fs::path& path) const 
     std::lock_guard lock(mutex_);
     auto it = manifest_.entries.find(path);
     if (it == manifest_.entries.end()) it = manifest_.entries.find(normalized(path));
-    if (it == manifest_.entries.end() || it->second.before.hash.empty()) return std::nullopt;
+    if (it == manifest_.entries.end() || !store_.has_object(it->second.before)) return std::nullopt;
     return it->second.before;
 }
 
@@ -46,7 +48,7 @@ void TurnRecovery::before(std::span<const fs::path> paths) {
 void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canonical) {
     // Taken before any read, so a stamp is trusted only if the file had
     // settled before its bytes were looked at.
-    const auto observed = std::chrono::system_clock::now();
+    const auto observed = clock_();
     bool stored = false;
     for (const auto& requested : paths) {
         const auto path = canonical ? requested : normalized(requested);
@@ -85,8 +87,11 @@ bool TurnRecovery::adopt_unchanged_unlocked(const fs::path& path) {
     const auto stamp = previous->second.latest_stamp();
     // A stamp is never 0 for a file it witnessed, and identity is 0 for
     // anything but a regular file, so equality also proves the file is there.
-    // Its object is in the session's store, kept alive by the earlier turn.
     if (stamp == 0 || core::utils::FileStamp::of(path).identity != stamp) return false;
+    // A file the earlier turn changed has an after image that was only
+    // hashed, never stored: adopting it would leave this turn a baseline it
+    // cannot read back, so such a file is captured afresh.
+    if (!store_.has_object(previous->second.latest())) return false;
     // The earlier turn's node moves over whole: no path or hash is copied.
     auto node = previous_entries_->extract(previous);
     auto& entry = node.mapped();
@@ -114,7 +119,7 @@ RecoveryEntries TurnRecovery::previous_turn_entries() const {
 
 void TurnRecovery::after(std::span<const fs::path> paths, std::span<const fs::path> created) {
     std::lock_guard lock(mutex_);
-    const auto observed = std::chrono::system_clock::now();
+    const auto observed = clock_();
     record_absent_unlocked(created);
     for (const auto& path : paths) {
         auto it = manifest_.entries.find(path);

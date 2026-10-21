@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/changes/TurnChangeTracker.hpp"
@@ -7,6 +8,7 @@
 #include "core/changes/TurnRecovery.hpp"
 #include "core/changes/WorkspaceInventory.hpp"
 #include "core/changes/RecoveryStore.hpp"
+#include "core/changes/StoredDiff.hpp"
 #include "core/utils/FileStamp.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/ProcessUtils.hpp"
@@ -23,6 +25,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <map>
+#include <set>
 #include <random>
 #include <string>
 #include <thread>
@@ -107,6 +111,12 @@ std::string refusal_of(const RevertResult& result, std::string_view path) {
         }
     }
     return {};
+}
+
+/// A clock far enough ahead that every file looks settled: what a turn sees
+/// of files written long before it, without sleeping through kSettleTime.
+std::chrono::system_clock::time_point settled_clock() {
+    return std::chrono::system_clock::now() + core::utils::FileStamp::kSettleTime + std::chrono::seconds(1);
 }
 
 } // namespace
@@ -1017,6 +1027,44 @@ TEST_CASE("A later turn shares the originals of files it did not change",
     CHECK(read(kept) == "kept\n");
 }
 
+TEST_CASE("A later turn stores the content an earlier turn's edit left behind",
+          "[changes][recovery][store][regression]") {
+    // The earlier turn only hashed its after image. Adopting that hash as the
+    // next baseline once the file settled left a baseline with no object, so
+    // the turn's summary showed "diff omitted" and its revert failed.
+    core::changes::WorkspaceMutationGate mutations;
+    TempDir dir, storage;
+    const auto edited = dir.path / "edited.md";
+    put(edited, "first\n");
+    const std::vector<fs::path> paths{edited};
+    const auto first = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        // Seen long after it was written, so its after stamp is trusted.
+        core::changes::TurnRecovery turn(first, dir.path, settled_clock);
+        turn.before(paths);
+        put(edited, "second\n");
+        turn.after(paths);
+        turn.finish();
+    }
+
+    const auto second = core::changes::RecoveryStore::new_directory(storage.path);
+    {
+        core::changes::TurnRecovery turn(second, dir.path, settled_clock);
+        turn.before(paths);
+        const auto image = turn.captured(edited);
+        REQUIRE(image);
+        CHECK(core::changes::RecoveryStore(second).original(*image).value_or("") == "second\n");
+        put(edited, "third\n");
+        turn.after(paths);
+        turn.finish();
+    }
+    TurnChanges changes;
+    changes.files.push_back({.path = "edited.md"});
+    changes.recovery_path = second.string();
+    REQUIRE(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(edited) == "second\n");
+}
+
 TEST_CASE("A turn recorded with its own object store still reverts",
           "[changes][recovery][store]") {
     core::changes::WorkspaceMutationGate mutations;
@@ -1087,4 +1135,191 @@ TEST_CASE("A turn still recording keeps the shared store from being swept",
     running.after(paths);
     running.finish();
     CHECK_FALSE(fs::exists(in_flight));
+}
+
+namespace {
+
+/// What a workspace holds, by display path: the model a turn sequence is
+/// checked against. Nothing in it comes from the code under test.
+using Tree = std::map<std::string, std::string>;
+
+std::size_t lines_in(std::string_view text) {
+    return static_cast<std::size_t>(std::ranges::count(text, '\n'))
+        + (!text.empty() && text.back() != '\n' ? 1 : 0);
+}
+
+/// Drives the real tracker, recovery and revert through many turns of random
+/// edits and checks every turn against `Tree`. Each property is one the user
+/// relies on, stated without reference to how it is achieved, so a new way of
+/// reusing or skipping work cannot pass by breaking one quietly:
+///  1. the summary lists exactly the files that differ from the turn's start;
+///  2. every one of them carries a diff, and the diff unwinds to that start;
+///  3. every original the turn recorded is readable and is what the file held;
+///  4. a revert puts the whole tree back the way the turn found it.
+class TurnSequence {
+public:
+    explicit TurnSequence(std::uint32_t seed) : rng_(seed) {
+        for (const auto& name : names_) {
+            if (chance(2)) write(name, text(name));
+        }
+    }
+
+    void run(int turns) {
+        for (int turn = 0; turn < turns; ++turn) {
+            INFO("turn " << turn);
+            if (chance(4)) edit_by_hand();
+            run_turn();
+        }
+    }
+
+private:
+    bool chance(unsigned in) { return std::uniform_int_distribution<unsigned>(0, in - 1)(rng_) == 0; }
+    const std::string& pick() { return names_[std::uniform_int_distribution<std::size_t>(0, names_.size() - 1)(rng_)]; }
+
+    std::string text(const std::string& name) {
+        std::string body;
+        const auto count = std::uniform_int_distribution<int>(1, 6)(rng_);
+        for (int i = 0; i < count; ++i) body += std::format("{} line {} v{}\n", name, i, version_++);
+        return body;
+    }
+
+    void write(const std::string& name, const std::string& content) {
+        put(dir_.path / name, content);
+        tree_[name] = content;
+    }
+    void remove(const std::string& name) {
+        fs::remove(dir_.path / name);
+        tree_.erase(name);
+    }
+
+    /// One random mutation of `name`, the kinds a turn or a user makes.
+    void mutate(const std::string& name) {
+        const auto found = tree_.find(name);
+        if (found == tree_.end()) return write(name, text(name));  // Created.
+        switch (std::uniform_int_distribution<int>(0, 3)(rng_)) {
+            case 0: return write(name, found->second + std::format("appended v{}\n", version_++));
+            case 1: return write(name, text(name));                 // Rewritten.
+            case 2: return write(name, std::string(found->second)); // Same bytes, new stamp.
+            default: return remove(name);
+        }
+    }
+
+    /// An edit between turns, made outside Filo: the next turn must start
+    /// from it, not from what the previous turn left.
+    void edit_by_hand() { mutate(pick()); }
+
+    void run_turn() {
+        // Half the turns see files long after they were written, so stamps
+        // are trusted and earlier turns' records are reused; half see them
+        // fresh, so everything is read again.
+        const bool settled = chance(2);
+        INFO("settled clock: " << settled);
+        const auto turn_directory = core::changes::RecoveryStore::new_directory(storage_.path);
+        const auto recovery = std::make_shared<core::changes::TurnRecovery>(
+            turn_directory, dir_.path, [settled] {
+                return settled ? settled_clock() : std::chrono::system_clock::now();
+            });
+        TurnChangeTracker tracker(dir_.path);
+        tracker.set_recovery(recovery);
+        const Tree start = tree_;
+
+        const auto calls = std::uniform_int_distribution<int>(1, 3)(rng_);
+        for (int call = 0; call < calls; ++call) {
+            std::vector<std::string> touched;
+            const auto count = std::uniform_int_distribution<int>(1, 3)(rng_);
+            for (int i = 0; i < count; ++i) touched.push_back(pick());
+            if (chance(2)) {
+                // A shell command: only an inventory of the workspace sees it.
+                edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"},
+                     [&] { for (const auto& name : touched) mutate(name); });
+            } else {
+                MutationScope scope;
+                for (const auto& name : touched) scope.paths.push_back(dir_.path / name);
+                edit(tracker, scope, [&] { for (const auto& name : touched) mutate(name); });
+            }
+        }
+        tracker.settle();
+        tracker.finish_recovery();
+        const auto changes = tracker.changes();
+
+        check_summary(changes, start);
+        check_recorded_originals(turn_directory, start);
+        if (!changes.files.empty() && chance(3)) {
+            core::changes::WorkspaceMutationGate mutations;
+            const auto result = revert_turn(changes, dir_.path, mutations);
+            REQUIRE(result.reverted());
+            tree_ = start;
+            CHECK(snapshot_tree(dir_.path) == std::vector<std::pair<std::string, std::string>>(start.begin(), start.end()));
+        }
+    }
+
+    void check_summary(const TurnChanges& changes, const Tree& start) const {
+        std::vector<std::string> expected;
+        for (const auto& name : std::set<std::string>(names_.begin(), names_.end())) {
+            const auto before = start.find(name);
+            const auto after = tree_.find(name);
+            const bool existed = before != start.end(), exists = after != tree_.end();
+            if (existed != exists || (existed && before->second != after->second)) expected.push_back(name);
+        }
+        std::vector<std::string> listed;
+        for (const auto& file : changes.files) listed.push_back(file.path);
+        REQUIRE(listed == expected);
+        CHECK_FALSE(changes.partial_enumeration);
+
+        for (const auto& file : changes.files) {
+            INFO("file " << file.path << " (" << core::changes::to_string(file.content) << ")");
+            REQUIRE(file.content == FileChangeContent::Text);
+            REQUIRE_FALSE(file.diff.empty());
+            const auto before = start.find(file.path);
+            const auto after = tree_.find(file.path);
+            if (before == start.end()) {
+                CHECK(file.kind == FileChangeKind::Added);
+                CHECK(file.added == lines_in(after->second));
+            } else if (after == tree_.end()) {
+                CHECK(file.kind == FileChangeKind::Deleted);
+                CHECK(file.deleted == lines_in(before->second));
+            } else {
+                CHECK(file.kind == FileChangeKind::Modified);
+                const auto hunks = core::changes::detail::parse_hunks(file.diff);
+                REQUIRE(hunks);
+                CHECK(core::changes::detail::reverse_apply(after->second, *hunks) == before->second);
+            }
+        }
+    }
+
+    void check_recorded_originals(const fs::path& turn_directory, const Tree& start) const {
+        const core::changes::RecoveryStore store(turn_directory);
+        auto manifest = store.load(dir_.path);
+        if (!manifest) return;  // A turn that saw no file records nothing.
+        for (const auto& [path, entry] : manifest->entries) {
+            const auto name = fs::relative(path, dir_.path).generic_string();
+            INFO("recorded original of " << name);
+            const auto held = start.find(name);
+            if (entry.before.hash.empty()) {
+                CHECK(held == start.end());
+                continue;
+            }
+            REQUIRE(held != start.end());
+            const auto bytes = store.original(entry.before);
+            REQUIRE(bytes.has_value());
+            CHECK(*bytes == held->second);
+        }
+    }
+
+    std::mt19937 rng_;
+    TempDir dir_, storage_;
+    const std::vector<std::string> names_{"README.md", "src/app.cpp", "src/app.hpp",
+                                          "docs/notes.md", "docs/deep/plan.md", "build.txt"};
+    Tree tree_;
+    int version_ = 0;
+};
+
+} // namespace
+
+TEST_CASE("Every turn of a session summarizes, records and reverts what it changed",
+          "[changes][recovery][store][model]") {
+    // Fixed seeds: a failure names the one that reproduces it.
+    const auto seed = GENERATE(range(1u, 41u));
+    INFO("seed " << seed);
+    TurnSequence(seed).run(10);
 }

@@ -100,6 +100,10 @@ public:
     /// Makes the objects stored so far durable: one directory sync per batch.
     void sync_objects() const;
     [[nodiscard]] std::expected<std::string, std::string> original(const RecoveryImage& image) const;
+    /// Whether this turn's store holds the bytes of `image`. Only
+    /// `store_original` writes objects: an image `identify` produced has none,
+    /// and neither has an absent file's empty image.
+    [[nodiscard]] bool has_object(const RecoveryImage& image) const;
     void acknowledge() const;
     void retain(const std::filesystem::path& workspace) const;
 private:
