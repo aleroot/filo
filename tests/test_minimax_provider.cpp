@@ -489,6 +489,81 @@ TEST_CASE("MiniMax quota uses explicit remaining percentages and validates unkno
     CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"code":"2056","message":"usage exhausted"}})", headers}));
 }
 
+TEST_CASE("MiniMax quota reads the text-model entry whatever the server names it", "[minimax][quota]") {
+    const auto entry = [](std::string_view name, int remaining) {
+        return std::format(R"({{"model_name":"{}","current_interval_remaining_percent":{}}})", name, remaining);
+    };
+    const auto remaining = [](const std::string& body) {
+        const auto info = parse_minimax_quota(body);
+        REQUIRE(info);
+        REQUIRE_FALSE(info->usage_windows.empty());
+        return std::lround(100.0F - info->usage_windows.front().utilization * 100.0F);
+    };
+    const auto remains = [](std::initializer_list<std::string> entries) {
+        std::string body = R"({"model_remains":[)";
+        for (const auto& item : entries) body += (body.ends_with('[') ? "" : ",") + item;
+        return body + "]}";
+    };
+    // Concrete text-model ids, as the official CLI's fixtures use.
+    CHECK(remaining(remains({entry("MiniMax-M3", 61)})) == 61);
+    CHECK(remaining(remains({entry("MiniMax-M2", 62)})) == 62);
+    // Media buckets never stand in for the text quota, even when listed first.
+    CHECK(remaining(remains({entry("video", 1), entry("MiniMax-Music-2", 2), entry("speech-hd", 3),
+                             entry("MiniMax-M3", 64)})) == 64);
+    CHECK_FALSE(parse_minimax_quota(remains({entry("video", 1), entry("image-01", 2)})));
+    // The plan model's own entry wins over shared buckets, which win over other ids.
+    CHECK(remaining(remains({entry("MiniMax-M3", 10), entry("MiniMax-M*", 20), entry("general", 30),
+                             entry("MiniMax-M3.1-Flash", 40)})) == 40);
+    CHECK(remaining(remains({entry("MiniMax-M3", 10), entry("MiniMax-M*", 20), entry("general", 30)})) == 30);
+    CHECK(remaining(remains({entry("MiniMax-M3", 10), entry("MiniMax-M*", 20)})) == 20);
+    // A bucket with no limited window (not in plan / unlimited) yields to the next.
+    CHECK(remaining(remains({R"({"model_name":"general","current_interval_status":3,"current_weekly_status":3})",
+                             entry("MiniMax-M3", 70)})) == 70);
+}
+
+TEST_CASE("MiniMax quota labels each window from the server's own bounds", "[minimax][quota]") {
+    const auto labels = [](std::string_view fields) {
+        const auto info = parse_minimax_quota(std::format(
+            R"({{"current_interval_remaining_percent":50,"current_weekly_remaining_percent":50{}}})", fields));
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 2);
+        return std::pair{info->usage_windows[0].label, info->usage_windows[1].label};
+    };
+    constexpr int64_t hour = 3'600'000, day = 24 * hour, start = 1'790'000'000'000;
+    // Without bounds the documented 5-hour and weekly windows are assumed.
+    CHECK(labels("") == std::pair<std::string, std::string>{"5h", "7d"});
+    CHECK(labels(std::format(R"(,"start_time":{},"end_time":{},"weekly_start_time":{},"weekly_end_time":{})",
+                             start, start + 5 * hour, start, start + 7 * day))
+          == std::pair<std::string, std::string>{"5h", "7d"});
+    // A changed plan is labelled truthfully; millisecond jitter is absorbed.
+    CHECK(labels(std::format(R"(,"start_time":{},"end_time":{},"weekly_start_time":{},"weekly_end_time":{})",
+                             start, start + 4 * hour - 1, start, start + day + 999))
+          == std::pair<std::string, std::string>{"4h", "1d"});
+    // Inverted or absurd bounds keep the documented length.
+    CHECK(labels(std::format(R"(,"start_time":{},"end_time":{},"weekly_start_time":{},"weekly_end_time":{})",
+                             start + hour, start, start, start + 400 * day))
+          == std::pair<std::string, std::string>{"5h", "7d"});
+}
+
+TEST_CASE("MiniMax plan endpoints accept the official base URL with trailing slashes only", "[minimax][quota]") {
+    CHECK(is_official_minimax_base_url(kMiniMaxBaseUrl));
+    CHECK(is_official_minimax_base_url("https://api.minimax.io/anthropic/"));
+    CHECK(is_official_minimax_base_url("https://api.minimax.io/anthropic//"));
+    CHECK_FALSE(is_official_minimax_base_url("https://api.minimax.io/anthropic/v1"));
+    CHECK_FALSE(is_official_minimax_base_url("https://api.minimax.io"));
+    CHECK_FALSE(is_official_minimax_base_url("http://api.minimax.io/anthropic"));
+    CHECK_FALSE(is_official_minimax_base_url("https://api.minimax.io.proxy.example/anthropic"));
+    CHECK_FALSE(is_official_minimax_base_url("https://proxy.example/anthropic"));
+    CHECK_FALSE(is_official_minimax_base_url(""));
+    int reads = 0;
+    const auto source = make_minimax_usage_source([&](std::string_view) -> std::optional<RateLimitInfo> {
+        ++reads;
+        return RateLimitInfo{};
+    });
+    CHECK(source->read("https://api.minimax.io/anthropic/", {{"x-api-key", "account"}}));
+    CHECK(reads == 1);
+}
+
 TEST_CASE("MiniMax usage enrichment is subscription-only and shared across clones", "[minimax][quota]") {
     auto usage = std::make_shared<UsageFixture>();
     MiniMaxProtocol plan(true, "max", usage), api(false, {}, usage);

@@ -7,12 +7,16 @@
 #include <simdjson.h>
 #include <cpr/cpr.h>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <format>
 #include <chrono>
 #include <cmath>
 #include <mutex>
 #include <limits>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace core::llm {
 using protocols::RateLimitInfo;
@@ -34,27 +38,86 @@ int64_t reset_time(simdjson::dom::element node, std::string_view key) {
     if (node[key].get(text) == simdjson::SUCCESS) return core::utils::time::parse_timestamp_or_duration(text);
     return 0;
 }
-void append_window(RateLimitInfo& info, simdjson::dom::element node,
-                   std::string_view prefix, std::string_view label, std::string_view reset) {
-    const auto percent_key = std::string(prefix) + "_remaining_percent";
+/// One quota window of a `model_remains` entry and the fields that bound it.
+struct WindowSpec {
+    std::string_view prefix;
+    std::string_view start_key;
+    std::string_view end_key;
+    std::string_view fallback_label;
+};
+constexpr std::array kWindows{
+    WindowSpec{"current_interval", "start_time", "end_time", "5h"},
+    WindowSpec{"current_weekly", "weekly_start_time", "weekly_end_time", "7d"},
+};
+
+/// The server's own bounds name the window, as the official CLI's quota table
+/// does, so a plan that changes its window length is labelled truthfully. A
+/// missing or implausible span keeps the documented length.
+std::string window_label(simdjson::dom::element node, const WindowSpec& spec) {
+    const int64_t start = reset_time(node, spec.start_key);
+    const int64_t end = reset_time(node, spec.end_key);
+    constexpr int64_t kMinutesPerDay = 24 * 60;
+    if (start <= 0 || end <= start || end - start > 366 * kMinutesPerDay * 60) return std::string(spec.fallback_label);
+    // Whole minutes absorb the sub-second loss of millisecond timestamps.
+    const int64_t minutes = (end - start + 30) / 60;
+    if (minutes <= 0) return std::string(spec.fallback_label);
+    if (minutes % kMinutesPerDay == 0) return std::format("{}d", minutes / kMinutesPerDay);
+    if (minutes >= 60) return std::format("{}h", (minutes + 30) / 60);
+    return std::format("{}m", minutes);
+}
+
+void append_window(RateLimitInfo& info, simdjson::dom::element node, const WindowSpec& spec) {
+    const std::string prefix(spec.prefix);
+    const auto percent_key = prefix + "_remaining_percent";
     auto remaining = number(node, percent_key);
-    const auto status = number(node, std::string(prefix) + "_status");
+    const auto status = number(node, prefix + "_status");
     if (status && *status == 3) return; // An unlimited bucket is not an exhausted zero limit.
     // Status 2 is the server's own verdict that this window is exhausted,
     // whatever percentage accompanies it.
     if (status && *status == 2) remaining = 0.0;
     simdjson::dom::element explicit_percent;
     if (!remaining && node[percent_key].get(explicit_percent) != simdjson::SUCCESS) {
-        const auto total = number(node, std::string(prefix) + "_total_count");
-        const auto count = number(node, std::string(prefix) + "_usage_count");
+        const auto total = number(node, prefix + "_total_count");
+        const auto count = number(node, prefix + "_usage_count");
         // The official CLI treats pre-percentage responses as remaining counts.
         // Never apply that historical interpretation when explicit % is present.
         if (total && count && *total > 0 && *count >= 0 && *count <= *total) remaining = *count / *total * 100.0;
     }
     if (!remaining || *remaining < 0 || *remaining > 100) return;
     const float utilization = static_cast<float>((100.0 - *remaining) / 100.0);
-    info.usage_windows.push_back({std::string(label), utilization, reset_time(node, reset)});
+    info.usage_windows.push_back({window_label(node, spec), utilization, reset_time(node, spec.end_key)});
     info.is_rate_limited |= *remaining == 0;
+}
+
+/// The windows of one quota entry, or nothing when it carries none.
+std::optional<RateLimitInfo> quota_from(simdjson::dom::element node) {
+    RateLimitInfo info;
+    info.subscription.tier_label = "M Plan";
+    for (const auto& spec : kWindows) append_window(info, node, spec);
+    if (info.usage_windows.empty()) return std::nullopt;
+    // A boost enlarges the weekly allowance; remaining percentages stay
+    // relative to it, so it is reported rather than folded into usage.
+    if (const auto boost = number(node, "weekly_boost_permille"); boost && *boost > 1000.0 && *boost < 100000.0) {
+        info.subscription.notice = std::format("Weekly quota boosted to {:g}%", std::round(*boost / 10.0));
+    }
+    return info;
+}
+
+/// Preference among `model_remains` entries for the text-model quota, lower
+/// first; nothing for entries that meter something else (image, speech, video,
+/// music). The server has labelled the text bucket `general`, `MiniMax-M*` and
+/// a concrete `MiniMax-M<n>` id, so a plan model's own entry wins, then the
+/// shared buckets, then any other text-model entry.
+std::optional<int> text_quota_rank(std::string_view name) {
+    if (is_minimax_plan_model(name)) return 0;
+    if (name == "general") return 1;
+    if (name == "MiniMax-M*") return 2;
+    constexpr std::string_view kTextFamily = "MiniMax-M";
+    if (name.starts_with(kTextFamily) && name.size() > kTextFamily.size()
+        && std::isdigit(static_cast<unsigned char>(name[kTextFamily.size()]))) {
+        return 3;
+    }
+    return std::nullopt;
 }
 
 std::optional<RateLimitInfo> fetch_quota(std::string_view key) {
@@ -137,31 +200,21 @@ std::optional<RateLimitInfo> parse_minimax_quota(std::string_view body) {
     if (doc["base_resp"].get(base) == simdjson::SUCCESS) {
         if (const auto status = number(base, "status_code"); status && *status != 0) return std::nullopt;
     }
-    RateLimitInfo info;
-    info.subscription.tier_label = "M Plan";
-    const auto append = [&](simdjson::dom::element node) {
-        append_window(info, node, "current_interval", "5h", "end_time");
-        append_window(info, node, "current_weekly", "7d", "weekly_end_time");
-        // A boost enlarges the weekly allowance; remaining percentages stay
-        // relative to it, so it is reported rather than folded into usage.
-        if (const auto boost = number(node, "weekly_boost_permille"); boost && *boost > 1000.0 && *boost < 100000.0) {
-            info.subscription.notice = std::format("Weekly quota boosted to {:g}%", std::round(*boost / 10.0));
-        }
-    };
     simdjson::dom::array models;
     if (doc["model_remains"].get(models) == simdjson::SUCCESS) {
+        std::vector<std::pair<int, simdjson::dom::element>> candidates;
         for (const auto model : models) {
             std::string_view name;
-            if (model["model_name"].get(name) == simdjson::SUCCESS
-                && (name == "general" || name == "MiniMax-M*" || name == kMiniMaxDefaultModel)) {
-                append(model);
-                if (!info.usage_windows.empty()) break;
-            }
+            if (model["model_name"].get(name) != simdjson::SUCCESS) continue;
+            if (const auto rank = text_quota_rank(name)) candidates.emplace_back(*rank, model);
+        }
+        std::ranges::stable_sort(candidates, {}, &std::pair<int, simdjson::dom::element>::first);
+        // An entry without a limited window (e.g. "not in plan") yields to the next.
+        for (const auto& candidate : candidates) {
+            if (auto info = quota_from(candidate.second)) return info;
         }
     }
-    if (info.usage_windows.empty()) append(doc);
-    if (info.usage_windows.empty()) return std::nullopt;
-    return info;
+    return quota_from(doc);
 }
 
 std::shared_ptr<IMiniMaxUsageSource> make_minimax_usage_source(MiniMaxQuotaFetcher fetcher) {

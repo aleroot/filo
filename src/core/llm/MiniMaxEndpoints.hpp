@@ -20,9 +20,12 @@ static_assert(kMiniMaxBaseUrl.starts_with(kMiniMaxApiOrigin));
 static_assert(kMiniMaxQuotaUrl.starts_with(kMiniMaxApiOrigin));
 static_assert(kMiniMaxSearchUrl.starts_with(kMiniMaxApiOrigin));
 
-/// True only for the official (already normalized) Messages base URL. Plan
-/// endpoints accept the same key, so they are contacted only then.
+/// True only for the official Messages base URL, ignoring trailing slashes
+/// (which the generation path also ignores). Plan endpoints accept the same
+/// key, so they are contacted only then; any other host, path or scheme is a
+/// proxy whose credential must never reach MiniMax.
 [[nodiscard]] constexpr bool is_official_minimax_base_url(std::string_view base_url) noexcept {
+    while (base_url.ends_with('/')) base_url.remove_suffix(1);
     return base_url == kMiniMaxBaseUrl;
 }
 
