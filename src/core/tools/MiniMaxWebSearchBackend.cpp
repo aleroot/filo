@@ -79,12 +79,8 @@ public:
         const auto key = subscription_key(*metadata);
         if (!key) return std::unexpected("MiniMax search requires a Subscription Key; run `filo --auth minimax`.");
 
-        cpr::Header headers{
-            {"Authorization", "Bearer " + *key},
-            {"Content-Type", "application/json"},
-            {"Accept", "application/json"},
-        };
-        core::auth::minimax_code::apply_identity_headers(headers, context.session_context.session_id);
+        cpr::Header headers{{"Authorization", "Bearer " + *key}};
+        core::auth::minimax_cli::apply_identity_headers(headers);
         std::string body;
         const cpr::Response response = cpr::Post(
             cpr::Url{options_.search_url}, headers,

@@ -59,8 +59,8 @@ void append_window(RateLimitInfo& info, simdjson::dom::element node,
 
 std::optional<RateLimitInfo> fetch_quota(std::string_view key) {
     std::string body;
-    cpr::Header headers{{"Authorization", "Bearer " + std::string(key)}, {"Accept", "application/json"}};
-    core::auth::minimax_code::apply_identity_headers(headers, {});
+    cpr::Header headers{{"Authorization", "Bearer " + std::string(key)}};
+    core::auth::minimax_cli::apply_identity_headers(headers);
     const auto response = cpr::Get(
         cpr::Url{std::string(kMiniMaxQuotaUrl)}, headers,
         cpr::Timeout{2500}, cpr::ConnectTimeout{1500}, cpr::Redirect{false},

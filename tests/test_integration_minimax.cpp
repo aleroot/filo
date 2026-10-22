@@ -108,7 +108,7 @@ TEST_CASE("MiniMax HTTP tool turns preserve reasoning and account for cached tok
         CHECK_THAT(body, !ContainsSubstring("budget_tokens"));
     }
     CHECK(keys == std::vector<std::string>{"fixture-key", "fixture-key"});
-    CHECK(agents == std::vector<std::string>{"MiniMaxAgent", "MiniMaxAgent"});
+    CHECK(agents == std::vector<std::string>{"Anthropic/JS 0.91.1", "Anthropic/JS 0.91.1"});
     CHECK(sessions == std::vector<std::string>{"session-fixture", "session-fixture"});
 
     // The same model on a different commercial service must not inherit signatures.
@@ -316,13 +316,15 @@ TEST_CASE("Parallel MiniMax provider forks isolate streaming state", "[integrati
     CHECK(failures == 0); CHECK(requests == 2); CHECK(first == "Done"); CHECK(second == "Done");
 }
 
-TEST_CASE("MiniMax plan search authenticates as MiniMax Code with the Subscription Key", "[integration][minimax][web]") {
+TEST_CASE("MiniMax plan search authenticates as mmx-cli with the Subscription Key", "[integration][minimax][web]") {
     httplib::Server server;
-    std::string authorization, agent, session, body;
+    std::string authorization, agent, content_type, body;
+    bool mavis = true;
     server.Post("/v1/coding_plan/search", [&](const auto& req, auto& response) {
         authorization = req.get_header_value("Authorization");
         agent = req.get_header_value("User-Agent");
-        session = req.get_header_value("X-Mavis-Session-Id");
+        content_type = req.get_header_value("Content-Type");
+        mavis = req.has_header("X-Mavis-Session-Id");
         body = req.body;
         response.set_content(R"({"organic":[{"title":"Filo","link":"https://filo.example/","snippet":"Agent"}],"base_resp":{"status_code":0}})",
                              "application/json");
@@ -350,8 +352,9 @@ TEST_CASE("MiniMax plan search authenticates as MiniMax Code with the Subscripti
     REQUIRE(result->results.size() == 1);
     CHECK(result->results[0].url == "https://filo.example/");
     CHECK(authorization == "Bearer sk-cp-fixture");
-    CHECK(agent == "MiniMaxAgent");
-    CHECK(session == "session-fixture");
+    CHECK(agent == "mmx-cli/1.0.28");
+    CHECK(content_type == "application/json");
+    CHECK_FALSE(mavis);
     CHECK(body == R"({"q":"filo"})");
 }
 

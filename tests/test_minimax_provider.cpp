@@ -286,13 +286,25 @@ TEST_CASE("MiniMax lowers thinking effort when the output budget is short", "[mi
     CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
 }
 
-TEST_CASE("MiniMax identifies itself as MiniMax Code on every request", "[minimax][identity]") {
+TEST_CASE("MiniMax identifies itself as MiniMax Code on its own-key path", "[minimax][identity]") {
     namespace identity = core::auth::minimax_code;
     MiniMaxProtocol plan(true);
     core::auth::AuthInfo auth;
     auth.headers["x-api-key"] = "sk-cp-fixture";
     auto headers = plan.build_headers(auth);
-    CHECK(headers.at("User-Agent") == "MiniMaxAgent");
+    // pi-mono's Anthropic SDK client, which minimax-code uses for own keys;
+    // MiniMaxAgent belongs to the managed-login backend only.
+    CHECK(headers.at("User-Agent") == "Anthropic/JS 0.91.1");
+    CHECK(headers.at("Accept") == "application/json");
+    CHECK(headers.at("anthropic-version") == "2023-06-01");
+    CHECK(headers.at("anthropic-dangerous-direct-browser-access") == "true");
+    CHECK(headers.at("X-Stainless-Lang") == "js");
+    CHECK(headers.at("X-Stainless-Package-Version") == "0.91.1");
+    CHECK(headers.at("X-Stainless-Runtime") == "node");
+    CHECK(headers.at("X-Stainless-Retry-Count") == "0");
+    CHECK(headers.at("X-Stainless-Timeout") == "600");
+    CHECK(headers.at("X-Stainless-OS") == identity::sdk_platform_os());
+    CHECK(headers.at("X-Stainless-Arch") == identity::sdk_platform_arch());
     CHECK(headers.at("X-Mavis-Agent-Id") == "main");
     CHECK(headers.at("X-Mavis-Session-Id") == identity::process_session_id());
     CHECK(headers.at("x-api-key") == "sk-cp-fixture");
