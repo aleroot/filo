@@ -91,9 +91,9 @@ public:
     // Thread-safe: locks only for the map lookup, then releases before executing
     // the tool (execution can be slow — shell commands, file I/O — and must not
     // hold the mutex while it runs).
-    std::string execute_tool(const std::string& name, const std::string& json_args,
+    std::string execute_tool(const std::string& name, std::string_view json_args,
                              const core::context::SessionContext& context);
-    std::string execute_tool(const std::string& name, const std::string& json_args,
+    std::string execute_tool(const std::string& name, std::string_view json_args,
                              const ToolInvocationContext& invocation);
 
     [[nodiscard]] std::expected<std::string, std::string>

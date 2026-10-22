@@ -12,7 +12,7 @@ ToolManager::ToolManager(std::shared_ptr<core::changes::WorkspaceMutationGate> m
 
 std::string ToolManager::execute_tool(
     const std::string& name,
-    const std::string& json_args,
+    std::string_view json_args,
     const core::context::SessionContext& context)
 {
     return execute_tool(name, json_args, ToolInvocationContext{
@@ -22,7 +22,7 @@ std::string ToolManager::execute_tool(
 
 std::string ToolManager::execute_tool(
     const std::string& name,
-    const std::string& json_args,
+    std::string_view json_args,
     const ToolInvocationContext& invocation)
 {
     std::shared_ptr<Tool> tool;

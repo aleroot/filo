@@ -3,6 +3,7 @@
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
 #include "../core/tools/ToolManager.hpp"
+#include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
 #include "../core/workspace/Workspace.hpp"
 #include <simdjson.h>
@@ -185,11 +186,14 @@ void read_request_meta(simdjson::ondemand::object& root, ParsedJsonRpcMessage& p
 }
 
 [[nodiscard]] std::optional<ParsedJsonRpcMessage>
-parse_jsonrpc_message(std::string_view json_body) {
+parse_jsonrpc_message(const std::string& json_body) {
     simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_body);
+    simdjson::padded_string storage;
     simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+    if (parser.iterate(core::utils::json::padded_view(json_body, storage)).get(doc)
+        != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
 
     simdjson::ondemand::object root;
     if (doc.get_object().get(root) != simdjson::SUCCESS) return std::nullopt;
@@ -368,7 +372,11 @@ private:
             line.pop_back();
             release_buffer();
         } else {
-            line = buffer_.substr(buffer_offset_, newline - buffer_offset_);
+            // Room for SIMDJSON_PADDING lets both parses of the line
+            // (routing, then dispatch) read it in place instead of copying.
+            const std::size_t length = newline - buffer_offset_;
+            line.reserve(length + simdjson::SIMDJSON_PADDING);
+            line.assign(buffer_, buffer_offset_, length);
             buffer_offset_ = newline + 1;
             compact_buffer_if_needed();
         }

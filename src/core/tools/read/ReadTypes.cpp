@@ -17,17 +17,20 @@ std::size_t utf8_prefix_end(std::string_view text, std::size_t bytes) {
     while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0U) == 0x80U) --bytes;
     return bytes;
 }
-std::string read_prefix(std::istream& stream, std::size_t bytes) {
+std::string read_prefix(std::istream& stream, std::size_t bytes, std::size_t spare) {
     if (bytes == 0) return {};
     // One allocation and one read. Callers pass the file size when they know
-    // it, so a small file never reserves the whole cap. A short read (EOF)
-    // shrinks to the bytes actually obtained; gcount == 0 ends the call even
-    // if the stream forgets to set failbit.
-    std::string result(bytes, '\0');
-    stream.read(result.data(), static_cast<std::streamsize>(bytes));
-    const auto got = stream.gcount();
-    if (got <= 0) return {};
-    result.resize(static_cast<std::size_t>(got));
+    // it, so a small file never reserves the whole cap. The buffer is read
+    // into directly, never zero-filled first. A short read (EOF) shrinks to
+    // the bytes actually obtained; gcount == 0 ends the call even if the
+    // stream forgets to set failbit.
+    std::string result;
+    result.reserve(bytes + spare);
+    result.resize_and_overwrite(bytes, [&stream](char* data, std::size_t size) {
+        stream.read(data, static_cast<std::streamsize>(size));
+        return static_cast<std::size_t>(std::max<std::streamsize>(stream.gcount(), 0));
+    });
+    if (result.empty()) return {};
     return result;
 }
 std::string bounded_prefix(std::string_view text, std::size_t bytes) {

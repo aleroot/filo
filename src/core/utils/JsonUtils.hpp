@@ -97,6 +97,69 @@ namespace json {
 [[nodiscard]] std::string_view object_or_empty(std::string_view input);
 
 // ---------------------------------------------------------------------------
+// find_members — read top-level fields of a JSON object without a parser.
+//
+// A DOM parse sizes its tape and string buffers to the whole document, so
+// asking a multi-megabyte tool result or argument payload for one small field
+// touched memory proportional to the payload, several times per tool call.
+// find_members validates the whole document in one pass, as strictly as
+// simdjson does for grammar, UTF-8, escapes and nesting depth, and reports
+// where the first occurrence of each requested top-level key sits in the
+// input. It allocates nothing; values stay raw JSON text.
+// ---------------------------------------------------------------------------
+enum class ValueKind : std::uint8_t {
+    Absent,
+    Object,
+    Array,
+    String,
+    Number,
+    True,
+    False,
+    Null,
+};
+
+struct RawMember {
+    ValueKind kind = ValueKind::Absent;
+    /// Raw JSON text of the value; a string keeps its quotes and escapes.
+    std::string_view value;
+};
+
+/// Returns false unless input is one complete JSON document whose root is an
+/// object. found[i] receives the first top-level member named keys[i]; keys
+/// compare after unescaping, as simdjson's object lookup does. found is only
+/// meaningful when the call returns true.
+[[nodiscard]] bool find_members(std::string_view input,
+                                std::span<const std::string_view> keys,
+                                std::span<RawMember> found) noexcept;
+
+/// Decodes a string token that find_members reported (quotes included).
+[[nodiscard]] std::string decode_string(std::string_view raw_token);
+
+/// Decodes the next part of a validated string's @p contents (the token
+/// without its quotes) into @p out, as much as fits, and drops that part from
+/// @p contents. Returns the bytes written; @p out must hold at least 4. Lets a
+/// caller that only forwards the text, to a file say, never hold all of it.
+[[nodiscard]] std::size_t decode_string_part(std::string_view& contents,
+                                             std::span<char> out) noexcept;
+
+/// Reads a number token that find_members reported as int64, exactly as
+/// simdjson's DOM get<int64_t>: integers that fit, nothing else.
+[[nodiscard]] std::optional<std::int64_t> decode_int64(std::string_view raw_token) noexcept;
+
+/// What an ondemand parser can iterate for @p text without copying it: the
+/// string itself when its spare capacity already holds SIMDJSON_PADDING bytes
+/// (simdjson's own std::string view does the same), else a padded copy kept
+/// in @p storage. Request lines can be megabytes.
+[[nodiscard]] inline simdjson::padded_string_view padded_view(const std::string& text,
+                                                              simdjson::padded_string& storage) {
+    if (text.capacity() - text.size() >= simdjson::SIMDJSON_PADDING) {
+        return simdjson::padded_string_view(text.data(), text.size(), text.capacity());
+    }
+    storage = simdjson::padded_string(text);
+    return storage;
+}
+
+// ---------------------------------------------------------------------------
 // ignore_error — deliberately discard an optional simdjson lookup.
 //
 // simdjson marks simdjson_result::get() with warn_unused_result. GCC, unlike
@@ -245,51 +308,47 @@ first_int64_field(const simdjson::dom::object& object,
     return std::nullopt;
 }
 
+// The raw_json overloads below read a field without parsing the document
+// into a DOM: see find_members. They return the fallback for anything that is
+// not a valid JSON object, like the dom::object overloads' callers did.
+
 [[nodiscard]] inline std::string string_field(std::string_view raw_json,
                                               std::string_view key,
                                               std::string_view fallback = {}) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    // parse(data, size) copies so stage 2 can read past the buffer.
-    // These views are exact; parse_unpadded does not copy or read past size().
-    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
+    const std::string_view keys[] = {key};
+    RawMember found[1];
+    if (!find_members(raw_json, keys, found) || found[0].kind != ValueKind::String) {
         return std::string(fallback);
     }
-    simdjson::dom::object object;
-    if (doc.get(object) != simdjson::SUCCESS) {
-        return std::string(fallback);
-    }
-    return string_field(object, key, fallback);
+    return decode_string(found[0].value);
 }
 
 [[nodiscard]] inline bool bool_field(std::string_view raw_json,
                                      std::string_view key,
                                      bool fallback = false) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
-        return fallback;
-    }
-    simdjson::dom::object object;
-    if (doc.get(object) != simdjson::SUCCESS) {
-        return fallback;
-    }
-    return bool_field(object, key, fallback);
+    const std::string_view keys[] = {key};
+    RawMember found[1];
+    if (!find_members(raw_json, keys, found)) return fallback;
+    if (found[0].kind == ValueKind::True) return true;
+    if (found[0].kind == ValueKind::False) return false;
+    return fallback;
 }
+
+/// The first of keys, in order, whose member satisfies accept; nullopt when
+/// none does or raw_json is not a valid object.
+[[nodiscard]] std::optional<RawMember> first_member(
+    std::string_view raw_json,
+    std::initializer_list<std::string_view> keys,
+    bool (*accept)(const RawMember&) noexcept) noexcept;
 
 [[nodiscard]] inline std::optional<std::string>
 first_string_field(std::string_view raw_json,
                    std::initializer_list<std::string_view> keys) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    simdjson::dom::object object;
-    if (doc.get(object) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    return first_string_field(object, keys);
+    const auto member = first_member(raw_json, keys, [](const RawMember& m) noexcept {
+        return m.kind == ValueKind::String;
+    });
+    if (!member) return std::nullopt;
+    return decode_string(member->value);
 }
 
 [[nodiscard]] inline std::string first_string_field_or_empty(
@@ -301,16 +360,11 @@ first_string_field(std::string_view raw_json,
 [[nodiscard]] inline std::optional<int64_t>
 first_int64_field(std::string_view raw_json,
                   std::initializer_list<std::string_view> keys) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    simdjson::dom::object object;
-    if (doc.get(object) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    return first_int64_field(object, keys);
+    const auto member = first_member(raw_json, keys, [](const RawMember& m) noexcept {
+        return m.kind == ValueKind::Number && decode_int64(m.value).has_value();
+    });
+    if (!member) return std::nullopt;
+    return decode_int64(member->value);
 }
 
 [[nodiscard]] inline int64_t first_int64_field_or_zero(

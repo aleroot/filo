@@ -10,6 +10,7 @@
 #include <atomic>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -131,6 +132,8 @@ public:
     static constexpr std::size_t               kMaxOutput{4 * 1024 * 1024};
     /// Bytes read from the shell per syscall.
     static constexpr std::size_t               kReadChunkBytes{64 * 1024};
+    /// Appended to the sentinel's status by the EXIT trap only.
+    static constexpr std::string_view          kExitMarker{":exit"};
 
     struct Result {
         std::string output;
@@ -399,9 +402,11 @@ private:
         stdout_fd_ = stdout_pipe[0];
 
         // Install EXIT trap so that `exit N` still prints the sentinel before
-        // the process terminates, giving us the correct exit code.
-        std::string trap_cmd = "trap 'printf \"\\n" + sentinel_ +
-                               ":%d\\n\" \"$?\"' EXIT\n";
+        // the process terminates, giving us the correct exit code. Its
+        // kExitMarker suffix tells read_until_done that the shell is going
+        // away, so only that case waits to reap it.
+        std::string trap_cmd = "trap 'printf \"\\n" + sentinel_ + ":%d"
+                               + kExitMarker + "\\n\" \"$?\"' EXIT\n";
         if (write_all(stdin_fd_, trap_cmd) != WriteAllResult::success) {
             stop();
             return;
@@ -612,24 +617,25 @@ private:
             }
             if (code_end != std::string::npos) {
                 const std::size_t code_start = pos + prefix.size();
+                const std::string_view code_text(
+                    raw.data() + code_start, code_end - code_start);
+                const bool shell_exiting = code_text.ends_with(kExitMarker);
 
                 int exit_code = 0;
-                try {
-                    exit_code = std::stoi(
-                        raw.substr(code_start, code_end - code_start));
-                } catch (...) {}
+                std::from_chars(code_text.data(), code_text.data() + code_text.size(), exit_code);
 
                 raw.resize(pos);
 
                 // If the command exited the persistent shell, tear the session
                 // down now. Descendants can keep stdout open after bash exits,
-                // so EOF is not a reliable liveness signal.
+                // so EOF is not a reliable liveness signal. Only the EXIT trap
+                // marks that case: waiting for it after every command cost
+                // each one 10 ms. A shell that dies later anyway is reaped and
+                // restarted by the next run().
                 int ignored_exit_code = -1;
-                [[maybe_unused]] const bool reaped =
-                    reap_if_exited_for(
-                        ignored_exit_code,
-                        true,
-                        std::chrono::milliseconds{10});
+                [[maybe_unused]] const bool reaped = shell_exiting
+                    ? reap_if_exited_for(ignored_exit_code, true, std::chrono::milliseconds{10})
+                    : reap_if_exited(ignored_exit_code, true);
 
                 return {std::move(raw), exit_code};
             }

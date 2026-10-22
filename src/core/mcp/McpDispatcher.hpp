@@ -41,12 +41,11 @@ enum class McpProtocolMode {
  * ### tools/call result envelope
  *
  * @code{.json}
- * {
- *   "content": [{"type": "text", "text": "<escaped tool JSON>"}],
- *   "isError": false,
- *   "structuredContent": { <raw tool JSON — present on successful results> }
- * }
+ * {"content": [], "isError": false, "structuredContent": { <raw tool JSON> }}
+ * {"content": [{"type": "text", "text": "<escaped tool output>"}], "isError": true}
  * @endcode
+ * A successful object result is sent only as structuredContent (the text copy
+ * doubled every response); errors and non-object output use the text block.
  *
  * ### Thread safety
  * @c dispatch() is thread-safe.  Each call creates all temporaries on the

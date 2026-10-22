@@ -19,6 +19,10 @@ struct McpDispatchResult {
     std::string body;
 };
 
+/// A finished response, shared by the HTTP reply, waiting duplicates and the
+/// replay cache. Bodies can be megabytes; each of those used to hold a copy.
+using SharedDispatchResult = std::shared_ptr<const McpDispatchResult>;
+
 // Keeps recently completed request responses for a short time so that retries
 // (same session + id + payload) are replayed without re-executing tools.
 // Bounded by age, entry count and total bytes: tool results can be megabytes,
@@ -36,7 +40,7 @@ public:
         std::condition_variable cv;
         bool ready = false;
         uint64_t generation = 0;
-        McpDispatchResult result;
+        SharedDispatchResult result;
     };
 
     struct Decision {
@@ -76,7 +80,7 @@ public:
         if (auto it = completed_.find(key); it != completed_.end()) {
             return Decision{
                 .kind = DecisionKind::replay_completed,
-                .replay_result = it->second.result,
+                .replay_result = *it->second.result,
                 .inflight = nullptr,
             };
         }
@@ -102,13 +106,16 @@ public:
     [[nodiscard]] McpDispatchResult wait_for(const std::shared_ptr<InflightEntry>& entry) const {
         std::unique_lock<std::mutex> lock(entry->mutex);
         entry->cv.wait(lock, [&entry]() { return entry->ready; });
-        return entry->result;
+        return *entry->result;
     }
 
-    void finish(const std::string& key,
-                const std::shared_ptr<InflightEntry>& entry,
-                const McpDispatchResult& result,
-                bool cache_result) {
+    /// Publishes @p result to waiting duplicates and, when @p cache_result,
+    /// keeps it for replay. Returns the one shared copy for the reply itself.
+    SharedDispatchResult finish(const std::string& key,
+                                const std::shared_ptr<InflightEntry>& entry,
+                                McpDispatchResult result_value,
+                                bool cache_result) {
+        auto result = std::make_shared<const McpDispatchResult>(std::move(result_value));
         {
             std::lock_guard<std::mutex> lock(entry->mutex);
             entry->result = result;
@@ -121,12 +128,12 @@ public:
             inflight_it != inflight_.end() && inflight_it->second == entry) {
             inflight_.erase(inflight_it);
         }
-        if (!cache_result || max_completed_entries_ == 0) return;
+        if (!cache_result || max_completed_entries_ == 0) return result;
         // A response larger than the whole budget is not kept: a retry of it
         // executes again rather than evicting everything else.
-        if (result.body.size() > max_completed_bytes_) return;
+        if (result->body.size() > max_completed_bytes_) return result;
         const std::string session_id = session_from_key(key);
-        if (entry->generation != session_generation_locked(session_id)) return;
+        if (entry->generation != session_generation_locked(session_id)) return result;
 
         if (auto existing = completed_.find(key); existing != completed_.end()) {
             erase_completed_locked(existing);
@@ -135,11 +142,12 @@ public:
             .result = result,
             .stored_at = std::chrono::steady_clock::now(),
         });
-        completed_bytes_ += result.body.size();
+        completed_bytes_ += result->body.size();
         while (completed_.size() > max_completed_entries_
                || completed_bytes_ > max_completed_bytes_) {
             evict_oldest_locked();
         }
+        return result;
     }
 
     /// Drops expired responses now. Expiry is otherwise only checked when the
@@ -185,8 +193,10 @@ public:
             {
                 std::lock_guard<std::mutex> lock(entry->mutex);
                 if (entry->ready) continue;
-                entry->result.status = 499;
-                entry->result.body = R"({"error":"MCP session was closed"})";
+                entry->result = std::make_shared<const McpDispatchResult>(McpDispatchResult{
+                    .status = 499,
+                    .body = R"({"error":"MCP session was closed"})",
+                });
                 entry->ready = true;
             }
             entry->cv.notify_all();
@@ -195,14 +205,14 @@ public:
 
 private:
     struct CompletedEntry {
-        McpDispatchResult result;
+        SharedDispatchResult result;
         std::chrono::steady_clock::time_point stored_at;
     };
 
     using CompletedMap = std::unordered_map<std::string, CompletedEntry>;
 
     CompletedMap::iterator erase_completed_locked(CompletedMap::iterator it) {
-        completed_bytes_ -= it->second.result.body.size();
+        completed_bytes_ -= it->second.result->body.size();
         return completed_.erase(it);
     }
 

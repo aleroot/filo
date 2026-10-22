@@ -2,9 +2,13 @@
 #include "JsonWriter.hpp"
 #include <simdjson.h>
 #include <algorithm>   // std::find_if
+#include <array>
+#include <charconv>    // std::from_chars
+#include <cstring>     // std::memchr
 #include <cstdio>      // std::snprintf
 #include <initializer_list>
 #include <optional>
+#include <ranges>
 
 namespace core::utils {
 
@@ -239,6 +243,396 @@ bool is_object(std::string_view input) {
 std::string_view object_or_empty(std::string_view input) {
     static constexpr std::string_view empty_object = "{}";
     return is_object(input) ? input : empty_object;
+}
+
+namespace {
+
+/// Same limit as simdjson's DEFAULT_MAX_DEPTH, so both reject the same nesting.
+constexpr std::size_t kMaxScanDepth = 1024;
+
+/// Bytes that end the fast run inside a string: the closing quote, an
+/// escape, or a control character JSON forbids unescaped.
+inline constexpr auto kStringStopTable = [] noexcept {
+    std::array<bool, 256> t{};
+    for (unsigned i = 0; i < 0x20u; ++i) t[i] = true;
+    t[static_cast<unsigned>('"')] = true;
+    t[static_cast<unsigned>('\\')] = true;
+    return t;
+}();
+
+[[nodiscard]] int hex_value(char c) noexcept {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+[[nodiscard]] bool read_hex4(const char* p, const char* end, std::uint32_t& out) noexcept {
+    if (end - p < 4) return false;
+    out = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int digit = hex_value(p[i]);
+        if (digit < 0) return false;
+        out = (out << 4) | static_cast<std::uint32_t>(digit);
+    }
+    return true;
+}
+
+/// Decodes the escape at p (just past the backslash) into UTF-8 and advances
+/// p past it. Returns 0 for an escape simdjson rejects: an unknown letter,
+/// bad hex, or an unpaired surrogate.
+[[nodiscard]] std::size_t decode_escape(const char*& p, const char* end, char out[4]) noexcept {
+    if (p == end) return 0;
+    switch (*p++) {
+        case '"':  out[0] = '"';  return 1;
+        case '\\': out[0] = '\\'; return 1;
+        case '/':  out[0] = '/';  return 1;
+        case 'b':  out[0] = '\b'; return 1;
+        case 'f':  out[0] = '\f'; return 1;
+        case 'n':  out[0] = '\n'; return 1;
+        case 'r':  out[0] = '\r'; return 1;
+        case 't':  out[0] = '\t'; return 1;
+        case 'u':  break;
+        default:   return 0;
+    }
+    std::uint32_t code_point = 0;
+    if (!read_hex4(p, end, code_point)) return 0;
+    p += 4;
+    if (code_point >= 0xD800 && code_point < 0xDC00) {
+        std::uint32_t low = 0;
+        if (end - p < 6 || p[0] != '\\' || p[1] != 'u'
+            || !read_hex4(p + 2, end, low) || low < 0xDC00 || low > 0xDFFF) {
+            return 0;
+        }
+        p += 6;
+        code_point = (((code_point - 0xD800) << 10) | (low - 0xDC00)) + 0x10000;
+    } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
+        return 0;
+    }
+    if (code_point < 0x80) {
+        out[0] = static_cast<char>(code_point);
+        return 1;
+    }
+    if (code_point < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (code_point >> 6));
+        out[1] = static_cast<char>(0x80 | (code_point & 0x3F));
+        return 2;
+    }
+    if (code_point < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (code_point >> 12));
+        out[1] = static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (code_point & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (code_point >> 18));
+    out[1] = static_cast<char>(0x80 | ((code_point >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (code_point & 0x3F));
+    return 4;
+}
+
+/// p is on the opening quote; on success it is left just past the closing one.
+[[nodiscard]] bool scan_string(const char*& p, const char* end) noexcept {
+    ++p;
+    while (true) {
+        while (p != end && !kStringStopTable[static_cast<unsigned char>(*p)]) ++p;
+        if (p == end) return false;
+        if (*p == '"') {
+            ++p;
+            return true;
+        }
+        if (*p != '\\') return false;  // unescaped control character
+        ++p;
+        char ignored[4];
+        if (decode_escape(p, end, ignored) == 0) return false;
+    }
+}
+
+[[nodiscard]] bool is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
+
+[[nodiscard]] bool scan_number(const char*& p, const char* end) noexcept {
+    const char* const start = p;
+    if (*p == '-') ++p;
+    if (p == end || !is_digit(*p)) return false;
+    const char* const integer = p;
+    if (*p == '0') {
+        ++p;
+    } else {
+        while (p != end && is_digit(*p)) ++p;
+    }
+    const char* const integer_end = p;
+    const char* fraction = p;
+    if (p != end && *p == '.') {
+        ++p;
+        if (p == end || !is_digit(*p)) return false;
+        fraction = p;
+        while (p != end && is_digit(*p)) ++p;
+    }
+    const char* const fraction_end = p;
+    bool has_exponent = false;
+    std::int64_t exponent = 0;
+    if (p != end && (*p == 'e' || *p == 'E')) {
+        has_exponent = true;
+        ++p;
+        const bool negative = p != end && *p == '-';
+        if (p != end && (*p == '+' || *p == '-')) ++p;
+        if (p == end || !is_digit(*p)) return false;
+        const char* const exponent_digits = p;
+        while (p != end && is_digit(*p)) ++p;
+        // Saturate: past 2^62 the sign is all that matters, and adding the
+        // leading-digit position below cannot overflow.
+        if (!std::from_chars(exponent_digits, p, exponent)) exponent = 1LL << 62;
+        if (negative) exponent = -exponent;
+    }
+    // Integers of any length are valid (simdjson keeps big ones as BIGINT);
+    // a fraction or exponent is invalid only when it overflows a double.
+    if (fraction == fraction_end && !has_exponent) return true;
+    double value = 0;
+    if (std::from_chars(start, p, value).ec != std::errc::result_out_of_range) return true;
+    // Out of range is overflow or underflow (read as zero, which is fine). The
+    // decimal position of the leading significant digit tells which.
+    std::int64_t leading = integer_end - integer - 1;
+    if (*integer == '0') {
+        const char* const significant =
+            std::ranges::find_if(fraction, fraction_end, [](char c) { return c != '0'; });
+        if (significant == fraction_end) return true;  // zero
+        leading = -(significant - fraction) - 1;
+    }
+    return leading + exponent < 0;
+}
+
+[[nodiscard]] bool scan_literal(const char*& p, const char* end, std::string_view word) noexcept {
+    if (static_cast<std::size_t>(end - p) < word.size()
+        || std::string_view(p, word.size()) != word) {
+        return false;
+    }
+    p += word.size();
+    return true;
+}
+
+void skip_whitespace(const char*& p, const char* end) noexcept {
+    while (p != end && is_whitespace(static_cast<unsigned char>(*p))) ++p;
+}
+
+/// Whether the raw contents of a validated string token (quotes excluded)
+/// decode to exactly `plain`.
+[[nodiscard]] bool string_contents_equal(std::string_view raw, std::string_view plain) noexcept {
+    if (raw.find('\\') == std::string_view::npos) return raw == plain;
+    const char* p = raw.data();
+    const char* const end = p + raw.size();
+    std::size_t matched = 0;
+    while (p != end) {
+        if (*p != '\\') {
+            if (matched == plain.size() || plain[matched] != *p) return false;
+            ++matched;
+            ++p;
+            continue;
+        }
+        ++p;
+        char decoded[4];
+        const std::size_t length = decode_escape(p, end, decoded);
+        if (length == 0 || plain.size() - matched < length
+            || plain.substr(matched, length) != std::string_view(decoded, length)) {
+            return false;
+        }
+        matched += length;
+    }
+    return matched == plain.size();
+}
+
+} // namespace
+
+bool find_members(std::string_view input,
+                  std::span<const std::string_view> keys,
+                  std::span<RawMember> found) noexcept {
+    for (auto& member : found) member = {};
+    if (!simdjson::validate_utf8(input)) return false;
+
+    const char* p = input.data();
+    const char* const end = p + input.size();
+    skip_whitespace(p, end);
+    if (p == end || *p != '{') return false;
+
+    // One bit per open container: set for arrays. Bounded like simdjson's.
+    std::array<bool, kMaxScanDepth> is_array{};
+    std::size_t depth = 0;
+    std::string_view top_key;
+    const char* top_value = nullptr;
+
+    const auto record = [&](const char* value_end, ValueKind kind) {
+        for (auto&& [key, slot] : std::views::zip(keys, found)) {
+            if (slot.kind == ValueKind::Absent && string_contents_equal(top_key, key)) {
+                slot = {.kind = kind,
+                        .value = std::string_view(top_value, static_cast<std::size_t>(value_end - top_value))};
+            }
+        }
+    };
+
+    // Each iteration starts at a value: the root, a member value, or an element.
+    bool expect_key = false;
+    while (true) {
+        if (expect_key) {
+            if (p == end || *p != '"') return false;
+            const char* key_start = p;
+            if (!scan_string(p, end)) return false;
+            if (depth == 1) {
+                top_key = std::string_view(key_start + 1, static_cast<std::size_t>(p - key_start - 2));
+            }
+            skip_whitespace(p, end);
+            if (p == end || *p != ':') return false;
+            ++p;
+            skip_whitespace(p, end);
+            expect_key = false;
+        }
+        if (p == end) return false;
+        if (depth == 1) top_value = p;
+
+        ValueKind kind = ValueKind::Absent;
+        bool scalar = true;
+        switch (*p) {
+            case '{':
+            case '[': {
+                if (depth == kMaxScanDepth) return false;
+                const bool array = *p == '[';
+                is_array[depth++] = array;
+                ++p;
+                skip_whitespace(p, end);
+                if (p != end && *p == (array ? ']' : '}')) {
+                    // An empty container is complete at once; fall through to
+                    // the close handling below with it still open.
+                    scalar = false;
+                    break;
+                }
+                expect_key = !array;
+                continue;
+            }
+            case '"':
+                if (!scan_string(p, end)) return false;
+                kind = ValueKind::String;
+                break;
+            case 't':
+                if (!scan_literal(p, end, "true")) return false;
+                kind = ValueKind::True;
+                break;
+            case 'f':
+                if (!scan_literal(p, end, "false")) return false;
+                kind = ValueKind::False;
+                break;
+            case 'n':
+                if (!scan_literal(p, end, "null")) return false;
+                kind = ValueKind::Null;
+                break;
+            default:
+                if (!scan_number(p, end)) return false;
+                kind = ValueKind::Number;
+                break;
+        }
+        if (scalar && depth == 1) record(p, kind);
+
+        // After a value: close as many containers as end here, then expect a
+        // separator before the next value.
+        while (true) {
+            skip_whitespace(p, end);
+            if (p == end) return false;
+            const bool array = is_array[depth - 1];
+            if (*p == (array ? ']' : '}')) {
+                ++p;
+                --depth;
+                if (depth == 0) {
+                    skip_whitespace(p, end);
+                    return p == end;
+                }
+                if (depth == 1) record(p, array ? ValueKind::Array : ValueKind::Object);
+                continue;
+            }
+            if (*p != ',') return false;
+            ++p;
+            skip_whitespace(p, end);
+            expect_key = !array;
+            break;
+        }
+    }
+}
+
+std::string decode_string(std::string_view raw_token) {
+    std::string out;
+    if (raw_token.size() < 2) return out;
+    const std::string_view contents = raw_token.substr(1, raw_token.size() - 2);
+    out.reserve(contents.size());
+    const char* p = contents.data();
+    const char* const end = p + contents.size();
+    while (p != end) {
+        const auto* backslash = static_cast<const char*>(
+            std::memchr(p, '\\', static_cast<std::size_t>(end - p)));
+        if (backslash == nullptr) {
+            out.append(p, end);
+            break;
+        }
+        out.append(p, backslash);
+        p = backslash + 1;
+        char decoded[4];
+        out.append(decoded, decode_escape(p, end, decoded));
+    }
+    return out;
+}
+
+std::size_t decode_string_part(std::string_view& contents, std::span<char> out) noexcept {
+    std::size_t written = 0;
+    const char* p = contents.data();
+    const char* const end = p + contents.size();
+    while (p != end && written < out.size()) {
+        if (*p == '\\') {
+            const char* next = p + 1;
+            char decoded[4];
+            const std::size_t length = decode_escape(next, end, decoded);
+            if (length > out.size() - written) break;  // the next part starts here
+            std::memcpy(out.data() + written, decoded, length);
+            written += length;
+            p = next;
+            continue;
+        }
+        const auto* backslash = static_cast<const char*>(
+            std::memchr(p, '\\', static_cast<std::size_t>(end - p)));
+        const std::size_t run = std::min(
+            static_cast<std::size_t>((backslash ? backslash : end) - p), out.size() - written);
+        std::memcpy(out.data() + written, p, run);
+        written += run;
+        p += run;
+    }
+    contents.remove_prefix(static_cast<std::size_t>(p - contents.data()));
+    return written;
+}
+
+std::optional<std::int64_t> decode_int64(std::string_view raw_token) noexcept {
+    // simdjson's DOM stores fractions and exponents as doubles, and integers
+    // beyond int64 as uint64 or big integers: none of them are int64.
+    if (raw_token.empty() || raw_token.find_first_of(".eE") != std::string_view::npos) {
+        return std::nullopt;
+    }
+    const char* const end = raw_token.data() + raw_token.size();
+    std::int64_t value = 0;
+    if (const auto parsed = std::from_chars(raw_token.data(), end, value); !parsed || parsed.ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<RawMember> first_member(
+    std::string_view raw_json,
+    std::initializer_list<std::string_view> keys,
+    bool (*accept)(const RawMember&) noexcept) noexcept {
+    // Callers name a handful of aliases; look them up in one pass per chunk.
+    constexpr std::size_t kChunk = 8;
+    const std::span<const std::string_view> all(keys.begin(), keys.size());
+    for (std::size_t offset = 0; offset < all.size(); offset += kChunk) {
+        const auto chunk = all.subspan(offset, std::min(kChunk, all.size() - offset));
+        std::array<RawMember, kChunk> found{};
+        if (!find_members(raw_json, chunk, found)) return std::nullopt;
+        for (std::size_t i = 0; i < chunk.size(); ++i) {
+            if (accept(found[i])) return found[i];
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace json

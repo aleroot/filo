@@ -112,7 +112,8 @@ std::string fetch_response_to_json(const FetchResponse& response) {
             utf8_prefix_boundary(response.text, kMaxReturnedContentBytes))
         : std::string_view(response.text);
 
-    core::utils::JsonWriter writer(4096);
+    core::utils::JsonWriter writer(content.size() + content.size() / 8 + response.final_url.size()
+                                   + response.content_type.size() + response.title.size() + 128);
     {
         auto _root = writer.object();
         writer.kv_str("url", response.final_url).comma()

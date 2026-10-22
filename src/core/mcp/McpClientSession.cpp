@@ -395,6 +395,12 @@ struct ParsedServerCapabilities {
             }
         }
     }
+    // Servers may return a structured result with no text copy (filo's own
+    // server does); the structured JSON is then the result.
+    simdjson::dom::element structured;
+    if (text_out.empty() && doc["structuredContent"].get(structured) == simdjson::SUCCESS) {
+        text_out = simdjson::minify(structured);
+    }
 
     if (is_error) {
         return std::format(R"({{"error":"{}"}})",

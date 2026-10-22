@@ -1159,23 +1159,23 @@ TEST_CASE("MCP tools/call run_terminal_command echo succeeds", "[mcp]") {
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"echo mcp_works"}},"id":10})");
 
     REQUIRE_THAT(resp, ContainsSubstring(R"("id":10)"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("content")"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("type":"text")"));
-    REQUIRE_THAT(resp, ContainsSubstring("mcp_works"));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
-    // structuredContent must also be present (MCP 2025-11-25)
-    REQUIRE_THAT(resp, ContainsSubstring(R"("structuredContent")"));
+    // A successful result travels once, as structuredContent; the required
+    // content array stays empty instead of repeating it as escaped text.
+    REQUIRE_THAT(resp, ContainsSubstring(R"("content":[])"));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("structuredContent":{"output":"mcp_works\n")"));
+    REQUIRE(resp.find("mcp_works") == resp.rfind("mcp_works"));
 }
 
 TEST_CASE("MCP tools/call run_terminal_command returns exit_code", "[mcp]") {
-    // The tool result is embedded as an escaped JSON string inside the MCP response.
+    // The tool result is embedded verbatim as structuredContent.
     auto resp_ok = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"true"}},"id":50})");
-    REQUIRE_THAT(resp_ok, ContainsSubstring(R"(\"exit_code\":0)"));
+    REQUIRE_THAT(resp_ok, ContainsSubstring(R"("exit_code":0)"));
 
     auto resp_fail = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"bash -c \"exit 42\""}},"id":51})");
-    REQUIRE_THAT(resp_fail, ContainsSubstring(R"(\"exit_code\":42)"));
+    REQUIRE_THAT(resp_fail, ContainsSubstring(R"("exit_code":42)"));
 }
 
 TEST_CASE("MCP tools/call omits structuredContent for tool execution errors", "[mcp]") {
@@ -1192,6 +1192,10 @@ TEST_CASE("MCP tools/call omits structuredContent for tool execution errors", "[
 
     simdjson::dom::element structured;
     REQUIRE(doc["result"]["structuredContent"].get(structured) != simdjson::SUCCESS);
+    // With no structuredContent, the text block is the error's only payload.
+    std::string_view text;
+    REQUIRE(doc["result"]["content"].at(0)["text"].get(text) == simdjson::SUCCESS);
+    REQUIRE_THAT(std::string(text), ContainsSubstring("error"));
 }
 
 TEST_CASE("MCP tools/call treats empty top-level error string as failure", "[mcp]") {

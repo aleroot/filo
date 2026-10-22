@@ -12,6 +12,7 @@
 #include <limits>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include <simdjson.h>
 
@@ -169,6 +170,176 @@ TEST_CASE("JsonUtils: raw JSON field accessors parse object fields",
     CHECK(core::utils::json::bool_field(R"({"ok":true})", "ok") == true);
     CHECK(core::utils::json::string_field("not-json", "action", "fallback")
           == "fallback");
+}
+
+namespace {
+
+/// What simdjson's DOM says about a document: whether it is an object, and
+/// for each key the first member's type and (for strings/int64) its value.
+struct DomVerdict {
+    bool object = false;
+    std::vector<std::optional<std::string>> strings;
+    std::vector<std::optional<int64_t>> integers;
+    std::vector<bool> present;
+    std::vector<bool> is_true;
+    std::vector<bool> is_null;
+};
+
+DomVerdict dom_verdict(const std::string& input, const std::vector<std::string_view>& keys) {
+    DomVerdict verdict;
+    simdjson::dom::parser parser;
+    parser.number_as_string(true);  // big integers are valid JSON
+    simdjson::dom::element doc;
+    simdjson::dom::object object;
+    if (parser.parse(input).get(doc) != simdjson::SUCCESS
+        || doc.get(object) != simdjson::SUCCESS) {
+        return verdict;
+    }
+    verdict.object = true;
+    for (const auto key : keys) {
+        simdjson::dom::element value;
+        const bool present = object[key].get(value) == simdjson::SUCCESS;
+        verdict.present.push_back(present);
+        std::string_view text;
+        int64_t number = 0;
+        bool flag = false;
+        verdict.strings.push_back(present && value.get(text) == simdjson::SUCCESS
+            ? std::optional<std::string>(std::string(text)) : std::nullopt);
+        verdict.integers.push_back(present && value.get(number) == simdjson::SUCCESS
+            ? std::optional<int64_t>(number) : std::nullopt);
+        verdict.is_true.push_back(present && value.get(flag) == simdjson::SUCCESS && flag);
+        verdict.is_null.push_back(present && value.is_null());
+    }
+    return verdict;
+}
+
+void check_against_dom(const std::string& input, const std::vector<std::string_view>& keys) {
+    namespace json = core::utils::json;
+    INFO("input: " << input);
+    const auto expected = dom_verdict(input, keys);
+    std::vector<json::RawMember> found(keys.size());
+    const bool valid = json::find_members(input, keys, found);
+    REQUIRE(valid == expected.object);
+    if (!valid) return;
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        INFO("key: " << keys[i]);
+        CHECK((found[i].kind != json::ValueKind::Absent) == expected.present[i]);
+        const auto string = found[i].kind == json::ValueKind::String
+            ? std::optional<std::string>(json::decode_string(found[i].value)) : std::nullopt;
+        CHECK(string == expected.strings[i]);
+        const auto integer = found[i].kind == json::ValueKind::Number
+            ? json::decode_int64(found[i].value) : std::nullopt;
+        CHECK(integer == expected.integers[i]);
+        CHECK((found[i].kind == json::ValueKind::True) == expected.is_true[i]);
+        CHECK((found[i].kind == json::ValueKind::Null) == expected.is_null[i]);
+    }
+}
+
+} // namespace
+
+TEST_CASE("find_members agrees with simdjson's DOM on validity and lookups",
+          "[json_utils][find_members]") {
+    const std::vector<std::string_view> keys = {"a", "error", "isError", "é", "k\"q", ""};
+    const std::vector<std::string> corpus = {
+        R"({})", R"(  { }  )", R"({"a":1})", R"({"a":"x","a":"y"})", R"({"a":[1,{"a":2}],"error":null})",
+        R"({"error":{"isError":true},"isError":false})", R"({"isError":true})", R"({"\u0061":"esc"})",
+        R"({"\u00e9":"accent"})", R"({"é":"raw"})", R"({"k\"q":5})", R"({"":"empty key"})",
+        R"({"a":"line\nbreak \"q\" \\ \/ \b\f\r\t \u0041 \u00e9 \u20ac \ud83d\ude00"})",
+        R"({"a":-0})", R"({"a":0})", R"({"a":-12})", R"({"a":9223372036854775807})",
+        R"({"a":-9223372036854775808})", R"({"a":9223372036854775808})", R"({"a":123456789012345678901234})",
+        R"({"a":1.5})", R"({"a":1e3})", R"({"a":1e400})", R"({"a":-1e400})",
+        R"({"a":1e-400})", R"({"a":0.5e400})", R"({"a":0.0000e999})", R"({"a":1.7976931348623159e308})",
+        R"({"a":1.7976931348623157e308})", R"({"a":2e-324})", R"({"a":10000000000000000000e-400})",
+        R"({"a":0.000000001e400})", R"({"a":1e99999999999999999999})", R"({"a":1e-99999999999999999999})",
+        R"({"a":123e+0308})", "{\"a\":1" + std::string(400, '0') + "}", "{\"a\":1" + std::string(400, '0') + ".5}", R"({"a":1E-3})", R"({"a":-0.0e+1})", R"({"a":true,"error":false})",
+        R"({"a" : [ ] , "error" : { } })", R"({"a":[[[[]]]]})",
+        // Invalid documents.
+        "", " ", "[]", "1", "\"s\"", "null", R"({"a":1,})", R"({"a":1 "b":2})", R"({"a"})", R"({"a":})",
+        R"({a:1})", R"({"a":01})", R"({"a":1.})", R"({"a":.5})", R"({"a":1e})", R"({"a":+1})", R"({"a":-})",
+        R"({"a":tru})", R"({"a":truex})", R"({"a":nul})", R"({"a":"unterminated})", R"({"a":"bad \x"})",
+        R"({"a":"\u12"})", R"({"a":"\ud83d"})", R"({"a":"\ud83dx"})", R"({"a":"\ude00"})",
+        R"({"a":"\ud83d\u0041"})", R"({"a":1}})", R"({"a":1} x)", R"({"a":[1,2})", R"({"a":[1,2]])",
+        "{\"a\":\"tab\there\"}", "{\"a\":\"nul\x01\"}", "{\"a\":\"\xff\"}", "{\"a\":\"\xc3\"}",
+        "{\"a\":1}\x00",
+    };
+    for (const auto& input : corpus) check_against_dom(input, keys);
+
+    std::string deep_ok = "{\"a\":";
+    std::string deep_bad = "{\"a\":";
+    for (int i = 0; i < 1022; ++i) deep_ok += '[';
+    for (int i = 0; i < 1022; ++i) deep_ok += ']';
+    deep_ok += '}';
+    for (int i = 0; i < 1024; ++i) deep_bad += '[';
+    for (int i = 0; i < 1024; ++i) deep_bad += ']';
+    deep_bad += '}';
+    check_against_dom(deep_ok, keys);
+    check_against_dom(deep_bad, keys);
+}
+
+TEST_CASE("find_members agrees with simdjson's DOM on mutated documents",
+          "[json_utils][find_members]") {
+    const std::vector<std::string_view> keys = {"a", "error", "isError"};
+    const std::vector<std::string> seeds = {
+        R"({"a":"x\n\"y\" \u00e9 \ud83d\ude00","error":null,"isError":false,"n":[1,-2.5e3,{"b":true}]})",
+        R"({"content":"text","isError":true,"a":-0,"z":{"error":"nested"},"error":"top"})",
+        R"({"a":1.5e307,"n":[-0.25e-307,9e30,0.0001e309,17976931348623157e292],"error":1e-320})",
+    };
+    const std::string alphabet = "{}[]:,\"\\ -+.eE0123456789abfnrtu\x01\xc3\xa9";
+    std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+    const auto next = [&state] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+    for (const auto& seed : seeds) {
+        for (int round = 0; round < 4000; ++round) {
+            std::string input = seed;
+            const int edits = 1 + static_cast<int>(next() % 3);
+            for (int e = 0; e < edits && !input.empty(); ++e) {
+                const auto at = static_cast<std::size_t>(next() % input.size());
+                const char c = alphabet[next() % alphabet.size()];
+                switch (next() % 3) {
+                    case 0: input[at] = c; break;
+                    case 1: input.insert(input.begin() + static_cast<std::ptrdiff_t>(at), c); break;
+                    default: input.erase(at, 1); break;
+                }
+            }
+            check_against_dom(input, keys);
+        }
+    }
+}
+
+TEST_CASE("raw JSON field accessors honour key priority and value types",
+          "[json_utils][find_members]") {
+    namespace json = core::utils::json;
+    const std::string_view raw = R"({"path":7,"file_path":"a\/b","count":"3","n":-4,"n2":4.0,"ok":"true"})";
+    CHECK(json::first_string_field(raw, {"path", "file_path"}) == "a/b");
+    CHECK(json::first_int64_field(raw, {"count", "n2", "n"}) == -4);
+    CHECK_FALSE(json::first_int64_field(raw, {"count", "n2"}).has_value());
+    CHECK(json::bool_field(raw, "ok", true) == true);
+    CHECK(json::bool_field(raw, "ok", false) == false);
+    CHECK(json::string_field(raw, "missing", "fb") == "fb");
+    CHECK_FALSE(json::first_string_field(R"({"path":"x",})", {"path"}).has_value());
+}
+
+TEST_CASE("decode_string_part reassembles to decode_string at any part size",
+          "[json_utils][find_members]") {
+    namespace json = core::utils::json;
+    const std::string_view token =
+        R"("plain \"quoted\" \\ \/ \n\t \u0041 \u00e9 \u20ac \ud83d\ude00 é€😀 tail")";
+    const std::string expected = json::decode_string(token);
+    for (std::size_t size = 4; size <= 9; ++size) {
+        std::string_view contents = token.substr(1, token.size() - 2);
+        std::string joined;
+        std::vector<char> buffer(size);
+        while (!contents.empty()) {
+            const std::size_t written = json::decode_string_part(contents, buffer);
+            REQUIRE(written > 0);
+            joined.append(buffer.data(), written);
+        }
+        CHECK(joined == expected);
+    }
 }
 
 TEST_CASE("JsonUtils: schema inference treats arbitrary-precision integers as integers",

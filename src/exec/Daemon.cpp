@@ -267,11 +267,14 @@ void write_response_id(JsonWriter& w, const ResponseId& id) {
 }
 
 [[nodiscard]] std::optional<ParsedJsonRpcMessage>
-parse_jsonrpc_message(std::string_view json_body) {
+parse_jsonrpc_message(const std::string& json_body) {
     simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_body);
+    simdjson::padded_string storage;
     simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+    if (parser.iterate(core::utils::json::padded_view(json_body, storage)).get(doc)
+        != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
 
     simdjson::ondemand::object root;
     if (doc.get_object().get(root) != simdjson::SUCCESS) return std::nullopt;
@@ -879,13 +882,37 @@ take_pending_server_response(HttpSessionState& session,
     return result;
 }
 
+/// Bodies up to this size are handed to httplib, which copies them next to
+/// the headers to save a write; larger ones are streamed from where they are.
+constexpr std::size_t kMaxCopiedResponseBytes = 64 * 1024;
+
+void write_mcp_result(httplib::Response& res, detail::SharedDispatchResult result) {
+    res.status = result->status;
+    if (result->body.empty()) return;
+    if (result->body.size() <= kMaxCopiedResponseBytes) {
+        res.set_content(result->body, "application/json");
+        return;
+    }
+    const std::size_t size = result->body.size();
+    res.set_content_provider(
+        size,
+        "application/json",
+        [result = std::move(result)](std::size_t offset, std::size_t length, httplib::DataSink& sink) {
+            return sink.write(result->body.data() + offset, length);
+        });
+}
+
 // Takes the result by value so the body, which can be megabytes, is moved
 // into the response rather than copied.
 void write_mcp_result(httplib::Response& res, detail::McpDispatchResult result) {
-    res.status = result.status;
-    if (!result.body.empty()) {
-        res.set_content(std::move(result.body), "application/json");
+    if (result.body.size() <= kMaxCopiedResponseBytes) {
+        res.status = result.status;
+        if (!result.body.empty()) {
+            res.set_content(std::move(result.body), "application/json");
+        }
+        return;
     }
+    write_mcp_result(res, std::make_shared<const detail::McpDispatchResult>(std::move(result)));
 }
 
 void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
@@ -1351,14 +1378,15 @@ void handle_mcp_post(const std::string& host,
                 sent = true;
 
                 auto finish_and_stream =
-                    [&](const detail::McpDispatchResult& result, bool cache_result) -> bool {
+                    [&](detail::McpDispatchResult result, bool cache_result) -> bool {
                         // This runs after the handler returned; see
                         // TouchSessionOnExit.
                         session_ptr->last_used.store(std::chrono::steady_clock::now());
                         const std::string payload = build_sse_message(result.body);
                         const bool wrote = sink.write(payload.data(), payload.size());
                         sink.done();
-                        replay_cache().finish(replay_key_value, inflight, result, cache_result);
+                        replay_cache().finish(
+                            replay_key_value, inflight, std::move(result), cache_result);
                         return wrote;
                     };
 
@@ -1377,7 +1405,7 @@ void handle_mcp_post(const std::string& host,
                             -32603,
                             "Failed to stream roots/list request to client"),
                     };
-                    replay_cache().finish(replay_key_value, inflight, error_result, false);
+                    replay_cache().finish(replay_key_value, inflight, std::move(error_result), false);
                     return false;
                 }
 
@@ -1443,13 +1471,13 @@ void handle_mcp_post(const std::string& host,
                         core::tools::ToolManager::get_instance().clear_session_state(session_id);
                     }
 
-                    const auto final_result = dispatch_mcp_payload(
+                    auto final_result = dispatch_mcp_payload(
                         original_request_body,
                         resolved_workspace,
                         session_id);
-                    return finish_and_stream(
-                        final_result,
-                        final_result.status == 200 || final_result.status == 202);
+                    const bool cacheable =
+                        final_result.status == 200 || final_result.status == 202;
+                    return finish_and_stream(std::move(final_result), cacheable);
                 } catch (const std::exception& e) {
                     {
                         std::lock_guard<std::mutex> lock(session_ptr->mutex);
@@ -1498,8 +1526,8 @@ void handle_mcp_post(const std::string& host,
     }
 
     const bool cache_result = execution_result.status == 200 || execution_result.status == 202;
-    replay_cache().finish(*replay_key, decision.inflight, execution_result, cache_result);
-    write_mcp_result(res, std::move(execution_result));
+    write_mcp_result(res, replay_cache().finish(
+        *replay_key, decision.inflight, std::move(execution_result), cache_result));
 }
 
 void handle_api_chat(

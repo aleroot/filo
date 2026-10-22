@@ -54,8 +54,10 @@ struct Resource {
 
 [[nodiscard]] std::string read_text_file(const Options& options, const core::context::SessionContext& context);
 /// Read at most @p bytes. The caller chooses @p bytes (file size when known);
-/// this does not probe the stream length.
-[[nodiscard]] std::string read_prefix(std::istream& stream, std::size_t bytes);
+/// this does not probe the stream length. @p spare reserves room for text the
+/// caller appends, such as a truncation marker, so that append cannot
+/// reallocate the buffer.
+[[nodiscard]] std::string read_prefix(std::istream& stream, std::size_t bytes, std::size_t spare = 0);
 [[nodiscard]] std::expected<Options, std::string> parse_options(std::string_view json);
 [[nodiscard]] std::string digest(std::string_view text);
 /// Largest index <= @p bytes that does not split a UTF-8 code point.

@@ -9,6 +9,7 @@
 #include <cpr/cpr.h>
 
 #include <algorithm>
+#include <cstring>
 #include <expected>
 #include <format>
 #include <memory>
@@ -24,16 +25,30 @@ constexpr int kFetchTimeoutMs = 60000;
 constexpr int kMaxFetchBytes = 2 * 1024 * 1024;
 constexpr int kMaxRedirects = 5;
 
+// A fetched page is up to kMaxFetchBytes. Every step below rewrites it in
+// place, since none of them makes text longer: no lowered copy of the page per
+// pass, and no erase()/replace() per match, which shifted the rest of the page
+// each time and took seconds on entity- or script-heavy pages.
+
 [[nodiscard]] std::string normalize_space(std::string text) {
-    return core::utils::str::collapse_ascii_whitespace_copy(text);
+    core::utils::str::collapse_ascii_whitespace(text);
+    return text;
 }
 
+/// Replaces every @p from with the shorter @p to, left to right.
 void replace_all(std::string& text, std::string_view from, std::string_view to) {
-    std::size_t pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        text.replace(pos, from.size(), to);
-        pos += to.size();
+    std::size_t write = 0;
+    std::size_t read = 0;
+    for (std::size_t match = text.find(from); ; match = text.find(from, read)) {
+        const std::size_t keep_end = match == std::string::npos ? text.size() : match;
+        std::memmove(text.data() + write, text.data() + read, keep_end - read);
+        write += keep_end - read;
+        if (match == std::string::npos) break;
+        std::memcpy(text.data() + write, to.data(), to.size());
+        write += to.size();
+        read = match + from.size();
     }
+    text.resize(write);
 }
 
 [[nodiscard]] std::string decode_html_entities(std::string text) {
@@ -49,25 +64,28 @@ void replace_all(std::string& text, std::string_view from, std::string_view to) 
 void erase_tag_blocks(std::string& html,
                       std::string_view open_tag,
                       std::string_view close_tag) {
-    std::string lowered = core::utils::str::to_lower_ascii_copy(html);
-    std::size_t pos = 0;
-    while ((pos = lowered.find(open_tag, pos)) != std::string::npos) {
-        const auto end = lowered.find(close_tag, pos);
-        const auto erase_end = end == std::string::npos
-            ? html.size()
-            : end + close_tag.size();
-        html.erase(pos, erase_end - pos);
-        lowered.erase(pos, erase_end - pos);
+    const core::utils::str::CaseInsensitiveAsciiSearcher open(open_tag);
+    const core::utils::str::CaseInsensitiveAsciiSearcher close(close_tag);
+    std::size_t write = 0;
+    std::size_t read = 0;
+    for (std::size_t begin = open.find(html); ; begin = open.find(html, read)) {
+        const std::size_t keep_end = begin == std::string::npos ? html.size() : begin;
+        std::memmove(html.data() + write, html.data() + read, keep_end - read);
+        write += keep_end - read;
+        if (begin == std::string::npos) break;
+        const auto end = close.find(html, begin);
+        read = end == std::string::npos ? html.size() : end + close_tag.size();
     }
+    html.resize(write);
 }
 
 [[nodiscard]] std::string extract_title(std::string_view html) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(html);
-    const auto start = lowered.find("<title");
+    const auto start = core::utils::str::CaseInsensitiveAsciiSearcher("<title").find(html);
     if (start == std::string::npos) return {};
-    const auto start_close = lowered.find('>', start);
+    const auto start_close = html.find('>', start);
     if (start_close == std::string::npos) return {};
-    const auto end = lowered.find("</title>", start_close + 1);
+    const auto end =
+        core::utils::str::CaseInsensitiveAsciiSearcher("</title>").find(html, start_close + 1);
     if (end == std::string::npos) return {};
     return normalize_space(decode_html_entities(
         std::string(html.substr(start_close + 1, end - start_close - 1))));
@@ -78,23 +96,24 @@ void erase_tag_blocks(std::string& html,
     erase_tag_blocks(html, "<style", "</style>");
     erase_tag_blocks(html, "<noscript", "</noscript>");
 
-    std::string text;
-    text.reserve(html.size());
+    // Tags become single spaces, so the text never outgrows the page.
+    std::size_t write = 0;
     bool in_tag = false;
     for (const char ch : html) {
         if (ch == '<') {
             in_tag = true;
-            text.push_back(' ');
+            html[write++] = ' ';
             continue;
         }
         if (ch == '>') {
             in_tag = false;
-            text.push_back(' ');
+            html[write++] = ' ';
             continue;
         }
-        if (!in_tag) text.push_back(ch);
+        if (!in_tag) html[write++] = ch;
     }
-    return normalize_space(decode_html_entities(std::move(text)));
+    html.resize(write);
+    return normalize_space(decode_html_entities(std::move(html)));
 }
 
 [[nodiscard]] std::expected<void, std::string> validate_http_url(std::string_view url) {

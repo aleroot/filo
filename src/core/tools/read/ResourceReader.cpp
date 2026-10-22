@@ -154,7 +154,7 @@ std::expected<Resource, std::string> ResourceReader::read(
         } else return std::unexpected("Resource is not a regular file or directory.");
     }
     if (resource.text.size() > kMaxSourceBytes) {
-        resource.text = bounded_prefix(resource.text, kMaxSourceBytes);
+        resource.text.resize(utf8_prefix_end(resource.text, kMaxSourceBytes));
         resource.truncated = true;
     }
     const std::string source_digest = digest(resource.text);

@@ -60,6 +60,13 @@ void write_canonical(core::utils::JsonWriter& writer, Element value) {
         write_canonical_array(writer, array);
         return;
     }
+    // A string straight into the writer: to_string() built each value in a
+    // temporary first, a full copy of a write_file payload. DOM strings are
+    // valid UTF-8, where str() escapes exactly like simdjson's serializer.
+    if (std::string_view text; value.get(text) == simdjson::SUCCESS) {
+        writer.str(text);
+        return;
+    }
     writer.raw(simdjson::to_string(value));
 }
 
@@ -641,9 +648,12 @@ void write_without_optional_nulls(core::utils::JsonWriter& writer,
     }
 }
 
+/// @p source_bytes sizes the result, which is rarely longer than its source,
+/// and SIMDJSON_PADDING more lets later parses of it skip the padding copy.
 [[nodiscard]] std::string strip_optional_nulls(Object arguments,
-                                               Object schema) {
-    core::utils::JsonWriter writer(128);
+                                               Object schema,
+                                               std::size_t source_bytes) {
+    core::utils::JsonWriter writer(source_bytes + simdjson::SIMDJSON_PADDING);
     write_object_without_optional_nulls(writer, arguments, schema, 0);
     return std::move(writer).take();
 }
@@ -734,14 +744,17 @@ std::string structural_input_schema(const ToolDefinition& definition) {
 std::expected<std::string, ArgumentIssue> validate_arguments(
     const ToolDefinition& definition,
     std::string_view raw_arguments) {
-    const std::string arguments_json = raw_arguments.empty() ? "{}" : std::string(raw_arguments);
+    // Arguments can be megabytes (a whole file for write_file). They are
+    // parsed unpadded, so never copied, and the normalized payload reuses the
+    // same parser: its buffers are already sized for this document, so the
+    // second parse touches no new memory.
+    const std::string_view arguments_json = raw_arguments.empty() ? "{}" : raw_arguments;
     const std::string schema_json = canonical_input_schema(definition);
 
     simdjson::dom::parser arguments_parser;
     arguments_parser.number_as_string(true);
-    simdjson::padded_string padded_arguments(arguments_json);
     Element arguments_root;
-    if (arguments_parser.parse(padded_arguments).get(arguments_root) != simdjson::SUCCESS) {
+    if (arguments_parser.parse_unpadded(arguments_json).get(arguments_root) != simdjson::SUCCESS) {
         return std::unexpected(make_issue(
             ArgumentIssueCode::InvalidJson,
             {},
@@ -757,21 +770,20 @@ std::expected<std::string, ArgumentIssue> validate_arguments(
 
     simdjson::dom::parser schema_parser;
     schema_parser.number_as_string(true);
-    simdjson::padded_string padded_schema(schema_json);
     Element schema_root;
     Object schema_object;
-    if (schema_parser.parse(padded_schema).get(schema_root) != simdjson::SUCCESS
+    if (schema_parser.parse(schema_json).get(schema_root) != simdjson::SUCCESS
         || schema_root.get(schema_object) != simdjson::SUCCESS) {
         return std::unexpected(make_issue(
             ArgumentIssueCode::SchemaInvalid, {}, {}, "tool has an invalid input schema"));
     }
 
-    const std::string normalized = strip_optional_nulls(arguments, schema_object);
-    simdjson::dom::parser normalized_parser;
-    normalized_parser.number_as_string(true);
-    simdjson::padded_string padded_normalized(normalized);
+    // Not const: it is returned by move, and the tool parses it in place.
+    std::string normalized =
+        strip_optional_nulls(arguments, schema_object, arguments_json.size());
+    // arguments_root is dead from here on: the parser is reused below.
     Element normalized_root;
-    if (normalized_parser.parse(padded_normalized).get(normalized_root) != simdjson::SUCCESS) {
+    if (arguments_parser.parse(normalized).get(normalized_root) != simdjson::SUCCESS) {
         return std::unexpected(make_issue(
             ArgumentIssueCode::NormalizeFailed, {}, {}, "failed to normalize arguments"));
     }

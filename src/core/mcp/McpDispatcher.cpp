@@ -36,6 +36,7 @@
 #include "core/version/Version.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -246,31 +247,37 @@ struct InitializeInfo {
 }
 
 /**
- * @brief Checks whether a simdjson DOM value matches a JSON Schema type token.
+ * @brief Checks whether a raw argument value matches a JSON Schema type token.
  *
  * Used during argument validation in @c tools/call.  Unknown type tokens
- * (e.g. vendor extensions) are accepted to avoid false rejections.
+ * (e.g. vendor extensions) are accepted to avoid false rejections. Integers
+ * are what simdjson's DOM stores as INT64 or UINT64: no fraction or exponent,
+ * within 64 bits.
  *
- * @param value          The parsed argument value.
+ * @param value          The argument as find_members reported it.
  * @param expected_type  A JSON Schema primitive type string.
  * @return @c true if the value's type matches @p expected_type.
  */
-[[nodiscard]] bool matches_declared_type(const simdjson::dom::element& value,
+[[nodiscard]] bool matches_declared_type(const core::utils::json::RawMember& value,
                                          std::string_view expected_type) {
-    const auto type = value.type();
-    if (expected_type == "string")  return type == simdjson::dom::element_type::STRING;
-    if (expected_type == "boolean") return type == simdjson::dom::element_type::BOOL;
-    if (expected_type == "object")  return type == simdjson::dom::element_type::OBJECT;
-    if (expected_type == "array")   return type == simdjson::dom::element_type::ARRAY;
+    using core::utils::json::ValueKind;
+    const auto kind = value.kind;
+    if (expected_type == "string")  return kind == ValueKind::String;
+    if (expected_type == "boolean") return kind == ValueKind::True || kind == ValueKind::False;
+    if (expected_type == "object")  return kind == ValueKind::Object;
+    if (expected_type == "array")   return kind == ValueKind::Array;
     if (expected_type == "integer") {
-        return type == simdjson::dom::element_type::INT64
-            || type == simdjson::dom::element_type::UINT64;
+        if (kind != ValueKind::Number) return false;
+        const std::string_view token = value.value;
+        if (token.find_first_of(".eE") != std::string_view::npos) return false;
+        const char* const end = token.data() + token.size();
+        const auto parses_as = [&]<typename Integer>(Integer value) {
+            const auto parsed = std::from_chars(token.data(), end, value);
+            return parsed && parsed.ptr == end;
+        };
+        return parses_as(std::int64_t{}) || parses_as(std::uint64_t{});
     }
-    if (expected_type == "number") {
-        return type == simdjson::dom::element_type::INT64
-            || type == simdjson::dom::element_type::UINT64
-            || type == simdjson::dom::element_type::DOUBLE;
-    }
+    if (expected_type == "number")  return kind == ValueKind::Number;
     return true;  // unknown type token — don't reject
 }
 
@@ -282,6 +289,9 @@ struct InitializeInfo {
  * - All required parameters are present.
  * - Present parameters have the declared type.
  *
+ * Only top-level members are inspected, so the payload is scanned in place
+ * rather than parsed into a DOM: a write_file argument can be megabytes.
+ *
  * @param def       The tool definition providing the parameter schema.
  * @param args_json Raw JSON string of the @c arguments field (may be @c "{}").
  * @return @c std::nullopt on success, or an error message string on failure.
@@ -290,21 +300,24 @@ struct InitializeInfo {
     const core::tools::ToolDefinition& def,
     std::string_view args_json)
 {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(args_json).get(doc) != simdjson::SUCCESS) {
-        return "Invalid params: 'arguments' must be valid JSON";
+    namespace json = core::utils::json;
+    // Every declared parameter, then "arguments" for the nested-string check.
+    std::vector<std::string_view> keys;
+    keys.reserve(def.parameters.size() + 1);
+    for (const auto& param : def.parameters) keys.push_back(param.name);
+    keys.push_back("arguments");
+    std::vector<json::RawMember> found(keys.size());
+    if (!json::find_members(args_json, keys, found)) {
+        // find_members also rejects valid JSON that is not an object.
+        return json::is_valid(args_json)
+            ? "Invalid params: 'arguments' must be a JSON object"
+            : "Invalid params: 'arguments' must be valid JSON";
     }
 
-    simdjson::dom::object args;
-    if (doc.get(args) != simdjson::SUCCESS) {
-        return "Invalid params: 'arguments' must be a JSON object";
-    }
-
-    for (const auto& param : def.parameters) {
-        simdjson::dom::element value;
-        const bool has_value = args[param.name].get(value) == simdjson::SUCCESS;
-        if (!has_value) {
+    for (std::size_t i = 0; i < def.parameters.size(); ++i) {
+        const auto& param = def.parameters[i];
+        const auto& value = found[i];
+        if (value.kind == json::ValueKind::Absent) {
             if (param.required) {
                 // Some client adapters expose an MCP tool through a generic
                 // string-valued `arguments` field and then forward that field
@@ -318,11 +331,8 @@ struct InitializeInfo {
                     [](const auto& candidate) {
                         return candidate.name == "arguments";
                     });
-                simdjson::dom::element nested_arguments;
                 if (!tool_declares_arguments
-                    && args["arguments"].get(nested_arguments) == simdjson::SUCCESS
-                    && nested_arguments.type()
-                        == simdjson::dom::element_type::STRING) {
+                    && found.back().kind == json::ValueKind::String) {
                     return std::format(
                         "Invalid params: received a nested string at "
                         "params.arguments.arguments; pass '{}' directly under "
@@ -352,21 +362,23 @@ struct InitializeInfo {
  * re-checked here, so a call is never executed with arguments this dispatcher
  * would have rejected.
  *
- * @return The arguments to execute, or the validation error to report.
+ * @return std::nullopt when @p args_json is valid as is, the coerced
+ *         arguments when only those are, or the validation error to report.
+ *         Valid arguments are not copied: they can be megabytes.
  */
-[[nodiscard]] std::expected<std::string, std::string> prepare_tool_arguments(
+[[nodiscard]] std::expected<std::optional<std::string>, std::string> prepare_tool_arguments(
     const core::tools::ToolDefinition& def,
     std::string_view args_json)
 {
     auto error = validate_tool_arguments(def, args_json);
-    if (!error.has_value()) return std::string(args_json);
+    if (!error.has_value()) return std::nullopt;
 
     auto coerced = core::tools::schema::coerce_arguments(
         args_json.empty() ? std::string_view{"{}"} : args_json,
         core::tools::schema::canonical_input_schema(def));
     if (coerced.has_value()
         && !validate_tool_arguments(def, *coerced).has_value()) {
-        return std::move(*coerced);
+        return std::optional<std::string>(std::move(*coerced));
     }
     return std::unexpected(std::move(*error));
 }
@@ -615,6 +627,24 @@ static std::string make_response(const RequestId& id,
         w.comma().kv_raw("result", result);
     }
     return std::move(w).take();
+}
+
+/// make_response for a result the caller no longer needs. A tool result can
+/// be megabytes; the legacy envelope is written around it in place instead
+/// of into a second buffer of the same size.
+static std::string make_response_in_place(const RequestId& id,
+                                          std::string&& result,
+                                          McpProtocolMode mode) {
+    if (mode == McpProtocolMode::stateless) {
+        return make_response(id, result, mode);
+    }
+    JsonWriter w(64);
+    w.raw("{").kv_str("jsonrpc", "2.0").comma();
+    write_response_id(w, id);
+    w.comma().key("result");
+    result.insert(0, w.view());
+    result.push_back('}');
+    return std::move(result);
 }
 
 /**
@@ -880,7 +910,9 @@ using RpcExpected = std::expected<T, RpcError>;
 
 struct ParsedToolCallRequest {
     std::string name;
-    std::string arguments_json{"{}"};
+    /// Views the request being dispatched, which outlives this struct: a
+    /// write_file payload can be megabytes and is never copied here.
+    std::string_view arguments_json{"{}"};
     bool client_supports_tasks = false;
 };
 
@@ -1318,7 +1350,7 @@ struct ParsedPromptGetRequest {
             return std::unexpected(
                 RpcError{-32602, "Invalid params: could not parse 'arguments'"});
         }
-        parsed.arguments_json = std::string(raw_json);
+        parsed.arguments_json = raw_json;
     }
 
     simdjson::ondemand::object meta;
@@ -1448,6 +1480,9 @@ private:
         remote_reporter.fail(prepared_arguments.error());
         return std::unexpected(RpcError{-32602, prepared_arguments.error()});
     }
+    const std::string_view arguments = prepared_arguments->has_value()
+        ? std::string_view(**prepared_arguments)
+        : request.arguments_json;
 
     auto execution_context = context;
     const bool modern = mode == McpProtocolMode::stateless;
@@ -1459,7 +1494,7 @@ private:
     }
     const std::string tool_result = sm.execute_tool(
         request.name,
-        *prepared_arguments,
+        arguments,
         execution_context);
     if (modern) {
         sm.clear_session_state(execution_context.session_id);
@@ -1547,13 +1582,7 @@ private:
 [[nodiscard]] bool is_long_running_delegate_task_call(const ParsedToolCallRequest& request) {
     if (request.name != core::tools::TaskTool::kToolName) return false;
 
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(request.arguments_json).get(doc) != simdjson::SUCCESS) return false;
-
-    std::string_view action;
-    if (doc["action"].get(action) != simdjson::SUCCESS) return false;
-
+    const auto action = core::utils::json::first_string_field(request.arguments_json, {"action"});
     return action == "start" || action == "resume";
 }
 
@@ -1839,7 +1868,8 @@ using MethodHandler = std::string (*)(
 
         const auto create_result = McpTaskManager::get_instance().create_task_tool_call(
             request->name,
-            *prepared_arguments,
+            prepared_arguments->has_value() ? std::string_view(**prepared_arguments)
+                                            : request->arguments_json,
             context,
             std::nullopt);
         return make_response(id, build_create_task_result(create_result), mode);
@@ -1848,7 +1878,7 @@ using MethodHandler = std::string (*)(
     auto result = build_tool_call_result(*request, context, mode);
     if (!result) return make_rpc_error(id, result.error());
 
-    return make_response(id, *result, mode);
+    return make_response_in_place(id, std::move(*result), mode);
 }
 
 [[nodiscard]] std::string handle_tasks_get(
@@ -1985,9 +2015,10 @@ std::string McpDispatcher::dispatch(const std::string& json_request,
     if (json_request.empty()) return std::string(kParseError);
 
     simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_request);
+    simdjson::padded_string storage;
     simdjson::ondemand::document request_doc;
-    if (parser.iterate(padded).get(request_doc) != simdjson::SUCCESS) {
+    if (parser.iterate(core::utils::json::padded_view(json_request, storage)).get(request_doc)
+        != simdjson::SUCCESS) {
         return std::string(kParseError);
     }
 

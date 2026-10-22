@@ -187,6 +187,7 @@ std::string read_text_file(const Options& options, const core::context::SessionC
 
     if (offset_line == 1 && limit_lines == -1) {
         constexpr std::size_t kCap = 1024 * 1024;
+        constexpr std::string_view kTruncatedMarker = "\n\n... [TRUNCATED DUE TO SIZE] ...";
         // Size from the already-open descriptor: two lseeks on this fd beat a
         // second path resolution, and size and bytes read cannot disagree.
         ifs.seekg(0, std::ios::end);
@@ -197,12 +198,15 @@ std::string read_text_file(const Options& options, const core::context::SessionC
                 ? static_cast<std::size_t>(std::min<std::streamoff>(
                       end, static_cast<std::streamoff>(kCap) + 1))
                 : kCap + 1;
-            content = read_prefix(ifs, request);
+            content = read_prefix(ifs, request, kTruncatedMarker.size());
             if (ifs.bad()) {
                 return format_read_error(path_str, resolved_path_string, "failed to read file");
             }
             if (content.size() > kCap) {
-                content = bounded_prefix(content, kCap) + "\n\n... [TRUNCATED DUE TO SIZE] ...";
+                // In place: the spare capacity read_prefix reserved holds the
+                // marker, so a capped file is never copied.
+                content.resize(utf8_prefix_end(content, kCap));
+                content += kTruncatedMarker;
             }
         }
     } else {
@@ -213,7 +217,26 @@ std::string read_text_file(const Options& options, const core::context::SessionC
         }
     }
 
-    return std::format("{{\"content\": \"{}\"}}", core::utils::escape_json_string(content));
+    // git's heuristic: a NUL byte near the start means binary. Its bytes would
+    // reach the model as up to a megabyte of escaped U+FFFD noise, several
+    // times the file's own size, and help no one read it.
+    constexpr std::size_t kBinarySniffBytes = 8000;
+    if (std::memchr(content.data(), '\0', std::min(content.size(), kBinarySniffBytes)) != nullptr) {
+        return format_read_error(path_str, resolved_path_string,
+                                 "binary file (contains NUL bytes); inspect it with "
+                                 "run_terminal_command, e.g. `file` or `xxd | head`");
+    }
+
+    // Escaped straight into the result: std::format over escape_json_string()
+    // held the escaped text twice.
+    constexpr std::string_view kPrefix = "{\"content\": \"";
+    constexpr std::string_view kSuffix = "\"}";
+    std::string result;
+    result.reserve(kPrefix.size() + content.size() + content.size() / 8 + kSuffix.size());
+    result += kPrefix;
+    core::utils::append_escaped(result, content);
+    result += kSuffix;
+    return result;
 }
 
 } // namespace core::tools::read

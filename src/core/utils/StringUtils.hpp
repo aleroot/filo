@@ -85,20 +85,27 @@ private:
     return std::string(trim_ascii_view(value));
 }
 
-[[nodiscard]] inline std::string collapse_ascii_whitespace_copy(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
+/// Collapses runs of ASCII whitespace into one space and trims both ends, in
+/// place: the result is never longer than the input.
+inline void collapse_ascii_whitespace(std::string& value) noexcept {
+    std::size_t write = 0;
     bool previous_space = true;
     for (const unsigned char ch : value) {
         if (core::utils::ascii::is_space(ch)) {
-            if (!previous_space) out.push_back(' ');
+            if (!previous_space) value[write++] = ' ';
             previous_space = true;
             continue;
         }
-        out.push_back(static_cast<char>(ch));
+        value[write++] = static_cast<char>(ch);
         previous_space = false;
     }
-    if (!out.empty() && out.back() == ' ') out.pop_back();
+    if (write > 0 && value[write - 1] == ' ') --write;
+    value.resize(write);
+}
+
+[[nodiscard]] inline std::string collapse_ascii_whitespace_copy(std::string_view value) {
+    std::string out(value);
+    collapse_ascii_whitespace(out);
     return out;
 }
 

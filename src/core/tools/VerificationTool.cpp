@@ -284,21 +284,32 @@ VerificationTool::execute_impl(const std::string &json_args,
       shell_arguments_json(recipe.command, working_directory), invocation);
   const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - started);
-  if (core::utils::json::first_string_field(raw_result, {"error"})
-          .has_value()) {
+  // One scan of the shell result, which can carry megabytes of output. The
+  // output is forwarded as the escaped token the shell already wrote:
+  // decoding and re-escaping it only made two more copies.
+  namespace json = core::utils::json;
+  constexpr std::string_view kKeys[] = {"error", "exit_code", "exitCode", "output"};
+  json::RawMember found[std::size(kKeys)];
+  const bool valid = json::find_members(raw_result, kKeys, found);
+  if (valid && found[0].kind == json::ValueKind::String) {
     return raw_result;
   }
-  const auto exit_code = core::utils::json::first_int64_field(
-      raw_result, {"exit_code", "exitCode"});
+  std::optional<std::int64_t> exit_code;
+  for (const auto& member : {found[1], found[2]}) {
+    if (valid && member.kind == json::ValueKind::Number) {
+      exit_code = json::decode_int64(member.value);
+      if (exit_code.has_value()) break;
+    }
+  }
   if (!exit_code.has_value()) {
     return error_result("Verification executor returned no exit code.");
   }
-  const std::string output =
-      core::utils::json::string_field(raw_result, "output");
+  const std::string_view output =
+      found[3].kind == json::ValueKind::String ? found[3].value : std::string_view{"\"\""};
   core::utils::JsonWriter writer(output.size() + 512);
   {
     auto root = writer.object();
-    writer.kv_str("output", output).comma();
+    writer.kv_raw("output", output).comma();
     writer.kv_num("exit_code", *exit_code).comma();
     writer.key("verification_receipt");
     {
