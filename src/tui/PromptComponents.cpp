@@ -6,6 +6,7 @@
 #include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
+#include "core/llm/MiniMaxEndpoints.hpp"
 #include "core/session/SessionReference.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ThreadCatalog.hpp"
@@ -733,7 +734,8 @@ std::string format_provider_setup_hint(std::string_view provider_name,
                "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
     }
     if (provider_name.starts_with("minimax-m-plan") && api_key.empty()) {
-        return "Run `filo --auth minimax` and paste your dedicated Subscription Key.\nUsage: https://www.minimax.io/m-plan\n";
+        return "Run `filo --auth minimax` and paste your dedicated Subscription Key.\nUsage: "
+            + std::string(core::llm::kMiniMaxPlanConsoleUrl) + "\n";
     }
     if (provider_name.starts_with("qwen-token-plan") && api_key.empty()) {
         return "Run `filo --auth qwen` and paste your dedicated Token Plan API key.\n"

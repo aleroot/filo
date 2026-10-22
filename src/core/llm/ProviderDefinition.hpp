@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../auth/ICredentialSource.hpp"
+#include "MiniMaxEndpoints.hpp"
 #include "core/config/ConfigManager.hpp"
 
 #include <algorithm>
@@ -74,14 +75,14 @@ struct BuiltinProviderDefinition {
 inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
         "minimax-m-plan", "minimax", "minimax", config::ApiType::Anthropic,
-        "https://api.minimax.io/anthropic",
+        kMiniMaxBaseUrl,
         {"MINIMAX_M_PLAN_API_KEY", "MINIMAX_SUBSCRIPTION_KEY"},
         ProviderAuthStyle::XApiKey, {}, core::auth::BillingKind::Subscription,
-        "https://www.minimax.io/m-plan",
+        kMiniMaxPlanConsoleUrl,
     },
     BuiltinProviderDefinition{
         "minimax", "minimax", "minimax", config::ApiType::Anthropic,
-        "https://api.minimax.io/anthropic", {"MINIMAX_API_KEY"},
+        kMiniMaxBaseUrl, {"MINIMAX_API_KEY"},
         ProviderAuthStyle::XApiKey, {},
     },
     BuiltinProviderDefinition{

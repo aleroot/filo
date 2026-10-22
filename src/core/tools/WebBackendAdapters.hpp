@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WebAccess.hpp"
+#include "../llm/MiniMaxEndpoints.hpp"
 
 #include <memory>
 
@@ -31,6 +32,19 @@ grok_web_search_request_json(const SearchRequest& request,
 [[nodiscard]] std::expected<SearchResponse, std::string>
 parse_grok_web_search_response(std::string_view body, int limit);
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_zai_web_search_backend();
+
+// MiniMax M Plan search (`POST /v1/coding_plan/search`, the endpoint
+// MiniMax-AI/cli uses). The URL is injectable for tests only; production
+// always targets the official host.
+struct MiniMaxWebSearchOptions {
+    std::string search_url = std::string(core::llm::kMiniMaxSearchUrl);
+    int timeout_ms = 30000;
+};
+[[nodiscard]] std::shared_ptr<IWebSearchBackend> make_minimax_web_search_backend(
+    MiniMaxWebSearchOptions options = {});
+[[nodiscard]] std::string minimax_web_search_request_json(const SearchRequest& request);
+[[nodiscard]] std::expected<SearchResponse, std::string>
+parse_minimax_web_search_response(std::string_view body, const SearchRequest& request);
 [[nodiscard]] std::shared_ptr<IWebFetchBackend> make_zai_web_fetch_backend();
 [[nodiscard]] std::shared_ptr<IWebFetchBackend> make_direct_web_fetch_backend();
 

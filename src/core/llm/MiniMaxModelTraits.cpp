@@ -13,6 +13,13 @@ bool is_minimax_plan_model(std::string_view model) {
     return canonical_minimax_model(model) == kMiniMaxDefaultModel;
 }
 
+std::string_view minimax_effort_ceiling(int max_tokens) noexcept {
+    if (max_tokens <= 4096) return "low";
+    if (max_tokens <= 16384) return "medium";
+    if (max_tokens <= 32768) return "high";
+    return {};
+}
+
 std::optional<ModelInfo> minimax_model_info(std::string_view model) {
     const auto id = canonical_minimax_model(model);
     if (id != kMiniMaxDefaultModel && id != "MiniMax-M3") return std::nullopt;
@@ -29,6 +36,9 @@ std::optional<ModelInfo> minimax_model_info(std::string_view model) {
         | static_cast<uint32_t>(ModelCapability::SystemPrompts)
         | static_cast<uint32_t>(ModelCapability::Vision)
         | static_cast<uint32_t>(ModelCapability::FunctionCalling)
+        // JSON-object output, as on every Messages endpoint: the caller asks
+        // for JSON and validates it. MiniMaxProtocol refuses JSON schemas.
+        | static_cast<uint32_t>(ModelCapability::JsonMode)
         | static_cast<uint32_t>(ModelCapability::Streaming)
         | static_cast<uint32_t>(ModelCapability::Reasoning)
         | static_cast<uint32_t>(ModelCapability::PromptCaching)

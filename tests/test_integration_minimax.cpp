@@ -7,6 +7,9 @@
 #include "core/llm/protocols/MiniMaxProtocol.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/tools/WebBackendAdapters.hpp"
+#include "core/tools/Tool.hpp"
+#include "TestSessionContext.hpp"
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -53,10 +56,14 @@ TEST_CASE("MiniMax HTTP tool turns preserve reasoning and account for cached tok
     MiniMaxServer fixture;
     std::vector<std::string> bodies;
     std::vector<std::string> keys;
+    std::vector<std::string> agents;
+    std::vector<std::string> sessions;
     std::atomic<int> calls{0};
     fixture.server.Post("/anthropic/v1/messages", [&](const auto& req, auto& response) {
         bodies.push_back(req.body);
         keys.push_back(req.get_header_value("x-api-key"));
+        agents.push_back(req.get_header_value("User-Agent"));
+        sessions.push_back(req.get_header_value("X-Mavis-Session-Id"));
         const auto start = event(R"({"type":"message_start","message":{"usage":{"input_tokens":20,"cache_read_input_tokens":200}}})");
         if (++calls == 1) {
             response.set_content(start
@@ -71,7 +78,7 @@ TEST_CASE("MiniMax HTTP tool turns preserve reasoning and account for cached tok
         } else response.set_content(start + end_turn(), "text/event-stream");
     });
     auto provider = fixture.provider(); REQUIRE(provider);
-    ChatRequest req; req.model = "MiniMax-M3.1-Flash";
+    ChatRequest req; req.model = "MiniMax-M3.1-Flash"; req.session_id = "session-fixture";
     req.messages = {{.role = "system", .content = "Workspace"}, {.role = "user", .content = "Read file"}};
     Message assistant{.role = "assistant"};
     bool failed = false;
@@ -101,6 +108,8 @@ TEST_CASE("MiniMax HTTP tool turns preserve reasoning and account for cached tok
         CHECK_THAT(body, !ContainsSubstring("budget_tokens"));
     }
     CHECK(keys == std::vector<std::string>{"fixture-key", "fixture-key"});
+    CHECK(agents == std::vector<std::string>{"MiniMaxAgent", "MiniMaxAgent"});
+    CHECK(sessions == std::vector<std::string>{"session-fixture", "session-fixture"});
 
     // The same model on a different commercial service must not inherit signatures.
     auto other = fixture.provider("minimax"); REQUIRE(other);
@@ -185,7 +194,7 @@ TEST_CASE("Claude retains legacy reasoning while MiniMax refuses unscoped state"
 TEST_CASE("MiniMax native counting caps generation using the actual input footprint", "[integration][minimax][budget]") {
     MiniMaxServer fixture;
     int input_tokens = 490000;
-    std::size_t history_bytes = 360000;
+    std::size_t history_bytes = 600000;
     std::string expected_max = R"("max_tokens":6000)";
     std::optional<int> requested_max;
     SECTION("Exact counts reduce output to fit") {}
@@ -238,10 +247,10 @@ TEST_CASE("MiniMax failed native counting keeps conservative context admission",
         full_output_budget = req.body.find(R"("max_tokens":128000)") != std::string::npos;
         ++generations; response.set_content(end_turn(), "text/event-stream");
     });
-    std::size_t bytes = 800000;
+    std::size_t bytes = 1200000;
     bool overfull = false;
     SECTION("Local fallback admits a fitting request") {}
-    SECTION("Local fallback refuses an overfull request") { bytes = 1100000; overfull = true; }
+    SECTION("Local fallback refuses an overfull request") { bytes = 1600000; overfull = true; }
     SECTION("Oversized count responses use the local fallback") { oversized_response = true; }
     ChatRequest req; req.messages = {{.role = "user", .content = std::string(bytes, 'a')}};
     bool error = false;
@@ -282,7 +291,7 @@ TEST_CASE("MiniMax cancellation during context counting prevents generation", "[
         ++generations; response.set_content(end_turn(), "text/event-stream");
     });
     auto provider = fixture.provider();
-    ChatRequest req; req.messages = {{.role = "user", .content = std::string(360000, 'a')}};
+    ChatRequest req; req.messages = {{.role = "user", .content = std::string(600000, 'a')}};
     std::jthread worker([&] { provider->stream_response(req, [](const auto&) {}); });
     for (int i = 0; i < 1000 && !counting.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     provider->cancel(); release = true;
@@ -305,4 +314,62 @@ TEST_CASE("Parallel MiniMax provider forks isolate streaming state", "[integrati
     std::jthread two([&] { fork->stream_response(req, [&](const auto& chunk) { failures += chunk.is_error; second += chunk.content; }); });
     one.join(); two.join();
     CHECK(failures == 0); CHECK(requests == 2); CHECK(first == "Done"); CHECK(second == "Done");
+}
+
+TEST_CASE("MiniMax plan search authenticates as MiniMax Code with the Subscription Key", "[integration][minimax][web]") {
+    httplib::Server server;
+    std::string authorization, agent, session, body;
+    server.Post("/v1/coding_plan/search", [&](const auto& req, auto& response) {
+        authorization = req.get_header_value("Authorization");
+        agent = req.get_header_value("User-Agent");
+        session = req.get_header_value("X-Mavis-Session-Id");
+        body = req.body;
+        response.set_content(R"({"organic":[{"title":"Filo","link":"https://filo.example/","snippet":"Agent"}],"base_resp":{"status_code":0}})",
+                             "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local sockets unavailable.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    for (int i = 0; i < 100 && !server.is_running(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(server.is_running());
+
+    core::config::ProviderConfig config;
+    config.api_key = "sk-cp-fixture";
+    auto provider = ProviderFactory::create_provider("minimax-m-plan", config);
+    REQUIRE(provider);
+    const auto backend = core::tools::web::make_minimax_web_search_backend(
+        {.search_url = "http://127.0.0.1:" + std::to_string(port) + "/v1/coding_plan/search", .timeout_ms = 5000});
+    core::tools::ToolInvocationContext context{
+        .session_context = test_support::make_workspace_session_context(
+            core::context::SessionTransport::cli, "session-fixture"),
+        .provider = provider};
+    REQUIRE(backend->supports(context));
+    const auto result = backend->search({.query = "filo"}, context);
+    server.stop();
+    REQUIRE(result);
+    REQUIRE(result->results.size() == 1);
+    CHECK(result->results[0].url == "https://filo.example/");
+    CHECK(authorization == "Bearer sk-cp-fixture");
+    CHECK(agent == "MiniMaxAgent");
+    CHECK(session == "session-fixture");
+    CHECK(body == R"({"q":"filo"})");
+}
+
+TEST_CASE("MiniMax serves JSON-object helper turns with a fitting thinking effort", "[integration][minimax][http]") {
+    MiniMaxServer fixture;
+    std::string body;
+    fixture.server.Post("/anthropic/v1/messages", [&](const auto& req, auto& response) {
+        body = req.body; response.set_content(end_turn(), "text/event-stream");
+    });
+    // The read tool's evidence reader: short budget, JSON object, temperature 0.
+    ChatRequest req{.model = "MiniMax-M3.1-Flash",
+        .messages = {{.role = "system", .content = "Return only JSON."}, {.role = "user", .content = "{}"}},
+        .temperature = 0.0f, .max_tokens = 1400,
+        .response_format = {.type = ResponseFormat::Type::JsonObject}};
+    bool error = false;
+    fixture.provider()->stream_response(req, [&](const auto& chunk) { error |= chunk.is_error; });
+    CHECK_FALSE(error);
+    CHECK_THAT(body, ContainsSubstring(R"("max_tokens":1400)"));
+    CHECK_THAT(body, ContainsSubstring(R"("output_config":{"effort":"low"})"));
+    CHECK_THAT(body, !ContainsSubstring("response_format"));
 }

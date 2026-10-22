@@ -6,6 +6,8 @@
 #include <fstream>
 #include <atomic>
 #include <future>
+#include <charconv>
+#include <cmath>
 #include "core/tools/WebBackendAdapters.hpp"
 #include "TestSessionContext.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
@@ -23,6 +25,7 @@
 #include "core/llm/providers/MiniMaxRequestBudget.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
 #include "core/auth/ApiKeyPromptStrategy.hpp"
+#include "core/auth/MiniMaxClientIdentity.hpp"
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -208,7 +211,8 @@ TEST_CASE("MiniMax sparse discovery preserves curated limits and separate plan i
     CHECK(result.models.front().max_output_tokens == kMiniMaxOutputLimit);
     CHECK(result.models.front().provider == "minimax-m-plan");
     CHECK(result.models.front().supports(ModelCapability::Vision));
-    CHECK_FALSE(result.models.front().supports(ModelCapability::JsonMode));
+    // JSON-object output passes request validation; schemas are refused by the protocol.
+    CHECK(result.models.front().supports(ModelCapability::JsonMode));
     const std::vector<std::string> providers{"minimax", "minimax-m-plan"};
     const auto group = provider_catalog_group_for("minimax-m-plan", providers);
     REQUIRE(group.sources.size() == 2);
@@ -225,15 +229,91 @@ TEST_CASE("MiniMax budgets complete context and refuses overfull history", "[min
     req.max_tokens = 999999;
     protocol.prepare_request(req);
     CHECK(req.max_tokens == kMiniMaxOutputLimit);
-    req.messages.back().content = std::string(800000, 'a');
+    req.messages.back().content = std::string(1200000, 'a');
     protocol.prepare_request(req);
     providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow);
     REQUIRE(req.max_tokens.has_value());
     CHECK(*req.max_tokens < kMiniMaxOutputLimit);
-    req.messages.back().content = std::string(1100000, 'a');
+    req.messages.back().content = std::string(1600000, 'a');
     CHECK_THROWS(providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow));
     req = request(); req.response_format.type = ResponseFormat::Type::JsonSchema;
     CHECK_THROWS(protocol.prepare_request(req));
+    // Reader and review turns ask for JSON objects and validate them locally.
+    req = request(); req.response_format.type = ResponseFormat::Type::JsonObject;
+    CHECK_NOTHROW(protocol.prepare_request(req));
+    valid_json(protocol.serialize(req));
+}
+
+TEST_CASE("MiniMax estimates CJK per character and other text per three characters", "[minimax][budget]") {
+    using providers::MiniMaxRequestBudget;
+    CHECK(MiniMaxRequestBudget::estimate_text("") == 0);
+    CHECK(MiniMaxRequestBudget::estimate_text("abc") == 1);
+    CHECK(MiniMaxRequestBudget::estimate_text("abcd") == 2);
+    CHECK(MiniMaxRequestBudget::estimate_text("\xE4\xBD\xA0\xE5\xA5\xBD") == 2);      // 你好
+    CHECK(MiniMaxRequestBudget::estimate_text("\xEC\x95\x88") == 1);                   // 안 (Hangul)
+    CHECK(MiniMaxRequestBudget::estimate_text("\xF0\xA0\x80\x80") == 1);               // U+20000
+    CHECK(MiniMaxRequestBudget::estimate_text("\xC3\xA9\xC3\xA9\xC3\xA9") == 1);       // ééé
+    CHECK(MiniMaxRequestBudget::estimate_text("\xE4\xBD") == 1);                       // truncated, no overrun
+    // Prose and code no longer count at two bytes per token, which made
+    // compaction start at roughly two thirds of its configured threshold.
+    const std::vector<Message> history{{.role = "user", .content = std::string(300000, 'a')}};
+    CHECK(MiniMaxRequestBudget::estimate_history(history) == 100000 + 8 + 4096);
+}
+
+TEST_CASE("MiniMax lowers thinking effort when the output budget is short", "[minimax][reasoning]") {
+    CHECK(minimax_effort_ceiling(1024) == "low");
+    CHECK(minimax_effort_ceiling(4096) == "low");
+    CHECK(minimax_effort_ceiling(8192) == "medium");
+    CHECK(minimax_effort_ceiling(32768) == "high");
+    CHECK(minimax_effort_ceiling(32769).empty());
+    MiniMaxProtocol protocol(true, "max");
+    const auto effort_for = [&](std::optional<int> max_tokens, std::string effort) {
+        auto req = request(); req.max_tokens = max_tokens; req.effort = std::move(effort);
+        protocol.prepare_request(req);
+        return protocol.serialize(req);
+    };
+    CHECK_THAT(effort_for(1400, ""), ContainsSubstring(R"("effort":"low")"));
+    CHECK_THAT(effort_for(2048, "xhigh"), ContainsSubstring(R"("effort":"low")"));
+    CHECK_THAT(effort_for(10000, "max"), ContainsSubstring(R"("effort":"medium")"));
+    CHECK_THAT(effort_for(30000, "max"), ContainsSubstring(R"("effort":"high")"));
+    CHECK_THAT(effort_for(10000, "low"), ContainsSubstring(R"("effort":"low")"));
+    CHECK_THAT(effort_for(std::nullopt, ""), ContainsSubstring(R"("effort":"max")"));
+    MiniMaxProtocol api;
+    auto m3 = request("MiniMax-M3"); m3.effort = "high"; m3.max_tokens = 1400;
+    api.prepare_request(m3);
+    CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
+    m3.max_tokens = 8192;
+    CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+}
+
+TEST_CASE("MiniMax identifies itself as MiniMax Code on every request", "[minimax][identity]") {
+    namespace identity = core::auth::minimax_code;
+    MiniMaxProtocol plan(true);
+    core::auth::AuthInfo auth;
+    auth.headers["x-api-key"] = "sk-cp-fixture";
+    auto headers = plan.build_headers(auth);
+    CHECK(headers.at("User-Agent") == "MiniMaxAgent");
+    CHECK(headers.at("X-Mavis-Agent-Id") == "main");
+    CHECK(headers.at("X-Mavis-Session-Id") == identity::process_session_id());
+    CHECK(headers.at("x-api-key") == "sk-cp-fixture");
+    int offset = 1;
+    const auto& zone = headers.at("X-Mavis-Timezone-Offset");
+    REQUIRE(std::from_chars(zone.data(), zone.data() + zone.size(), offset).ec == std::errc{});
+    CHECK(offset % 60 == 0);
+    CHECK(std::abs(offset) <= 14 * 3600);
+    auto req = request(); req.session_id = "session-1";
+    plan.prepare_headers(headers, req, kMiniMaxBaseUrl);
+    CHECK(headers.at("X-Mavis-Session-Id") == "session-1");
+    for (const auto field : {"anthropic-beta", "x-anthropic-billing-header", "Authorization"}) CHECK_FALSE(headers.contains(field));
+}
+
+TEST_CASE("MiniMax retries plan rate limits on a seconds-scale schedule", "[minimax][errors]") {
+    const auto policy = MiniMaxProtocol(true).stream_retry_policy();
+    CHECK(policy.max_retries == 5);
+    CHECK(policy.initial_backoff == std::chrono::seconds(1));
+    CHECK(policy.maximum_backoff == std::chrono::seconds(30));
+    CHECK(policy.retry_only_before_output);
+    CHECK(MiniMaxProtocol(true).clone()->stream_retry_policy() == policy);
 }
 
 TEST_CASE("MiniMax image input supports pinned data and native URL sources", "[minimax][vision]") {
@@ -353,6 +433,13 @@ TEST_CASE("MiniMax business errors distinguish exhaustion from transient rate li
         ContainsSubstring("MiniMax error 429"));
     CHECK_FALSE(protocol.is_retryable({429,
         R"({"base_resp":{"status_code":"2056","status_msg":"Exhausted"}})", headers}));
+    CHECK_THAT(protocol.format_error_message({401, R"({"type":"error","error":{"type":"authentication_error","message":"invalid key"}})", headers}),
+        ContainsSubstring("filo --auth minimax"));
+    CHECK_THAT(protocol.format_error_message({400, R"({"base_resp":{"status_code":1026,"status_msg":"input new_sensitive"}})", headers}),
+        ContainsSubstring("content filter"));
+    CHECK(minimax_error_code(R"({"base_resp":{"status_code":0,"status_msg":"success"}})") == 0);
+    CHECK(minimax_error_code(R"({"base_resp":{"status_code":1004,"status_msg":"unauthorized"}})") == 1004);
+    CHECK(minimax_error_code("not json") == 0);
 }
 
 TEST_CASE("MiniMax quota uses explicit remaining percentages and validates unknown data", "[minimax][quota]") {
@@ -376,6 +463,15 @@ TEST_CASE("MiniMax quota uses explicit remaining percentages and validates unkno
     REQUIRE(legacy); CHECK(legacy->usage_windows.front().utilization == 0.25F);
     CHECK_FALSE(parse_minimax_quota(R"({"current_interval_total_count":0,"current_interval_usage_count":0})"));
     CHECK_FALSE(parse_minimax_quota(R"({"current_interval_status":3,"current_interval_remaining_percent":0})"));
+    // Status 2 is authoritative exhaustion; a boost is reported, not folded in.
+    const auto exhausted = parse_minimax_quota(R"({"model_remains":[{"model_name":"general","current_interval_status":1,"current_interval_remaining_percent":40,"current_weekly_status":2,"current_weekly_remaining_percent":3,"weekly_boost_permille":1500}]})");
+    REQUIRE(exhausted); REQUIRE(exhausted->usage_windows.size() == 2);
+    CHECK(exhausted->usage_windows[1].label == "7d");
+    CHECK(exhausted->usage_windows[1].utilization == 1.0F);
+    CHECK(exhausted->is_rate_limited);
+    CHECK(exhausted->subscription.notice == "Weekly quota boosted to 150%");
+    const auto unboosted = parse_minimax_quota(R"({"current_interval_remaining_percent":50,"weekly_boost_permille":1000})");
+    REQUIRE(unboosted); CHECK(unboosted->subscription.notice.empty()); CHECK_FALSE(unboosted->is_rate_limited);
     MiniMaxProtocol protocol;
     const cpr::Header headers;
     CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"code":"2056","message":"usage exhausted"}})", headers}));
@@ -447,4 +543,58 @@ TEST_CASE("MiniMax quota failures stay unknown and are cached", "[minimax][quota
     CHECK(reads == 1);
     CHECK_FALSE(source->read(kMiniMaxBaseUrl, {}));
     CHECK(reads == 1);
+}
+
+TEST_CASE("MiniMax plan search serves only the official subscription endpoint", "[minimax][web]") {
+    MiniMaxEnv environment;
+    using namespace core::tools::web;
+    core::config::ProviderConfig config;
+    config.api_key = "sk-cp-fixture";
+    const auto backend = make_minimax_web_search_backend();
+    const auto context = [](std::shared_ptr<LLMProvider> provider) {
+        return core::tools::ToolInvocationContext{
+            .session_context = test_support::make_workspace_session_context(), .provider = std::move(provider)};
+    };
+    CHECK(backend->supports(context(ProviderFactory::create_provider("minimax-m-plan", config))));
+    CHECK(backend->supports(context(ProviderFactory::create_provider("minimax-m-plan-work", config))));
+    config.api_key = "sk-api-fixture";
+    CHECK_FALSE(backend->supports(context(ProviderFactory::create_provider("minimax", config))));
+    config.api_key = "sk-cp-fixture";
+    config.base_url = "https://proxy.example/anthropic";
+    CHECK_FALSE(backend->supports(context(ProviderFactory::create_provider("minimax-m-plan", config))));
+    CHECK_FALSE(backend->supports(context(nullptr)));
+}
+
+TEST_CASE("MiniMax plan search maps organic hits, limits and domain filters", "[minimax][web]") {
+    using namespace core::tools::web;
+    SearchRequest request{.query = "filo \"agent\"", .limit = 2};
+    CHECK(minimax_web_search_request_json(request) == R"({"q":"filo \"agent\""})");
+    const std::string body = R"({"organic":[
+        {"title":"One","link":"https://docs.example.com/a","snippet":"First","date":"2026-01-02"},
+        {"title":"Two","link":"https://blocked.example.org/b","snippet":"Second"},
+        {"title":"Three","link":"https://example.com/c","snippet":"Third"},
+        {"title":"Four","link":"https://example.com/d","snippet":"Fourth"}],
+        "base_resp":{"status_code":0,"status_msg":"success"}})";
+    auto response = parse_minimax_web_search_response(body, request);
+    REQUIRE(response); REQUIRE(response->results.size() == 2);
+    CHECK(response->backend == "minimax-plan-search");
+    CHECK(response->results[0].url == "https://docs.example.com/a");
+    CHECK(response->results[0].snippet == "2026-01-02 — First");
+    CHECK(response->results[1].title == "Two");
+    request.limit = 10;
+    request.domains.blocked_domains = {"example.org"};
+    response = parse_minimax_web_search_response(body, request);
+    REQUIRE(response); CHECK(response->results.size() == 3);
+    request.domains = {.allowed_domains = {"https://Example.com/"}};
+    response = parse_minimax_web_search_response(body, request);
+    REQUIRE(response); REQUIRE(response->results.size() == 3);
+    CHECK(response->results[0].title == "One");
+    const auto failed = parse_minimax_web_search_response(
+        R"({"base_resp":{"status_code":1004,"status_msg":"login fail"}})", request);
+    REQUIRE_FALSE(failed);
+    CHECK_THAT(failed.error(), ContainsSubstring("MiniMax error 1004"));
+    CHECK_THAT(failed.error(), ContainsSubstring("login fail"));
+    CHECK_FALSE(parse_minimax_web_search_response("{", request));
+    const auto empty = parse_minimax_web_search_response(R"({"organic":[]})", request);
+    REQUIRE(empty); CHECK(empty->results.empty());
 }

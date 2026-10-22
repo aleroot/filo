@@ -1,11 +1,13 @@
 #include "MiniMaxUsageClient.hpp"
 #include "MiniMaxModelTraits.hpp"
 #include "transport/HttpHeaderUtils.hpp"
+#include "core/auth/MiniMaxClientIdentity.hpp"
 #include "core/utils/TimeUtils.hpp"
 #include "core/utils/Crypto.hpp"
 #include <simdjson.h>
 #include <cpr/cpr.h>
 #include <algorithm>
+#include <format>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -38,6 +40,9 @@ void append_window(RateLimitInfo& info, simdjson::dom::element node,
     auto remaining = number(node, percent_key);
     const auto status = number(node, std::string(prefix) + "_status");
     if (status && *status == 3) return; // An unlimited bucket is not an exhausted zero limit.
+    // Status 2 is the server's own verdict that this window is exhausted,
+    // whatever percentage accompanies it.
+    if (status && *status == 2) remaining = 0.0;
     simdjson::dom::element explicit_percent;
     if (!remaining && node[percent_key].get(explicit_percent) != simdjson::SUCCESS) {
         const auto total = number(node, std::string(prefix) + "_total_count");
@@ -54,9 +59,10 @@ void append_window(RateLimitInfo& info, simdjson::dom::element node,
 
 std::optional<RateLimitInfo> fetch_quota(std::string_view key) {
     std::string body;
+    cpr::Header headers{{"Authorization", "Bearer " + std::string(key)}, {"Accept", "application/json"}};
+    core::auth::minimax_code::apply_identity_headers(headers, {});
     const auto response = cpr::Get(
-        cpr::Url{"https://www.minimax.io/v1/token_plan/remains"},
-        cpr::Header{{"Authorization", "Bearer " + std::string(key)}, {"Accept", "application/json"}},
+        cpr::Url{std::string(kMiniMaxQuotaUrl)}, headers,
         cpr::Timeout{2500}, cpr::ConnectTimeout{1500}, cpr::Redirect{false},
         cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {
             if (bytes.size() > kMaxQuotaBodyBytes - body.size()) return false;
@@ -100,7 +106,7 @@ public:
 
     std::optional<RateLimitInfo> read(std::string_view base_url, const cpr::Header& headers) override {
         // A custom proxy must never cause its credential to be forwarded to MiniMax.
-        if (base_url != kMiniMaxBaseUrl) return std::nullopt;
+        if (!is_official_minimax_base_url(base_url)) return std::nullopt;
         auto key = transport::find_header(headers, "x-api-key");
         if (!key || key->empty()) return std::nullopt;
         const auto identity = core::utils::crypto::sha256_hex(*key);
@@ -113,7 +119,9 @@ public:
         try {
             entry->value = fetcher_(*key);
         } catch (...) { /* Usage is best-effort and must not fail generation. */ }
-        entry->expires = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        // Quota windows span hours, so a minute of staleness is invisible;
+        // the read sits on the response path and should rarely be paid.
+        entry->expires = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         return entry->value;
     }
 };
@@ -134,6 +142,11 @@ std::optional<RateLimitInfo> parse_minimax_quota(std::string_view body) {
     const auto append = [&](simdjson::dom::element node) {
         append_window(info, node, "current_interval", "5h", "end_time");
         append_window(info, node, "current_weekly", "7d", "weekly_end_time");
+        // A boost enlarges the weekly allowance; remaining percentages stay
+        // relative to it, so it is reported rather than folded into usage.
+        if (const auto boost = number(node, "weekly_boost_permille"); boost && *boost > 1000.0 && *boost < 100000.0) {
+            info.subscription.notice = std::format("Weekly quota boosted to {:g}%", std::round(*boost / 10.0));
+        }
     };
     simdjson::dom::array models;
     if (doc["model_remains"].get(models) == simdjson::SUCCESS) {

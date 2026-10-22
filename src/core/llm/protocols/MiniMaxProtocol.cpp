@@ -5,6 +5,7 @@
 #include "../ReasoningEffortResolution.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../providers/MiniMaxRequestBudget.hpp"
+#include "core/auth/MiniMaxClientIdentity.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
 #include <simdjson.h>
@@ -70,7 +71,7 @@ bool transient(int code) {
         || code == 1033 || code == 1041 || code == 1045 || code == 2045
         || code == 2046 || code == 2047 || code == 2062 || code == 2064 || code == 2066;
 }
-std::string_view guidance(int code) {
+std::string_view guidance(int code, int http_status) {
     switch (code) {
     case 1004: case 2049: return "Check your MiniMax key and account region.";
     case 2056: case 2067: return "M Plan usage exhausted; wait for reset or manage your plan/credits.";
@@ -78,12 +79,50 @@ std::string_view guidance(int code) {
     case 2061: case 2068: return "This model is not included in your plan.";
     case 2062: return "M Plan request rate limited; reduce request frequency or concurrency.";
     case 2069: return "This model was retired; select an available MiniMax model.";
+    case 2022: return "This model does not exist or is not available to this key.";
     case 1008: case 2053: return "MiniMax balance or credits are insufficient.";
-    default: return {};
+    case 1026: return "MiniMax's content filter rejected the input; rephrase the request.";
+    case 1027: return "MiniMax's content filter rejected the output; rephrase the request.";
+    case 1039: return "MiniMax token limit reached; retry shortly or compact the conversation.";
+    case 1042: return "The input contains too many invisible or illegal characters.";
+    case 1046: return "MiniMax rejected an identity claim in the prompt.";
+    case 2013: case 2014: return "MiniMax rejected the request parameters.";
+    default: break;
     }
+    if (http_status == 401 || http_status == 403) {
+        return "MiniMax rejected the key; run `filo --auth minimax` to replace it.";
+    }
+    return {};
+}
+
+/// Only an effort the model accepts reaches the wire, and a short output
+/// budget lowers it so thinking cannot consume the whole answer (see
+/// minimax_effort_ceiling).
+std::string budgeted_effort(const std::vector<std::string>& supported, std::string effort,
+                            std::optional<int> max_tokens) {
+    if (std::ranges::find(supported, effort) == supported.end()) effort = "max";
+    if (!max_tokens) return effort;
+    const auto ceiling = minimax_effort_ceiling(*max_tokens);
+    const auto rank = [&](std::string_view value) {
+        return std::ranges::find(supported, value) - supported.begin();
+    };
+    return !ceiling.empty() && rank(ceiling) < rank(effort) ? std::string(ceiling) : effort;
 }
 
 } // namespace
+
+int minimax_error_code(std::string_view body) {
+    try { return parse_error(body).code; } catch (...) { return 0; }
+}
+
+std::string describe_minimax_error(int http_status, std::string_view body) {
+    MiniMaxError error;
+    try { error = parse_error(body); } catch (...) {}
+    std::string message = "MiniMax error " + std::to_string(error.code ? error.code : http_status);
+    if (const auto hint = guidance(error.code, http_status); !hint.empty()) message += ": " + std::string(hint);
+    if (!error.message.empty()) message += " " + error.message;
+    return message;
+}
 
 MiniMaxProtocol::MiniMaxProtocol(bool subscription, std::string default_effort,
                                std::shared_ptr<IMiniMaxUsageSource> usage, int context_window)
@@ -104,8 +143,11 @@ void MiniMaxProtocol::prepare_request(ChatRequest& req) {
         throw std::invalid_argument("Select a supported MiniMax model for this provider.");
     }
     if (req.effort.empty()) req.effort = default_effort_;
-    if (req.response_format.type != ResponseFormat::Type::Text) {
-        throw std::invalid_argument("MiniMax does not advertise structured-output guarantees; use text and validated tools.");
+    // JSON-object callers (reader, review) instruct and validate JSON
+    // themselves, as with every other Messages endpoint. A schema is a
+    // guarantee MiniMax does not document, so it is refused rather than faked.
+    if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
+        throw std::invalid_argument("MiniMax does not support JSON-schema output; use JSON-object output and validate it.");
     }
     for (const auto& message : req.messages) for (const auto& part : message.content_parts) {
         if (part.type != ContentPartType::Image) continue;
@@ -150,8 +192,10 @@ void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_ur
             }
             body += '}';
             std::string count_body;
+            auto headers = build_headers(auth);
+            prepare_headers(headers, req, base_url);
             const auto response = cpr::Post(cpr::Url{build_url(base_url, req.model) + "/count_tokens"},
-                build_headers(auth), cpr::Body{body}, cpr::Timeout{1500}, cpr::ConnectTimeout{500}, cpr::Redirect{false},
+                headers, cpr::Body{body}, cpr::Timeout{1500}, cpr::ConnectTimeout{500}, cpr::Redirect{false},
                 cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {
                     constexpr std::size_t max_bytes = 16 * 1024;
                     if (bytes.size() > max_bytes - count_body.size()) return false;
@@ -186,14 +230,20 @@ std::string MiniMaxProtocol::serialize(const ChatRequest& req) const {
             const auto configured = core::utils::str::to_lower_ascii_copy(
                 core::utils::str::trim_ascii_copy(request.effort.empty() ? default_effort_ : request.effort));
             const auto effort = resolve_reasoning_effort(configured, info->reasoning.effort);
-            const std::string effective = std::ranges::find(info->reasoning.supported_efforts, effort.effective) != info->reasoning.supported_efforts.end() ? effort.effective : "max";
+            const auto effective = budgeted_effort(
+                info->reasoning.supported_efforts, effort.effective, request.max_tokens);
             payload += R"(,"thinking":{"type":"adaptive"},"output_config":{"effort":")";
             payload += core::utils::escape_json_string(effective);
             payload += R"("})";
         } else {
             const auto effort = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(request.effort));
-            if (!effort.empty() && effort != "auto" && effort != "default" && effort != "unset"
-                && effort != "off" && effort != "none" && effort != "disabled") payload += R"(,"thinking":{"type":"adaptive"})";
+            const bool requested = !effort.empty() && effort != "auto" && effort != "default"
+                && effort != "unset" && effort != "off" && effort != "none" && effort != "disabled";
+            // Optional thinking is dropped where even the shallowest effort
+            // could exhaust the budget before any answer text.
+            const bool fits = !request.max_tokens
+                || minimax_effort_ceiling(*request.max_tokens) != "low";
+            if (requested && fits) payload += R"(,"thinking":{"type":"adaptive"})";
         }
     };
     auto payload = AnthropicSerializer::serialize(req, kMiniMaxOutputLimit, options);
@@ -207,7 +257,25 @@ cpr::Header MiniMaxProtocol::build_headers(const core::auth::AuthInfo& auth) con
     if (key && ((subscription_ && key->starts_with("sk-api-")) || (!subscription_ && key->starts_with("sk-cp-")))) {
         throw std::invalid_argument("MiniMax key type does not match this provider; select M Plan or API access explicitly.");
     }
+    core::auth::minimax_code::apply_identity_headers(headers, {});
     return headers;
+}
+
+void MiniMaxProtocol::prepare_headers(cpr::Header& headers, const ChatRequest& request,
+                                      std::string_view) {
+    if (!request.session_id.empty()) {
+        headers[std::string(core::auth::minimax_code::kSessionIdHeader)] = request.session_id;
+    }
+}
+
+transport::RetryPolicy MiniMaxProtocol::stream_retry_policy() const noexcept {
+    // Plan rate limits (2062) and cluster load (2064) clear in seconds, not on
+    // the generic 0.5 s schedule.
+    transport::RetryPolicy policy;
+    policy.max_retries = 5;
+    policy.initial_backoff = std::chrono::seconds(1);
+    policy.maximum_backoff = std::chrono::seconds(30);
+    return policy;
 }
 ReasoningCapabilities MiniMaxProtocol::reasoning_capabilities(std::string_view model) const noexcept {
     try { if (auto info = minimax_model_info(model)) return info->reasoning.effort; } catch (...) {}
@@ -251,11 +319,7 @@ void MiniMaxProtocol::enrich_rate_limit(std::string_view base_url, const cpr::He
     }
 }
 std::string MiniMaxProtocol::format_error_message(const HttpResponse& response) const {
-    const auto error = parse_error(response.body);
-    std::string message = "MiniMax error " + std::to_string(error.code ? error.code : response.status_code);
-    if (!guidance(error.code).empty()) message += ": " + std::string(guidance(error.code));
-    if (!error.message.empty()) message += " " + error.message;
-    return message;
+    return describe_minimax_error(response.status_code, response.body);
 }
 bool MiniMaxProtocol::is_retryable(const HttpResponse& response) const noexcept {
     if (transport::retry_vetoed(response.headers)) return false;

@@ -635,64 +635,6 @@ the importing user's home directory automatically. For other layouts, use
 
 </details>
 
-## MiniMax M Plan
-
-Filo supports global MiniMax M Plan through the Anthropic Messages-compatible API.
-Subscribe at [MiniMax M Plan](https://www.minimax.io/m-plan), then copy the
-**Subscription Key** from your plan details and run:
-
-```sh
-filo --auth minimax
-filo --model minimax-m-plan/MiniMax-M3.1-Flash
-```
-
-For an environment-only setup, export `MINIMAX_M_PLAN_API_KEY` (or
-`MINIMAX_SUBSCRIPTION_KEY`) and select `minimax-m-plan` as above.
-`filo --auth minimax-m-plan` is an alias for the same M Plan setup. Regular API keys use
-`filo --auth minimax-api`, provider `minimax`, and `MINIMAX_API_KEY`. Filo keeps the
-two billing identities separate and never falls back to a metered key when plan
-usage runs out. Subscription Keys can consume available credit packs according
-to your MiniMax account settings.
-
-The default model is **MiniMax-M3.1-Flash**, with streaming, tool use, preserved
-reasoning across tool turns, image input, cache usage, and best-effort five-hour
-and weekly quota reporting. Reasoning is required: `/effort` offers `low`,
-`medium`, `high`, `xhigh`, and `max`; an off request resolves to `low`. The default
-is `max`. M3 is additionally available through the API provider, with switchable
-thinking. Legacy M2 and preview defaults are not offered as current plan models.
-
-The default working context is 512,000 tokens, with up to 128,000 output tokens.
-Filo reserves room for reasoning/output, uses the same conservative estimate for
-compaction and request admission, and attempts native counting for large
-histories. To opt into 1M context, merge this provider setting into your Filo
-configuration:
-
-```json
-{
-  "providers": {
-    "minimax-m-plan": { "context_window": 1000000 }
-  }
-}
-```
-
-Larger contexts can consume more plan usage. Images support pinned data, local
-files, and native image URLs; local/inline images are limited to 10 MiB and total
-request bodies to 64 MiB. Native video uploads and guaranteed structured JSON
-output are not advertised. Web search uses Filo's existing web backends or an
-explicitly configured MCP server, rather than Claude's hosted-search API.
-
-Quota reads are cached and best-effort; unavailable data remains unknown. The
-MiniMax dashboard is authoritative for plan entitlement, Credits, and usage.
-See the [integration design](docs/minimax-implementation-plan.md) for architecture
-and live-account acceptance checks.
-
-`api_type: anthropic` selects the shared Messages wire format. Claude policy is
-selected by a `claude` provider name (including `claude-…`), Claude OAuth, or the
-native `api.anthropic.com` host. For an existing Claude proxy configured under a
-custom name, rename its provider entry to `claude-<name>` to retain Claude aliases,
-reasoning, caching, and attribution. Other custom Messages providers use the
-neutral protocol.
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and code style.

@@ -4,6 +4,13 @@
 #include "../MiniMaxModelTraits.hpp"
 
 namespace core::llm::protocols {
+/// MiniMax business code from any MiniMax JSON body (`error.code`,
+/// `base_resp.status_code` or a trailing "(code)"), 0 when there is none.
+[[nodiscard]] int minimax_error_code(std::string_view body);
+/// One readable failure with actionable guidance, shared by every MiniMax
+/// endpoint (Messages, quota, web search).
+[[nodiscard]] std::string describe_minimax_error(int http_status, std::string_view body);
+
 /// MiniMax policy over the vendor-neutral Messages encoder/parser.
 class MiniMaxProtocol final : public AnthropicProtocol {
 public:
@@ -17,7 +24,10 @@ public:
                          const core::auth::AuthInfo& auth,
                          const std::function<bool()>& cancelled) override;
     cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
+    void prepare_headers(cpr::Header& headers, const ChatRequest& request,
+                         std::string_view base_url) override;
     std::string_view name() const noexcept override { return "minimax"; }
+    transport::RetryPolicy stream_retry_policy() const noexcept override;
     ReasoningCapabilities reasoning_capabilities(std::string_view model) const noexcept override;
     std::unique_ptr<ModelCatalogProvider> model_catalog(std::string_view provider) const override;
     ParseResult parse_event(std::string_view raw_event) override;

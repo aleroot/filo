@@ -17,6 +17,7 @@
 #include "OAuthTokenManager.hpp"
 #include "ui/ConsoleAuthUI.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/llm/MiniMaxEndpoints.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -346,7 +347,7 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         .login_aliases = {"minimax-m-plan"},
         .display_name = "MiniMax M Plan",
         .instructions =
-            "Copy your M Plan Subscription Key from https://www.minimax.io/m-plan. "
+            "Copy your M Plan Subscription Key from " + std::string(core::llm::kMiniMaxPlanConsoleUrl) + ". "
             "This key uses subscription quota and available credit packs.",
         .profiles = {ApiKeyLoginProfile{
             .provider_name = "minimax-m-plan",
@@ -356,7 +357,7 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
             .invalid_key_message = "Use the M Plan Subscription Key; this is a pay-as-you-go key.",
         }},
         .env_var = "MINIMAX_M_PLAN_API_KEY",
-        .docs_hint = "MINIMAX_SUBSCRIPTION_KEY is also accepted. Usage: https://www.minimax.io/m-plan",
+        .docs_hint = "MINIMAX_SUBSCRIPTION_KEY is also accepted. Usage: " + std::string(core::llm::kMiniMaxPlanConsoleUrl),
     });
     auto minimax_api = std::make_shared<ApiKeyPromptStrategy>(ApiKeyPromptStrategySpec{
         .login_provider = "minimax-api",
