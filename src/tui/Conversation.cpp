@@ -3544,6 +3544,14 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         }
     }
 
+    if (tool_name == core::tools::names::kPython) {
+        // A reset-only call carries no script to preview.
+        if (core::utils::json::bool_field(object, "reset")
+            && !core::utils::json::first_string_field(object, {"code"}).has_value()) {
+            return tool_description_line("reset namespace");
+        }
+    }
+
     if (tool_name == core::tools::names::kGrepSearch) {
         const auto pattern = core::utils::json::first_string_field(object, {"pattern"});
         const auto dir = core::utils::json::first_string_field(object, {"path"});

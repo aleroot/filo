@@ -63,6 +63,14 @@ public:
      */
     PythonExecResult execute(const std::string& code, std::string_view scope = {});
 
+    /** Take the process-wide Python execution lock.
+     *
+     * Foreign Python entry points (e.g. Python skill calls) hold this while
+     * they run, so their code cannot run in the window where execute() has
+     * sys.stdout/sys.stderr redirected to its capture buffers.
+     */
+    std::unique_lock<std::mutex> lock_execution();
+
     /** Drop the namespace of @p scope and free what it kept alive.
      *
      * The next execute() with this scope starts from a clean slate. A call
@@ -103,6 +111,13 @@ private:
     PyThreadState*                          main_thread_state_{nullptr};
     // Set once initialization finished, so clear/move can skip a cold start.
     std::atomic<bool>                       initialized_{false};
+
+    // Serialises the sys.stdout/sys.stderr swap + run + restore in execute()
+    // against every other Python entry point. Python code may release the GIL
+    // mid-call (sleep, join, IO, subprocess), so without this an overlapping
+    // call can restore out of order and leave a dead capture buffer installed
+    // as sys.stdout/sys.stderr forever. Always taken before the GIL.
+    std::mutex                              execution_mutex_;
 
     // Guard for lazy initialization thread-safety
     std::mutex init_mutex_;

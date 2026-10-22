@@ -19,6 +19,9 @@ PythonTool::PythonTool(const std::string& script_path, const std::string& module
 
 void PythonTool::load_definition() {
     try {
+        // Serialized against PythonManager::execute so skill code never runs
+        // while another call has sys.stdout/sys.stderr redirected.
+        auto exec_lock = PythonManager::get_instance().lock_execution();
         py::gil_scoped_acquire acquire;
 
         // Add the script directory to python path
@@ -64,6 +67,9 @@ ToolDefinition PythonTool::get_definition() const {
 }
 
 std::string PythonTool::execute(const std::string& json_args, [[maybe_unused]] const core::context::SessionContext& context) {
+    // Serialized against PythonManager::execute so skill code never runs while
+    // another call has sys.stdout/sys.stderr redirected.
+    auto exec_lock = PythonManager::get_instance().lock_execution();
     try {
         py::gil_scoped_acquire acquire;
 

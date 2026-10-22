@@ -25,9 +25,9 @@ ToolDefinition PythonInterpreterTool::get_definition() const {
             "To keep installed packages separate from the system Python, point the "
             "FILO_PYTHON_VENV environment variable to a venv directory before starting filo.",
         .parameters = {
-            {"code", "string", "Python source code to execute. May be empty when reset is true.", true},
+            {"code", "string", "Python source code to execute. Required unless reset is true.", false},
             {"reset", "boolean",
-             "Clear this conversation's namespace before running code. Defaults to false.", false}
+             "Clear this conversation's namespace before running code, or on its own. Defaults to false.", false}
         },
         .annotations = {
             .destructive_hint = true,  // can modify files, make network calls, etc.
@@ -70,7 +70,7 @@ std::string PythonInterpreterTool::execute(const std::string& json_args, const c
     const std::string_view scope = context.root_session();
     if (reset) {
         manager.clear_scope(scope);
-        if (code_view.empty()) return R"({"output":"","success":true})";
+        if (code_view.empty()) return R"({"output":"Python namespace cleared.","success":true})";
     }
     auto result = manager.execute(std::string(code_view), scope);
 

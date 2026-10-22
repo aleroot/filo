@@ -578,6 +578,14 @@ TEST_CASE("the embedded interpreter is refused while steering is withheld",
     CHECK_THAT(innocent, Catch::Matchers::ContainsSubstring("Access denied"));
     CHECK_THAT(innocent, Catch::Matchers::ContainsSubstring("run_terminal_command"));
 
+    // A reset-only call is refused too: while steering is withheld the
+    // interpreter is unavailable as a whole, not only for code that names
+    // files.
+    const auto denied_reset = python.execute(
+        R"JSON({"reset":true})JSON",
+        make_context(workspace.dir.path(), no_steering()));
+    CHECK_THAT(denied_reset, Catch::Matchers::ContainsSubstring("Access denied"));
+
     const auto allowed = run("print(1 + 1)", default_steering());
     CHECK_THAT(allowed, !Catch::Matchers::ContainsSubstring("Access denied"));
     CHECK_THAT(allowed, Catch::Matchers::ContainsSubstring(R"("success":true)"));

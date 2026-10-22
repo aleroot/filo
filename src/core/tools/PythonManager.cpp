@@ -9,6 +9,57 @@ namespace py = pybind11;
 
 namespace core::tools {
 
+namespace {
+
+/**
+ * @brief Restores sys.stdout/sys.stderr on every exit path, including
+ *        exceptions thrown while the redirected code runs.
+ *
+ * Pairing this with PythonManager's execution_mutex_ is what makes the
+ * redirection safe: user code can release the GIL mid-run (sleep, join, IO,
+ * subprocess), so without the lock two overlapping execute() calls would
+ * restore each other's capture buffers and leave a dead io.StringIO installed
+ * as sys.stdout/sys.stderr forever.
+ */
+class StreamRedirect {
+public:
+    StreamRedirect(py::object out, py::object err)
+        : sys_(py::module_::import("sys")) {
+        old_out_ = sys_.attr("stdout");
+        old_err_ = sys_.attr("stderr");
+        sys_.attr("stdout") = std::move(out);
+        sys_.attr("stderr") = std::move(err);
+    }
+
+    ~StreamRedirect() {
+        try {
+            restore();
+        } catch (...) {
+            // Never throw from a destructor; the process keeps whatever
+            // streams are installed and the next call re-establishes them.
+        }
+    }
+
+    /** Put the real streams back. Idempotent, so the caller can restore as
+     *  soon as the code is done and the destructor becomes a no-op. */
+    void restore() {
+        if (!sys_) return;
+        sys_.attr("stdout") = old_out_;
+        sys_.attr("stderr") = old_err_;
+        sys_ = py::module_();
+    }
+
+    StreamRedirect(const StreamRedirect&) = delete;
+    StreamRedirect& operator=(const StreamRedirect&) = delete;
+
+private:
+    py::module_ sys_;
+    py::object  old_out_;
+    py::object  old_err_;
+};
+
+} // namespace
+
 PythonManager& PythonManager::get_instance() {
     // Intentionally leak the singleton to avoid Python finalization during
     // C++ static destruction, which is fragile in multi-threaded embed setups
@@ -139,7 +190,14 @@ std::size_t PythonManager::scope_count() {
     return scopes_.size();
 }
 
+std::unique_lock<std::mutex> PythonManager::lock_execution() {
+    return std::unique_lock<std::mutex>(execution_mutex_);
+}
+
 PythonExecResult PythonManager::execute(const std::string& code, std::string_view scope_key) {
+    // Held across the stream swap, the code, and the restore: the three only
+    // form one atomic step for other Python entry points when serialised.
+    std::lock_guard<std::mutex> exec_lock(execution_mutex_);
     ensure_initialized();
 
     // Acquire the GIL before any Python C API calls.
@@ -162,16 +220,12 @@ PythonExecResult PythonManager::execute(const std::string& code, std::string_vie
 
     PythonExecResult result;
 
-    py::module_ sys    = py::module_::import("sys");
     py::module_ io     = py::module_::import("io");
     py::object buf_out = io.attr("StringIO")();
     py::object buf_err = io.attr("StringIO")();
 
-    py::object old_stdout = sys.attr("stdout");
-    py::object old_stderr = sys.attr("stderr");
-    sys.attr("stdout") = buf_out;
-    sys.attr("stderr") = buf_err;
-
+    // The guard restores the streams on every exit path of the block below.
+    StreamRedirect redirect(buf_out, buf_err);
     try {
         // Use the scope's dict for both globals and locals so that function
         // definitions and assignments persist across calls (REPL semantics).
@@ -180,10 +234,16 @@ PythonExecResult PythonManager::execute(const std::string& code, std::string_vie
     } catch (const py::error_already_set& e) {
         result.success = false;
         result.error   = e.what();
+    } catch (const std::exception& e) {
+        result.success = false;
+        result.error   = std::string("Python execution failed: ") + e.what();
+    } catch (...) {
+        result.success = false;
+        result.error   = "Python execution failed with an unknown error.";
     }
-
-    sys.attr("stdout") = old_stdout;
-    sys.attr("stderr") = old_stderr;
+    // Restore before reading the buffers: the real streams are back as soon
+    // as the code is done, and getvalue() works on the detached buffers.
+    redirect.restore();
 
     result.output = py::str(buf_out.attr("getvalue")()).cast<std::string>();
     std::string err_str = py::str(buf_err.attr("getvalue")()).cast<std::string>();

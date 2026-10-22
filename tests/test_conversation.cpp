@@ -378,6 +378,16 @@ TEST_CASE("summarize_tool_arguments — python keeps the whole script on one lin
     REQUIRE(result == "import os print('" + body + "')");
 }
 
+TEST_CASE("summarize_tool_arguments — python reset-only call",
+          "[tui][conversation][args]") {
+    // No script to preview: say what the call does instead of nothing.
+    REQUIRE(summarize_tool_arguments("python", R"({"reset":true})")
+            == "reset namespace");
+    // With code present, the script stays the preview.
+    REQUIRE(summarize_tool_arguments("python", R"JSON({"code":"print(1)","reset":true})JSON")
+            == "print(1)");
+}
+
 TEST_CASE("summarize_tool_arguments — multi-line shell commands render on one line",
           "[tui][conversation][args]") {
     const auto result = summarize_tool_arguments(

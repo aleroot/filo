@@ -35,6 +35,8 @@
 #include "TestSessionContext.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
+#include "core/tools/PythonInterpreterTool.hpp"
+#include <pybind11/embed.h>
 #endif
 #include <algorithm>
 #include <cerrno>
@@ -3292,6 +3294,19 @@ TEST_CASE("SearchReplaceTool returns error for missing old_string key", "[tools]
 
 #undef execute
 #ifdef FILO_ENABLE_PYTHON
+namespace {
+
+// Peek at the installed streams from outside an execute() call: inside one,
+// sys.stdout is legitimately the capture buffer for that call.
+std::string installed_stream_types() {
+    py::gil_scoped_acquire gil;
+    py::module_ sys = py::module_::import("sys");
+    return py::str(py::type::of(sys.attr("stdout"))).cast<std::string>() + " "
+        + py::str(py::type::of(sys.attr("stderr"))).cast<std::string>();
+}
+
+} // namespace
+
 TEST_CASE("PythonManager execute works correctly", "[tools][python]") {
     // Basic test of Python execution functionality
     auto& pm = core::tools::PythonManager::get_instance();
@@ -3300,6 +3315,90 @@ TEST_CASE("PythonManager execute works correctly", "[tools][python]") {
     auto result = pm.execute("print('hello from python')");
     REQUIRE(result.success);
     REQUIRE_THAT(result.output, Catch::Matchers::ContainsSubstring("hello from python"));
+}
+
+TEST_CASE("PythonManager keeps sys.stdout/sys.stderr when calls interleave",
+          "[tools][python][regression]") {
+    // Python code may release the GIL mid-call (sleep, join, IO, subprocess).
+    // Two overlapping calls must not restore each other's capture buffers:
+    // that used to leave a dead io.StringIO installed as sys.stdout/sys.stderr
+    // forever, and that buffer kept absorbing output.
+    auto& pm = core::tools::PythonManager::get_instance();
+    core::tools::PythonExecResult first_result;
+    core::tools::PythonExecResult second_result;
+
+    std::thread first([&] {
+        first_result = pm.execute(
+            "import time\nprint('first start')\ntime.sleep(0.15)\nprint('first end')\n",
+            "stream-regression-first");
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    std::thread second([&] {
+        second_result = pm.execute(
+            "import time\nprint('second start')\ntime.sleep(0.30)\nprint('second end')\n",
+            "stream-regression-second");
+    });
+    first.join();
+    second.join();
+
+    REQUIRE(first_result.success);
+    REQUIRE(second_result.success);
+    CHECK(first_result.output == "first start\nfirst end\n");
+    CHECK(second_result.output == "second start\nsecond end\n");
+    const auto streams = installed_stream_types();
+    REQUIRE_THAT(streams, Catch::Matchers::ContainsSubstring("TextIOWrapper"));
+    REQUIRE_THAT(streams, !Catch::Matchers::ContainsSubstring("StringIO"));
+}
+
+TEST_CASE("PythonManager clear_scope clears the default namespace",
+          "[tools][python]") {
+    auto& pm = core::tools::PythonManager::get_instance();
+    REQUIRE(pm.execute("filo_reset_probe = 1").success);
+    REQUIRE_THAT(pm.execute("print('filo_reset_probe' in globals())").output,
+                 Catch::Matchers::ContainsSubstring("True"));
+
+    pm.clear_scope({});
+
+    REQUIRE_THAT(pm.execute("print('filo_reset_probe' in globals())").output,
+                 Catch::Matchers::ContainsSubstring("False"));
+    // Builtins survive the reset.
+    REQUIRE(pm.execute("print(1 + 1)").success);
+}
+
+TEST_CASE("PythonInterpreterTool clears the namespace with reset",
+          "[tools][python]") {
+    core::tools::PythonInterpreterTool tool;
+    const auto context = test_support::make_workspace_session_context();
+
+    const auto definition = tool.get_definition();
+    const auto code_parameter = std::ranges::find(definition.parameters, "code", &ToolParameter::name);
+    REQUIRE(code_parameter != definition.parameters.end());
+    CHECK_FALSE(code_parameter->required);
+
+    REQUIRE_THAT(tool.execute(R"({"code":"filo_tool_probe = 7"})", context),
+                 Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(
+        tool.execute(R"JSON({"code":"print('filo_tool_probe' in globals())"})JSON", context),
+        Catch::Matchers::ContainsSubstring("True"));
+
+    // reset alone clears and says so.
+    const auto reset = tool.execute(R"({"reset":true})", context);
+    REQUIRE_THAT(reset, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(reset, Catch::Matchers::ContainsSubstring("namespace cleared"));
+
+    // reset + code clears first, then runs on the clean namespace.
+    REQUIRE_THAT(tool.execute(R"({"code":"filo_tool_probe = 7"})", context),
+                 Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(
+        tool.execute(
+            R"JSON({"code":"print('filo_tool_probe' in globals())","reset":true})JSON", context),
+        Catch::Matchers::ContainsSubstring("False"));
+
+    // Without reset, code is still required.
+    REQUIRE_THAT(tool.execute(R"({"reset":false})", context),
+                 Catch::Matchers::ContainsSubstring("Missing or empty 'code'"));
+    REQUIRE_THAT(tool.execute(R"({"reset":"true"})", context),
+                 Catch::Matchers::ContainsSubstring("'reset' must be a boolean"));
 }
 #endif // FILO_ENABLE_PYTHON
 

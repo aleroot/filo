@@ -120,12 +120,15 @@ TEST_CASE("The python tool's reset argument starts from an empty namespace",
           "[python][memory]") {
     core::tools::PythonInterpreterTool tool;
     const auto context = python_session(unique_session("reset"));
+    const auto other = python_session(unique_session("reset-other"));
 
     REQUIRE_THAT(run(tool, context, "kept = 1"), ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(run(tool, other, "kept = 42"), ContainsSubstring(R"("success":true)"));
 
     const auto reset_only = run(tool, context, "", true);
     CHECK_THAT(reset_only, ContainsSubstring(R"("success":true)"));
     CHECK_THAT(run(tool, context, "print('kept' in globals())"), ContainsSubstring("False"));
+    CHECK_THAT(run(tool, other, "print(kept)"), ContainsSubstring("42"));
 
     REQUIRE_THAT(run(tool, context, "kept = 2"), ContainsSubstring(R"("success":true)"));
     CHECK_THAT(run(tool, context, "print('kept' in globals())", true),
@@ -161,35 +164,45 @@ TEST_CASE("Clearing a session with a running Python call waits for it to finish"
                  ContainsSubstring(R"("success":true)"));
 
     std::string running_result;
-    std::thread running([&] {
+    std::jthread running([&] {
         running_result = run(tool, context, std::format(
             "import sys, time\n"
             "sys.modules['__main__'].__dict__['{0}_started'] = True\n"
+            "deadline = time.monotonic() + 5\n"
             "while not sys.modules['__main__'].__dict__.get('{0}', False):\n"
+            "    if time.monotonic() >= deadline: raise TimeoutError('test did not release call')\n"
             "    time.sleep(0.005)\n"
             "print('still here', type(payload).__name__)\n",
             flag));
     });
 
-    const auto started = std::format(
-        "import sys\nprint(sys.modules['__main__'].__dict__.get('{}_started', False))", flag);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (run(tool, observer, started).find("True") == std::string::npos) {
+    // execute() serialises stream redirection even across separate scopes.
+    // Observe and signal the running call under the GIL directly, so a second
+    // execute() cannot block the test behind the call it needs to release.
+    const auto has_started = [&] {
+        py::gil_scoped_acquire gil;
+        return py::module_::import("__main__").attr("__dict__")
+            .attr("get")(py::str(flag + "_started"), false).cast<bool>();
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!has_started()) {
         REQUIRE(std::chrono::steady_clock::now() < deadline);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     tool.clear_session_state(id);
 
-    // The running call keeps its namespace; a new call already starts fresh.
-    CHECK_THAT(run(tool, observer, probe_alive_code(probe)), ContainsSubstring("alive"));
-    CHECK_THAT(run(tool, context, "print('payload' in globals())"), ContainsSubstring("False"));
-
-    run(tool, observer, std::format(
-        "import sys\nsys.modules['__main__'].__dict__['{}'] = True", flag));
+    // Clearing must leave the running call's objects alive until it finishes.
+    {
+        py::gil_scoped_acquire gil;
+        const auto main = py::module_::import("__main__").attr("__dict__");
+        CHECK_FALSE(main["_filo_probes"][py::str(probe)]().is_none());
+        main[py::str(flag)] = true;
+    }
     running.join();
 
     CHECK_THAT(running_result, ContainsSubstring("still here Payload"));
+    CHECK_THAT(run(tool, context, "print('payload' in globals())"), ContainsSubstring("False"));
     CHECK_THAT(run(tool, observer, probe_alive_code(probe)), ContainsSubstring("released"));
 }
 
