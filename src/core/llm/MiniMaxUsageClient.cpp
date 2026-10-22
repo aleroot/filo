@@ -106,10 +106,10 @@ std::optional<RateLimitInfo> quota_from(simdjson::dom::element node) {
 /// Preference among `model_remains` entries for the text-model quota, lower
 /// first; nothing for entries that meter something else (image, speech, video,
 /// music). The server has labelled the text bucket `general`, `MiniMax-M*` and
-/// a concrete `MiniMax-M<n>` id, so a plan model's own entry wins, then the
-/// shared buckets, then any other text-model entry.
+/// a concrete `MiniMax-M<n>` id, so the flagship model's own entry wins, then
+/// the shared buckets, then any other text-model entry.
 std::optional<int> text_quota_rank(std::string_view name) {
-    if (is_minimax_plan_model(name)) return 0;
+    if (canonical_minimax_model(name) == kMiniMaxDefaultModel) return 0;
     if (name == "general") return 1;
     if (name == "MiniMax-M*") return 2;
     constexpr std::string_view kTextFamily = "MiniMax-M";

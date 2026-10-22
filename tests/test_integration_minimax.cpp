@@ -193,21 +193,21 @@ TEST_CASE("Claude retains legacy reasoning while MiniMax refuses unscoped state"
 
 TEST_CASE("MiniMax native counting caps generation using the actual input footprint", "[integration][minimax][budget]") {
     MiniMaxServer fixture;
-    int input_tokens = 490000;
-    std::size_t history_bytes = 600000;
+    int input_tokens = 978000;
+    std::size_t history_bytes = 1100000;
     std::string expected_max = R"("max_tokens":6000)";
     std::optional<int> requested_max;
     SECTION("Exact counts reduce output to fit") {}
     SECTION("Exact counts admit histories overstated by the local estimate") {
-        input_tokens = 100000; history_bytes = 1100000;
+        input_tokens = 100000; history_bytes = 3000000;
         expected_max = R"("max_tokens":128000)";
     }
     SECTION("Exact counts restore output room lost to an inflated estimate") {
-        input_tokens = 100000; history_bytes = 800000;
+        input_tokens = 100000; history_bytes = 2800000;
         expected_max = R"("max_tokens":128000)";
     }
     SECTION("Explicit smaller output requests remain respected") {
-        input_tokens = 100000; history_bytes = 800000; requested_max = 20000;
+        input_tokens = 100000; history_bytes = 2800000; requested_max = 20000;
         expected_max = R"("max_tokens":20000)";
     }
     std::atomic<int> counts{0};
@@ -247,10 +247,10 @@ TEST_CASE("MiniMax failed native counting keeps conservative context admission",
         full_output_budget = req.body.find(R"("max_tokens":128000)") != std::string::npos;
         ++generations; response.set_content(end_turn(), "text/event-stream");
     });
-    std::size_t bytes = 1200000;
+    std::size_t bytes = 2800000;
     bool overfull = false;
     SECTION("Local fallback admits a fitting request") {}
-    SECTION("Local fallback refuses an overfull request") { bytes = 1600000; overfull = true; }
+    SECTION("Local fallback refuses an overfull request") { bytes = 3200000; overfull = true; }
     SECTION("Oversized count responses use the local fallback") { oversized_response = true; }
     ChatRequest req; req.messages = {{.role = "user", .content = std::string(bytes, 'a')}};
     bool error = false;
@@ -291,7 +291,7 @@ TEST_CASE("MiniMax cancellation during context counting prevents generation", "[
         ++generations; response.set_content(end_turn(), "text/event-stream");
     });
     auto provider = fixture.provider();
-    ChatRequest req; req.messages = {{.role = "user", .content = std::string(600000, 'a')}};
+    ChatRequest req; req.messages = {{.role = "user", .content = std::string(1100000, 'a')}};
     std::jthread worker([&] { provider->stream_response(req, [](const auto&) {}); });
     for (int i = 0; i < 1000 && !counting.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     provider->cancel(); release = true;

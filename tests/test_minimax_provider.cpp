@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <simdjson.h>
+#include <algorithm>
 #include <cstdlib>
 #include <chrono>
 #include <fstream>
@@ -161,7 +162,8 @@ TEST_CASE("MiniMax keeps required thinking and all supported effort levels", "[m
         m3.effort = effort;
         CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
     }
-    CHECK_THROWS(protocol.prepare_request(m3));
+    // M Plan serves both curated models; only their thinking policies differ.
+    CHECK_NOTHROW(protocol.prepare_request(m3));
 }
 
 TEST_CASE("MiniMax rejects mismatched key types and leaves unknown formats usable", "[minimax][auth]") {
@@ -206,19 +208,30 @@ TEST_CASE("MiniMax sparse discovery preserves curated limits and separate plan i
     MiniMaxProtocol plan(true), api;
     const auto catalog = plan.model_catalog("minimax-m-plan");
     const auto result = catalog->parse_models_response(R"({"data":[{"id":"MiniMax-M3.1-Flash"},{"id":"MiniMax-M3.1-Flash-Preview"},{"id":"MiniMax-M3"},{"id":"MiniMax-M2.7"}]})");
-    REQUIRE(result.ok()); REQUIRE(result.models.size() == 1);
-    CHECK(result.models.front().context_window == kMiniMaxContextWindow);
-    CHECK(result.models.front().max_output_tokens == kMiniMaxOutputLimit);
-    CHECK(result.models.front().provider == "minimax-m-plan");
-    CHECK(result.models.front().supports(ModelCapability::Vision));
+    REQUIRE(result.ok()); REQUIRE(result.models.size() == 2);
+    // Retired M2.x names never reach the picker: the service reroutes them.
+    CHECK(std::ranges::none_of(result.models, [](const auto& model) {
+        return model.canonical_id.starts_with("MiniMax-M2");
+    }));
+    const auto flash = std::ranges::find_if(result.models, [](const auto& model) {
+        return model.canonical_id == kMiniMaxDefaultModel;
+    });
+    REQUIRE(flash != result.models.end());
+    CHECK(flash->context_window == kMiniMaxContextWindow);
+    CHECK(flash->max_output_tokens == kMiniMaxOutputLimit);
+    CHECK(flash->provider == "minimax-m-plan");
+    CHECK(flash->supports(ModelCapability::Vision));
     // JSON-object output passes request validation; schemas are refused by the protocol.
-    CHECK(result.models.front().supports(ModelCapability::JsonMode));
+    CHECK(flash->supports(ModelCapability::JsonMode));
+    CHECK(std::ranges::any_of(result.models, [](const auto& model) {
+        return model.canonical_id == "MiniMax-M3";
+    }));
     const std::vector<std::string> providers{"minimax", "minimax-m-plan"};
     const auto group = provider_catalog_group_for("minimax-m-plan", providers);
     REQUIRE(group.sources.size() == 2);
     const auto* source = group.find_source("minimax-m-plan"); REQUIRE(source);
     CHECK(source->includes_registry_model("MiniMax-M3.1-Flash"));
-    CHECK_FALSE(source->includes_registry_model("MiniMax-M3"));
+    CHECK(source->includes_registry_model("MiniMax-M3"));
     CHECK(provider_catalog_selection_key("minimax", kMiniMaxDefaultModel)
           != provider_catalog_selection_key("minimax-m-plan", kMiniMaxDefaultModel));
 }
@@ -229,12 +242,12 @@ TEST_CASE("MiniMax budgets complete context and refuses overfull history", "[min
     req.max_tokens = 999999;
     protocol.prepare_request(req);
     CHECK(req.max_tokens == kMiniMaxOutputLimit);
-    req.messages.back().content = std::string(1200000, 'a');
+    req.messages.back().content = std::string(2800000, 'a');
     protocol.prepare_request(req);
     providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow);
     REQUIRE(req.max_tokens.has_value());
     CHECK(*req.max_tokens < kMiniMaxOutputLimit);
-    req.messages.back().content = std::string(1600000, 'a');
+    req.messages.back().content = std::string(3200000, 'a');
     CHECK_THROWS(providers::MiniMaxRequestBudget::prepare(req, kMiniMaxContextWindow));
     req = request(); req.response_format.type = ResponseFormat::Type::JsonSchema;
     CHECK_THROWS(protocol.prepare_request(req));

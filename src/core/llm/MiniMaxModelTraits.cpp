@@ -9,8 +9,13 @@ std::string canonical_minimax_model(std::string_view model) {
     return std::string(model);
 }
 
+/// Both curated models are served on M Plan subscription keys (verified
+/// against the live endpoint). The retired M2.x names are deliberately not
+/// offered: the service reroutes them to M3.1-Flash server-side, so selecting
+/// one would misreport what actually runs.
 bool is_minimax_plan_model(std::string_view model) {
-    return canonical_minimax_model(model) == kMiniMaxDefaultModel;
+    const auto id = canonical_minimax_model(model);
+    return id == kMiniMaxDefaultModel || id == "MiniMax-M3";
 }
 
 std::string_view minimax_effort_ceiling(int max_tokens) noexcept {

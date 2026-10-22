@@ -129,7 +129,7 @@ MiniMaxProtocol::MiniMaxProtocol(bool subscription, std::string default_effort,
     : AnthropicProtocol(kMiniMaxOutputLimit), context_window_(context_window), subscription_(subscription),
       default_effort_(std::move(default_effort)),
       usage_(usage ? std::move(usage) : make_minimax_usage_source()) {
-    if (context_window_ != kMiniMaxContextWindow && context_window_ != 1000000) {
+    if (context_window_ != kMiniMaxContextWindow && context_window_ != kMiniMaxConservativeContextWindow) {
         throw std::invalid_argument("MiniMax context_window must be 512000 or 1000000.");
     }
 }

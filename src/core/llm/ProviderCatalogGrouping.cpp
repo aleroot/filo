@@ -205,7 +205,8 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
         const bool plan = definition && definition->billing_kind == core::auth::BillingKind::Subscription;
         source.category_label = plan ? "M Plan subscription." : "MiniMax API.";
         if (plan) {
-            source.registry_model_filter = {ProviderCatalogModelRule::Include, {"MiniMax-M3.1-Flash"}};
+            source.registry_model_filter = {ProviderCatalogModelRule::Include,
+                                            {"MiniMax-M3.1-Flash", "MiniMax-M3"}};
             source.api_model_filter = source.registry_model_filter;
         }
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
