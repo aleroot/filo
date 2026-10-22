@@ -1608,7 +1608,13 @@ TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", 
         CAPTURE(failure.name);
         httplib::Server server;
         std::atomic<int> requests{0};
-        server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& response) {
+        std::mutex betas_mutex;
+        std::vector<std::string> betas;
+        server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+            {
+                std::lock_guard lock(betas_mutex);
+                betas.push_back(request.get_header_value("anthropic-beta"));
+            }
             if (++requests == 1) {
                 response.status = failure.status;
                 if (failure.veto) {
@@ -1630,6 +1636,14 @@ TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", 
         std::vector<StreamChunk> chunks;
         provider->stream_response(make_claude_request("claude-haiku-5-5"), [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
         REQUIRE(requests == (failure.retry ? 2 : 1));
+        {
+            // The retry resends a payload carrying `thinking.block_binding`,
+            // which the API rejects unless the binding beta is still sent.
+            std::lock_guard lock(betas_mutex);
+            for (const auto& beta : betas) {
+                CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
+            }
+        }
         REQUIRE_FALSE(chunks.empty());
         CHECK(chunks.back().is_final);
         CHECK(chunks.back().is_error == !failure.retry);

@@ -144,6 +144,28 @@ TEST_CASE("Fable 5.1 binding controls do not leak to other models",
     }
 }
 
+TEST_CASE("A Claude retry keeps the request-scoped beta headers",
+          "[claude][headers][retry]") {
+    // HttpLLMProvider resends the payload serialized for the first attempt and
+    // rebuilds only the headers, so the betas that payload depends on must
+    // survive reset_attempt_state(). Losing the binding beta made the API
+    // reject `thinking.block_binding` with a 400 on every transport retry.
+    ClaudeProtocol protocol;
+    auto request = make_simple_request("claude-opus-5-5[1m]");
+    protocol.prepare_request(request);
+    REQUIRE_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring("block_binding"));
+    const auto before = protocol.build_headers({}).at("anthropic-beta");
+    REQUIRE_THAT(before, Catch::Matchers::ContainsSubstring(std::string(claude::kThinkingBindingBeta)));
+    REQUIRE_THAT(before, Catch::Matchers::ContainsSubstring("context-1m"));
+
+    protocol.reset_attempt_state();
+    CHECK(protocol.build_headers({}).at("anthropic-beta") == before);
+
+    protocol.reset_state();
+    CHECK_THAT(protocol.build_headers({}).at("anthropic-beta"),
+               !Catch::Matchers::ContainsSubstring(std::string(claude::kThinkingBindingBeta)));
+}
+
 TEST_CASE("Fable 5.1 preserves empty signed thinking when history is edited",
           "[claude][fable51][serializer][sse]") {
     AnthropicSSEParser parser;

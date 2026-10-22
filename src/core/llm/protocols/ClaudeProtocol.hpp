@@ -54,6 +54,9 @@ public:
     ReasoningCapabilities reasoning_capabilities(std::string_view model) const noexcept override;
     std::unique_ptr<ApiProtocolBase> clone() const override;
     void reset_state() override;
+    /// A retry resends the already serialized payload, so the request-scoped
+    /// header inputs (model, 1M context) must survive it.
+    void reset_attempt_state() override;
     void on_response(const HttpResponse& response) override;
     void enrich_rate_limit(std::string_view base_url, const cpr::Header& headers,
                            const HttpResponse& response) override;

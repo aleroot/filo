@@ -980,6 +980,11 @@ void ClaudeProtocol::reset_state() {
     last_requested_model_.clear();
 }
 
+void ClaudeProtocol::reset_attempt_state() {
+    AnthropicProtocol::reset_state();
+    last_rate_limit_ = {};
+}
+
 void ClaudeProtocol::on_response(const HttpResponse& response) {
     last_rate_limit_ = impl_parse_rate_limit_headers(response.headers);
     last_rate_limit_.is_rate_limited = last_rate_limit_.is_rate_limited || response.status_code == 429;
