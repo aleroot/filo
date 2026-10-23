@@ -2,7 +2,7 @@
 
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
-#include "../llm/ClaudeModelTraits.hpp"
+#include "../llm/ClaudeBilling.hpp"
 #include "../llm/ProviderDefinition.hpp"
 #include "../utils/UriUtils.hpp"
 #include "../llm/protocols/ClaudeProtocol.hpp"
@@ -27,8 +27,6 @@ constexpr int kSearchTimeoutMs = 60000;
 constexpr int kMaxSearchUses = 8;
 
 constexpr std::string_view kWebSearchBeta = "web-search-2025-03-05";
-constexpr std::string_view kBillingHeader =
-    core::llm::claude::kBillingHeader;
 
 [[nodiscard]] bool is_anthropic_endpoint(
     const core::llm::ProviderMetadata& metadata) {
@@ -57,6 +55,9 @@ void write_string_array(core::utils::JsonWriter& writer,
 
 [[nodiscard]] std::string search_payload(const SearchRequest& request,
                                          std::string_view model) {
+    const std::string prompt = "Call the web_search tool to search for the following query. "
+        "Base your answer on the search results and cite source URLs. Query: "
+        + request.query;
     core::utils::JsonWriter writer(2048);
     {
         auto _root = writer.object();
@@ -64,8 +65,7 @@ void write_string_array(core::utils::JsonWriter& writer,
               .kv_bool("stream", false).comma()
               .kv_num("max_tokens", 2048).comma()
               .kv_str("system",
-                      "x-anthropic-billing-header: "
-                          + std::string(kBillingHeader)
+                      core::llm::claude::billing_block(prompt)
                           + "\n\nYou are an assistant for performing a web search tool use. "
                             "Return concise findings and preserve source URLs.").comma()
               .key("messages");
@@ -74,9 +74,7 @@ void write_string_array(core::utils::JsonWriter& writer,
             {
                 auto _message = writer.object();
                 writer.kv_str("role", "user").comma()
-                      .kv_str("content", "Call the web_search tool to search for the following query. "
-                          "Base your answer on the search results and cite source URLs. Query: "
-                          + request.query);
+                      .kv_str("content", prompt);
             }
         }
         writer.comma().key("tools");
@@ -109,7 +107,9 @@ void write_string_array(core::utils::JsonWriter& writer,
             }
         }
     }
-    return std::move(writer).take();
+    auto payload = std::move(writer).take();
+    core::llm::claude::sign_body(payload);
+    return payload;
 }
 
 [[nodiscard]] cpr::Header anthropic_headers(
@@ -232,7 +232,7 @@ public:
 
         const auto auth = metadata->credential_source->get_auth();
         const cpr::Response response = cpr::Post(
-            cpr::Url{detail::append_path(metadata->base_url, "/v1/messages")},
+            cpr::Url{protocol.build_url(metadata->base_url, model)},
             anthropic_headers(auth, protocol),
             cpr::Body{search_payload(request, model)},
             cpr::Timeout{kSearchTimeoutMs});

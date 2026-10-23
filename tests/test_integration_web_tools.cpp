@@ -117,8 +117,10 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
                 .forced_tool_choice_rejected;
         CHECK(choice == (expect_auto ? "auto" : "tool"));
         if (expect_auto) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
-        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.280"));
-        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring(actual.get_header_value("x-anthropic-billing-header")));
+        CHECK_FALSE(actual.has_header("x-anthropic-billing-header"));
+        CHECK(actual.get_header_value("x-claude-code-request-class") == "main");
+        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
+        CHECK_THAT(actual.body, !Catch::Matchers::ContainsSubstring("cch=00000;"));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("web-search-2025-03-05"));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
         CHECK(actual.get_header_value("Authorization") == "Bearer test-oauth-token");

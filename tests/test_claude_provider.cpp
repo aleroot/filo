@@ -3,6 +3,9 @@
 
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/ClaudeModelTraits.hpp"
+#include "core/llm/ClaudeBilling.hpp"
+#include "core/llm/ClaudeCodeClient.hpp"
+#include "core/utils/Uuid.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
@@ -10,9 +13,13 @@
 #include "core/tools/Tool.hpp"
 
 #include <simdjson.h>
+#include <zlib.h>
 
+#include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <utility>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -57,6 +64,62 @@ static ChatRequest make_simple_request(std::string model    = "claude-sonnet-4-6
     req.messages.push_back(Message{.role = "user", .content = std::move(user_text)});
     return req;
 }
+
+namespace {
+
+[[nodiscard]] std::string join_betas(const std::vector<std::string_view>& betas) {
+    std::string out;
+    for (const auto beta : betas) {
+        if (!out.empty()) out += ',';
+        out += beta;
+    }
+    return out;
+}
+
+[[nodiscard]] std::string gunzip(std::string_view bytes) {
+    z_stream stream{};
+    REQUIRE(inflateInit2(&stream, 15 + 16) == Z_OK);
+    std::string out(bytes.size() * 20 + 1024, '\0');
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(bytes.data()));
+    stream.avail_in = static_cast<uInt>(bytes.size());
+    stream.next_out = reinterpret_cast<Bytef*>(out.data());
+    stream.avail_out = static_cast<uInt>(out.size());
+    const int status = inflate(&stream, Z_FINISH);
+    out.resize(stream.total_out);
+    inflateEnd(&stream);
+    REQUIRE(status == Z_STREAM_END);
+    return out;
+}
+
+/// Sets or clears environment variables for one scope and restores them.
+class ScopedEnv {
+public:
+    ScopedEnv(std::initializer_list<std::pair<const char*, const char*>> values) {
+        for (const auto& [name, value] : values) {
+            const char* old = std::getenv(name);
+            saved_.emplace_back(name, old ? std::optional<std::string>(old) : std::nullopt);
+            if (value) ::setenv(name, value, 1);
+            else ::unsetenv(name);
+        }
+    }
+    ~ScopedEnv() {
+        for (const auto& [name, value] : saved_) {
+            if (value) ::setenv(name.c_str(), value->c_str(), 1);
+            else ::unsetenv(name.c_str());
+        }
+    }
+private:
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
+};
+
+constexpr std::string_view kPerTurnMainBetas =
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+    "context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,"
+    "mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20,"
+    "mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,thinking-binding-controls-2026-08-01,"
+    "thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07";
+
+} // namespace
 
 TEST_CASE("Anthropic serializer replaces malformed tool input with an object",
           "[claude][serializer][tool-call][regression]") {
@@ -112,9 +175,10 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
             auth.headers["Authorization"] = "Bearer test-token";
             auth.headers["anthropic-beta"] = "custom-beta,thinking-binding-controls-2026-08-01";
             const auto headers = protocol.build_headers(auth);
-            CHECK_THAT(headers.at("x-anthropic-billing-header"),
-                       Catch::Matchers::StartsWith("cc_version=2.1.280"));
-            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(headers.at("x-anthropic-billing-header")));
+            // Claude Code carries attribution only in the body's first system block.
+            CHECK_FALSE(headers.contains("x-anthropic-billing-header"));
+            CHECK(headers.at("x-claude-code-request-class") == "main");
+            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
             CHECK(headers.at("Authorization") == "Bearer test-token");
             const auto& beta = headers.at("anthropic-beta");
             const auto binding = std::string(claude::kThinkingBindingBeta);
@@ -122,7 +186,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
             CHECK(beta.find(binding, beta.find(binding) + binding.size()) == std::string::npos);
             CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
             CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("custom-beta"));
-            CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+            CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("per-turn-control-2026-07-01"));
         }
     }
 }
@@ -139,8 +203,9 @@ TEST_CASE("Fable 5.1 binding controls do not leak to other models",
         protocol.prepare_request(request);
         CHECK(request.model == model);
         CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring("block_binding"));
+        // Claude Code's per-model list difference is per-turn-control, not the binding beta.
         CHECK_THAT(protocol.build_headers({}).at("anthropic-beta"),
-                   !Catch::Matchers::ContainsSubstring(std::string(claude::kThinkingBindingBeta)));
+                   !Catch::Matchers::ContainsSubstring("per-turn-control-2026-07-01"));
     }
 }
 
@@ -163,7 +228,7 @@ TEST_CASE("A Claude retry keeps the request-scoped beta headers",
 
     protocol.reset_state();
     CHECK_THAT(protocol.build_headers({}).at("anthropic-beta"),
-               !Catch::Matchers::ContainsSubstring(std::string(claude::kThinkingBindingBeta)));
+               !Catch::Matchers::ContainsSubstring("context-1m"));
 }
 
 TEST_CASE("Fable 5.1 preserves empty signed thinking when history is edited",
@@ -392,7 +457,7 @@ TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
         const auto beta = headers.at("anthropic-beta");
         CHECK_THAT(beta, Catch::Matchers::ContainsSubstring(
             std::string(claude::kThinkingBindingBeta)));
-        CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+        CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("per-turn-control-2026-07-01"));
     }
 
     // Claude Opus 5 hides reasoning text by default and rejects non-default
@@ -656,11 +721,12 @@ TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
 
     const auto payload = ClaudeSerializer::serialize(req);
     require_valid_json(payload);
+    // Claude Code's order puts max_tokens after tools.
     const auto tools_begin = payload.find(R"("tools":[)");
-    const auto messages_begin = payload.find(R"(,"messages":[)");
+    const auto tools_end = payload.find(R"(,"max_tokens":)", tools_begin);
     REQUIRE(tools_begin != std::string::npos);
-    REQUIRE(messages_begin != std::string::npos);
-    const auto tools = payload.substr(tools_begin, messages_begin - tools_begin);
+    REQUIRE(tools_end != std::string::npos);
+    const auto tools = payload.substr(tools_begin, tools_end - tools_begin);
 
     const auto first_tool = tools.find(R"("name":"read")");
     const auto last_tool = tools.find(R"("name":"write_file")");
@@ -1142,8 +1208,10 @@ TEST_CASE("ClaudeSerializer - malformed tool results cannot poison request JSON"
     const auto payload = ClaudeSerializer::serialize(req);
 
     REQUIRE(simdjson::validate_utf8(payload));
+    // The signed body is re-serialized as JSON.stringify does, which writes
+    // U+FFFD as UTF-8 rather than as an escape.
     REQUIRE_THAT(payload,
-                 Catch::Matchers::ContainsSubstring(R"(bad \ufffd fetch result)"));
+                 Catch::Matchers::ContainsSubstring("bad \xEF\xBF\xBD fetch result"));
     require_valid_json(payload);
 }
 
@@ -1300,8 +1368,10 @@ TEST_CASE("ClaudeProtocol::prepare_request resolves Haiku alias to Haiku 5.5",
     REQUIRE(req.model == "claude-haiku-5-5");
 }
 
-TEST_CASE("ClaudeProtocol::build_headers omits legacy thinking beta for Fable 5",
+TEST_CASE("ClaudeProtocol::build_headers sends Claude Code's default list for Fable 5",
           "[claude][headers][thinking]") {
+    // Claude Code keeps interleaved-thinking on every main request, adaptive-only
+    // models included, whatever the thinking configuration.
     ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
     ChatRequest req = make_simple_request("claude-fable-5");
     protocol.prepare_request(req);
@@ -1309,8 +1379,7 @@ TEST_CASE("ClaudeProtocol::build_headers omits legacy thinking beta for Fable 5"
     core::auth::AuthInfo auth;
     auto headers = protocol.build_headers(auth);
     REQUIRE(headers.count("anthropic-beta") == 1);
-    REQUIRE_THAT(headers.at("anthropic-beta"),
-                 !Catch::Matchers::ContainsSubstring("interleaved-thinking-2025-05-14"));
+    CHECK(headers.at("anthropic-beta") == join_betas(claude::main_request_betas("claude-fable-5", false, false)));
 }
 
 TEST_CASE("ClaudeProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
@@ -2029,8 +2098,9 @@ TEST_CASE("Claude 5.5 policies are valid without discovery and keep their distin
                 CHECK(doc["output_config"]["effort"].get_string().value() == request.effort);
             }
             const auto beta = protocol.build_headers({}).at("anthropic-beta");
+            // Claude Code's main list carries the binding beta even without a binding field.
             CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
-            CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+            CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
         }
     }
     CHECK(claude_wire_policy("claude-sonnet-5-5").forced_tool_choice_rejected);
@@ -2133,4 +2203,360 @@ TEST_CASE("Claude structured outputs share output_config with effort and reject 
     core::auth::AuthInfo auth;
     auth.headers["Anthropic-Beta"] = "custom-beta";
     CHECK_THAT(protocol.build_headers(auth).at("anthropic-beta"), Catch::Matchers::ContainsSubstring("custom-beta"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude Code 2.1.302 billing attribution. Expected values come from
+// cortexkit/commons test-vectors/claude-oauth-wire (anthropic-policy 0.1.2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// The body with its billing `cch` reset to the unsigned placeholder.
+std::string unsigned_billing_body(std::string body) {
+    const auto marker = body.find("x-anthropic-billing-header: cc_version=");
+    REQUIRE(marker != std::string::npos);
+    const auto token = body.find("cch=", marker);
+    REQUIRE(token != std::string::npos);
+    body.replace(token + 4, 5, "00000");
+    return body;
+}
+
+} // namespace
+
+TEST_CASE("Claude billing primitives match the Claude Code 2.1.302 vectors", "[claude][billing]") {
+    CHECK(std::format("{:05x}", claude::xxh64("hello world test message", 0x4d659218e32a3268ULL) & 0xFFFFFULL)
+          == "cc124");
+    const std::pair<std::string_view, std::string_view> suffixes[] = {
+        {"Summarise the README in two sentences.", "f6a"},
+        {"Find where the retry limit is configured.", "0b6"},
+        {"Plan the database migration.", "0c6"},
+        {"Rename the helper function and update its callers.", "73f"},
+        {"What does the README say?", "0b6"},
+        {"Run the unit tests and report failures.", "44d"},
+        {"Extract the package name and version as JSON.", "c63"},
+    };
+    for (const auto& [text, suffix] : suffixes) {
+        CAPTURE(text);
+        CHECK(claude::version_suffix(text) == suffix);
+    }
+    CHECK(claude::billing_block("Summarise the README in two sentences.")
+          == "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch=00000;");
+}
+
+TEST_CASE("Claude body signing reproduces the Claude Code 2.1.302 vectors", "[claude][billing]") {
+    const std::pair<std::string_view, std::string_view> vectors[] = {
+        {R"VEC({"model":"claude-opus-5-5","messages":[{"role":"user","content":[{"type":"text","text":"Find where the retry limit is configured.","cache_control":{"type":"ephemeral","ttl":"1h"}}]},{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants the retry limit location.","signature":"SIGNATURE_PLACEHOLDER_0001"},{"type":"text","text":"It is set in src/config.ts as MAX_RETRIES = 3.","cache_control":{"type":"ephemeral","ttl":"1h"}}]},{"role":"user","content":[{"type":"text","text":"Raise it to 5 and explain the trade-off.","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.302.0b6; cc_entrypoint=cli; cch=24c5d; cc_prev_req=req_PLACEHOLDER0000000000000001; cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=2; cc_turn_index=2;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nOnly refuse if the assistant honestly cannot help with the request."},{"type":"text","text":"Environment context you are running in:\n<env>\n  Working directory: /work/demo\n  Is directory a git repo: yes\n  Platform: darwin\n  Today's date: Thu Oct 15 2026\n</env>","cache_control":{"type":"ephemeral","ttl":"1h"}}],"metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"00000000-0000-4000-8000-000000000000\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}"},"max_tokens":32000,"thinking":{"type":"adaptive","display":"summarized","block_binding":{"prefix_mismatch_behavior":"drop_block"}},"output_config":{"effort":"high"},"diagnostics":{"previous_message_id":"msg_PLACEHOLDER0000000000000001"},"stream":true,"fallbacks":"default"})VEC", "24c5d"},
+        {R"VEC({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":[{"type":"text","text":"Rename the helper function and update its callers."}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.302.73f; cc_entrypoint=cli; cch=455aa; cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nOnly refuse if the assistant honestly cannot help with the request."},{"type":"text","text":"Environment context you are running in:\n<env>\n  Working directory: /work/demo\n  Is directory a git repo: yes\n  Platform: darwin\n  Today's date: Thu Oct 15 2026\n</env>"}],"metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"00000000-0000-4000-8000-000000000000\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}"},"max_tokens":32000,"thinking":{"type":"between_tools"},"output_config":{"effort":"high"},"diagnostics":{"previous_message_id":null},"stream":true,"cache_control":{"type":"ephemeral","ttl":"1h"}})VEC", "455aa"},
+    };
+    for (const auto& [signed_body, cch] : vectors) {
+        auto body = unsigned_billing_body(std::string(signed_body));
+        CHECK(claude::body_signature(body) == std::string(cch));
+        claude::sign_body(body);
+        CHECK(body == signed_body);
+    }
+}
+
+TEST_CASE("Claude body signing hashes the JSON.stringify form", "[claude][billing]") {
+    // Filo writes doubles with std::to_string and may escape differently; the
+    // signature is taken over the JavaScript re-serialization, without
+    // max_tokens and with an empty model.
+    const std::string body =
+        R"({"model":"claude-x","stream":true,"max_tokens":32000,"temperature":0.200000,)"
+        R"("big":1e21,"small":0.0000001,"neg":-2.50,"text":"\u00e9\u0001\/"})";
+    const std::string canonical =
+        "{\"model\":\"\",\"stream\":true,\"temperature\":0.2,"
+        "\"big\":1e+21,\"small\":1e-7,\"neg\":-2.5,\"text\":\"\xC3\xA9\\u0001/\"}";
+    CHECK(claude::body_signature(body)
+          == std::format("{:05x}", claude::xxh64(canonical, 0x4d659218e32a3268ULL) & 0xFFFFFULL));
+    CHECK_FALSE(claude::body_signature("not json").has_value());
+}
+
+TEST_CASE("Claude requests carry a signed Claude Code billing block", "[claude][billing][serializer]") {
+    ChatRequest req;
+    req.model = "claude-sonnet-4-6";
+    req.temperature = 0.2;
+    req.messages = {{.role = "system", .content = "You are helpful."},
+                    {.role = "user", .content = "Summarise the README in two sentences."}};
+    const auto payload = ClaudeSerializer::serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch="));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("cch=00000;"));
+    const auto token = payload.find("cch=") + 4;
+    CHECK(claude::body_signature(unsigned_billing_body(payload)) == payload.substr(token, 5));
+
+    ChatRequest parts;
+    parts.model = "claude-sonnet-4-6";
+    parts.messages = {{.role = "user",
+                       .content_parts = {{.type = ContentPartType::Text, .text = "<system-reminder>ctx</system-reminder>"},
+                                         {.type = ContentPartType::Text, .text = "Run the unit tests and report failures."}}},
+                      {.role = "assistant", .content = "Done."},
+                      {.role = "user", .content = "Thanks"}};
+    CHECK(claude::first_user_text(parts) == "Run the unit tests and report failures.");
+    parts.messages.front().content_parts.front().text = "x <command-name>/review</command-name>";
+    CHECK(claude::first_user_text(parts) == "<command-name>/review</command-name>");
+}
+
+
+TEST_CASE("Claude Code beta lists match the 2.1.302 capture per model", "[claude][client][headers]") {
+    // cortexkit/commons 3ce6295 vectors, minus the host's own betas
+    // (fine-grained-tool-streaming, server-side-fallback, fast-mode).
+    for (const auto* model : {"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5",
+                              "claude-opus-5-5[1m]", "claude-sonnet-5-5-20261001"}) {
+        CAPTURE(model);
+        CHECK(join_betas(claude::main_request_betas(model, true, false)) == kPerTurnMainBetas);
+    }
+    CHECK(join_betas(claude::main_request_betas("claude-haiku-5-5", true, false))
+          == "oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+             "context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,"
+             "per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20,"
+             "mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,thinking-binding-controls-2026-08-01,"
+             "thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07");
+    CHECK(join_betas(claude::main_request_betas("claude-opus-4-8", true, true))
+          == "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+             "context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-tool-changes-2026-07-01,"
+             "advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,"
+             "thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,"
+             "extended-cache-ttl-2025-04-11,structured-outputs-2025-12-15,cache-diagnosis-2026-04-07");
+    // Without OAuth only the OAuth beta goes; a near-miss id keeps the default list.
+    const auto api_key = join_betas(claude::main_request_betas("claude-fable-5-10", false, false));
+    CHECK_THAT(api_key, !Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
+    CHECK_THAT(api_key, !Catch::Matchers::ContainsSubstring("per-turn-control"));
+    CHECK(api_key.starts_with("claude-code-20250219,interleaved-thinking-2025-05-14,"));
+}
+
+TEST_CASE("Claude requests carry Claude Code's client headers and URL", "[claude][client][headers]") {
+    ClaudeProtocol protocol;
+    auto request = make_simple_request("claude-sonnet-5-5");
+    request.session_id = "client-headers-session";
+    protocol.prepare_request(request);
+
+    core::auth::AuthInfo auth;
+    auth.properties["oauth"] = "1";
+    auth.headers["Authorization"] = "Bearer test-token";
+    auto headers = protocol.build_headers(auth);
+    headers["Accept"] = "text/event-stream"; // What HttpLLMProvider sets before the hook.
+    protocol.prepare_headers(headers, request, "https://api.anthropic.com");
+
+    CHECK(headers.at("User-Agent") == "claude-cli/2.1.302 (external, cli)");
+    CHECK(headers.at("x-app") == "cli");
+    CHECK(headers.at("anthropic-dangerous-direct-browser-access") == "true");
+    CHECK(headers.at("anthropic-version") == "2023-06-01");
+    CHECK(headers.at("Accept") == "application/json");
+    CHECK(headers.at("x-claude-code-request-class") == "main");
+    CHECK(headers.at("x-stainless-lang") == "js");
+    CHECK(headers.at("x-stainless-package-version") == "0.128.0");
+    CHECK(headers.at("x-stainless-runtime") == "node");
+    CHECK(headers.at("x-stainless-runtime-version") == "v26.3.0");
+    CHECK(headers.at("x-stainless-timeout") == "600");
+    CHECK(headers.at("x-stainless-os") == claude::stainless_os());
+    CHECK(headers.at("x-stainless-arch") == claude::stainless_arch());
+    CHECK(headers.at("x-stainless-retry-count") == "0");
+    CHECK(headers.at("anthropic-beta") == kPerTurnMainBetas);
+
+    const auto session = headers.at("x-claude-code-session-id");
+    const auto prompt = headers.at("x-claude-code-prompt-id");
+    const auto client_request = headers.at("x-client-request-id");
+    CHECK(session.size() == 36);
+    CHECK(prompt.size() == 36);
+    CHECK(client_request.size() == 36);
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring("cc_prompt_id=" + prompt + ";"));
+
+    // A retry keeps the request ids and counts the attempt.
+    protocol.reset_attempt_state();
+    auto retry = protocol.build_headers(auth);
+    protocol.prepare_headers(retry, request, "https://api.anthropic.com");
+    CHECK(retry.at("x-stainless-retry-count") == "1");
+    CHECK(retry.at("x-client-request-id") == client_request);
+    CHECK(retry.at("x-claude-code-prompt-id") == prompt);
+
+    // The next request of the same conversation keeps the session id, gets a
+    // new client request id, and keeps the prompt id while the prompt is the same.
+    ClaudeProtocol next;
+    next.prepare_request(request);
+    auto next_headers = next.build_headers(auth);
+    next.prepare_headers(next_headers, request, "https://api.anthropic.com");
+    CHECK(next_headers.at("x-claude-code-session-id") == session);
+    CHECK(next_headers.at("x-claude-code-prompt-id") == prompt);
+    CHECK(next_headers.at("x-client-request-id") != client_request);
+
+    CHECK(protocol.build_url("https://api.anthropic.com", request.model)
+          == "https://api.anthropic.com/v1/messages?beta=true");
+    CHECK(protocol.build_url("https://proxy.example/v1", request.model)
+          == "https://proxy.example/v1/messages?beta=true");
+}
+
+TEST_CASE("Claude billing lineage follows the Claude Code 2.1.302 vectors", "[claude][billing][lineage]") {
+    CHECK(claude::billing_block("Summarise the README in two sentences.",
+                                {.prompt_id = "33333333-3333-4333-8333-333333333333", .prompt_index = 1})
+          == "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch=00000; "
+             "cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=1; "
+             "cc_turn_index=1;");
+    CHECK(claude::billing_block("Find where the retry limit is configured.",
+                                {.previous_request_id = "req_PLACEHOLDER0000000000000001",
+                                 .prompt_id = "33333333-3333-4333-8333-333333333333",
+                                 .prompt_index = 2})
+          == "x-anthropic-billing-header: cc_version=2.1.302.0b6; cc_entrypoint=cli; cch=00000; "
+             "cc_prev_req=req_PLACEHOLDER0000000000000001; cc_prompt_id=33333333-3333-4333-8333-333333333333; "
+             "cc_turn_origin=human; cc_prompt_index=2; cc_turn_index=2;");
+    // An invalid request id is dropped; no prompt id means no prompt fields.
+    CHECK(claude::billing_block("short", {.previous_request_id = "req_short", .prompt_index = 3})
+          == claude::billing_block("short"));
+    CHECK(claude::is_valid_request_id("req_011CUabcdEFGH"));
+    CHECK_FALSE(claude::is_valid_request_id("msg_011CUabcdEFGH"));
+}
+
+TEST_CASE("Claude conversations carry request lineage, metadata and diagnostics",
+          "[claude][billing][lineage][serializer]") {
+    auto request = make_simple_request("claude-opus-5-5");
+    request.session_id = "lineage-session-" + core::utils::random_uuid_v4();
+    request.auth_properties["account_id"] = "00000000-0000-4000-8000-000000000000";
+
+    ClaudeProtocol first;
+    first.prepare_request(request);
+    const auto first_payload = first.serialize(request);
+    simdjson::dom::parser parser;
+    auto doc = parser.parse(first_payload);
+    CHECK(doc["diagnostics"]["previous_message_id"].is_null());
+    std::string_view user_id;
+    REQUIRE(doc["metadata"]["user_id"].get(user_id) == simdjson::SUCCESS);
+    simdjson::dom::parser user_parser;
+    const auto identity = user_parser.parse(std::string(user_id));
+    CHECK(std::string_view(identity["device_id"].get_string().value()) == claude::device_id());
+    CHECK(identity["device_id"].get_string().value().size() == 64);
+    CHECK(identity["account_uuid"].get_string().value() == "00000000-0000-4000-8000-000000000000");
+    std::string session(identity["session_id"].get_string().value());
+    CHECK_THAT(first_payload, Catch::Matchers::ContainsSubstring("cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"));
+    CHECK_THAT(first_payload, !Catch::Matchers::ContainsSubstring("cc_prev_req="));
+
+    // The response names the request and the message.
+    const cpr::Header response_headers{{"request-id", "req_011CUlineageTest01"}};
+    first.on_response({200, "", response_headers});
+    (void)first.parse_event(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_011CUlineage\","
+        "\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n");
+
+    // A follow-up for the same prompt (a tool round) keeps the prompt id.
+    const auto prompt_id = [](std::string_view payload) {
+        const auto start = payload.find("cc_prompt_id=") + 13;
+        return std::string(payload.substr(start, 36));
+    };
+    request.messages.push_back({.role = "assistant", .content = "Working on it."});
+    ClaudeProtocol second;
+    second.prepare_request(request);
+    const auto second_payload = second.serialize(request);
+    CHECK_THAT(second_payload, Catch::Matchers::ContainsSubstring("cc_prev_req=req_011CUlineageTest01;"));
+    CHECK(prompt_id(second_payload) == prompt_id(first_payload));
+    simdjson::dom::parser second_parser;
+    auto second_doc = second_parser.parse(second_payload);
+    CHECK(second_doc["diagnostics"]["previous_message_id"].get_string().value() == "msg_011CUlineage");
+
+    // A new user prompt gets a new prompt id and the next index.
+    request.messages.push_back({.role = "user", .content = "And now the tests."});
+    ClaudeProtocol third;
+    third.prepare_request(request);
+    const auto third_payload = third.serialize(request);
+    CHECK(prompt_id(third_payload) != prompt_id(first_payload));
+    CHECK_THAT(third_payload, Catch::Matchers::ContainsSubstring("cc_prompt_index=2; cc_turn_index=2;"));
+    CHECK_THAT(third_payload, Catch::Matchers::ContainsSubstring(session));
+
+    // A failed response is not lineage.
+    third.on_response({500, "", cpr::Header{{"request-id", "req_011CUfailedRequest"}}});
+    ClaudeProtocol fourth;
+    fourth.prepare_request(request);
+    CHECK_THAT(fourth.serialize(request), Catch::Matchers::ContainsSubstring("cc_prev_req=req_011CUlineageTest01;"));
+
+    // Without an account id there is no metadata, as in Claude Code.
+    request.auth_properties.clear();
+    CHECK_THAT(fourth.serialize(request), !Catch::Matchers::ContainsSubstring("\"metadata\""));
+}
+
+TEST_CASE("Claude bodies go out in Claude Code's field order and stay signed", "[claude][billing][serializer]") {
+    ClaudeProtocol protocol;
+    auto request = make_simple_request("claude-opus-5-5");
+    request.session_id = "order-session";
+    request.auth_properties["account_id"] = "00000000-0000-4000-8000-000000000000";
+    protocol.prepare_request(request);
+    const auto payload = protocol.serialize(request);
+
+    simdjson::dom::parser parser;
+    simdjson::dom::object root = parser.parse(payload).get_object();
+    std::vector<std::string> keys;
+    for (const auto field : root) keys.emplace_back(field.key);
+    const std::vector<std::string> order{"model", "messages", "system", "metadata", "max_tokens", "thinking",
+                                         "output_config", "diagnostics", "stream"};
+    std::vector<std::ptrdiff_t> positions;
+    for (const auto& key : keys) {
+        const auto it = std::ranges::find(order, key);
+        CHECK(it != order.end());
+        positions.push_back(it - order.begin());
+    }
+    CHECK(std::ranges::is_sorted(positions));
+    CHECK(payload.starts_with(R"({"model":"claude-opus-5-5","messages":[)"));
+
+    const auto token = payload.find("cch=") + 4;
+    CHECK(claude::body_signature(unsigned_billing_body(payload)) == payload.substr(token, 5));
+}
+
+TEST_CASE("Claude request bodies are gzipped the way Claude Code sends them", "[claude][client][gzip]") {
+    ScopedEnv env{{"HTTPS_PROXY", nullptr}, {"https_proxy", nullptr}, {"HTTP_PROXY", nullptr},
+                  {"http_proxy", nullptr}, {"NO_PROXY", nullptr}, {"no_proxy", nullptr},
+                  {"CLAUDE_CODE_GZIP_REQUEST_BODIES", nullptr}, {"CLAUDE_CODE_CLIENT_CERT", nullptr},
+                  {"CLAUDE_CODE_CLIENT_KEY", nullptr}};
+    const std::string big =
+        R"({"model":"m","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch=6b2d9;"}],"pad":")"
+        + std::string(4096, 'a') + "\"}";
+    const std::string url = "https://api.anthropic.com/v1/messages?beta=true";
+    CHECK(claude::should_gzip_body(url, big));
+    CHECK_FALSE(claude::should_gzip_body(url, big.substr(0, 4000)));
+    CHECK_FALSE(claude::should_gzip_body("https://proxy.example/v1/messages", big));
+    CHECK_FALSE(claude::should_gzip_body("http://127.0.0.1:8080/v1/messages", big));
+    {
+        ScopedEnv proxy{{"HTTPS_PROXY", "http://proxy.local:3128"}};
+        CHECK_FALSE(claude::should_gzip_body(url, big));
+        ScopedEnv bypass{{"NO_PROXY", ".anthropic.com"}};
+        CHECK(claude::should_gzip_body(url, big));
+    }
+    {
+        ScopedEnv off{{"CLAUDE_CODE_GZIP_REQUEST_BODIES", "0"}};
+        CHECK_FALSE(claude::should_gzip_body(url, big));
+    }
+
+    const auto wire = claude::gzip_body(big);
+    REQUIRE(wire.size() > 10);
+    CHECK(static_cast<unsigned char>(wire[0]) == 0x1f);
+    CHECK(static_cast<unsigned char>(wire[1]) == 0x8b);
+    CHECK(static_cast<unsigned char>(wire[9]) == 0xff);
+    CHECK(wire.size() < big.size() / 4);
+    const auto text = gunzip(wire);
+    // cch is reset (Claude Code signs only uncompressed bodies), then padding.
+    std::string expected = big;
+    expected.replace(expected.find("cch=6b2d9") + 4, 5, "00000");
+    REQUIRE(text.starts_with(expected + "\n"));
+    const auto padding = std::string_view(text).substr(expected.size() + 1);
+    CHECK(padding.size() <= 256);
+    CHECK(padding.find_first_not_of(" \t") == std::string_view::npos);
+
+    ClaudeProtocol protocol;
+    const auto encoded = protocol.encode_request_body(big, url);
+    REQUIRE(encoded.has_value());
+    CHECK(encoded->content_encoding == "gzip");
+    CHECK_FALSE(protocol.encode_request_body(big, "http://127.0.0.1:9/v1/messages").has_value());
+}
+
+TEST_CASE("Claude Code recognises a rejected gzip body", "[claude][client][gzip]") {
+    const cpr::Header anthropic{{"request-id", "req_011CUrejectTest"}};
+    const cpr::Header cloudflare{{"cf-ray", "8f00000000000000-FRA"}};
+    const cpr::Header proxy{{"server", "squid"}};
+    CHECK(claude::is_gzip_rejection(415, proxy, ""));
+    CHECK(claude::is_gzip_rejection(403, proxy, "Forbidden"));
+    CHECK_FALSE(claude::is_gzip_rejection(500, proxy, ""));
+    CHECK_FALSE(claude::is_gzip_rejection(403, anthropic, ""));
+    CHECK_FALSE(claude::is_gzip_rejection(
+        400, anthropic, R"({"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: too large"}})"));
+    CHECK(claude::is_gzip_rejection(
+        400, anthropic,
+        R"({"type":"error","error":{"type":"invalid_request_error","message":"The request body is not valid JSON: x"}})"));
+    CHECK(claude::is_gzip_rejection(400, cloudflare, "bad json: unexpected EOF\n"));
+    CHECK(claude::is_gzip_rejection(400, cloudflare, R"({"error":"bad json: invalid character 'x'","reason":"bad_json"})"));
 }

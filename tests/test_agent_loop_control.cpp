@@ -1755,10 +1755,17 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
     REQUIRE(first_messages != std::string::npos);
     REQUIRE(second_messages != std::string::npos);
     REQUIRE(third_messages != std::string::npos);
-    CHECK(first_payload.substr(0, first_messages)
-          == second_payload.substr(0, second_messages));
-    CHECK(second_payload.substr(0, second_messages)
-          == third_payload.substr(0, third_messages));
+    // `cch` signs the whole body, so it differs on every request by design;
+    // everything else before the messages must stay byte-identical.
+    const auto unsigned_prefix = [](const std::string& payload, std::size_t end) {
+        auto prefix = payload.substr(0, end);
+        if (const auto token = prefix.find("cch="); token != std::string::npos) prefix.replace(token + 4, 5, "00000");
+        return prefix;
+    };
+    CHECK(unsigned_prefix(first_payload, first_messages)
+          == unsigned_prefix(second_payload, second_messages));
+    CHECK(unsigned_prefix(second_payload, second_messages)
+          == unsigned_prefix(third_payload, third_messages));
 }
 
 TEST_CASE("Agent keeps attached files out of the stable prompt prefix",

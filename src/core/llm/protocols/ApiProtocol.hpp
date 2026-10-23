@@ -310,6 +310,12 @@ struct WebSocketRequestFrame {
     bool suppress_output = false;
 };
 
+/// A request body sent content-encoded, with its `Content-Encoding` value.
+struct EncodedRequestBody {
+    std::string bytes;
+    std::string content_encoding;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ApiProtocolBase
 // ─────────────────────────────────────────────────────────────────────────────
@@ -574,6 +580,29 @@ public:
      */
     virtual void observe_response_headers([[maybe_unused]] const cpr::Header& headers,
                                           [[maybe_unused]] const ChatRequest& request) {}
+
+    /**
+     * @brief Wire bytes for an HTTP request body the protocol sends encoded.
+     *
+     * The serialized payload stays the source of truth for retries; only the
+     * bytes on the wire change. nullopt sends @p payload unencoded.
+     */
+    [[nodiscard]] virtual std::optional<EncodedRequestBody> encode_request_body(
+        [[maybe_unused]] std::string_view payload,
+        [[maybe_unused]] std::string_view url) const {
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Whether @p response rejected an encoded body.
+     *
+     * When true the transport resends the same request unencoded once (not a
+     * retry), and the protocol must stop encoding so it is not offered again.
+     */
+    [[nodiscard]] virtual bool rejects_encoded_body(
+        [[maybe_unused]] const HttpResponse& response) {
+        return false;
+    }
 
     [[nodiscard]] virtual bool supports_websocket_transport() const noexcept {
         return false;

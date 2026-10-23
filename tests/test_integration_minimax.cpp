@@ -168,7 +168,7 @@ TEST_CASE("Claude retains legacy reasoning while MiniMax refuses unscoped state"
     std::vector<bool> billing;
     fixture.server.Post("/anthropic/v1/messages", [&](const auto& req, auto& response) {
         bodies.push_back(req.body);
-        billing.push_back(req.has_header("x-anthropic-billing-header"));
+        billing.push_back(req.body.find("x-anthropic-billing-header:") != std::string::npos);
         response.set_content(end_turn(), "text/event-stream");
     });
     core::config::ProviderConfig config;

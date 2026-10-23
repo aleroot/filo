@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           set -eu
-          packages="gcc-c++ cmake make pkg-config libopenssl-devel libicu-devel libcurl-devel python3 python3-devel git patch"
+          packages="gcc-c++ cmake make pkg-config libopenssl-devel libicu-devel libcurl-devel zlib-devel python3 python3-devel git patch"
 
           zypper --non-interactive --gpg-auto-import-keys refresh
 

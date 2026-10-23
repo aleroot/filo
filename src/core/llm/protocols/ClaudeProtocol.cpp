@@ -3,11 +3,13 @@
 #include "../Models.hpp"
 #include "../ModelRegistry.hpp"
 #include "../ClaudeModelTraits.hpp"
+#include "../ClaudeBilling.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
 #include "../../utils/TimeUtils.hpp"
+#include "../../utils/Uuid.hpp"
 #include "../../tools/StrictToolSchema.hpp"
 #include "../../tools/ToolSchema.hpp"
 #include "../StrictToolPolicy.hpp"
@@ -29,11 +31,7 @@
 namespace core::llm::protocols {
 
 namespace {
-    constexpr std::string_view ANTHROPIC_BETA_CLAUDE_CODE = "claude-code-20250219";
-    constexpr std::string_view ANTHROPIC_BETA_THINKING = "interleaved-thinking-2025-05-14";
     constexpr std::string_view ANTHROPIC_BETA_CONTEXT_1M = "context-1m-2025-08-07";
-    constexpr std::string_view ANTHROPIC_BETA_OAUTH    = "oauth-2025-04-20";
-    constexpr std::string_view ANTHROPIC_BILLING_HEADER = claude::kBillingHeader;
 
     struct HeaderWindowDef {
         std::string_view suffix;
@@ -737,16 +735,20 @@ ClaudeWirePolicy claude_wire_policy(
 
 std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_tokens,
                                         const ClaudeThinkingConfig& thinking,
-                                        PromptCacheTtl cache_ttl) {
+                                        PromptCacheTtl cache_ttl,
+                                        const claude::RequestLineage* lineage) {
     const auto wire_policy = claude_wire_policy(
         req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     AnthropicSerializationOptions options;
     const bool has_attribution = req.prompt_plan.empty()
         && std::ranges::any_of(req.messages, [](const Message& message) {
             return message.role == "system"
-                && message.content.find("x-anthropic-billing-header:") != std::string::npos;
+                && message.content.find(claude::kBillingMarker) != std::string::npos;
         });
-    if (!has_attribution) options.system_prefix = "x-anthropic-billing-header: " + std::string(claude::kBillingHeader);
+    if (!has_attribution) {
+        options.system_prefix = claude::billing_block(
+            claude::first_user_text(req), lineage ? lineage->billing : claude::BillingLineage{});
+    }
     options.system_as_text = true;
     options.cache_control = true;
     options.cache_ttl = cache_ttl;
@@ -757,6 +759,22 @@ std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_
     options.omit_historical_thinking = effort_explicitly_disabled(req.effort)
         && (wire_policy.between_tools_thinking || wire_policy.disabled_thinking);
     options.extra_fields = [&](std::string& payload, const ChatRequest& req) {
+        if (lineage) {
+            // Claude Code identifies the account, device and session only when
+            // the OAuth token named the account.
+            if (const auto account = req.auth_properties.find("account_id");
+                account != req.auth_properties.end() && !account->second.empty()) {
+                payload += R"(,"metadata":{"user_id":")";
+                payload += core::utils::escape_json_string(
+                    claude::metadata_user_id(account->second, lineage->session_id));
+                payload += R"("})";
+            }
+            payload += R"(,"diagnostics":{"previous_message_id":)";
+            payload += lineage->previous_message_id.empty()
+                ? std::string("null")
+                : '"' + core::utils::escape_json_string(lineage->previous_message_id) + '"';
+            payload += '}';
+        }
         // Effort can reduce output/token spend for tool-heavy sessions.
         // Anthropic docs (Apr 2026): generally available, no beta header needed.
         ReasoningCapabilities reasoning_capabilities = wire_policy.effort;
@@ -872,7 +890,9 @@ std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_
             payload += '}';
         }
     };
-    return AnthropicSerializer::serialize(req, default_max_tokens, options);
+    auto payload = AnthropicSerializer::serialize(req, default_max_tokens, options);
+    if (!has_attribution) claude::sign_body(payload);
+    return payload;
 }
 
 std::string ClaudeProtocol::model_id(std::string_view model) const {
@@ -881,7 +901,12 @@ std::string ClaudeProtocol::model_id(std::string_view model) const {
 
 void ClaudeProtocol::prepare_request(ChatRequest& request) {
     request_uses_context_1m_ = false;
+    request_structured_output_ = request.response_format.type == ResponseFormat::Type::JsonSchema;
     last_requested_model_.clear();
+    conversation_ = request.session_id;
+    lineage_ = claude::begin_request(conversation_, claude::count_user_prompts(request));
+    client_request_id_ = core::utils::random_uuid_v4();
+    header_attempts_ = 0;
     if (request.model.empty()) return;
 
     ModelNormalization normalized = normalize_requested_claude_model(request.model);
@@ -893,7 +918,61 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
 }
 
 std::string ClaudeProtocol::serialize(const ChatRequest& req) const {
-    return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_);
+    // Only a prepared request belongs to a conversation.
+    return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_,
+                                       lineage_.session_id.empty() ? nullptr : &lineage_);
+}
+
+std::string ClaudeProtocol::build_url(std::string_view base_url, std::string_view model) const {
+    auto url = AnthropicProtocol::build_url(base_url, model);
+    url += url.find('?') == std::string::npos ? "?beta=true" : "&beta=true";
+    return url;
+}
+
+void ClaudeProtocol::prepare_headers(cpr::Header& headers, const ChatRequest&, std::string_view) {
+    // Claude Code asks for JSON and still receives the stream `stream:true` selects.
+    headers["Accept"] = "application/json";
+    if (lineage_.session_id.empty()) return;
+    headers["x-claude-code-session-id"] = lineage_.session_id;
+    if (!lineage_.billing.prompt_id.empty()) headers["x-claude-code-prompt-id"] = lineage_.billing.prompt_id;
+    headers["x-client-request-id"] = client_request_id_;
+    headers["x-stainless-retry-count"] = std::to_string(header_attempts_++);
+}
+
+ParseResult ClaudeProtocol::parse_event(std::string_view raw_event) {
+    if (!lineage_.session_id.empty() && raw_event.find("message_start") != std::string_view::npos) {
+        sse::ParsedEventView parsed;
+        if (sse::parse_event_payload(raw_event, parsed) && !parsed.data.empty()) {
+            simdjson::dom::parser parser;
+            const simdjson::padded_string data(parsed.data);
+            std::string_view type, id;
+            simdjson::dom::element doc;
+            if (parser.parse(data).get(doc) == simdjson::SUCCESS
+                && doc["type"].get(type) == simdjson::SUCCESS && type == "message_start"
+                && doc["message"]["id"].get(id) == simdjson::SUCCESS) {
+                claude::record_message_id(conversation_, id);
+            }
+        }
+    }
+    return AnthropicProtocol::parse_event(raw_event);
+}
+
+std::optional<EncodedRequestBody> ClaudeProtocol::encode_request_body(std::string_view payload,
+                                                                      std::string_view url) const {
+    if (!claude::should_gzip_body(url, payload)) return std::nullopt;
+    try {
+        return EncodedRequestBody{.bytes = claude::gzip_body(payload), .content_encoding = "gzip"};
+    } catch (const std::exception& e) {
+        // Compression is an optimisation: send the body as it is.
+        core::logging::warn("[Claude] gzip request body failed: {}", e.what());
+        return std::nullopt;
+    }
+}
+
+bool ClaudeProtocol::rejects_encoded_body(const HttpResponse& response) {
+    if (!claude::is_gzip_rejection(response.status_code, response.headers, response.body)) return false;
+    claude::disable_body_gzip();
+    return true;
 }
 
 ReasoningCapabilities ClaudeProtocol::reasoning_capabilities(
@@ -911,7 +990,9 @@ ReasoningCapabilities ClaudeProtocol::reasoning_capabilities(
 
 cpr::Header ClaudeProtocol::build_headers(const core::auth::AuthInfo& auth) const {
     auto headers = AnthropicProtocol::build_headers(auth);
-    headers.try_emplace("x-anthropic-billing-header", ANTHROPIC_BILLING_HEADER);
+    claude::apply_client_headers(headers);
+    // Claude Code carries billing attribution in the first system block only.
+    headers.try_emplace("x-claude-code-request-class", "main");
 
     std::string anthropic_beta;
     const auto append_beta_unique = [&](std::string_view beta) {
@@ -935,19 +1016,14 @@ cpr::Header ClaudeProtocol::build_headers(const core::auth::AuthInfo& auth) cons
         anthropic_beta += candidate;
     };
 
-    append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
-    const auto wire_policy = claude_wire_policy(last_requested_model_);
-    if (wire_policy.reasoning_bound_to_prefix) {
-        append_beta_unique(claude::kThinkingBindingBeta);
+    const auto oauth = auth.properties.find("oauth");
+    for (const auto beta : claude::main_request_betas(
+             last_requested_model_,
+             oauth != auth.properties.end() && oauth->second == "1",
+             request_structured_output_)) {
+        append_beta_unique(beta);
     }
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
-    if (thinking_.enabled && !wire_policy.rejects_manual_thinking()) {
-        append_beta_unique(ANTHROPIC_BETA_THINKING);
-    }
-    if (auto it = auth.properties.find("oauth");
-        it != auth.properties.end() && it->second == "1") {
-        append_beta_unique(ANTHROPIC_BETA_OAUTH);
-    }
 
     for (const auto& [k, raw_v] : auth.headers) {
         if (core::utils::ascii::iequals(k, "anthropic-beta") && !raw_v.empty()) {
@@ -989,7 +1065,12 @@ void ClaudeProtocol::reset_state() {
     AnthropicProtocol::reset_state();
     last_rate_limit_ = {};
     request_uses_context_1m_ = false;
+    request_structured_output_ = false;
     last_requested_model_.clear();
+    conversation_.clear();
+    lineage_ = {};
+    client_request_id_.clear();
+    header_attempts_ = 0;
 }
 
 void ClaudeProtocol::reset_attempt_state() {
@@ -998,6 +1079,11 @@ void ClaudeProtocol::reset_attempt_state() {
 }
 
 void ClaudeProtocol::on_response(const HttpResponse& response) {
+    if (response.status_code == 200 && !lineage_.session_id.empty()) {
+        if (const auto id = find_header_case_insensitive(response.headers, "request-id")) {
+            claude::record_request_id(conversation_, *id);
+        }
+    }
     last_rate_limit_ = impl_parse_rate_limit_headers(response.headers);
     last_rate_limit_.is_rate_limited = last_rate_limit_.is_rate_limited || response.status_code == 429;
 }

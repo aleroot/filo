@@ -856,6 +856,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
             if (payload.empty()) payload = protocol->serialize(request_metadata);
             transport::RetryController retry_controller(retries);
+            // Cleared once the server rejects an encoded body, so it is resent plain.
+            bool encode_body = true;
 
             const auto prepare_retry = [&](const transport::RetrySchedule& retry) {
                 if (!transport::wait_for_retry(
@@ -883,9 +885,22 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     protocol->requires_terminal_event();
                 transport::StreamWatchdog watchdog(timeouts);
 
+                // Only the wire bytes change; `payload` stays the retry source.
+                const auto encoded_body = encode_body
+                    ? protocol->encode_request_body(payload, url)
+                    : std::nullopt;
+                if (encoded_body) {
+                    headers["Content-Encoding"] = encoded_body->content_encoding;
+                } else {
+                    headers.erase("Content-Encoding");
+                }
+                const std::string_view wire_body = encoded_body
+                    ? std::string_view(encoded_body->bytes)
+                    : std::string_view(payload);
+
                 uint64_t response_bytes_received = 0;
                 const uint64_t request_bytes_sent =
-                    static_cast<uint64_t>(payload.size())
+                    static_cast<uint64_t>(wire_body.size())
                     + core::net::estimated_http_header_bytes(headers);
                 cpr::Header response_headers_seen;
                 bool observed_transport_headers = false;
@@ -901,7 +916,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 // A view, not a copy: payload outlives the session, and both
                 // cpr::Body and curl's COPYPOSTFIELDS would duplicate a body
                 // that grows with the whole conversation.
-                session.SetBodyView(cpr::BodyView{payload});
+                session.SetBodyView(cpr::BodyView{wire_body});
                 session.SetProgressCallback(cpr::ProgressCallback(
                     [cancel_requested = &self->cancel_requested_,
                      &watchdog](
@@ -1107,6 +1122,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     static_cast<int>(r.status_code), lifecycle_body, r.header};
                 protocol->observe_response_headers(r.header, request_metadata);
                 protocol->on_response(http_resp);
+
+                if (encoded_body && !output_emitted && protocol->rejects_encoded_body(http_resp)) {
+                    core::logging::warn(
+                        "[HTTP] {} rejected the {} request body (HTTP {}); resending it unencoded",
+                        protocol->name(), encoded_body->content_encoding, r.status_code);
+                    encode_body = false;
+                    continue;
+                }
 
                 const bool incomplete_required_stream =
                     requires_terminal_event

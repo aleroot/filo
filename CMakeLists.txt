@@ -283,6 +283,8 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/ClaudeProtocol.cpp
+    src/core/llm/ClaudeBilling.cpp
+    src/core/llm/ClaudeCodeClient.cpp
     src/core/llm/protocols/MiniMaxProtocol.cpp
     src/core/llm/MiniMaxModelTraits.cpp
     src/core/llm/MiniMaxUsageClient.cpp
@@ -622,6 +624,17 @@ target_link_libraries(filo_core
         uni-algo::uni-algo
         ${CMAKE_DL_LIBS}
 )
+
+# zlib gzips Claude request bodies as Claude Code does. On Apple, link the SDK
+# library directly: ZLIB::ZLIB would add the SDK's usr/include as a system
+# include and break libc++'s include_next (see the cpp-httplib note above).
+if(APPLE)
+    find_library(FILO_ZLIB_LIBRARY z REQUIRED)
+    target_link_libraries(filo_core PUBLIC ${FILO_ZLIB_LIBRARY})
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(filo_core PUBLIC ZLIB::ZLIB)
+endif()
 
 if(APPLE)
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)

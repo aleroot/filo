@@ -9,7 +9,6 @@
 
 namespace core::llm::claude {
 
-inline constexpr std::string_view kBillingHeader = "cc_version=2.1.280.13b; cc_entrypoint=cli; cch=0;";
 inline constexpr std::string_view kThinkingBindingBeta =
     "thinking-binding-controls-2026-08-01";
 

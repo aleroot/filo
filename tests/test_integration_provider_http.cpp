@@ -4,6 +4,7 @@
 
 #include <httplib.h>
 #include <simdjson.h>
+#include <zlib.h>
 
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
@@ -1107,7 +1108,8 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
         CHECK(doc["model"].get_string().value() == "claude-fable-5-1");
         CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
-        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.280"));
+        CHECK_FALSE(actual.has_header("x-anthropic-billing-header"));
+        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
     }
     simdjson::dom::parser parser;
     const auto doc = parser.parse(received.back().body);
@@ -1663,6 +1665,150 @@ TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", 
             CHECK(usage.cache_creation_prompt_tokens == 30);
         }
     }
+}
+
+namespace {
+/// Gzips every body the way Claude Code does for api.anthropic.com, so the
+/// transport path can be exercised against a local server. Its rejection test
+/// does not latch the process, unlike ClaudeProtocol's.
+class GzipEverywhereClaudeProtocol final : public ClaudeProtocol {
+public:
+    explicit GzipEverywhereClaudeProtocol(std::shared_ptr<std::atomic_bool> rejected)
+        : rejected_(std::move(rejected)) {}
+    std::unique_ptr<ApiProtocolBase> clone() const override {
+        return std::make_unique<GzipEverywhereClaudeProtocol>(rejected_);
+    }
+    std::optional<EncodedRequestBody> encode_request_body(std::string_view payload,
+                                                          std::string_view) const override {
+        if (*rejected_) return std::nullopt;
+        return EncodedRequestBody{.bytes = core::llm::claude::gzip_body(payload), .content_encoding = "gzip"};
+    }
+    bool rejects_encoded_body(const HttpResponse& response) override {
+        if (!core::llm::claude::is_gzip_rejection(response.status_code, response.headers, response.body)) return false;
+        *rejected_ = true;
+        return true;
+    }
+private:
+    std::shared_ptr<std::atomic_bool> rejected_;
+};
+
+[[nodiscard]] std::string maybe_gunzip(const std::string& body) {
+    if (body.size() < 2 || static_cast<unsigned char>(body[0]) != 0x1f
+        || static_cast<unsigned char>(body[1]) != 0x8b) return body;
+    z_stream stream{};
+    REQUIRE(inflateInit2(&stream, 15 + 16) == Z_OK);
+    std::string out(body.size() * 20 + 4096, '\0');
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(body.data()));
+    stream.avail_in = static_cast<uInt>(body.size());
+    stream.next_out = reinterpret_cast<Bytef*>(out.data());
+    stream.avail_out = static_cast<uInt>(out.size());
+    const int status = inflate(&stream, Z_FINISH);
+    out.resize(stream.total_out);
+    inflateEnd(&stream);
+    REQUIRE(status == Z_STREAM_END);
+    return out;
+}
+} // namespace
+
+TEST_CASE("Claude sends Claude Code's wire identity and resends a rejected gzip body plain",
+          "[integration][http][claude][client]") {
+    struct Seen {
+        httplib::Headers headers;
+        std::string body;
+        std::string beta_param;
+    };
+    httplib::Server server;
+    std::mutex mutex;
+    std::vector<Seen> seen;
+    int successes = 0;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(mutex);
+        seen.push_back({request.headers, maybe_gunzip(request.body), request.get_param_value("beta")});
+        if (request.get_header_value("Content-Encoding") == "gzip") {
+            // A proxy-style rejection: no Anthropic request id, no cf-ray.
+            response.status = 415;
+            response.set_content("unsupported media type", "text/plain");
+            return;
+        }
+        ++successes;
+        response.set_header("request-id", std::format("req_011CUwireTest{:04}", successes));
+        response.set_content(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_011CUwire"
+                + std::to_string(successes) + "\",\"usage\":{\"input_tokens\":10}}}\n\n" + claude_success,
+            "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+
+    auto credentials = std::make_shared<RefreshingClaudeCredentials>();
+    auto rejected = std::make_shared<std::atomic_bool>(false);
+    auto provider = std::make_shared<HttpLLMProvider>(std::format("http://127.0.0.1:{}", port), credentials,
+        "claude-sonnet-5-5", std::make_unique<GzipEverywhereClaudeProtocol>(rejected));
+    auto request = make_claude_request("claude-sonnet-5-5", std::string(5000, 'x'));
+    request.session_id = "wire-identity-" + std::to_string(port);
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    REQUIRE_FALSE(chunks.empty());
+    CAPTURE(chunks.back().content);
+    CHECK_FALSE(chunks.back().is_error);
+    // The gzipped send was rejected (by the handler, or by httplib itself where
+    // it is built without zlib), and the same request went out plain.
+    CHECK(*rejected);
+
+    std::unique_lock lock(mutex);
+    REQUIRE(successes == 1);
+    REQUIRE_FALSE(seen.empty());
+    const auto header = [](const Seen& s, const char* name) {
+        const auto it = s.headers.find(name);
+        return it == s.headers.end() ? std::string{} : it->second;
+    };
+    const auto& plain = seen.back();
+    CHECK(header(plain, "Content-Encoding").empty());
+    CHECK(plain.body.starts_with(R"({"model":"claude-sonnet-5-5","messages":[)"));
+    CHECK_THAT(plain.body, !Catch::Matchers::ContainsSubstring("cch=00000;"));
+    if (seen.size() == 2) {
+        CHECK(header(seen[0], "Content-Encoding") == "gzip");
+        CHECK_THAT(seen[0].body, Catch::Matchers::ContainsSubstring("cch=00000;"));
+        // The plain resend is the same request, not a retry.
+        CHECK(header(seen[0], "x-client-request-id") == header(plain, "x-client-request-id"));
+        CHECK(header(seen[0], "x-stainless-retry-count") == "0");
+    }
+    for (const auto& s : seen) {
+        CHECK(s.beta_param == "true");
+        CHECK(header(s, "User-Agent") == "claude-cli/2.1.302 (external, cli)");
+        CHECK(header(s, "x-app") == "cli");
+        CHECK(header(s, "Accept") == "application/json");
+        CHECK(header(s, "anthropic-dangerous-direct-browser-access") == "true");
+        CHECK(header(s, "x-stainless-package-version") == "0.128.0");
+        CHECK(header(s, "x-stainless-retry-count") == "0");
+        CHECK(header(s, "x-claude-code-request-class") == "main");
+        CHECK(header(s, "x-claude-code-session-id").size() == 36);
+        CHECK(header(s, "x-claude-code-prompt-id").size() == 36);
+        CHECK(header(s, "x-client-request-id").size() == 36);
+        CHECK(header(s, "Authorization") == "Bearer expired-test-token");
+        CHECK_THAT(header(s, "anthropic-beta"), Catch::Matchers::StartsWith("claude-code-20250219,oauth-2025-04-20,"));
+    }
+    const auto session = header(plain, "x-claude-code-session-id");
+    const auto prompt = header(plain, "x-claude-code-prompt-id");
+
+    // The next request of the conversation names the previous response.
+    request.messages.push_back({.role = "assistant", .content = "Recovered"});
+    request.messages.push_back({.role = "user", .content = "Next"});
+    chunks.clear();
+    seen.clear();
+    lock.unlock();
+    provider->stream_response(request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    lock.lock();
+    REQUIRE(seen.size() == 1);
+    CHECK(header(seen[0], "Content-Encoding").empty());
+    CHECK(header(seen[0], "x-claude-code-session-id") == session);
+    CHECK(header(seen[0], "x-claude-code-prompt-id") != prompt);
+    CHECK_THAT(seen[0].body, Catch::Matchers::ContainsSubstring("cc_prev_req=req_011CUwireTest0001;"));
+    CHECK_THAT(seen[0].body, Catch::Matchers::ContainsSubstring(R"("diagnostics":{"previous_message_id":"msg_011CUwire1"})"));
+    CHECK_THAT(seen[0].body, Catch::Matchers::ContainsSubstring("cc_prompt_index=2; cc_turn_index=2;"));
 }
 
 TEST_CASE("Claude OAuth refresh happens once and cancellation stops retry backoff", "[integration][http][claude][hardening][oauth]") {
