@@ -27,6 +27,8 @@ namespace core::llm::protocols {
 struct GeminiUsageMetadata {
     int32_t prompt_tokens = 0;
     int32_t completion_tokens = 0;
+    /// `cachedContentTokenCount`: the part of prompt_tokens served from an implicit or explicit context cache.
+    int32_t cached_prompt_tokens = 0;
 };
 
 /**

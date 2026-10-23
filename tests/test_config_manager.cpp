@@ -99,6 +99,12 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.context_compression;
         case core::config::ManagedSettingKey::SteeringMode:
             return settings.steering_mode;
+        case core::config::ManagedSettingKey::PromptCacheGuardTokens:
+            return settings.prompt_cache_guard_tokens;
+        case core::config::ManagedSettingKey::PromptCacheNoticeSeconds:
+            return settings.prompt_cache_notice_seconds;
+        case core::config::ManagedSettingKey::PromptCacheKeepWarm:
+            return settings.prompt_cache_keep_warm;
     }
     return settings.default_mode;
 }
@@ -138,6 +144,14 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return config.context_compression;
         case core::config::ManagedSettingKey::SteeringMode:
             return config.steering_mode;
+        case core::config::ManagedSettingKey::PromptCacheGuardTokens:
+            return config.prompt_cache_guard_tokens
+                ? std::to_string(*config.prompt_cache_guard_tokens) : std::string{};
+        case core::config::ManagedSettingKey::PromptCacheNoticeSeconds:
+            return config.prompt_cache_notice_seconds
+                ? std::to_string(*config.prompt_cache_notice_seconds) : std::string{};
+        case core::config::ManagedSettingKey::PromptCacheKeepWarm:
+            return config.prompt_cache_keep_warm;
     }
     return config.default_mode;
 }
@@ -1441,6 +1455,21 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
             core::config::ManagedSettingKey::SteeringMode,
             "steering_mode",
             "fallback",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::PromptCacheGuardTokens,
+            "prompt_cache_guard_tokens",
+            "50000",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+            "prompt_cache_notice_seconds",
+            "0",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::PromptCacheKeepWarm,
+            "prompt_cache_keep_warm",
+            "auto",
         },
     };
 

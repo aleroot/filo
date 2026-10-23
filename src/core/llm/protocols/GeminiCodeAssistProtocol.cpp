@@ -146,6 +146,7 @@ ParseResult GeminiCodeAssistProtocol::parse_event(std::string_view raw_event) {
         extract_gemini_usage_metadata(simdjson::minify(response_el));
     result.prompt_tokens = usage.prompt_tokens;
     result.completion_tokens = usage.completion_tokens;
+    result.cached_prompt_tokens = usage.cached_prompt_tokens;
     return result;
 }
 

@@ -60,6 +60,12 @@ public:
     /// whose promise must still be resolved by the caller.
     [[nodiscard]] QuestionDialogEventResult force_interrupt();
 
+    /// Dismisses the active dialog only when it is the one answering
+    /// @p promise, as if the user had pressed Esc. Lets the poster of an
+    /// unsolicited dialog take it back once it no longer applies, without
+    /// ever closing a dialog somebody else opened meanwhile.
+    [[nodiscard]] QuestionDialogEventResult withdraw(const QuestionDialogPromise& promise);
+
     [[nodiscard]] bool active() const;
     [[nodiscard]] ftxui::Component editor_component() const;
     [[nodiscard]] ftxui::Element render();

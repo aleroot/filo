@@ -72,6 +72,12 @@ public:
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n"; }
     [[nodiscard]] ParseResult      parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name()  const noexcept override { return "ollama"; }
+    /// Ollama keeps its KV cache in the serving process and bills no prompt
+    /// cache, so an idle conversation has nothing to lose.
+    [[nodiscard]] PromptCacheProfile prompt_cache_profile(
+        std::string_view) const noexcept override {
+        return PromptCacheProfile::none();
+    }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<OllamaProtocol>(*this);

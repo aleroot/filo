@@ -26,8 +26,12 @@ JsonValue canonical_document(JsonValue document) {
 
 JsonValue settings_values(const JsonValue& settings) {
     auto values = settings;
-    if (const auto* threshold = settings.find("auto_compact_threshold"); threshold && threshold->is_string()) {
-        values.set("auto_compact_threshold", JsonValue::integer(std::stoll(std::string(threshold->as_string()))));
+    // settings.json writes managed numbers as strings.
+    for (const std::string_view key :
+         {"auto_compact_threshold", "prompt_cache_guard_tokens", "prompt_cache_notice_seconds"}) {
+        if (const auto* number = settings.find(key); number && number->is_string()) {
+            values.set(std::string(key), JsonValue::integer(std::stoll(std::string(number->as_string()))));
+        }
     }
     if (const auto* policy = settings.find("default_router_policy")) {
         auto router = JsonValue::object();
@@ -60,10 +64,12 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
     check(root, {"default_provider", "default_model_selection", "default_mode", "default_approval_mode",
                  "prompt_editor", "diff_comparer", "ui_banner", "ui_footer", "ui_model_info",
                  "ui_context_usage", "ui_timestamps", "ui_spinner", "ui_reasoning", "ui_theme",
-                 "context_compression", "steering_mode", "active_profile", "default_router_policy"}, string, "a string");
+                 "context_compression", "steering_mode", "prompt_cache_keep_warm", "active_profile",
+                 "default_router_policy"}, string, "a string");
     check(root, {"tool_recovery", "strict_tool_schemas"}, boolean, "a boolean");
     check(root, {"tool_output_token_limit"}, integer, "an integer");
-    check(root, {"auto_compact_threshold"}, [&](const JsonValue& v) {
+    check(root, {"auto_compact_threshold", "prompt_cache_guard_tokens", "prompt_cache_notice_seconds"},
+          [&](const JsonValue& v) {
         // settings.json writes this managed preference as a string.
         return integer(v) || (v.is_string() && !v.as_string().empty()
             && v.as_string().find_first_not_of("0123456789") == std::string_view::npos);
@@ -73,7 +79,7 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
         for (const auto& [name, provider] : providers->members()) {
             if (!provider.is_object()) throw std::runtime_error("provider must be an object: " + name);
             check(provider, {"api_type", "api_key", "model", "base_url", "auth_type", "reasoning_effort",
-                              "wire_api", "service_tier", "model_path", "chat_template"}, string, "a string");
+                              "wire_api", "service_tier", "prompt_cache_ttl", "model_path", "chat_template"}, string, "a string");
             check(provider, {"stream_usage", "use_mmap", "use_mlock"}, boolean, "a boolean");
             check(provider, {"thinking_budget", "context_window", "top_k", "seed", "context_size", "batch_size",
                               "threads", "threads_batch", "gpu_layers"}, integer, "an integer");

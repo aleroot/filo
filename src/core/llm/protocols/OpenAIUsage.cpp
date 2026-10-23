@@ -43,6 +43,15 @@ bool parse_openai_usage(simdjson::dom::object usage,
         result.cached_prompt_tokens = token_count(cached);
         result.cache_creation_prompt_tokens = token_count(created);
     }
+    if (result.cached_prompt_tokens == 0) {
+        // OpenAI-compatible vendors that report cache hits outside the
+        // details object: DeepSeek (`prompt_cache_hit_tokens`) and Moonshot
+        // (top-level `cached_tokens`).
+        int64_t cached = 0;
+        if (read_first(usage, "prompt_cache_hit_tokens", "cached_tokens", cached)) {
+            result.cached_prompt_tokens = token_count(cached);
+        }
+    }
 
     simdjson::dom::object completion_details;
     if (usage["completion_tokens_details"].get(completion_details) == simdjson::SUCCESS

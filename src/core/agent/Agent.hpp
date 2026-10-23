@@ -22,6 +22,8 @@
 #include "HistoryCompactionPlanner.hpp"
 #include "HistoryCompactor.hpp"
 #include "PermissionGate.hpp"
+#include "PromptCacheGuard.hpp"
+#include "PromptCacheTracker.hpp"
 #include "SubagentEvents.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "ToolCallDeduplicator.hpp"
@@ -44,6 +46,7 @@ class SessionStatsRegistry;
 #include <mutex>
 #include <atomic>
 #include <optional>
+#include <chrono>
 #include <cstdint>
 
 namespace core::config {
@@ -234,6 +237,43 @@ public:
         std::function<void(const std::string&)> text_callback,
         std::function<void()> done_callback = {},
         HistoryCompactionReason reason = HistoryCompactionReason::Manual);
+    /// Manual compaction whose continuation always runs, with whether the
+    /// summary replaced the history. Callers that must proceed either way
+    /// ("compact, then send") use this instead of compact_history_async,
+    /// whose done callback fires only on success.
+    void compact_history_then(
+        std::function<void(const std::string&)> status_callback,
+        std::function<void(bool compacted)> finished_callback);
+
+    // -----------------------------------------------------------------------
+    // Prompt cache — what the provider still holds of this conversation.
+    // -----------------------------------------------------------------------
+
+    /// The cache this conversation's next request would read: when it was
+    /// last used and what the provider promises about it. Untracked when the
+    /// next request goes to another provider or model than the last one.
+    [[nodiscard]] PromptCacheState prompt_cache_state() const;
+
+    /// Seeds the last exchange of a resumed session, whose requests an
+    /// earlier process made with @p provider_name / @p model. Ignored unless
+    /// this agent still talks to that provider and model: any other one
+    /// starts from an empty cache, whatever the session's age.
+    void restore_prompt_cache_activity(std::chrono::system_clock::time_point last_exchange_at,
+                                       std::string_view provider_name,
+                                       std::string_view model);
+
+    struct PromptCacheRefresh {
+        bool refreshed = false;
+        core::llm::TokenUsage usage = {};
+        std::string error = {};
+    };
+
+    /// Re-sends the last request on an isolated provider instance and stops
+    /// it at the first output, which renews the provider's cache lifetime
+    /// for the price of a cache read. Only possible when the provider's
+    /// profile says a replay renews the cache (PromptCacheGuard::can_keep_warm).
+    /// `done` runs on a worker thread.
+    void refresh_prompt_cache_async(std::function<void(PromptCacheRefresh)> done);
     void undo_last();
     std::string last_user_message();
     [[nodiscard]] bool has_user_turn() const;
@@ -556,7 +596,15 @@ private:
         std::string model,
         HistoryCompactionReason reason,
         std::function<void(const std::string&)> status_log_callback,
-        std::function<void()> done_callback = {});
+        std::function<void()> done_callback = {},
+        std::function<void(bool compacted)> finished_callback = {});
+    void start_manual_compaction(
+        std::function<void(const std::string&)> status_callback,
+        std::function<void()> done_callback,
+        std::function<void(bool compacted)> finished_callback,
+        HistoryCompactionReason reason);
+
+    void record_prompt_cache_exchange(PromptCacheTracker::Exchange exchange);
 
     // Returns true if the tool call was approved (or doesn't need permission).
     [[nodiscard]] bool check_permission(const std::string& tool_name,
@@ -595,6 +643,8 @@ private:
     std::uint64_t history_revision_ = 0;
     std::uint64_t conversation_generation_ = 0;
     bool compaction_in_progress_ = false;
+    // Guarded by history_mutex_.
+    PromptCacheTracker prompt_cache_;
     AgentMode current_mode_ = AgentMode::Build;
     AutoTurnCoordinator auto_turn_coordinator_;
     PermissionProfile permission_profile_ = PermissionProfile::Interactive;

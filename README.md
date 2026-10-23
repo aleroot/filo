@@ -507,6 +507,9 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Auto-Compaction | `auto_compact_threshold` | `0` (off), `25000`, `50000`, `100000`, `200000` |
 | Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
 | Steering Mode | `steering_mode` | `default`, `fallback`, `none` |
+| Cold-Cache Guard | `prompt_cache_guard_tokens` | `0` (off), `50000`, `100000` (default), `200000` |
+| Cache Expiry Notice | `prompt_cache_notice_seconds` | `0` (off), `30`, `60` (default), `120` |
+| Cache Keep-Warm | `prompt_cache_keep_warm` | `ask` (default), `auto` |
 
 `--steering` on the command line overrides the saved `steering_mode` for that run only.
 

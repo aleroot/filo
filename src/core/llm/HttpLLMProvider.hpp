@@ -111,6 +111,10 @@ public:
     [[nodiscard]] bool should_estimate_cost() const override;
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
+    /// The protocol's profile, except that a loopback endpoint (Ollama,
+    /// LM Studio, a llama.cpp server) bills no cache whatever it speaks.
+    [[nodiscard]] PromptCacheProfile prompt_cache_profile(
+        std::string_view model) const noexcept override;
     void reset_conversation_state() override;
 
     /**

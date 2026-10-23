@@ -201,6 +201,24 @@ QuestionDialogEventResult ThreadModalHost::interrupt_question(
     return result;
 }
 
+QuestionDialogEventResult ThreadModalHost::withdraw_question(
+    std::string_view session_id,
+    const QuestionDialogPromise& promise) {
+    std::shared_ptr<QuestionDialogController> controller;
+    {
+        std::lock_guard lock(mutex_);
+        controller = busy_question_locked(session_id);
+    }
+    if (!controller) {
+        return {};
+    }
+    auto result = controller->withdraw(promise);
+    if (result.has_resolution()) {
+        mark_question_idle(session_id);
+    }
+    return result;
+}
+
 PermissionSlotGuard ThreadModalHost::acquire_permission_slot(
     std::string session_id) {
     std::unique_lock lock(mutex_);

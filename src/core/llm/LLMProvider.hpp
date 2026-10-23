@@ -7,6 +7,7 @@
 #include <atomic>
 #include <optional>
 #include "Models.hpp"
+#include "PromptCacheProfile.hpp"
 #include "ReasoningCapabilities.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "../config/ConfigManager.hpp"
@@ -107,6 +108,18 @@ public:
      *        Local backends can override this to suppress synthetic pricing.
      */
     [[nodiscard]] virtual bool should_estimate_cost() const { return true; }
+
+    /**
+     * @brief What this provider's prompt cache does with an idle conversation.
+     *
+     * The default claims nothing: a provider that cannot describe its cache
+     * never triggers cold-cache warnings. HTTP providers answer from their
+     * wire protocol; aggregates answer for the provider they last used.
+     */
+    [[nodiscard]] virtual PromptCacheProfile prompt_cache_profile(
+        [[maybe_unused]] std::string_view model) const noexcept {
+        return PromptCacheProfile::none();
+    }
 
     /** Reasoning controls supported by this provider for a concrete model. */
     [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(

@@ -429,7 +429,7 @@ void RouterProvider::stream_response(
                             health_->observe_success(dec.provider);
 
                             const auto usage = tp->get_last_usage();
-                            set_last_usage(usage.prompt_tokens, usage.completion_tokens);
+                            set_last_usage(usage);
                             set_last_rate_limit_info(tp->get_last_rate_limit_info());
 
                             if (router_engine_) {
@@ -442,6 +442,7 @@ void RouterProvider::stream_response(
                             std::lock_guard lock(state_mutex_);
                             last_model_ = dec.model;
                             last_should_estimate_cost_ = tp->should_estimate_cost();
+                            last_prompt_cache_profile_ = tp->prompt_cache_profile(dec.model);
                             if (!guardrail_blocks.empty()) {
                                 last_guardrail_summary_ = join_limited(guardrail_blocks);
                                 last_route_summary_ = std::format(
@@ -647,6 +648,15 @@ std::shared_ptr<LLMProvider> RouterProvider::fork_for_parallel_request() const {
 bool RouterProvider::should_estimate_cost() const {
     std::lock_guard lock(state_mutex_);
     return last_should_estimate_cost_;
+}
+
+PromptCacheProfile RouterProvider::prompt_cache_profile(std::string_view) const noexcept {
+    std::lock_guard lock(state_mutex_);
+    auto profile = last_prompt_cache_profile_;
+    // A replay is routed afresh and may land on another provider's cache, so
+    // it cannot be relied on to renew this one.
+    profile.replay_renews = false;
+    return profile;
 }
 
 void RouterProvider::cancel() {

@@ -63,7 +63,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 16> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 19> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -92,7 +92,27 @@ static constexpr std::array<ManagedSettingDescriptor, 16> kManagedSettingDescrip
     { ManagedSettingKey::SteeringMode,
       "steering_mode",
       &ManagedSettings::steering_mode },
+    { ManagedSettingKey::PromptCacheGuardTokens,
+      "prompt_cache_guard_tokens",
+      &ManagedSettings::prompt_cache_guard_tokens },
+    { ManagedSettingKey::PromptCacheNoticeSeconds,
+      "prompt_cache_notice_seconds",
+      &ManagedSettings::prompt_cache_notice_seconds },
+    { ManagedSettingKey::PromptCacheKeepWarm,
+      "prompt_cache_keep_warm",
+      &ManagedSettings::prompt_cache_keep_warm },
 }};
+
+/// settings.json stores every managed value as a string; a numeric one that
+/// does not parse to a non-negative integer leaves the setting unchanged.
+std::optional<std::int64_t> managed_count(const std::string& value) {
+    try {
+        std::size_t consumed = 0;
+        const auto parsed = std::stoll(value, &consumed);
+        if (consumed == value.size() && parsed >= 0) return parsed;
+    } catch (...) {}
+    return std::nullopt;
+}
 
 const ManagedSettingDescriptor* managed_setting_descriptor(ManagedSettingKey key) {
     for (const auto& descriptor : kManagedSettingDescriptors) {
@@ -165,6 +185,15 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::SteeringMode:
             config.steering_mode = value;
+            break;
+        case ManagedSettingKey::PromptCacheGuardTokens:
+            if (const auto count = managed_count(value)) config.prompt_cache_guard_tokens = count;
+            break;
+        case ManagedSettingKey::PromptCacheNoticeSeconds:
+            if (const auto count = managed_count(value)) config.prompt_cache_notice_seconds = count;
+            break;
+        case ManagedSettingKey::PromptCacheKeepWarm:
+            config.prompt_cache_keep_warm = value;
             break;
     }
 }
@@ -255,6 +284,7 @@ ProviderConfig merge_provider(std::string_view name, const ProviderConfig& base,
     if (!overlay.reasoning_effort.empty()) merged.reasoning_effort = overlay.reasoning_effort;
     if (!overlay.wire_api.empty())         merged.wire_api = overlay.wire_api;
     if (!overlay.service_tier.empty())     merged.service_tier = overlay.service_tier;
+    if (!overlay.prompt_cache_ttl.empty()) merged.prompt_cache_ttl = overlay.prompt_cache_ttl;
     if (overlay.context_window > 0) merged.context_window = overlay.context_window;
     if (overlay.thinking_budget > 0)       merged.thinking_budget = overlay.thinking_budget;
     if (overlay.stream_usage)              merged.stream_usage = overlay.stream_usage;
@@ -801,6 +831,9 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj, ProviderConfig
     if (!provider_obj["service_tier"].get(value)) {
         provider.service_tier = std::string(value);
     }
+    if (!provider_obj["prompt_cache_ttl"].get(value)) {
+        provider.prompt_cache_ttl = std::string(value);
+    }
     int64_t context_window = 0;
     if (!provider_obj["context_window"].get(context_window)) {
         if (context_window < 0 || context_window > 100000000) throw std::invalid_argument("Invalid provider context_window");
@@ -1216,6 +1249,19 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed,
         parsed.strict_tool_schemas = strict_tool_schemas;
         parsed.strict_tool_schemas_explicit = true;
     }
+    int64_t prompt_cache_guard_tokens = 0;
+    if (!doc["prompt_cache_guard_tokens"].get(prompt_cache_guard_tokens)
+        && prompt_cache_guard_tokens >= 0) {
+        parsed.prompt_cache_guard_tokens = prompt_cache_guard_tokens;
+    }
+    int64_t prompt_cache_notice_seconds = 0;
+    if (!doc["prompt_cache_notice_seconds"].get(prompt_cache_notice_seconds)
+        && prompt_cache_notice_seconds >= 0) {
+        parsed.prompt_cache_notice_seconds = prompt_cache_notice_seconds;
+    }
+    if (!doc["prompt_cache_keep_warm"].get(value)) {
+        parsed.prompt_cache_keep_warm = std::string(value);
+    }
 
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
@@ -1557,6 +1603,15 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (overlay.strict_tool_schemas_explicit) {
         base.strict_tool_schemas = overlay.strict_tool_schemas;
         base.strict_tool_schemas_explicit = true;
+    }
+    if (overlay.prompt_cache_guard_tokens.has_value()) {
+        base.prompt_cache_guard_tokens = overlay.prompt_cache_guard_tokens;
+    }
+    if (overlay.prompt_cache_notice_seconds.has_value()) {
+        base.prompt_cache_notice_seconds = overlay.prompt_cache_notice_seconds;
+    }
+    if (!overlay.prompt_cache_keep_warm.empty()) {
+        base.prompt_cache_keep_warm = overlay.prompt_cache_keep_warm;
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;

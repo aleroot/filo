@@ -529,8 +529,13 @@ GeminiUsageMetadata extract_gemini_usage_metadata(std::string_view json_sv) {
             doc["usageMetadata"]["outputTokenCount"].get(completion);
     }
 
+    int64_t cached = 0;
+    [[maybe_unused]] auto cached_err =
+        doc["usageMetadata"]["cachedContentTokenCount"].get(cached);
+
     usage.prompt_tokens = prompt > 0 ? static_cast<int32_t>(prompt) : 0;
     usage.completion_tokens = completion > 0 ? static_cast<int32_t>(completion) : 0;
+    usage.cached_prompt_tokens = cached > 0 ? static_cast<int32_t>(cached) : 0;
     return usage;
 }
 
@@ -585,6 +590,7 @@ ParseResult GeminiProtocol::parse_event(std::string_view raw_event) {
     const GeminiUsageMetadata usage = extract_gemini_usage_metadata(json_sv);
     result.prompt_tokens = usage.prompt_tokens;
     result.completion_tokens = usage.completion_tokens;
+    result.cached_prompt_tokens = usage.cached_prompt_tokens;
     if (!content.empty() || !tools.empty()) {
         StreamChunk chunk;
         chunk.content = std::move(content);

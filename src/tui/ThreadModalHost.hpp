@@ -131,6 +131,11 @@ public:
     [[nodiscard]] std::vector<QuestionDialogEventResult> interrupt_all_questions();
     [[nodiscard]] QuestionDialogEventResult interrupt_question(
         std::string_view session_id);
+    /// Takes back the session's dialog only if it answers @p promise; any
+    /// other dialog is left alone. The caller resolves the result.
+    [[nodiscard]] QuestionDialogEventResult withdraw_question(
+        std::string_view session_id,
+        const QuestionDialogPromise& promise);
 
     /// Block until this session's permission slot is free. An empty guard
     /// means the host is shutting down and the caller must deny the request.

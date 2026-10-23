@@ -135,6 +135,13 @@ public:
     void set_prompt_draft(PromptDraft draft);
     [[nodiscard]] PromptDraft prompt_draft() const;
 
+    /// Hands a prompt that was not sent back to this thread's composer. Any
+    /// thread may call it; the UI thread applies it with take_returned_prompt
+    /// once this thread's composer is the visible one, so a worker never
+    /// writes the live input buffer.
+    void return_prompt(std::string text);
+    [[nodiscard]] std::optional<std::string> take_returned_prompt();
+
     [[nodiscard]] ReviewActivity review_activity() const;
     void mutate_review_activity(const std::function<void(ReviewActivity&)>& mutation);
 
@@ -189,6 +196,7 @@ private:
     core::session::ActiveSessionLease::Ptr lease_;
     mutable std::mutex prompt_draft_mutex_;
     PromptDraft prompt_draft_;
+    std::optional<std::string> returned_prompt_;
     mutable std::mutex review_mutex_;
     ReviewActivity review_activity_;
 

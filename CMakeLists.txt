@@ -209,6 +209,9 @@ set(FILO_CORE_SOURCES
     src/tui/SessionPicker.cpp
     src/tui/ThreadRuntime.cpp
     src/tui/ThreadModalHost.cpp
+    src/tui/DeadlineScheduler.cpp
+    src/tui/PromptCacheDialogs.cpp
+    src/tui/PromptCacheWatch.cpp
     src/tui/SessionReplay.cpp
     src/tui/Text.cpp
     src/tui/TextLayout.cpp
@@ -290,6 +293,8 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/OllamaProtocol.cpp
     src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp
+    src/core/llm/PromptCacheProfile.cpp
+    src/core/llm/PromptCacheCalibration.cpp
     src/core/llm/routing/PolicyConfig.cpp
     src/core/llm/routing/ProviderHealth.cpp
     src/core/llm/routing/PolicyLoader.cpp
@@ -332,6 +337,8 @@ set(FILO_CORE_SOURCES
     src/core/agent/AutoTurnCoordinator.cpp
     src/core/agent/DelegatedAgentRunner.cpp
     src/core/agent/HistoryCompactor.cpp
+    src/core/agent/PromptCacheGuard.cpp
+    src/core/agent/PromptCacheTracker.cpp
     src/core/agent/HistoryCompactionPlanner.cpp
     src/core/agent/SemanticHistoryEditor.cpp
     src/core/agent/ToolCallDeduplicator.cpp
@@ -764,6 +771,10 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_session_picker.cpp
     tests/test_thread_runtime.cpp
     tests/test_thread_modal_host.cpp
+    tests/test_prompt_cache_guard.cpp
+    tests/test_deadline_scheduler.cpp
+    tests/test_prompt_cache_dialogs.cpp
+    tests/test_prompt_cache_watch.cpp
     tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp
     tests/test_budget_tracker.cpp
@@ -996,6 +1007,10 @@ source_group(
         tests/test_session_picker.cpp
         tests/test_thread_runtime.cpp
         tests/test_thread_modal_host.cpp
+        tests/test_prompt_cache_guard.cpp
+        tests/test_deadline_scheduler.cpp
+        tests/test_prompt_cache_dialogs.cpp
+        tests/test_prompt_cache_watch.cpp
         tests/test_agent_ignore.cpp
         tests/test_session_efficiency.cpp
         tests/test_sessions_lifecycle.cpp

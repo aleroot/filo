@@ -37,6 +37,9 @@ enum class ManagedSettingKey {
     AutoCompactThreshold,
     ContextCompression,
     SteeringMode,
+    PromptCacheGuardTokens,
+    PromptCacheNoticeSeconds,
+    PromptCacheKeepWarm,
 };
 
 struct ManagedSettings {
@@ -56,6 +59,9 @@ struct ManagedSettings {
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
     std::optional<std::string> steering_mode;
+    std::optional<std::string> prompt_cache_guard_tokens;
+    std::optional<std::string> prompt_cache_notice_seconds;
+    std::optional<std::string> prompt_cache_keep_warm;
 
     [[nodiscard]] bool empty() const;
 };
@@ -168,6 +174,7 @@ struct LocalModelConfig {
 //   "stream_usage": true        → appends stream_options to OpenAI requests
 //   "wire_api": "responses"     → OpenAI wire API ("chat_completions" or "responses")
 //   "service_tier": "priority"  → Responses API service tier override
+//   "prompt_cache_ttl": "1h"    → one-hour prompt cache (Anthropic; "5m" default)
 // ---------------------------------------------------------------------------
 struct ProviderConfig {
     ApiType     api_type    = ApiType::Unknown;  ///< Inferred from name when Unknown
@@ -180,6 +187,7 @@ struct ProviderConfig {
     std::string reasoning_effort{}; ///< Provider effort, e.g. low/high/xhigh/max/ultra
     std::string wire_api{};         ///< "chat_completions" / "responses" for OpenAI APIs
     std::string service_tier{};     ///< Responses API service_tier (e.g. "priority", "flex")
+    std::string prompt_cache_ttl{}; ///< "" / "5m" or "1h"; honoured where the wire can request it
     int         context_window    = 0;     ///< Explicit endpoint working limit; 0 uses vendor default
     int         thinking_budget   = 0;     ///< >0 enables extended thinking (Anthropic)
     bool        stream_usage      = false; ///< Append stream_options (OpenAI)
@@ -279,6 +287,15 @@ struct AppConfig {
     bool        strict_tool_schemas = false;
     bool        strict_tool_schemas_explicit = false;
     std::string context_compression;
+    // Cold prompt-cache protection; unset keeps the built-in defaults of
+    // core::agent::PromptCacheGuardSettings. Zero turns each part off.
+    //   prompt_cache_guard_tokens   — context size from which an expired
+    //                                 cache asks before a prompt is sent
+    //   prompt_cache_notice_seconds — lead before expiry for the notice
+    //   prompt_cache_keep_warm      — "ask" (empty) or "auto" at that notice
+    std::optional<std::int64_t> prompt_cache_guard_tokens;
+    std::optional<std::int64_t> prompt_cache_notice_seconds;
+    std::string prompt_cache_keep_warm;
     // Canonical steering token ("default", "fallback", "none"); empty means
     // "not persisted", in which case --steering and then the built-in default
     // decide. Precedence lives in main.cpp: an explicit flag wins over this.

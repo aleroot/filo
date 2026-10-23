@@ -98,6 +98,18 @@ QuestionDialogEventResult QuestionDialogController::force_interrupt() {
     return handle_event(ftxui::Event::Escape, /*is_interrupt=*/true);
 }
 
+QuestionDialogEventResult QuestionDialogController::withdraw(
+    const QuestionDialogPromise& promise) {
+    std::lock_guard lock(mutex_);
+    QuestionDialogEventResult result;
+    if (!state_.active || !promise || promise_ != promise) {
+        return result;
+    }
+    result.handled = true;
+    dismiss(false, result);
+    return result;
+}
+
 bool QuestionDialogController::active() const {
     std::lock_guard lock(mutex_);
     return state_.active;

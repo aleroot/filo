@@ -38,20 +38,26 @@ struct ClaudeWirePolicy {
 
 /// Claude's model, reasoning, attribution and caching policy over Messages.
 struct ClaudeSerializer {
-    static std::string serialize(const ChatRequest& req, int default_max_tokens = 8096,
-                                 const ClaudeThinkingConfig& thinking = {});
+    static std::string serialize(const ChatRequest& req, int default_max_tokens = kAnthropicDefaultMaxTokens,
+                                 const ClaudeThinkingConfig& thinking = {},
+                                 PromptCacheTtl cache_ttl = PromptCacheTtl::Standard);
 };
 
 class ClaudeProtocol : public AnthropicProtocol {
 public:
-    explicit ClaudeProtocol(ClaudeThinkingConfig thinking = {}, int default_max_tokens = 8096)
-        : AnthropicProtocol(default_max_tokens), thinking_(thinking) {}
+    explicit ClaudeProtocol(ClaudeThinkingConfig thinking = {}, int default_max_tokens = kAnthropicDefaultMaxTokens,
+                            PromptCacheTtl cache_ttl = PromptCacheTtl::Standard)
+        : AnthropicProtocol(default_max_tokens), thinking_(thinking), cache_ttl_(cache_ttl) {}
     void prepare_request(ChatRequest& request) override;
     std::string model_id(std::string_view model) const override;
     bool accepts_legacy_continuation() const noexcept override { return true; }
     std::string serialize(const ChatRequest& req) const override;
     cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
     ReasoningCapabilities reasoning_capabilities(std::string_view model) const noexcept override;
+    /// Anthropic documents the lifetime it is asked for (5 min, or 1 h with
+    /// `"ttl":"1h"`), renews it on every hit, and keeps no server-side
+    /// conversation state, so re-sending the last request keeps it warm.
+    PromptCacheProfile prompt_cache_profile(std::string_view model) const noexcept override;
     std::unique_ptr<ApiProtocolBase> clone() const override;
     void reset_state() override;
     /// A retry resends the already serialized payload, so the request-scoped
@@ -65,6 +71,7 @@ public:
     bool is_retryable(const HttpResponse& response) const noexcept override;
 private:
     ClaudeThinkingConfig thinking_;
+    PromptCacheTtl cache_ttl_ = PromptCacheTtl::Standard;
     bool request_uses_context_1m_ = false;
     std::string last_requested_model_;
     RateLimitInfo last_rate_limit_;

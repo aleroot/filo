@@ -1720,16 +1720,18 @@ TEST_CASE("ClaudeProtocol - final usage includes cached input token fields", "[c
     auto start = protocol.parse_event(
         "event: message_start\n"
         "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":500,\"cache_creation_input_tokens\":200,\"cache_read_input_tokens\":1300}}}\n");
+    // The input is published as soon as it is known, so a stream stopped
+    // before message_stop still reports what reading the prompt cost.
     REQUIRE(!start.done);
-    REQUIRE(start.prompt_tokens == 0);
+    REQUIRE(start.prompt_tokens == 2000);
+    REQUIRE(start.cached_prompt_tokens == 1300);
+    REQUIRE(start.cache_creation_prompt_tokens == 200);
     REQUIRE(start.completion_tokens == 0);
 
     auto delta = protocol.parse_event(
         "event: message_delta\n"
         "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n");
     REQUIRE(!delta.done);
-    REQUIRE(delta.prompt_tokens == 0);
-    REQUIRE(delta.completion_tokens == 0);
 
     auto stop = protocol.parse_event(
         "event: message_stop\n"

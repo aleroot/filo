@@ -66,6 +66,20 @@ PromptDraft ThreadRuntime::prompt_draft() const {
     return prompt_draft_;
 }
 
+void ThreadRuntime::return_prompt(std::string text) {
+    std::lock_guard lock(prompt_draft_mutex_);
+    if (returned_prompt_.has_value() && !returned_prompt_->empty()) {
+        returned_prompt_->append("\n").append(text);
+    } else {
+        returned_prompt_ = std::move(text);
+    }
+}
+
+std::optional<std::string> ThreadRuntime::take_returned_prompt() {
+    std::lock_guard lock(prompt_draft_mutex_);
+    return std::exchange(returned_prompt_, std::nullopt);
+}
+
 ReviewActivity ThreadRuntime::review_activity() const {
     std::lock_guard lock(review_mutex_);
     return review_activity_;

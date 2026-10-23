@@ -395,7 +395,17 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         if ((builtin && builtin->registry_provider == "anthropic")
             || normalized_auth_type == "oauth_claude"
             || (host && core::utils::ascii::iequals(*host, "api.anthropic.com"))) {
-            protocol = std::make_unique<protocols::ClaudeProtocol>(thinking);
+            const auto cache_ttl = parse_prompt_cache_ttl(config.prompt_cache_ttl);
+            if (!cache_ttl.has_value()) {
+                core::logging::warn(
+                    "Provider '{}': unknown prompt_cache_ttl '{}'; using the 5-minute cache. "
+                    "Accepted values are \"5m\" and \"1h\".",
+                    name, config.prompt_cache_ttl);
+            }
+            protocol = std::make_unique<protocols::ClaudeProtocol>(
+                thinking,
+                protocols::kAnthropicDefaultMaxTokens,
+                cache_ttl.value_or(PromptCacheTtl::Standard));
         } else {
             protocol = std::make_unique<protocols::AnthropicProtocol>();
         }

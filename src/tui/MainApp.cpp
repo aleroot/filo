@@ -24,6 +24,8 @@
 #include "PromptComponents.hpp"
 #include "QuestionDialogController.hpp"
 #include "ThreadModalHost.hpp"
+#include "PromptCacheWatch.hpp"
+#include "core/utils/Uuid.hpp"
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
@@ -680,6 +682,10 @@ RunResult run(RunOptions opts) {
 
     auto& config_manager     = core::config::ConfigManager::get_instance();
     auto config              = config_manager.get_config();
+    // Read by the prompt cache watch from worker and timer threads; `config`
+    // itself stays UI-thread state.
+    std::atomic<core::agent::PromptCacheGuardSettings> prompt_cache_settings{
+        core::agent::prompt_cache_guard_settings(config)};
     auto& provider_manager   = core::llm::ProviderManager::get_instance();
     const auto authentication_manager =
         core::auth::AuthenticationManager::create_with_defaults(
@@ -1619,6 +1625,45 @@ RunResult run(RunOptions opts) {
                 SettingsChoice{.value = "ultra", .label = "Ultra"},
             },
         });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::PromptCacheGuardTokens,
+            .category = "Session",
+            .label = "Cold-Cache Guard",
+            .description = "Context size from which a prompt asks before re-sending an "
+                           "expired provider cache. 0 = never ask.",
+            .choices = {
+                SettingsChoice{.value = "0",      .label = "Disabled"},
+                SettingsChoice{.value = "50000",  .label = "50k"},
+                SettingsChoice{.value = "100000", .label = "100k (Default)"},
+                SettingsChoice{.value = "200000", .label = "200k"},
+            },
+        });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+            .category = "Session",
+            .label = "Cache Expiry Notice",
+            .description = "How long before an idle session's cache expires Filo offers to "
+                           "keep it warm or compact. 0 = no notice.",
+            .choices = {
+                SettingsChoice{.value = "0",   .label = "Disabled"},
+                SettingsChoice{.value = "30",  .label = "30 s before"},
+                SettingsChoice{.value = "60",  .label = "1 min before (Default)"},
+                SettingsChoice{.value = "120", .label = "2 min before"},
+            },
+        });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::PromptCacheKeepWarm,
+            .category = "Session",
+            .label = "Cache Keep-Warm",
+            .description = "At the expiry notice, ask or renew the cache automatically. Auto "
+                           "stops once renewing would cost more than a cold cache, then asks.",
+            .choices = {
+                SettingsChoice{.value = std::string(core::agent::kPromptCacheKeepWarmAsk),
+                               .label = "Ask (Default)"},
+                SettingsChoice{.value = std::string(core::agent::kPromptCacheKeepWarmAuto),
+                               .label = "Auto"},
+            },
+        });
         // Choices come from the shared steering-mode table, so this panel can
         // never offer a token that parse_steering_policy() would misread as a
         // path. Custom file/directory steering stays CLI- and command-only
@@ -1739,6 +1784,15 @@ RunResult run(RunOptions opts) {
         }
     }
 
+    // A resumed conversation's provider cache aged while no process held it;
+    // seed its last activity so the first prompt can tell whether it is cold.
+    const auto restore_prompt_cache_activity =
+        [](core::agent::Agent& resumed, const core::session::SessionData& data) {
+            if (const auto last_active = core::session::parse_iso8601_utc(data.last_active_at)) {
+                resumed.restore_prompt_cache_activity(*last_active, data.provider, data.model);
+            }
+        };
+
     if (startup_data.has_value()) {
         auto& data = *startup_data;
         session_id         = data.session_id;
@@ -1754,6 +1808,7 @@ RunResult run(RunOptions opts) {
         // Restore agent state.
         agent->set_session_id(data.session_id);
         agent->load_history(data.messages, data.context_summary, data.mode);
+        restore_prompt_cache_activity(*agent, data);
         data.messages = agent->get_history();
         agent->set_session_goal(goal_manager.active_goal());
 
@@ -2554,6 +2609,7 @@ RunResult run(RunOptions opts) {
         created->set_effort_level(session_effort_value);
         created->set_active_model(data.model.empty() ? active_model_name : data.model);
         created->load_history(data.messages, data.context_summary, data.mode);
+        restore_prompt_cache_activity(*created, data);
         created->restore_todos(data.todos);
         return created;
     };
@@ -3541,6 +3597,7 @@ RunResult run(RunOptions opts) {
         agent->set_auto_compact_threshold(
             config.auto_compact_threshold,
             !config.auto_compact_threshold_explicit);
+        prompt_cache_settings.store(core::agent::prompt_cache_guard_settings(config));
         agent->reload_subagent_profiles(config);
 
         core::mcp::McpConnectionManager::get_instance().connect_all(
@@ -4898,6 +4955,12 @@ RunResult run(RunOptions opts) {
                 return settings.context_compression;
             case core::config::ManagedSettingKey::SteeringMode:
                 return settings.steering_mode;
+            case core::config::ManagedSettingKey::PromptCacheGuardTokens:
+                return settings.prompt_cache_guard_tokens;
+            case core::config::ManagedSettingKey::PromptCacheNoticeSeconds:
+                return settings.prompt_cache_notice_seconds;
+            case core::config::ManagedSettingKey::PromptCacheKeepWarm:
+                return settings.prompt_cache_keep_warm;
         }
         return std::nullopt;
     };
@@ -4950,6 +5013,18 @@ RunResult run(RunOptions opts) {
                 return effective.steering_mode.empty()
                     ? std::string("default")
                     : effective.steering_mode;
+            case core::config::ManagedSettingKey::PromptCacheGuardTokens:
+                return std::to_string(
+                    core::agent::prompt_cache_guard_settings(effective).min_context_tokens);
+            case core::config::ManagedSettingKey::PromptCacheNoticeSeconds:
+                return std::to_string(
+                    core::agent::prompt_cache_guard_settings(effective).notice_lead.count());
+            case core::config::ManagedSettingKey::PromptCacheKeepWarm:
+                return std::string(
+                    core::agent::prompt_cache_guard_settings(effective).keep_warm
+                            == core::agent::PromptCacheKeepWarm::Auto
+                        ? core::agent::kPromptCacheKeepWarmAuto
+                        : core::agent::kPromptCacheKeepWarmAsk);
         }
         return {};
     };
@@ -4989,6 +5064,10 @@ RunResult run(RunOptions opts) {
         config.ui_theme = after.ui_theme;
         config.context_compression = after.context_compression;
         config.steering_mode = after.steering_mode;
+        config.prompt_cache_guard_tokens = after.prompt_cache_guard_tokens;
+        config.prompt_cache_notice_seconds = after.prompt_cache_notice_seconds;
+        config.prompt_cache_keep_warm = after.prompt_cache_keep_warm;
+        prompt_cache_settings.store(core::agent::prompt_cache_guard_settings(after));
 
         if (before.default_mode != after.default_mode) {
             const std::string desired_mode = normalize_mode(after.default_mode);
@@ -5737,6 +5816,49 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
+    // ── Prompt cache watch ───────────────────────────────────────────────────
+    // Cold-cache questions use the same per-thread dialog as AskUserQuestion,
+    // and their notes land in the thread's transcript like every other status.
+    // The renderer publishes whether the visible composer holds a draft, so a
+    // notice never takes the keyboard from someone mid-sentence.
+    std::atomic_bool composer_has_draft{false};
+    PromptCacheWatch prompt_cache_watch(
+        PromptCacheWatch::Dependencies{
+            .post_question =
+                [&](std::string session_id,
+                    core::tools::QuestionItem question,
+                    QuestionDialogPromise promise) {
+                    thread_modals.post_question(core::tools::QuestionRequest{
+                        .id = core::utils::random_uuid_v4(),
+                        .questions = {std::move(question)},
+                        .session_id = std::move(session_id),
+                        .promise = std::move(promise),
+                    });
+                    wake_ui();
+                },
+            .withdraw_question =
+                [&](std::string_view session_id, const QuestionDialogPromise& promise) {
+                    auto withdrawn = thread_modals.withdraw_question(session_id, promise);
+                    if (!withdrawn.has_resolution()) {
+                        return false;
+                    }
+                    withdrawn.resolve();
+                    wake_ui();
+                    return true;
+                },
+            .notify =
+                [&](const ThreadRuntime::Ptr& runtime, std::string text) {
+                    append_runtime_history(runtime, text);
+                },
+            .settings = [&]() { return prompt_cache_settings.load(); },
+            .composer_in_use =
+                [&](std::string_view session_id) {
+                    const auto visible = thread_runtimes.current();
+                    return visible && visible->session_id() == session_id
+                        && composer_has_draft.load(std::memory_order_relaxed);
+                },
+        });
+
     auto update_ui_message = [&](const ThreadRuntime::Ptr& runtime,
                                  std::string_view message_id,
                                  auto&& updater) {
@@ -6116,6 +6238,7 @@ RunResult run(RunOptions opts) {
             return "The thread became active while it was being closed.";
         }
 
+        prompt_cache_watch.forget(target);
         auto dismissed_overlay = thread_modals.erase_session(target);
         if (dismissed_overlay.has_resolution()) {
             dismissed_overlay.resolve();
@@ -7290,6 +7413,51 @@ RunResult run(RunOptions opts) {
                 std::move(pending.callbacks));
         };
 
+    // Closes a turn whose cards are on screen but whose prompt never reached
+    // the agent (the worker could not start, or the user cancelled a cold-cache
+    // send): the cards end as a stopped turn, @p note explains why, and the
+    // thread moves on to its next queued turn.
+    auto settle_unstarted_turn = [&](const ThreadRuntime::Ptr& runtime,
+                                     const std::shared_ptr<LiveAssistantTimeline>& live_timeline,
+                                     const std::string& user_message_id,
+                                     UiMessage note) {
+        {
+            std::lock_guard lock(ui_mutex);
+            runtime->activity_timers().stop(
+                std::string(live_timeline->current_message_id()));
+            std::string turn_elapsed;
+            if (const auto elapsed =
+                    runtime->activity_timers().elapsed(user_message_id)) {
+                turn_elapsed = format_elapsed_compact(*elapsed);
+                stamp_user_turn_elapsed(
+                    *runtime->messages(),
+                    user_message_id,
+                    turn_elapsed);
+            }
+            runtime->activity_timers().stop(user_message_id);
+            if (auto* assistant =
+                    live_timeline->current(*runtime->messages())) {
+                assistant->timestamp = current_time_str();
+                if (!turn_elapsed.empty()) {
+                    assistant->activity_elapsed = turn_elapsed;
+                }
+            }
+            live_timeline->finish(
+                *runtime->messages(),
+                {},
+                true);
+            append_ui_message(*runtime->messages(), std::move(note));
+        }
+        animation_cv.notify_one();
+        if (auto next_turn = runtime->finish_turn(false); next_turn.has_value()) {
+            submit_agent_turn(
+                runtime,
+                std::move(next_turn->text),
+                std::move(next_turn->callbacks));
+        }
+        wake_ui();
+    };
+
     submit_agent_turn = [&](ThreadRuntime::Ptr runtime,
                             std::string text,
                             core::agent::Agent::TurnCallbacks turn_callbacks) {
@@ -7383,6 +7551,8 @@ RunResult run(RunOptions opts) {
                      user_message_id,
                      &update_live_assistant_message,
                      &submit_agent_turn,
+                     &settle_unstarted_turn,
+                     &prompt_cache_watch,
                      &ui_mutex,
                      &animation_cv,
                      &wake_ui,
@@ -7392,6 +7562,34 @@ RunResult run(RunOptions opts) {
                 ~WorkerCompletion() { runtime->finish_worker(); }
             } worker_completion{runtime};
             auto agent = runtime->agent();
+
+            // A prompt over a heavy, expired prompt cache re-sends the whole
+            // context at full price; ask first. Blocks only this worker.
+            switch (prompt_cache_watch.confirm_send(runtime)) {
+            case prompt_cache::SendChoice::Send:
+                break;
+            case prompt_cache::SendChoice::Cancel:
+                runtime->return_prompt(text);
+                settle_unstarted_turn(
+                    runtime,
+                    live_timeline,
+                    user_message_id,
+                    make_system_message(
+                        "\n\xe2\x84\xb9  Not sent: the prompt is back in the composer.\n"));
+                return;
+            case prompt_cache::SendChoice::CompactThenSend: {
+                const auto& status_log = effective_callbacks.on_status_log;
+                std::promise<bool> compaction;
+                auto compacted = compaction.get_future();
+                agent->compact_history_then(
+                    status_log,
+                    [&compaction](bool applied) { compaction.set_value(applied); });
+                if (!compacted.get() && status_log) {
+                    status_log(prompt_cache::compaction_skipped_notice());
+                }
+                break;
+            }
+            }
             const auto expanded_prompt = core::context::expand_prompt(
                 text,
                 base_dir,
@@ -7439,6 +7637,7 @@ RunResult run(RunOptions opts) {
                 [](const std::string&, const std::string&) {},
                 [runtime, live_timeline, agent, user_message_id, turn_changes,
                  &submit_agent_turn,
+                 &prompt_cache_watch,
                  &ui_mutex,
                  &animation_cv,
                  &wake_ui,
@@ -7482,6 +7681,7 @@ RunResult run(RunOptions opts) {
                     animation_cv.notify_one();
                     wake_ui();
                     save_runtime_snapshot(runtime);
+                    prompt_cache_watch.track(runtime);
                     if (auto next_turn = runtime->finish_turn(turn_succeeded);
                         next_turn.has_value()) {
                         submit_agent_turn(runtime,
@@ -7493,42 +7693,13 @@ RunResult run(RunOptions opts) {
           }).detach();
         } catch (const std::exception& error) {
             runtime->finish_worker();
-            {
-                std::lock_guard lock(ui_mutex);
-                std::string turn_elapsed;
-                if (const auto elapsed =
-                        runtime->activity_timers().elapsed(user_message_id)) {
-                    turn_elapsed = format_elapsed_compact(*elapsed);
-                    stamp_user_turn_elapsed(
-                        *runtime->messages(),
-                        user_message_id,
-                        turn_elapsed);
-                }
-                runtime->activity_timers().stop(user_message_id);
-                if (auto* assistant =
-                        live_timeline->current(*runtime->messages())) {
-                    assistant->timestamp = current_time_str();
-                    if (!turn_elapsed.empty()) {
-                        assistant->activity_elapsed = turn_elapsed;
-                    }
-                }
-                live_timeline->finish(
-                    *runtime->messages(),
-                    {},
-                    true);
-                append_ui_message(
-                    *runtime->messages(),
-                    make_warning_message(std::format(
-                        "Could not start the agent worker: {}",
-                        error.what())));
-            }
-            if (auto next_turn = runtime->finish_turn(false); next_turn.has_value()) {
-                submit_agent_turn(
-                    runtime,
-                    std::move(next_turn->text),
-                    std::move(next_turn->callbacks));
-            }
-            wake_ui();
+            settle_unstarted_turn(
+                runtime,
+                live_timeline,
+                user_message_id,
+                make_warning_message(std::format(
+                    "Could not start the agent worker: {}",
+                    error.what())));
         }
     };
 
@@ -8104,6 +8275,15 @@ RunResult run(RunOptions opts) {
                 diff_comparer.cancel();
             }
             return true;
+        }
+
+        // A prompt a worker handed back (a cancelled cold-cache send) lands
+        // in the composer of its own thread once that thread is on screen.
+        if (auto returned = current_runtime->take_returned_prompt()) {
+            input_text = input_text.empty()
+                ? std::move(*returned)
+                : std::move(*returned) + "\n" + input_text;
+            input_cursor_position = static_cast<int>(input_text.size());
         }
 
         // A refresh notification is not input, and must not be reported as
@@ -9970,6 +10150,7 @@ RunResult run(RunOptions opts) {
 
     // ── Renderer ─────────────────────────────────────────────────────────────
     auto renderer = Renderer(main_container, [&]() {
+        composer_has_draft.store(!input_text.empty(), std::memory_order_relaxed);
         refresh_status_labels();
         auto command_snapshot = current_command_snapshot();
         sync_command_picker(command_snapshot);
@@ -10874,6 +11055,9 @@ RunResult run(RunOptions opts) {
     // waiting worker would block shutdown forever (permission slot queue,
     // unanswered question dialog, queued steering turns).
     thread_modals.request_shutdown();
+    // After the modal host released its waiters: a cache notice waiting on
+    // an answer has its answer now, and no new one can be posted.
+    prompt_cache_watch.shutdown();
 
     // Detached turn launchers only retain runtime-owned state, but their TUI
     // callbacks still reference this composition root. Stop and join logically

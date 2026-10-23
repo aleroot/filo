@@ -81,11 +81,19 @@ private:
 
 using AnthropicReasoningEmitter = std::function<void(std::string&, const ChatRequest&)>;
 
+/// `max_tokens` is mandatory on the Messages API; used when neither the
+/// request nor the model registry supplies one.
+inline constexpr int kAnthropicDefaultMaxTokens = 8096;
+
 /// Opt-in endpoint policy. The Messages encoder makes no vendor/model decisions.
 struct AnthropicSerializationOptions {
     std::string system_prefix;
     bool system_as_text = false;
     bool cache_control = false;
+    /// Requested cache lifetime for every `cache_control` marker. Extended
+    /// asks for Anthropic's one-hour cache; all markers share one lifetime
+    /// because the API requires longer lifetimes to precede shorter ones.
+    PromptCacheTtl cache_ttl = PromptCacheTtl::Standard;
     bool image_urls = false;
     std::optional<core::tools::schema::StrictDialect> tool_schema_dialect;
     std::function<bool(std::string_view)> admit_strict_tool;
@@ -94,7 +102,7 @@ struct AnthropicSerializationOptions {
 };
 struct AnthropicSerializer {
     static int max_tokens(const ChatRequest& req, int fallback);
-    static std::string serialize(const ChatRequest& req, int default_max_tokens = 8096,
+    static std::string serialize(const ChatRequest& req, int default_max_tokens = kAnthropicDefaultMaxTokens,
                                 const AnthropicSerializationOptions& options = {});
 };
 
@@ -102,7 +110,7 @@ struct AnthropicSerializer {
 /// Vendor policy belongs in a concrete adapter, never in this class.
 class AnthropicProtocol : public ApiProtocolBase {
 public:
-    explicit AnthropicProtocol(int default_max_tokens = 8096) : default_max_tokens_(default_max_tokens) {}
+    explicit AnthropicProtocol(int default_max_tokens = kAnthropicDefaultMaxTokens) : default_max_tokens_(default_max_tokens) {}
     std::string serialize(const ChatRequest& req) const override;
     cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
     std::string build_url(std::string_view base_url, std::string_view model) const override;

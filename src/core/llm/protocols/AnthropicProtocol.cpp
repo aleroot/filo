@@ -32,6 +32,16 @@ namespace {
         return std::string(type);
     }
 
+    /// One `cache_control` marker. Every marker carries the same lifetime:
+    /// Anthropic rejects a request whose shorter-lived marker precedes a
+    /// longer-lived one.
+    void append_cache_control(std::string& payload,
+                              const AnthropicSerializationOptions& options) {
+        payload += options.cache_ttl == PromptCacheTtl::Extended
+            ? R"(,"cache_control":{"type":"ephemeral","ttl":"1h"})"
+            : R"(,"cache_control":{"type":"ephemeral"})";
+    }
+
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
         return type == "overloaded_error"
             || type == "rate_limit_error"
@@ -77,7 +87,7 @@ void append_system_field(std::string& payload, const ChatRequest& req,
         payload += R"({"type":"text","text":")";
         payload += core::utils::escape_json_string(layers[i]);
         payload += '"';
-        if (options.cache_control && cache_boundary == i) payload += R"(,"cache_control":{"type":"ephemeral"})";
+        if (options.cache_control && cache_boundary == i) append_cache_control(payload, options);
         payload += '}';
     }
     payload += ']';
@@ -183,7 +193,7 @@ std::string AnthropicSerializer::serialize(
     const bool should_enable_auto_cache =
         options.cache_control && (!req.tools.empty() || req.messages.size() > 2);
     if (should_enable_auto_cache) {
-        payload += R"(,"cache_control":{"type":"ephemeral"})";
+        append_cache_control(payload, options);
     }
 
     if (options.extra_fields) options.extra_fields(payload, req);
@@ -219,7 +229,7 @@ std::string AnthropicSerializer::serialize(
                 payload += R"(,"strict":true)";
             }
             if (options.cache_control && i + 1 == req.tools.size()) {
-                payload += R"(,"cache_control":{"type":"ephemeral"})";
+                append_cache_control(payload, options);
             }
             payload += '}';
             if (i + 1 < req.tools.size()) payload += ',';
@@ -735,12 +745,17 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
         result.chunks.push_back(std::move(chunk));
     }
 
-    if (r.done) {
-        result.done              = true;
+    // Usage is published as soon as message_start reports the input, not
+    // only at message_stop: a stream stopped early (a cancelled turn, a
+    // keep-warm replay) has still paid to read its prompt.
+    if (r.input_usage_reported || r.done) {
         result.prompt_tokens     = accumulated_input_;
         result.completion_tokens = accumulated_output_;
         result.cached_prompt_tokens = accumulated_cached_input_;
         result.cache_creation_prompt_tokens = accumulated_cache_creation_;
+    }
+    if (r.done) {
+        result.done              = true;
         result.stop_reason       = last_stop_reason_;
         result.incomplete_tool_call = r.incomplete_tool_call;
     }

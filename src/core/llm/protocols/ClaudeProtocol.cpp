@@ -736,7 +736,8 @@ ClaudeWirePolicy claude_wire_policy(
 }
 
 std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_tokens,
-                                        const ClaudeThinkingConfig& thinking) {
+                                        const ClaudeThinkingConfig& thinking,
+                                        PromptCacheTtl cache_ttl) {
     const auto wire_policy = claude_wire_policy(
         req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     AnthropicSerializationOptions options;
@@ -748,6 +749,7 @@ std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_
     if (!has_attribution) options.system_prefix = "x-anthropic-billing-header: " + std::string(claude::kBillingHeader);
     options.system_as_text = true;
     options.cache_control = true;
+    options.cache_ttl = cache_ttl;
     options.tool_schema_dialect = configured_strict_tool_dialect(ToolSchemaWire::Anthropic, req.model);
     ClaudeSchemaBudget schema_budget;
     if (req.response_format.type == ResponseFormat::Type::JsonSchema) schema_budget.reserve_output(req.response_format.schema);
@@ -891,7 +893,7 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
 }
 
 std::string ClaudeProtocol::serialize(const ChatRequest& req) const {
-    return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_);
+    return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_);
 }
 
 ReasoningCapabilities ClaudeProtocol::reasoning_capabilities(
@@ -970,8 +972,18 @@ cpr::Header ClaudeProtocol::build_headers(const core::auth::AuthInfo& auth) cons
     return headers;
 }
 
+PromptCacheProfile ClaudeProtocol::prompt_cache_profile(std::string_view) const noexcept {
+    using namespace std::chrono_literals;
+    // Anthropic prices a cache read at 0.1x input and a write at 1.25x (5 min)
+    // or 2x (1 h).
+    const bool extended = cache_ttl_ == PromptCacheTtl::Extended;
+    return PromptCacheProfile::documented(extended ? std::chrono::seconds{1h} : std::chrono::seconds{5min},
+                                          /*replay_renews=*/true)
+        .with_costs(/*read_percent=*/10, /*write_percent=*/extended ? 200 : 125);
+}
+
 std::unique_ptr<ApiProtocolBase> ClaudeProtocol::clone() const {
-    return std::make_unique<ClaudeProtocol>(thinking_, default_max_tokens_);
+    return std::make_unique<ClaudeProtocol>(thinking_, default_max_tokens_, cache_ttl_);
 }
 void ClaudeProtocol::reset_state() {
     AnthropicProtocol::reset_state();

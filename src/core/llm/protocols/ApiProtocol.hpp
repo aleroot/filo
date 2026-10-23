@@ -86,6 +86,7 @@
  */
 
 #include "../Models.hpp"
+#include "../PromptCacheProfile.hpp"
 #include "../ReasoningCapabilities.hpp"
 #include "../transport/StreamResilience.hpp"
 #include "../../auth/ICredentialSource.hpp"
@@ -453,6 +454,20 @@ public:
 
     /// Whether deployment metadata takes precedence over model-family rules.
     [[nodiscard]] virtual bool uses_provider_reasoning_catalog() const noexcept { return false; }
+
+    /**
+     * What the endpoint's prompt cache does with an idle conversation.
+     *
+     * Remote APIs cache repeated prompt prefixes and bill a cold prefix at
+     * the full input rate, but most do not document how long the cache
+     * lives, so the default is the conservative estimate. Override when the
+     * protocol itself chooses the lifetime on the wire, or has no billed
+     * cache at all.
+     */
+    [[nodiscard]] virtual PromptCacheProfile prompt_cache_profile(
+        [[maybe_unused]] std::string_view model) const noexcept {
+        return PromptCacheProfile::estimated(kEstimatedPromptCacheTtl);
+    }
 
     /**
      * Idle and response-start deadlines for one HTTP stream.

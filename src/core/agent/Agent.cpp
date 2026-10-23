@@ -1263,6 +1263,7 @@ void Agent::clear_history() {
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
     reset_efficiency_tracking_unlocked();
+    prompt_cache_.reset();
     if (provider_) {
         provider_->reset_conversation_state();
     }
@@ -1313,6 +1314,9 @@ void Agent::apply_compaction_unlocked(
     // baseline. Execution-owned state (loop breaker, todos, goals, resumable
     // subagents, and tool-result storage) deliberately survives compaction.
     reset_efficiency_tracking_unlocked();
+    // The summary starts a new prefix: nothing cached for the old one can be
+    // read again, so there is nothing left to keep warm or warn about.
+    prompt_cache_.reset();
     if (provider_) {
         // Every provider must discard transport continuation handles after a
         // history rewrite. This does not affect authentication or session-owned
@@ -1330,6 +1334,23 @@ void Agent::apply_compaction_unlocked(
 void Agent::compact_history_async(
     std::function<void(const std::string&)> text_callback,
     std::function<void()> done_callback,
+    HistoryCompactionReason reason) {
+    start_manual_compaction(
+        std::move(text_callback), std::move(done_callback), {}, reason);
+}
+
+void Agent::compact_history_then(
+    std::function<void(const std::string&)> status_callback,
+    std::function<void(bool compacted)> finished_callback) {
+    start_manual_compaction(
+        std::move(status_callback), {}, std::move(finished_callback),
+        HistoryCompactionReason::Manual);
+}
+
+void Agent::start_manual_compaction(
+    std::function<void(const std::string&)> text_callback,
+    std::function<void()> done_callback,
+    std::function<void(bool compacted)> finished_callback,
     HistoryCompactionReason reason) {
 
     HistoryCompactionPlan plan;
@@ -1358,6 +1379,9 @@ void Agent::compact_history_async(
         if (text_callback) {
             text_callback("\n\xe2\x84\xb9  A history compaction is already in progress.\n");
         }
+        if (finished_callback) {
+            finished_callback(false);
+        }
         return;
     }
 
@@ -1369,7 +1393,8 @@ void Agent::compact_history_async(
         std::move(model),
         reason,
         std::move(text_callback),
-        std::move(done_callback));
+        std::move(done_callback),
+        std::move(finished_callback));
 }
 
 void Agent::launch_compaction_transaction(
@@ -1380,9 +1405,11 @@ void Agent::launch_compaction_transaction(
     std::string model,
     HistoryCompactionReason reason,
     std::function<void(const std::string&)> status_log_callback,
-    std::function<void()> done_callback) {
+    std::function<void()> done_callback,
+    std::function<void(bool compacted)> finished_callback) {
     auto self = shared_from_this();
     auto summary_history = plan.summary_history;
+    auto applied_flag = std::make_shared<std::atomic<bool>>(false);
     history_compactor_.compact_async(
         HistoryCompactionRequest{
             .history = std::move(summary_history),
@@ -1395,6 +1422,7 @@ void Agent::launch_compaction_transaction(
             .on_summary =
                 [self,
                  base_revision,
+                 applied_flag,
                  plan = std::move(plan),
                  active_skill_context = std::move(active_skill_context),
                  done_callback = std::move(done_callback)](std::string summary) mutable {
@@ -1409,6 +1437,7 @@ void Agent::launch_compaction_transaction(
                         applied = true;
                     }
                 }
+                applied_flag->store(applied, std::memory_order_release);
                 if (applied && done_callback) {
                     done_callback();
                 }
@@ -1416,11 +1445,126 @@ void Agent::launch_compaction_transaction(
                     ? HistoryCompactionApplyStatus::Applied
                     : HistoryCompactionApplyStatus::Stale;
             },
-            .on_finished = [self]() {
-                std::lock_guard lock(self->history_mutex_);
-                self->compaction_in_progress_ = false;
+            .on_finished = [self,
+                            applied_flag,
+                            finished_callback = std::move(finished_callback)]() {
+                {
+                    std::lock_guard lock(self->history_mutex_);
+                    self->compaction_in_progress_ = false;
+                }
+                if (finished_callback) {
+                    finished_callback(applied_flag->load(std::memory_order_acquire));
+                }
             },
         });
+}
+
+// ---------------------------------------------------------------------------
+// Prompt cache
+// ---------------------------------------------------------------------------
+
+void Agent::record_prompt_cache_exchange(PromptCacheTracker::Exchange exchange) {
+    std::lock_guard lock(history_mutex_);
+    prompt_cache_.record(std::move(exchange));
+}
+
+PromptCacheState Agent::prompt_cache_state() const {
+    std::lock_guard lock(history_mutex_);
+    return prompt_cache_.state(
+        provider_,
+        active_model_,
+        static_cast<std::int64_t>(context_window_snapshot_.estimated_context_tokens));
+}
+
+void Agent::restore_prompt_cache_activity(
+    std::chrono::system_clock::time_point last_exchange_at,
+    std::string_view provider_name,
+    std::string_view model) {
+    std::lock_guard lock(history_mutex_);
+    // Any other provider or model starts from an empty cache.
+    if (provider_name != active_provider_name_ || model != active_model_) {
+        return;
+    }
+    prompt_cache_.restore(last_exchange_at, provider_, active_provider_name_, active_model_);
+}
+
+void Agent::refresh_prompt_cache_async(std::function<void(PromptCacheRefresh)> done) {
+    std::optional<PromptCacheTracker::Replay> replay;
+    std::string session_id;
+    {
+        std::lock_guard lock(history_mutex_);
+        replay = prompt_cache_.replay();
+        session_id = session_context_.session_id;
+    }
+    if (!replay.has_value()) {
+        done({.error = "this conversation has no cached request to renew"});
+        return;
+    }
+    // An isolated instance keeps the replay away from the conversation's
+    // provider state: a prompt sent meanwhile is neither blocked nor cancelled.
+    auto worker = replay->provider->fork_for_parallel_request();
+    if (!worker) {
+        done({.error = "the provider cannot run a request beside the conversation"});
+        return;
+    }
+
+    auto self = shared_from_this();
+    auto task = [self, request = std::move(replay->request), worker,
+                 model = std::move(replay->model), session_id, done]() {
+        const auto started_at = std::chrono::system_clock::now();
+        bool answered = false;
+        std::string error;
+        try {
+            worker->stream_response(*request, [&](const core::llm::StreamChunk& chunk) {
+                if (chunk.is_final) {
+                    if (chunk.is_error && !answered) {
+                        error = core::utils::str::trim_ascii_copy(chunk.content);
+                    }
+                    return;
+                }
+                // The first output proves the prompt was read, which is what
+                // renews the cache. Generating the rest would only cost tokens.
+                if (!answered
+                    && (!chunk.content.empty() || !chunk.reasoning_content.empty()
+                        || !chunk.tools.empty())) {
+                    answered = true;
+                    worker->cancel();
+                }
+            });
+        } catch (const std::exception& e) {
+            if (!answered) error = e.what();
+        } catch (...) {
+            if (!answered) error = "unknown provider error";
+        }
+
+        PromptCacheRefresh result{
+            .refreshed = error.empty(),
+            .usage = worker->get_last_usage(),
+            .error = std::move(error),
+        };
+        if (result.refreshed) {
+            if (result.usage.has_data()) {
+                self->budget_tracker_->record_event({
+                    .kind = core::budget::TokenLedgerEventKind::Actual,
+                    .source = core::budget::TokenLedgerSource::ModelCall,
+                    .session_id = session_id,
+                    .actor = "prompt-cache",
+                    .model = model,
+                    .usage = result.usage,
+                    .should_estimate_cost = worker->should_estimate_cost(),
+                    .billable = worker->should_estimate_cost(),
+                });
+            }
+            std::lock_guard lock(self->history_mutex_);
+            self->prompt_cache_.renewed(request, started_at);
+        }
+        done(std::move(result));
+    };
+    try {
+        std::thread(std::move(task)).detach();
+    } catch (const std::exception& e) {
+        done({.error = e.what()});
+    }
 }
 
 void Agent::undo_last() {
@@ -1977,6 +2121,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
     }
 
+    // Shared so a provider whose cache a replay renews can keep the exact
+    // request for refresh_prompt_cache_async without another copy.
+    const auto shared_request =
+        std::make_shared<const core::llm::ChatRequest>(std::move(request));
+    const auto request_started_at = std::chrono::system_clock::now();
     auto assistant_response   = std::make_shared<std::string>();
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
     auto tool_cost_attribution =
@@ -1993,7 +2142,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
          continuation_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
          already_stopped, turn_state,
-         step_session_context, provider_name_snapshot](
+         step_session_context, provider_name_snapshot,
+         shared_request, request_started_at](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -2205,6 +2355,16 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         !model.empty() && core::llm::ModelRegistry::instance().supports(
                             model,
                             core::llm::ModelCapability::PromptCaching),
+                });
+            }
+            if (!chunk.is_error) {
+                self->record_prompt_cache_exchange(PromptCacheTracker::Exchange{
+                    .provider = provider,
+                    .provider_name = provider_name_snapshot,
+                    .model = turn_state->model,
+                    .started_at = request_started_at,
+                    .request = shared_request,
+                    .usage = usage,
                 });
             }
         }
@@ -3156,7 +3316,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
 
     try {
-        provider->stream_response(request, on_stream_chunk);
+        provider->stream_response(*shared_request, on_stream_chunk);
     } catch (const std::exception& e) {
         core::logging::error("Provider threw before streaming started: {}", e.what());
         on_stream_chunk(core::llm::StreamChunk::make_error(
@@ -3277,6 +3437,9 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
   consecutive_failure_rounds_ = 0;
   orchestrator_.clear_sessions();
   reset_efficiency_tracking_unlocked();
+  // A replaced conversation has its own cache; a resumed one is re-seeded by
+  // restore_prompt_cache_activity once its last activity is known.
+  prompt_cache_.reset();
   if (provider_) {
     provider_->reset_conversation_state();
   }

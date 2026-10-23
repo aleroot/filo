@@ -505,6 +505,14 @@ ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(
     return protocol_capabilities;
 }
 
+PromptCacheProfile HttpLLMProvider::prompt_cache_profile(
+    std::string_view model) const noexcept {
+    if (!protocol_ || looks_like_loopback_base_url(base_url_)) {
+        return PromptCacheProfile::none();
+    }
+    return protocol_->prompt_cache_profile(model);
+}
+
 ProviderCapabilities HttpLLMProvider::capabilities() const {
     const bool is_ollama = protocol_ && protocol_->name() == "ollama";
     return ProviderCapabilities{

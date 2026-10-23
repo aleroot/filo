@@ -29,6 +29,11 @@ public:
     [[nodiscard]] ProviderCapabilities capabilities() const override;
     [[nodiscard]] std::shared_ptr<LLMProvider> fork_for_parallel_request() const override;
     [[nodiscard]] bool should_estimate_cost() const override;
+    /// The profile of the provider that served the last request: that is
+    /// the cache the conversation's prefix lives in. Never replay-renewable,
+    /// because a replay is routed again.
+    [[nodiscard]] PromptCacheProfile prompt_cache_profile(
+        std::string_view model) const noexcept override;
     void cancel() override;
     void reset_conversation_state() override;
 
@@ -70,6 +75,7 @@ private:
     std::string last_route_summary_;
     std::string last_guardrail_summary_;
     bool last_should_estimate_cost_ = true;
+    PromptCacheProfile last_prompt_cache_profile_ = PromptCacheProfile::none();
     bool isolate_target_requests_ = false;
     std::shared_ptr<LLMProvider> active_isolated_provider_;
 };
