@@ -2,6 +2,7 @@
 #include "../logging/Logger.hpp"
 #include <pybind11/eval.h>
 #include <cstdlib>
+#include <utility>
 #include <Python.h>
 
 namespace py = pybind11;
@@ -26,14 +27,14 @@ PythonManager::~PythonManager() {
         if (main_thread_state_ != nullptr) {
             PyEval_RestoreThread(main_thread_state_);
             main_thread_state_ = nullptr;
-            namespace_.reset();
+            scopes_.clear();
             interpreter_.reset();
             return;
         }
 
         // Fallback path: interpreter exists but no saved main thread state.
         py::gil_scoped_acquire acquire;
-        namespace_.reset();
+        scopes_.clear();
         interpreter_.reset();
     } catch (...) {
         // Avoid throwing from static destruction. At process shutdown the OS
@@ -47,14 +48,11 @@ void PythonManager::ensure_initialized() {
 
     interpreter_ = std::make_unique<py::scoped_interpreter>();
 
-    // Bootstrap the persistent namespace with builtins
-    namespace_.emplace();
-    (*namespace_)["__builtins__"] = py::module_::import("builtins");
-
     // Venv isolation
     const char* venv_env = std::getenv("FILO_PYTHON_VENV");
     if (venv_env && *venv_env) {
         try {
+            py::dict locals;
             py::exec(R"(
 import sys, os as _os
 _venv = _os.environ.get('FILO_PYTHON_VENV', '')
@@ -65,8 +63,7 @@ if _venv and _os.path.isdir(_venv):
         sys.path.insert(0, _sp)
     sys.prefix      = _venv
     sys.exec_prefix = _venv
-del _venv, _ver, _sp, _os
-)", py::globals(), *namespace_);
+)", py::globals(), locals);
         } catch (const py::error_already_set& e) {
             core::logging::warn("PythonManager: venv setup failed: {}", e.what());
         }
@@ -75,9 +72,74 @@ del _venv, _ver, _sp, _os
     // Release the GIL to enable multi-threading and keep the returned main
     // thread state so we can restore it during shutdown before finalization.
     main_thread_state_ = PyEval_SaveThread();
+    initialized_.store(true, std::memory_order_release);
 }
 
-PythonExecResult PythonManager::execute(const std::string& code) {
+std::shared_ptr<PythonManager::Scope> PythonManager::acquire_scope(std::string_view scope) {
+    auto it = scopes_.find(scope);
+    if (it == scopes_.end()) {
+        auto created = std::make_shared<Scope>();
+        created->globals["__builtins__"] = py::module_::import("builtins");
+        it = scopes_.emplace(std::string(scope), std::move(created)).first;
+    }
+    return it->second;
+}
+
+void PythonManager::release(Scope& scope) {
+    // Functions defined in the namespace reference it as their globals, so
+    // the dict sits in a reference cycle: clear it to break the cycle, then
+    // collect so whatever else the conversation built is freed now rather
+    // than at the next automatic collection.
+    try {
+        scope.globals.clear();
+        py::module_::import("gc").attr("collect")();
+    } catch (const py::error_already_set& e) {
+        core::logging::warn("PythonManager: releasing a namespace failed: {}", e.what());
+    }
+}
+
+void PythonManager::retire(std::shared_ptr<Scope> scope) {
+    if (!scope) return;
+    if (scope->running > 0) {
+        scope->retired = true;  // the last running call releases it
+        return;
+    }
+    release(*scope);
+}
+
+void PythonManager::clear_scope(std::string_view scope) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    py::gil_scoped_acquire acquire;
+    const auto it = scopes_.find(scope);
+    if (it == scopes_.end()) return;
+    auto removed = std::move(it->second);
+    scopes_.erase(it);
+    retire(std::move(removed));
+}
+
+void PythonManager::move_scope(std::string_view from, std::string_view to) {
+    if (from == to || !initialized_.load(std::memory_order_acquire)) return;
+    py::gil_scoped_acquire acquire;
+    const auto it = scopes_.find(from);
+    if (it == scopes_.end()) return;
+    auto moved = std::move(it->second);
+    scopes_.erase(it);
+    std::shared_ptr<Scope> displaced;
+    if (const auto target = scopes_.find(to); target != scopes_.end()) {
+        displaced = std::exchange(target->second, std::move(moved));
+    } else {
+        scopes_.emplace(std::string(to), std::move(moved));
+    }
+    retire(std::move(displaced));
+}
+
+std::size_t PythonManager::scope_count() {
+    if (!initialized_.load(std::memory_order_acquire)) return 0;
+    py::gil_scoped_acquire acquire;
+    return scopes_.size();
+}
+
+PythonExecResult PythonManager::execute(const std::string& code, std::string_view scope_key) {
     ensure_initialized();
 
     // Acquire the GIL before any Python C API calls.
@@ -85,6 +147,18 @@ PythonExecResult PythonManager::execute(const std::string& code) {
     // during initialization. The GIL is automatically released when this guard
     // goes out of scope (RAII).
     py::gil_scoped_acquire acquire;
+
+    // Declared after the GIL guard, so the last reference to a retired
+    // namespace is dropped while the GIL is still held.
+    const auto scope = acquire_scope(scope_key);
+    ++scope->running;
+    struct RunningGuard {
+        PythonManager& manager;
+        Scope& scope;
+        ~RunningGuard() {
+            if (--scope.running == 0 && scope.retired) manager.release(scope);
+        }
+    } running_guard{*this, *scope};
 
     PythonExecResult result;
 
@@ -99,9 +173,9 @@ PythonExecResult PythonManager::execute(const std::string& code) {
     sys.attr("stderr") = buf_err;
 
     try {
-        // Use namespace_ for both globals and locals so that function
+        // Use the scope's dict for both globals and locals so that function
         // definitions and assignments persist across calls (REPL semantics).
-        py::exec(py::str(code), *namespace_, *namespace_);
+        py::exec(py::str(code), scope->globals, scope->globals);
         result.success = true;
     } catch (const py::error_already_set& e) {
         result.success = false;
@@ -119,16 +193,6 @@ PythonExecResult PythonManager::execute(const std::string& code) {
     }
 
     return result;
-}
-
-void PythonManager::reset_namespace() {
-    if (!interpreter_ || !namespace_) return;
-
-    // Acquire the GIL before modifying Python objects.
-    py::gil_scoped_acquire acquire;
-
-    namespace_->clear();
-    (*namespace_)["__builtins__"] = py::module_::import("builtins");
 }
 
 } // namespace core::tools

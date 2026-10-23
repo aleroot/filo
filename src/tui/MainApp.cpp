@@ -2024,6 +2024,9 @@ RunResult run(RunOptions opts) {
                 previous_session_id,
                 session_id);
         }
+        // /clear starts over: drop what tools kept for the old conversation
+        // (the Python namespace, the shell session) instead of orphaning it.
+        core::tools::ToolManager::get_instance().clear_session_state(previous_session_id);
         session_leases.release(previous_session_id);
         wake_ui();
     };
@@ -3150,6 +3153,10 @@ RunResult run(RunOptions opts) {
             branch_lease->commit();
         }
         agent->set_session_id(new_session_id);
+        // The live conversation continues under the branch id; its tool state
+        // goes with it.
+        core::tools::ToolManager::get_instance().move_session_state(
+            old_session_id, new_session_id);
         current_runtime->set_lease(session_leases.retain(new_session_id));
         sync_runtime_metadata();
         if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
@@ -3257,6 +3264,9 @@ RunResult run(RunOptions opts) {
             // Runtime-local identity: always safe — this agent is the only
             // consumer of its own session id.
             runtime_agent->set_session_id(new_session_id);
+            // Compaction continues the same conversation: keep its tool state.
+            core::tools::ToolManager::get_instance().move_session_state(
+                old_session_id, new_session_id);
 
             // TOCTOU guard: the selected-thread check at the top of this
             // lambda is advisory only. Re-validate under ui_mutex that this
@@ -6246,6 +6256,7 @@ RunResult run(RunOptions opts) {
 
         runtime->set_lease(nullptr);
         session_leases.release(target);
+        core::tools::ToolManager::get_instance().clear_session_state(target);
         session_stats_registry->reset(target);
         core::budget::BudgetTracker::get_instance().reset_session(target);
         return std::nullopt;

@@ -154,6 +154,20 @@ public:
         }
     }
 
+    void move_session_state(std::string_view from, std::string_view to) {
+        std::vector<std::shared_ptr<Tool>> tools;
+        {
+            std::lock_guard lock(mutex_);
+            tools.reserve(tools_.size());
+            for (const auto& [_, registered] : tools_) {
+                tools.push_back(registered.tool);
+            }
+        }
+        for (const auto& tool : tools) {
+            tool->move_session_state(from, to);
+        }
+    }
+
 private:
     struct RegisteredTool {
         std::shared_ptr<Tool> tool;

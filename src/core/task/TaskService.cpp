@@ -316,6 +316,9 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
     // either for the worker's own prompt or for the tool-side denial that
     // SteeringGuard derives from it.
     worker_context.steering_policy = parent_context.steering_policy;
+    // A worker shares the conversation's Python namespace, so it can use what
+    // the parent computed and hand results back through it.
+    worker_context.root_session_id = std::string(parent_context.root_session());
     return worker_context;
 }
 

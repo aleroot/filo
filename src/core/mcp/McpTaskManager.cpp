@@ -142,6 +142,15 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
         [entry,
          stop_token = record->stop_source.get_token(),
          execute = std::move(runner.execute)]() mutable {
+            // A task is one stateless request: whatever session state its
+            // tools (and the workers it delegates to) keyed by the task id is
+            // released when it ends, like the per-request scope of tools/call.
+            struct SessionStateRelease {
+                std::string session_id;
+                ~SessionStateRelease() {
+                    core::tools::ToolManager::get_instance().clear_session_state(session_id);
+                }
+            } release_session_state{entry->state.task_id};
             {
                 std::lock_guard lock(entry->mutex);
                 if (!entry->finished) {

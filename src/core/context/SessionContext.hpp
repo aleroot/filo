@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -36,12 +37,20 @@ struct SessionContext {
         , path_visibility(std::move(path_visibility)) {}
 
     std::string session_id;
+    // The top-level session a delegated context works for; empty for a
+    // top-level session. Session-scoped tool state that a conversation shares
+    // with its workers (the Python namespace) is keyed by root_session().
+    std::string root_session_id;
     core::workspace::SessionWorkspace workspace;
     SessionTransport transport;
     std::shared_ptr<const core::workspace::PathVisibility> path_visibility;
     core::memory::MemoryThreadPolicy memory_policy;
     SteeringPolicy steering_policy;
 
+    [[nodiscard]] std::string_view root_session() const noexcept {
+        return root_session_id.empty() ? std::string_view(session_id)
+                                       : std::string_view(root_session_id);
+    }
     [[nodiscard]] const core::workspace::SessionWorkspace& workspace_view() const noexcept;
     [[nodiscard]] const core::workspace::WorkspaceSnapshot& effective_workspace() const noexcept;
     [[nodiscard]] std::filesystem::path resolve_path(

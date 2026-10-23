@@ -220,6 +220,15 @@ public:
      * explicit lifecycle cleanup instead of hidden process-wide registries.
      */
     virtual void clear_session_state(std::string_view) {}
+
+    /**
+     * @brief Re-keys per-session state when a live session changes its id.
+     *
+     * Called when the same conversation continues under a new session id
+     * (compaction rotation, branching), so state the conversation built is
+     * carried over instead of being orphaned under the old id.
+     */
+    virtual void move_session_state(std::string_view /*from*/, std::string_view /*to*/) {}
 };
 
 } // namespace core::tools
