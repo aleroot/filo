@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -1508,6 +1509,135 @@ TEST_CASE("KimiProtocol - quota exhausted 429 is not retryable", "[kimi][retry]"
                  Catch::Matchers::ContainsSubstring("quota exhausted"));
 }
 
+TEST_CASE("KimiProtocol - retryable statuses match kimi-code", "[kimi][retry]") {
+    const KimiProtocol protocol;
+    cpr::Header headers;
+
+    // kimi-code's isRetryableGenerateError: 408 (request timeout), 409
+    // (lock/conflict timeout), 429 (rate limit), 5xx and 529 (overloaded).
+    for (const int status : {408, 409, 429, 500, 502, 503, 504, 529}) {
+        CAPTURE(status);
+        const HttpResponse response{
+            .status_code = status, .body = "{}", .headers = headers};
+        CHECK(protocol.is_retryable(response));
+    }
+
+    // Deterministic client errors fail fast instead of burning the retry budget.
+    for (const int status : {400, 401, 403, 404, 422}) {
+        CAPTURE(status);
+        const HttpResponse response{
+            .status_code = status, .body = "{}", .headers = headers};
+        CHECK_FALSE(protocol.is_retryable(response));
+    }
+}
+
+TEST_CASE("KimiProtocol - completion budget fills the room the prompt leaves",
+          "[kimi][budget]") {
+    KimiProtocol protocol;
+    // The estimator charges 4096 tokens of framing, 8 per message and
+    // (ascii+2)/3 per run of text, so a bare "Hello" prompt costs this much.
+    constexpr int kHelloPrompt = 4'096 + 8 + 2;
+
+    SECTION("a registry-sized cap is clamped to the window minus the prompt") {
+        auto req = make_simple_request("kimi-for-coding");
+        req.max_tokens = 262'144;
+        protocol.prepare_request(req);
+        REQUIRE(req.max_tokens.has_value());
+        CHECK(*req.max_tokens == 262'144 - kHelloPrompt);
+    }
+
+    SECTION("an unset budget fills the room, as kimi-code does when unset") {
+        auto req = make_simple_request("kimi-for-coding");
+        protocol.prepare_request(req);
+        REQUIRE(req.max_tokens.has_value());
+        CHECK(*req.max_tokens == 262'144 - kHelloPrompt);
+    }
+
+    SECTION("an explicit ceiling below the room is preserved") {
+        auto req = make_simple_request("kimi-for-coding");
+        req.max_tokens = 1'000;
+        protocol.prepare_request(req);
+        CHECK(*req.max_tokens == 1'000);
+    }
+
+    SECTION("a longer prompt leaves less room") {
+        auto req = make_simple_request("kimi-for-coding", std::string(3'000, 'x'));
+        req.max_tokens = 262'144;
+        protocol.prepare_request(req);
+        CHECK(*req.max_tokens == 262'144 - (4'096 + 8 + 1'000));
+    }
+
+    SECTION("the live catalog window outranks the trait table") {
+        auto req = make_simple_request("kimi-for-coding");
+        req.catalog_context_window = 131'072;
+        req.max_tokens = 262'144;
+        protocol.prepare_request(req);
+        CHECK(*req.max_tokens == 131'072 - kHelloPrompt);
+    }
+
+    SECTION("a prompt that fills the window still leaves a legal minimum") {
+        auto req = make_simple_request("kimi-for-coding", std::string(30'000, 'x'));
+        req.catalog_context_window = 4'096;
+        req.max_tokens = 262'144;
+        protocol.prepare_request(req);
+        CHECK(*req.max_tokens == 1);
+    }
+
+    SECTION("a model with no known window keeps whatever it was given") {
+        auto req = make_simple_request("ghost-model");
+        req.max_tokens = 1'234;
+        protocol.prepare_request(req);
+        CHECK(*req.max_tokens == 1'234);
+    }
+}
+
+TEST_CASE("KimiProtocol - names a wire it cannot speak instead of misrouting",
+          "[kimi][wire]") {
+    KimiProtocol protocol;
+
+    // The managed catalog can serve a model on the Messages or Responses wire.
+    for (const char* declared : {"anthropic", "openai_responses"}) {
+        CAPTURE(declared);
+        auto req = make_simple_request("kimi-for-coding");
+        req.catalog_wire_protocol = std::string(declared);
+        CHECK_THROWS_AS(protocol.prepare_request(req), std::invalid_argument);
+    }
+
+    // An empty declaration means "the provider default", not a foreign wire.
+    auto req = make_simple_request("kimi-for-coding");
+    req.catalog_wire_protocol = std::string{};
+    CHECK_NOTHROW(protocol.prepare_request(req));
+}
+
+TEST_CASE("Kimi traits - K3 series ids are matched exactly, never by prefix",
+          "[kimi][traits]") {
+    for (const auto model : {"kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"}) {
+        CAPTURE(model);
+        CHECK(is_kimi_k3_model(model));
+        // Public K3 configures reasoning with top-level reasoning_effort.
+        CHECK(is_kimi_public_k3_model(model));
+        CHECK(kimi_model_context_window(model) == 1'048'576);
+    }
+    // A prefix rule would sweep this unrelated id into the K3 effort ladder.
+    CHECK_FALSE(is_kimi_k3_model("kimi-k3-turbo"));
+    CHECK_FALSE(is_kimi_public_k3_model("kimi-k3-turbo"));
+
+    for (const auto model : {"k3", "k3-256k", "kimi-for-coding",
+                             "kimi-for-coding-highspeed"}) {
+        CAPTURE(model);
+        CHECK(is_kimi_code_model(model));
+    }
+    // The whole K2 series is a 262,144-token window, and the completion
+    // ceiling follows it because the API accepts max_completion_tokens up to
+    // the window and lowers it itself on overflow.
+    for (const auto model : {"kimi-k2.7-code", "kimi-k2.7-code-highspeed",
+                             "kimi-k2.6", "kimi-for-coding"}) {
+        CAPTURE(model);
+        CHECK(kimi_model_context_window(model) == 262'144);
+        CHECK(kimi_model_max_output_tokens(model) == 262'144);
+    }
+}
+
 TEST_CASE("Kimi region resolver defaults to the international deployment",
           "[kimi][region]") {
     const ScopedKimiProcessEnv env;
@@ -1559,7 +1689,7 @@ TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
     const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders(session.device_id());
 
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
-    REQUIRE(headers.at("X-Msh-Version") == "0.42.0");
+    REQUIRE(headers.at("X-Msh-Version") == "2.3.1");
     REQUIRE_FALSE(headers.at("X-Msh-Device-Name").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Device-Model").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Os-Version").empty());
@@ -1600,7 +1730,7 @@ TEST_CASE("KimiProtocol - headers identify Kimi CLI and preserve OAuth device id
 
     const auto headers = protocol.build_headers(auth);
 
-    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/0.42.0");
+    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/2.3.1");
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
     REQUIRE(headers.at("X-Msh-Device-Id") == "device-from-jwt");
     REQUIRE(headers.at("Authorization") == "Bearer token");

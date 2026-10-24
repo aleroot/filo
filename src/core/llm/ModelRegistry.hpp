@@ -277,6 +277,12 @@ struct ModelInfo {
     ModelReasoningProfile reasoning = {};              ///< Advertised effort levels and thinking wire modes
     ModelWireConstraints wire = {};                    ///< Documented request-field rejections for this model
     ModelTier tier = ModelTier::Balanced;        ///< Quality tier for routing
+    /// Wire the serving endpoint declares for this model, when its live catalog
+    /// names one (Kimi Code publishes `protocol`: `anthropic` | `response`).
+    /// Empty means the provider's default wire. Stays on the provider snapshot:
+    /// merge_model_metadata does not copy it onto a curated card, and the JSON
+    /// registry does not read or write it.
+    std::string wire_protocol = {};
     
     // ------------------------------------------------------------------------
     // Metadata

@@ -637,6 +637,11 @@ struct ChatRequest {
     std::optional<ModelReasoningProfile> catalog_reasoning = {};
     /// Serving endpoint's context limit, when its live catalog supplied one.
     std::optional<int> catalog_context_window = {};
+    /// Wire the serving endpoint declares for this model, when its live catalog
+    /// names one. Empty means the provider's default wire. Copied onto the
+    /// request for the same reason as `catalog_context_window`: discovery is
+    /// provider-scoped and never reaches the global registry.
+    std::optional<std::string> catalog_wire_protocol = {};
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

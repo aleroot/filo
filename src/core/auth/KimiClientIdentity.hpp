@@ -10,7 +10,7 @@
  * `XaiGrokClientIdentity.hpp` — so KimiOAuthFlow, KimiProtocol, and the web
  * search backend cannot drift.
  *
- * Compatibility version audited against MoonshotAI/kimi-code 0.42.0
+ * Compatibility version audited against MoonshotAI/kimi-code 2.3.1
  * (`apps/kimi-code` package version; OAuth client id and regional hosts from
  * `packages/oauth/src/constants.ts` + `region.ts`).
  */
@@ -25,7 +25,7 @@ inline constexpr std::string_view kClientId =
 inline constexpr std::string_view kPlatform = "kimi_code_cli";
 inline constexpr std::string_view kUserAgentProduct = "kimi-code-cli";
 // Bare CLI version sent as X-Msh-Version. Track kimi-code, not Filo.
-inline constexpr std::string_view kClientVersion = "0.42.0";
+inline constexpr std::string_view kClientVersion = "2.3.1";
 
 inline constexpr std::string_view kMainlandOAuthHost = "https://auth.kimi.com";
 inline constexpr std::string_view kGlobalOAuthHost = "https://auth.kimi.ai";

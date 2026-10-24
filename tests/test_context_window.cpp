@@ -44,7 +44,7 @@ TEST_CASE("ContextWindowTracker estimates live history snapshots", "[context][wi
         "kimi-for-coding");
 
     CHECK(snapshot.estimated_context_tokens == 101);
-    CHECK(snapshot.max_context_tokens == 256'000);
+    CHECK(snapshot.max_context_tokens == 262'144);
     CHECK(snapshot.remaining_pct == 100);
 }
 
@@ -71,25 +71,28 @@ TEST_CASE("ContextWindowTracker ceils tiny Kimi 2.7 startup usage to full remain
         nullptr,
         "kimi-k2.7-code");
 
-    CHECK(snapshot.max_context_tokens == 256'000);
+    CHECK(snapshot.max_context_tokens == 262'144);
     CHECK(snapshot.estimated_context_tokens == 1'001);
     CHECK(snapshot.remaining_pct == 100);
 }
 
 TEST_CASE("ContextWindowTracker does not show 99 percent left before one percent is used",
           "[context][window]") {
+    // One percent of the 262'144-token K2 window is 2'621.44 tokens, and
+    // estimate_tokens() is chars/4 + 1 — so these two prompts sit either side
+    // of the first whole percent.
     const auto just_under_one_percent = core::context::ContextWindowTracker::snapshot(
-        {message_with_chars(10'232)},
+        {message_with_chars(10'480)},
         nullptr,
         "kimi-k2.7-code");
     const auto just_over_one_percent = core::context::ContextWindowTracker::snapshot(
-        {message_with_chars(10'240)},
+        {message_with_chars(10'484)},
         nullptr,
         "kimi-k2.7-code");
 
-    CHECK(just_under_one_percent.estimated_context_tokens == 2'559);
+    CHECK(just_under_one_percent.estimated_context_tokens == 2'621);
     CHECK(just_under_one_percent.remaining_pct == 100);
-    CHECK(just_over_one_percent.estimated_context_tokens == 2'561);
+    CHECK(just_over_one_percent.estimated_context_tokens == 2'622);
     CHECK(just_over_one_percent.remaining_pct == 99);
 }
 
@@ -149,8 +152,8 @@ TEST_CASE("ContextWindowTracker resolves representative provider model windows",
         {"kimi-k3", 1'048'576},
         {"k3", 1'048'576},
         {"k3-256k", 262'144},
-        {"kimi-for-coding", 256'000},
-        {"kimi-k2.7-code", 256'000},
+        {"kimi-for-coding", 262'144},
+        {"kimi-k2.7-code", 262'144},
         {"claude-sonnet-4-6[1m]", 1'000'000},
         {"gpt-5.6-sol", 1'050'000},
         {"gpt-5.6-terra", 1'050'000},
@@ -208,8 +211,9 @@ TEST_CASE("ContextWindowTracker keeps default compaction threshold proportional 
                 core::context::CompactionTriggerPolicy::kDefaultFixedTokenThreshold,
         });
 
-    CHECK(decision.max_context_tokens == 256'000);
-    CHECK(decision.effective_token_threshold == 192'000);
+    CHECK(decision.max_context_tokens == 262'144);
+    // 0.75 of the window, as the model-aware default.
+    CHECK(decision.effective_token_threshold == 196'608);
     CHECK_FALSE(decision.should_compact);
 }
 
@@ -228,7 +232,7 @@ TEST_CASE("ContextWindowTracker preserves explicit threshold equal to built-in d
             .use_model_aware_default_threshold = false,
         });
 
-    CHECK(decision.max_context_tokens == 256'000);
+    CHECK(decision.max_context_tokens == 262'144);
     CHECK(decision.effective_token_threshold == 25'000);
     CHECK(decision.should_compact);
 }

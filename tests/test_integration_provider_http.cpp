@@ -340,6 +340,79 @@ TEST_CASE("MiMo Token Plan completes a streamed HTTP tool round trip",
         R"("tool_call_id":"call_read")"));
 }
 
+TEST_CASE("Kimi Code subscription sends the completion budget the window leaves",
+          "[integration][http][kimi][budget]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex received_mutex;
+    server.Post("/v1/chat/completions",
+                [&](const httplib::Request& request, httplib::Response& response) {
+        {
+            std::lock_guard lock(received_mutex);
+            received.push_back(request);
+        }
+        const std::string body =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n";
+        response.set_chunked_content_provider("text/event-stream",
+            [body](std::size_t offset, httplib::DataSink& sink) {
+                const auto size = std::min(std::size_t{13}, body.size() - offset);
+                if (!sink.write(body.data() + offset, size)) return false;
+                if (offset + size == body.size()) sink.done();
+                return true;
+            });
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    // No provider name, so discovery stays off and this test touches no global
+    // catalog state: the budget comes from the registry card, which is what a
+    // subscription sees before its first /models refresh lands. The managed
+    // catalog dialect itself is covered in test_model_catalog_provider.cpp.
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-kimi-key"),
+        "kimi-for-coding",
+        std::make_unique<KimiProtocol>());
+
+    ChatRequest request;
+    request.model = "kimi-for-coding";
+    request.stream = true;
+    request.messages = {Message{.role = "user", .content = "Summarise the repo."}};
+
+    std::string answer;
+    std::string error_text;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error_text += chunk.content;
+        answer += chunk.content;
+    });
+    REQUIRE(error_text == "");
+    CHECK(answer == "Done.");
+
+    std::lock_guard lock(received_mutex);
+    REQUIRE(received.size() == 1);
+    const auto& wire = received.front();
+    CHECK(wire.get_header_value("X-Msh-Platform") == "kimi_code_cli");
+    CHECK(wire.get_header_value("X-Msh-Version") == "2.3.1");
+
+    simdjson::dom::parser parser;
+    const auto body = parser.parse(wire.body);
+    // The registry card used to pin 8192 here, which an always-thinking model
+    // can spend entirely on reasoning and still return empty content. The
+    // budget now fills the window the prompt leaves, as kimi-code does.
+    int64_t completion_budget = 0;
+    REQUIRE(body["max_completion_tokens"].get(completion_budget) == simdjson::SUCCESS);
+    CHECK(completion_budget > 200'000);
+    CHECK(completion_budget < 262'144);
+    // Managed Kimi thinking is a `thinking` object, never top-level effort.
+    CHECK_THAT(wire.body, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"enabled","keep":"all"})"));
+    CHECK(body["reasoning_effort"].error() != simdjson::SUCCESS);
+}
+
 TEST_CASE("Qwen Token Plan stops HTTP retries when the weekly quota is exhausted",
           "[integration][http][qwen][retry]") {
     bool stream_error = false;

@@ -22,10 +22,14 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("kimi-k3") == 1048576);
     REQUIRE(get_max_context_size("k3") == 1048576);
     REQUIRE(get_max_context_size("k3-256k") == 262144);
-    REQUIRE(get_max_context_size("kimi-k2.7-code") == 256000);
-    REQUIRE(get_max_context_size("kimi-k2.6") == 256000);
-    REQUIRE(get_max_context_size("kimi-k2.5") == 256000);
-    REQUIRE(get_max_context_size("kimi-for-coding") == 256000);
+    // Moonshot prices the whole K2 series at a 262,144-token window; the
+    // "256K" in its model guide is that same figure rounded.
+    REQUIRE(get_max_context_size("kimi-k3.1-pro") == 1048576);
+    REQUIRE(get_max_context_size("kimi-k3.1-pro-highspeed") == 1048576);
+    REQUIRE(get_max_context_size("kimi-k2.7-code") == 262144);
+    REQUIRE(get_max_context_size("kimi-k2.6") == 262144);
+    REQUIRE(get_max_context_size("kimi-k2.5") == 262144);
+    REQUIRE(get_max_context_size("kimi-for-coding") == 262144);
     
     // Anthropic (via new registry)
     REQUIRE(get_max_context_size("claude-fable-5") == 1000000);
@@ -625,7 +629,7 @@ TEST_CASE("HttpLLMProvider::max_context_size uses registry", "[llm][provider][re
         "kimi-k2.5",
         std::make_unique<protocols::OpenAIProtocol>());
     
-    REQUIRE(provider_kimi.max_context_size() == 256000);
+    REQUIRE(provider_kimi.max_context_size() == 262144);
     
     HttpLLMProvider provider_unknown(
         "https://example.com",

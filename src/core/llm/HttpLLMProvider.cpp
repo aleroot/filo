@@ -158,6 +158,24 @@ namespace {
             });
     }
 
+/// Project the endpoint's own live catalog card onto the request.
+///
+/// Model discovery is intentionally provider-scoped: a model ID exposed by one
+/// configured endpoint must not overwrite the global registry card for another
+/// endpoint, so whatever a serializer has to honor travels on the request
+/// instead. Each field is projected on its own evidence — a catalog that
+/// publishes one and omits the other must not lose either.
+void apply_live_catalog_metadata(ChatRequest& request,
+                                 const std::optional<ModelInfo>& live) {
+    if (!live.has_value()) return;
+    if (live->context_window > 0) {
+        request.catalog_context_window = live->context_window;
+    }
+    if (!live->wire_protocol.empty()) {
+        request.catalog_wire_protocol = live->wire_protocol;
+    }
+}
+
 }
 
 HttpLLMProvider::HttpLLMProvider(std::string                                    base_url,
@@ -585,14 +603,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         }
         ensure_model_metadata(metadata_model);
         const auto metadata_info = resolved_model_info(metadata_model);
-        if (const auto live = provider_model_info(metadata_model); live && live->context_window > 0) {
-            effective_request.catalog_context_window = live->context_window;
-        }
-        // Model discovery is intentionally provider-scoped: a model ID exposed
-        // by one configured endpoint must not overwrite the global registry
-        // card for another endpoint. Copy its concrete output limit onto this
-        // request instead, so serializers that require or honor max_tokens do
-        // not fall back to their generic, often much smaller, default.
+        apply_live_catalog_metadata(
+            effective_request, provider_model_info(metadata_model));
+        // Same reasoning as the projections above: copy this endpoint's concrete
+        // output limit onto the request, so serializers that require or honor
+        // max_tokens do not fall back to their generic, often much smaller,
+        // default.
         if (!effective_request.max_tokens.has_value() && metadata_info.has_value()) {
             const int32_t max_output_tokens = metadata_info->max_output_tokens;
             if (max_output_tokens > 0) {

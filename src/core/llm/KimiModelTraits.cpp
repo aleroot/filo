@@ -19,6 +19,15 @@ constexpr std::array<std::string_view, 4> kCodeModelIds{{
     "kimi-for-coding-highspeed",
 }};
 
+/// Public-API K3 series. Matched exactly, never by `kimi-k3` prefix: that
+/// would sweep in unrelated ids such as `kimi-k3-turbo`, which is not a K3
+/// reasoning model and must not inherit its effort ladder.
+constexpr std::array<std::string_view, 3> kPublicK3ModelIds{{
+    "kimi-k3",
+    "kimi-k3.1-pro",
+    "kimi-k3.1-pro-highspeed",
+}};
+
 constexpr std::string_view kPublicApiServiceId = "kimi:public-api";
 constexpr std::string_view kCodeServiceId = "kimi:code";
 
@@ -77,6 +86,14 @@ constexpr KimiRegionProfile kGlobalProfile{
                 path.substr(0, prefix.size()),
                 prefix)
             && path[prefix.size()] == '/');
+}
+
+[[nodiscard]] bool is_public_k3_id(std::string_view value) noexcept {
+    return std::ranges::any_of(
+        kPublicK3ModelIds,
+        [&](std::string_view candidate) {
+            return core::utils::ascii::iequals(value, candidate);
+        });
 }
 
 [[nodiscard]] bool is_kimi_code_host(std::string_view host) noexcept {
@@ -142,9 +159,10 @@ bool is_kimi_code_model(std::string_view model_id) noexcept {
 
 bool is_kimi_k3_model(std::string_view model_id) noexcept {
     const std::string_view value = trimmed(model_id);
+    // Managed Kimi Code ids are exact; so are the public K3 series ids.
     return core::utils::ascii::iequals(value, "k3")
         || core::utils::ascii::iequals(value, "k3-256k")
-        || core::utils::ascii::iequals(value, "kimi-k3");
+        || is_public_k3_id(value);
 }
 
 bool is_kimi_k3_256k_model(std::string_view model_id) noexcept {
@@ -152,20 +170,47 @@ bool is_kimi_k3_256k_model(std::string_view model_id) noexcept {
 }
 
 bool is_kimi_public_k3_model(std::string_view model_id) noexcept {
-    return core::utils::ascii::iequals(trimmed(model_id), "kimi-k3");
+    // Public K3 configures reasoning with the top-level `reasoning_effort`
+    // field; `thinking` is a K2.x-only parameter (platform.kimi.ai model
+    // parameter reference).
+    return is_public_k3_id(trimmed(model_id));
 }
 
 int32_t kimi_model_context_window(std::string_view model_id) noexcept {
     const std::string_view value = trimmed(model_id);
-    if (core::utils::ascii::iequals(value, "k3-256k")) return 262'144;
-    if (core::utils::ascii::iequals(value, "k3")
-        || core::utils::ascii::iequals(value, "kimi-k3")) {
+    // 256K on Moonshot's own pages is 262'144 tokens; the pricing reference
+    // states the exact figure for the whole K2 series.
+    constexpr std::array<std::string_view, 9> k256Models{{
+        "k3-256k",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "kimi-for-coding",
+        "kimi-for-coding-highspeed",
+        "kimi-for-university",
+        "kimi-k2",
+    }};
+    if (std::ranges::any_of(k256Models, [&](std::string_view candidate) {
+            return core::utils::ascii::iequals(value, candidate);
+        })) {
+        return 262'144;
+    }
+    // The whole K3 series (kimi-k3, kimi-k3.1-pro and its highspeed variant)
+    // is a 1M-token window.
+    if (core::utils::ascii::iequals(value, "k3") || is_public_k3_id(value)) {
         return 1'048'576;
     }
     return 0;
 }
 
 int32_t kimi_model_max_output_tokens(std::string_view model_id) noexcept {
+    // Moonshot publishes no separate completion ceiling: `max_completion_tokens`
+    // may be set up to the context window and the API lowers it automatically
+    // when prompt + completion would overflow. kimi-code therefore sends the
+    // window itself and lets the server fit the request, so the registry card
+    // must not invent a smaller one — a tiny cap on an always-thinking model
+    // can burn the whole budget on reasoning and return empty content.
     const int32_t context_window = kimi_model_context_window(model_id);
     return context_window > 0 ? context_window : 8'192;
 }

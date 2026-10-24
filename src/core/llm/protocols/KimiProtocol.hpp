@@ -112,6 +112,20 @@ public:
     }
 
     /**
+     * @brief Size the completion budget the way kimi-code does.
+     *
+     * Moonshot publishes no completion ceiling below the context window:
+     * `max_completion_tokens` accepts up to the window and the API lowers it
+     * automatically when prompt + completion would overflow. The reference
+     * client therefore clamps the budget to the room left after the prompt
+     * (`resolveMaxCompletionCap`) and, when nothing was configured, fills
+     * exactly that room (`kimiUnsetCompletionTokens`). A small static cap
+     * instead truncates long turns — and on an always-thinking model it can
+     * spend the whole budget on reasoning and return empty content.
+     */
+    void prepare_request(ChatRequest& request) override;
+
+    /**
      * @brief Serialize request using Kimi-specific message extensions.
      *
      * Unlike the generic OpenAI serializer, Kimi thinking models may require
@@ -155,8 +169,11 @@ public:
     /**
      * @brief Returns true for status codes that warrant automatic retry.
      *
-     * Retryable: 429 (rate limit), 500, 502, 503, 504.
-     * Non-retryable: 400, 401, 403, 404.
+     * Retryable, matching kimi-code's isRetryableGenerateError: 408, 409, 429,
+     * 500, 502, 503, 504 and 529 (provider overloaded).
+     * Non-retryable: other 4xx (400, 401, 403, 404, 422), plus a 429 whose body
+     * reports exhausted quota/balance — deterministic until the account is
+     * recharged.
      */
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
 

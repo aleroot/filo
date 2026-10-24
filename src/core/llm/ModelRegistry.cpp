@@ -118,14 +118,16 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Kimi Models (Moonshot AI)
     // -----------------------------------------------------------------------
+    { "kimi-k3.1-pro",     1048576 },
     { "kimi-k3",           1048576 },
-    { "kimi-k2.6",         256000 },
-    { "kimi-k2-6",         256000 },
-    { "kimi-k2.5",         256000 },
-    { "kimi-for-coding",   256000 },
-    { "kimi-k2",           256000 },
-    { "kimi-for-university", 256000 },
-    { "kimi-k1.5",         256000 },
+    { "kimi-k2.7-code",    262144 },
+    { "kimi-k2.6",         262144 },
+    { "kimi-k2-6",         262144 },
+    { "kimi-k2.5",         262144 },
+    { "kimi-for-coding",   262144 },
+    { "kimi-k2",           262144 },
+    { "kimi-for-university", 262144 },
+    { "kimi-k1.5",         262144 },
     { "kimi-",             128000 },
 
     // -----------------------------------------------------------------------
@@ -864,15 +866,47 @@ std::vector<ModelInfo> build_mimo_catalog() {
 std::vector<ModelInfo> build_kimi_catalog() {
     constexpr ModelCapabilities CAP_KIMI_MULTIMODAL =
         CAP_FULL | static_cast<uint32_t>(ModelCapability::VideoInput);
+    // Moonshot documents no completion ceiling below the context window:
+    // `max_completion_tokens` accepts up to the window and the API lowers it
+    // on overflow. KimiProtocol::prepare_request clamps it to the room left
+    // after the prompt, exactly like kimi-code's resolveMaxCompletionCap.
+    constexpr int32_t K3_WINDOW = 1'048'576;
+    constexpr int32_t K2_WINDOW = 262'144;
     return {
+        {
+            .canonical_id = "kimi-k3.1-pro",
+            .aliases = {"k3.1-pro"},
+            .display_name = "Kimi K3.1 Pro",
+            .provider = "kimi",
+            .context_window = K3_WINDOW,
+            .max_output_tokens = K3_WINDOW,
+            .max_reasoning_tokens = K3_WINDOW,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Reasoning,
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "kimi-k3.1-pro-highspeed",
+            .aliases = {},
+            .display_name = "Kimi K3.1 Pro HighSpeed",
+            .provider = "kimi",
+            .context_window = K3_WINDOW,
+            .max_output_tokens = K3_WINDOW,
+            .max_reasoning_tokens = K3_WINDOW,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Fast,
+            .constraints = kStandardConstraints,
+        },
         {
             .canonical_id = "kimi-k3",
             .aliases = {},
             .display_name = "Kimi K3",
             .provider = "kimi",
-            .context_window = 1'048'576,
-            .max_output_tokens = 1'048'576,
-            .max_reasoning_tokens = 1'048'576,
+            .context_window = K3_WINDOW,
+            .max_output_tokens = K3_WINDOW,
+            .max_reasoning_tokens = K3_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL
                 | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Reasoning,
@@ -883,9 +917,9 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {},
             .display_name = "Kimi K3 (Kimi Code)",
             .provider = "kimi",
-            .context_window = 1'048'576,
-            .max_output_tokens = 1'048'576,
-            .max_reasoning_tokens = 1'048'576,
+            .context_window = K3_WINDOW,
+            .max_output_tokens = K3_WINDOW,
+            .max_reasoning_tokens = K3_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL
                 | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Reasoning,
@@ -896,9 +930,9 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {},
             .display_name = "Kimi K3 256K (Kimi Code)",
             .provider = "kimi",
-            .context_window = 262'144,
-            .max_output_tokens = 262'144,
-            .max_reasoning_tokens = 262'144,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
+            .max_reasoning_tokens = K2_WINDOW,
             .capabilities = CAP_FULL
                 | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Reasoning,
@@ -909,8 +943,8 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {"k2.7-code"},
             .display_name = "Kimi K2.7 Code",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Balanced,
             .pricing = {0.95, 4.0, 0.19, -1.0},
@@ -922,8 +956,8 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {},
             .display_name = "Kimi K2.7 Code HighSpeed",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL
                 | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Fast,
@@ -935,8 +969,8 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {"kimi-k2-6", "k2.6"},
             .display_name = "Kimi K2.6",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
@@ -946,10 +980,10 @@ std::vector<ModelInfo> build_kimi_catalog() {
         {
             .canonical_id = "kimi-k2.5",
             .aliases = {"kimi-k2-5", "k2.5"},
-            .display_name = "Kimi K2.5",
+            .display_name = "Kimi K2.5 (deprecated)",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
@@ -961,8 +995,8 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {},
             .display_name = "Kimi for Coding",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
@@ -974,8 +1008,8 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .aliases = {},
             .display_name = "Kimi for Coding HighSpeed",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL
                 | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Fast,
@@ -985,10 +1019,10 @@ std::vector<ModelInfo> build_kimi_catalog() {
         {
             .canonical_id = "kimi-k2",
             .aliases = {},
-            .display_name = "Kimi K2",
+            .display_name = "Kimi K2 (deprecated)",
             .provider = "kimi",
-            .context_window = 256000,
-            .max_output_tokens = 8192,
+            .context_window = K2_WINDOW,
+            .max_output_tokens = K2_WINDOW,
             .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},

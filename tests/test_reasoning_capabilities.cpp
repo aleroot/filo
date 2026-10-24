@@ -70,7 +70,8 @@ TEST_CASE("Mistral protocol owns its reasoning model allow-list",
 TEST_CASE("Kimi protocol reports selectable and required reasoning modes",
           "[llm][effort][kimi]") {
     KimiProtocol protocol;
-    for (const auto model : {"k3", "k3-256k", "kimi-k3", "K3", "Kimi-K3"}) {
+    for (const auto model : {"k3", "k3-256k", "kimi-k3", "K3", "Kimi-K3",
+                             "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"}) {
         CAPTURE(model);
         CHECK(supports(protocol, model, ReasoningCapability::Effort));
         CHECK(supports(protocol, model, ReasoningCapability::MaxEffort));

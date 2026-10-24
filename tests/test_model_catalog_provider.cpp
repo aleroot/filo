@@ -886,6 +886,157 @@ TEST_CASE("KimiModelCatalogProvider parses current Kimi Code reasoning metadata"
     CHECK_FALSE(k3_256k.supports(ModelCapability::VideoInput));
 }
 
+TEST_CASE("KimiModelCatalogProvider parses the managed Kimi Code catalog dialect",
+          "[llm][model-catalog][kimi]") {
+    KimiModelCatalogProvider provider;
+
+    // The managed /models response nests what kimi-code reads: a mandatory
+    // limit.context, one `reasoning` object, `modalities.input`,
+    // `supports_tool_use`, and the wire the endpoint serves the model on.
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "k3",
+          "display_name": "K3",
+          "limit": { "context": 1048576 },
+          "reasoning": {
+            "type": "only",
+            "effort": { "valid": ["low", "high", "max"], "default": "max" }
+          },
+          "modalities": { "input": ["text", "image", "video"] },
+          "supports_tool_use": true
+        },
+        {
+          "id": "kimi-for-coding",
+          "limit": { "context": 262144 },
+          "reasoning": { "type": "both" },
+          "modalities": { "input": ["text"] },
+          "protocol": "anthropic"
+        },
+        {
+          "id": "kimi-k2.6",
+          "limit": { "context": 262144 },
+          "reasoning": { "type": "none" },
+          "supports_tool_use": false
+        },
+        {
+          "id": "k3-256k",
+          "limit": { "context": 262144 },
+          "reasoning": {
+            "type": "unrecognized",
+            "effort": { "valid": ["low"], "default": "not-listed" }
+          },
+          "protocol": "response"
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 4);
+
+    const auto& k3 = result.models[0];
+    CHECK(k3.display_name == "K3");
+    CHECK(k3.context_window == 1048576);
+    CHECK(k3.max_output_tokens == 1048576);
+    CHECK(k3.reasoning.complete);
+    CHECK(k3.reasoning.manual_thinking);
+    CHECK(k3.reasoning.effort.supports(ReasoningCapability::Required));
+    CHECK(k3.reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(k3.reasoning.catalog_default_effort == "max");
+    CHECK(k3.reasoning.supported_efforts
+          == std::vector<std::string>{"low", "high", "max"});
+    CHECK(k3.supports(ModelCapability::Vision));
+    CHECK(k3.supports(ModelCapability::VideoInput));
+    CHECK(k3.supports(ModelCapability::FunctionCalling));
+    CHECK(k3.wire_protocol.empty());
+
+    const auto& coding = result.models[1];
+    CHECK(coding.context_window == 262144);
+    // "both": thinking can be switched off, so effort is offered but not forced.
+    CHECK(coding.reasoning.complete);
+    CHECK(coding.reasoning.effort.supports(ReasoningCapability::Effort));
+    CHECK_FALSE(coding.reasoning.effort.supports(
+        ReasoningCapability::Required));
+    // A published modality list that omits image/video is authoritative, even
+    // for an id whose name would otherwise infer vision.
+    CHECK_FALSE(coding.supports(ModelCapability::Vision));
+    CHECK_FALSE(coding.supports(ModelCapability::VideoInput));
+    CHECK(coding.wire_protocol == "anthropic");
+
+    const auto& k26 = result.models[2];
+    // "none" publishes a non-thinking model, and supports_tool_use:false strips
+    // tool calling even though the id would otherwise infer it.
+    CHECK(k26.reasoning.complete);
+    CHECK_FALSE(k26.reasoning.effort.supports(ReasoningCapability::Effort));
+    CHECK_FALSE(k26.supports(ModelCapability::FunctionCalling));
+    CHECK_FALSE(k26.supports(ModelCapability::ParallelToolCalls));
+
+    const auto& k3_256k = result.models[3];
+    // An unrecognized reasoning type stays unknown rather than being guessed
+    // at, and a default outside `valid` is dropped; `response` normalizes to
+    // the Responses wire.
+    CHECK_FALSE(k3_256k.reasoning.complete);
+    CHECK_FALSE(k3_256k.reasoning.catalog_default_effort.has_value());
+    CHECK(k3_256k.wire_protocol == "openai_responses");
+}
+
+TEST_CASE("Kimi catalog reasoning is authoritative and matched exactly",
+          "[llm][model-catalog][kimi]") {
+    KimiModelCatalogProvider provider;
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "brand-new-kimi",
+          "limit": { "context": 131072 },
+          "reasoning": {
+            "type": "only",
+            "effort": { "valid": ["low", "high"], "default": "high" }
+          }
+        },
+        {
+          "id": "kimi-k2.6",
+          "supports_thinking_type": "only"
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+
+    // Nothing about this id implies reasoning. The published block must still
+    // win, and "only" must not be read as "no".
+    const auto& unseen = result.models[0];
+    CHECK(unseen.supports(ModelCapability::Reasoning));
+    CHECK(unseen.reasoning.complete);
+    CHECK(unseen.reasoning.effort.supports(ReasoningCapability::Required));
+    CHECK(unseen.reasoning.catalog_default_effort == "high");
+    CHECK_FALSE(unseen.supports(ModelCapability::Vision));
+
+    // Open-platform dialect, and no supports_reasoning boolean to paper over a
+    // substring match of "no" inside "only".
+    const auto& k26 = result.models[1];
+    CHECK(k26.supports(ModelCapability::Reasoning));
+    CHECK(k26.reasoning.complete);
+    CHECK(k26.reasoning.effort.supports(ReasoningCapability::Required));
+}
+
+TEST_CASE("Merging a catalog row does not publish its endpoint wire",
+          "[llm][model-catalog][kimi]") {
+    ModelInfo baseline;
+    baseline.canonical_id = "k3";
+    baseline.context_window = 1'048'576;
+
+    ModelInfo discovered = baseline;
+    discovered.wire_protocol = "anthropic";
+    discovered.context_window = 262'144;
+
+    const ModelInfo merged =
+        merge_model_metadata(baseline, std::move(discovered));
+    CHECK(merged.context_window == 262'144);
+    CHECK(merged.wire_protocol.empty());
+}
+
 TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[llm][model-catalog]") {
     KimiModelCatalogProvider provider;
 
@@ -908,7 +1059,11 @@ TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[ll
         CHECK(result.models[index].supports(ModelCapability::VideoInput));
     }
     CHECK(result.models[2].context_window == 8192);
-    CHECK(result.models[3].context_window == 256000);
+    // Managed Kimi Code row with no published limit: the K2-series window
+    // Moonshot documents (262,144) is inferred, and the completion ceiling
+    // follows it because the API accepts max_completion_tokens up to the window.
+    CHECK(result.models[3].context_window == 262144);
+    CHECK(result.models[3].max_output_tokens == 262144);
     CHECK(result.models[3].supports(ModelCapability::Reasoning));
     CHECK(result.models[3].supports(ModelCapability::Vision));
 }

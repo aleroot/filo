@@ -92,6 +92,12 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
 
     baseline.wire.disabled_thinking = baseline.wire.disabled_thinking || discovered.wire.disabled_thinking;
 
+    // wire_protocol describes the endpoint that served this row, not the model.
+    // Copying it onto the curated card would publish one deployment's wire
+    // (Kimi Code's `protocol: "anthropic"`, for instance) as a fact about every
+    // later lookup of that id. The request path reads it from the provider's
+    // own catalog snapshot instead.
+
     if (discovered.tier != ModelTier::Balanced
         || baseline.tier == ModelTier::Balanced) {
         baseline.tier = discovered.tier;

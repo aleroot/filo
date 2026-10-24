@@ -1,6 +1,7 @@
 #include "KimiProtocol.hpp"
 #include "SseUtils.hpp"
 #include "../KimiModelTraits.hpp"
+#include "../ModelRegistry.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../auth/KimiSessionStore.hpp"
 #include "../../logging/Logger.hpp"
@@ -972,6 +973,76 @@ void merge_kimi_usage_snapshot(RateLimitInfo& info, const KimiUsageSnapshot& sna
     return false;
 }
 
+// ─── Completion budget ───────────────────────────────────────────────────────
+
+/// Conservative token estimate for one run of text. Not a tokenizer: UTF-8 and
+/// code/tool-heavy payloads need more headroom than chars/4.
+[[nodiscard]] std::size_t estimate_text_tokens(std::string_view text) noexcept {
+    std::size_t ascii = 0;
+    std::size_t non_ascii = 0;
+    for (const unsigned char ch : text) {
+        if (ch < 128) ++ascii;
+        else ++non_ascii;
+    }
+    return (ascii + 2) / 3 + (non_ascii + 1) / 2;
+}
+
+/// Prompt side of the request, in tokens: system layers, history and tool
+/// schemas. Media is charged at a flat per-asset rate so base64 payloads are
+/// never mistaken for text. Deliberately not QwenRequestBudget: a protocol
+/// must not depend on another vendor's provider, and this count also includes
+/// the prompt plan and continuation items that budget does not.
+[[nodiscard]] std::size_t estimate_prompt_tokens(const ChatRequest& request) {
+    std::size_t tokens = 4'096; // Framing the estimator cannot see.
+    for (const auto& layer : request.prompt_plan.layers()) {
+        tokens += estimate_text_tokens(layer.content);
+    }
+    for (const auto& message : request.messages) {
+        tokens += 8 + estimate_text_tokens(message.content)
+            + estimate_text_tokens(message.reasoning_content);
+        for (const auto& call : message.tool_calls) {
+            tokens += 16 + estimate_text_tokens(call.function.name)
+                + estimate_text_tokens(call.function.arguments);
+        }
+        for (const auto& part : message.content_parts) {
+            if (part.type == ContentPartType::Image) {
+                tokens += 4'096;
+            } else if (part.type == ContentPartType::Video) {
+                tokens += 32'768;
+            } else if (part.type == ContentPartType::Text
+                       && message.content.find(part.text) == std::string::npos) {
+                tokens += estimate_text_tokens(part.text);
+            }
+        }
+        for (const auto& item : message.continuation_items) {
+            tokens += estimate_text_tokens(item.payload);
+        }
+    }
+    for (const auto& tool : request.tools) {
+        tokens += estimate_text_tokens(
+                      core::tools::schema::canonical_input_schema(tool.function))
+            + estimate_text_tokens(tool.function.name)
+            + estimate_text_tokens(tool.function.description) + 16;
+    }
+    return tokens;
+}
+
+/// Live catalog window first, then the Kimi trait table, then the registry.
+[[nodiscard]] int64_t resolve_context_window(const ChatRequest& request) {
+    if (request.catalog_context_window.has_value()
+        && *request.catalog_context_window > 0) {
+        return *request.catalog_context_window;
+    }
+    if (const int32_t known = kimi_model_context_window(request.model); known > 0) {
+        return known;
+    }
+    if (const auto card = ModelRegistry::instance().lookup(request.model);
+        card && card->context_window > 0) {
+        return card->context_window;
+    }
+    return 0;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1116,6 +1187,36 @@ std::string KimiProtocol::serialize(const ChatRequest& req) const {
     return payload;
 }
 
+void KimiProtocol::prepare_request(ChatRequest& request) {
+    // The managed catalog can declare that a model is served on a different
+    // wire (`protocol: "anthropic"` | `"response"`). Chat Completions sent to
+    // such a model fails with an opaque server error, so name the real cause.
+    if (request.catalog_wire_protocol.has_value()
+        && !request.catalog_wire_protocol->empty()) {
+        throw std::invalid_argument(std::format(
+            "This Kimi endpoint serves '{}' on its '{}' wire, which the Kimi "
+            "provider here does not speak. Pick a model the endpoint serves on "
+            "the OpenAI-compatible wire.",
+            request.model,
+            *request.catalog_wire_protocol));
+    }
+
+    const int64_t window = resolve_context_window(request);
+    if (window <= 0) return;
+
+    // kimi-code: cap = min(requested, window - usedContextTokens), floored at 1.
+    const int64_t room =
+        window - static_cast<int64_t>(estimate_prompt_tokens(request));
+    if (room <= 0) {
+        request.max_tokens = 1;
+        return;
+    }
+    const int64_t ceiling = request.max_tokens.has_value()
+        ? std::min<int64_t>(*request.max_tokens, room)
+        : room;
+    request.max_tokens = static_cast<int>(std::max<int64_t>(1, ceiling));
+}
+
 void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                                          std::string_view base_url,
                                          const core::auth::AuthInfo& auth) {
@@ -1246,6 +1347,12 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     // The X-Msh-Device-Id header MUST match the device_id claim in the JWT token,
     // otherwise the server returns 401 Authentication failed.
     // The device_id is passed via auth.properties from OAuthCredentialSource.
+    //
+    // An OAuth credential without that claim gets NO header rather than this
+    // process's persisted id: that id belongs to a different login, so sending
+    // it would misreport which device owns the token. Building headers must
+    // also stay free of filesystem side effects. kimi-code can always send one
+    // because it mints and persists the identity it logged in with.
     auto it = auth.properties.find("device_id");
     if (it != auth.properties.end() && !it->second.empty()) {
         kimi_headers["X-Msh-Device-Id"] = it->second;
@@ -1390,11 +1497,22 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
 
 bool KimiProtocol::is_retryable(const HttpResponse& response) const noexcept {
     if (kimi_quota_exhausted(response)) return false;
-    return response.status_code == 429 ||
-           response.status_code == 500 ||
-           response.status_code == 502 ||
-           response.status_code == 503 ||
-           response.status_code == 504;
+    // kimi-code's isRetryableGenerateError: 408 (request timeout), 409
+    // (lock/conflict timeout), 429 (rate limit), 5xx (server errors) and 529
+    // (provider overloaded). Deterministic 4xx stay fatal.
+    switch (response.status_code) {
+        case 408:
+        case 409:
+        case 429:
+        case 500:
+        case 502:
+        case 503:
+        case 504:
+        case 529:
+            return true;
+        default:
+            return false;
+    }
 }
 
 void KimiProtocol::on_response(const HttpResponse& response) {
