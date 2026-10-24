@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -77,17 +78,49 @@ public:
         EventCallback on_event = {};
         std::string effort = {};
         std::shared_ptr<core::session::ExecutionJournal> execution_journal = {};
+        // Resources such as fan-out slots belong to the invocation, including
+        // the time a cancelled provider takes to actually return.
+        std::shared_ptr<void> execution_lease = {};
     };
 
     struct Result {
-        bool timed_out = false;
-        bool cancelled = false;
+        enum class StopReason { Completed, StepLimit, Interrupted, Failed, Cancelled, TimedOut };
+        StopReason stop_reason = StopReason::Interrupted;
+        std::string final_text;
         std::string streamed_text;
         std::string context_summary;
         std::vector<core::llm::Message> history;
         int steps = 0;
         int tool_calls_total = 0;
         int tool_calls_success = 0;
+        // A cancelled/non-cooperative provider can outlive the result. Callers
+        // must not resume that mutable worker until its invocation has settled.
+        std::shared_future<void> settled;
+
+        [[nodiscard]] bool timed_out() const noexcept { return stop_reason == StopReason::TimedOut; }
+        [[nodiscard]] bool cancelled() const noexcept { return stop_reason == StopReason::Cancelled; }
+        [[nodiscard]] std::string_view status() const noexcept {
+            switch (stop_reason) {
+                case StopReason::Completed: return "completed";
+                case StopReason::StepLimit:
+                case StopReason::Interrupted: return "partial";
+                case StopReason::Cancelled: return "cancelled";
+                case StopReason::Failed:
+                case StopReason::TimedOut: return "failed";
+            }
+            return "failed";
+        }
+        [[nodiscard]] std::string_view reason() const noexcept {
+            switch (stop_reason) {
+                case StopReason::Completed: return "completed";
+                case StopReason::StepLimit: return "step_limit";
+                case StopReason::Interrupted: return "interrupted";
+                case StopReason::Cancelled: return "cancelled";
+                case StopReason::Failed: return "error";
+                case StopReason::TimedOut: return "timeout";
+            }
+            return "error";
+        }
     };
 
     [[nodiscard]] static Result run(Request request);

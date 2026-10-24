@@ -868,6 +868,40 @@ std::string render_panel_text(const std::vector<UiMessage>& messages,
 }
 } // namespace
 
+TEST_CASE("Partial subagents display a resumable handoff rather than completion",
+          "[tui][conversation][render][subagent]") {
+    auto message = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("parent", "task", "{}", "inspect files");
+    tool.status = ToolActivity::Status::Succeeded;
+    ToolActivity::SubagentActivity subagent;
+    subagent.id = "task_0123abcd";
+    subagent.worker_name = "explore";
+    subagent.status = ToolActivity::Status::Partial;
+    subagent.summary = "Found relevant files; more investigation needed.";
+    tool.subagents.push_back(std::move(subagent));
+    message.tools.push_back(std::move(tool));
+    const auto rendered = render_panel_text({message}, {.expand_tool_results = true});
+    CHECK_THAT(rendered, ContainsSubstring("partial"));
+    CHECK_THAT(rendered, ContainsSubstring("resumable"));
+    CHECK_THAT(rendered, ContainsSubstring("Found relevant files"));
+    CHECK_FALSE(message_uses_animation(message, true));
+}
+
+TEST_CASE("Delegation tool cards retain the worker's terminal status", "[tui][conversation][tool]") {
+    for (const auto name : {"task", "delegate_task"}) {
+        auto tool = make_tool_activity("parent", name, "{}", "inspect files");
+        apply_tool_result(tool, R"({"status":"partial","stop_reason":"step_limit","result":"Saved findings"})");
+        CHECK(tool.status == ToolActivity::Status::Partial);
+        CHECK(tool.result.summary == "Saved findings");
+        CHECK(tool_disclosure_defaults_expanded(tool));
+        CHECK(tool_status_label(tool.status) == "Partial");
+        apply_tool_result(tool, R"({"status":"failed","result":"Worker failed"})");
+        CHECK(tool.status == ToolActivity::Status::Failed);
+        apply_tool_result(tool, R"({"status":"cancelled","result":"Worker stopped"})");
+        CHECK(tool.status == ToolActivity::Status::Cancelled);
+    }
+}
+
 TEST_CASE("tool headers use the terminal's width and elide only when it runs out",
           "[tui][conversation][render][tool]") {
     const std::string tail = "print('end-of-script')";

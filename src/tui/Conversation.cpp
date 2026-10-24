@@ -991,6 +991,7 @@ std::string tool_result_metric(const ToolActivity& tool, const ToolResultView& v
         return {};
     }
     std::string detail = tool_metric_detail(tool, view);
+    if (tool.status == ToolActivity::Status::Partial) return detail.empty() ? "Partial" : "Partial · " + detail;
     return detail.empty() ? std::string(tool_status_label(tool.status)) : std::move(detail);
 }
 
@@ -1612,6 +1613,7 @@ std::string subagent_status_label(const ToolActivity::SubagentActivity& subagent
         }
         return label;
     }
+    if (subagent.status == ToolActivity::Status::Partial) return "partial · resumable";
     if (subagent.status == ToolActivity::Status::Succeeded) {
         return subagent.tool_calls > 0
             ? std::format("completed · {} {}", subagent.tool_calls, subagent.tool_calls == 1 ? "tool" : "tools")
@@ -1743,6 +1745,7 @@ AssistantActivityState compute_assistant_activity_state(const UiMessage& msg) {
         if (tool.status == ToolActivity::Status::Executing) {
             state.has_executing_tools = true;
         } else if (tool.status == ToolActivity::Status::Succeeded ||
+                   tool.status == ToolActivity::Status::Partial ||
                    tool.status == ToolActivity::Status::Failed) {
             state.has_completed_tools = true;
         }
@@ -1750,6 +1753,7 @@ AssistantActivityState compute_assistant_activity_state(const UiMessage& msg) {
             if (subagent.status == ToolActivity::Status::Executing) {
                 state.has_executing_tools = true;
             } else if (subagent.status == ToolActivity::Status::Succeeded ||
+                       subagent.status == ToolActivity::Status::Partial ||
                        subagent.status == ToolActivity::Status::Failed ||
                        subagent.status == ToolActivity::Status::Cancelled) {
                 state.has_completed_tools = true;
@@ -2392,6 +2396,17 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
         return;
     }
 
+    if (tool.name == "task" || tool.name == core::tools::names::kDelegateTask) {
+        const auto status = core::utils::json::first_string_field(object, {"status"}).value_or("completed");
+        tool.status = status == "partial" ? ToolActivity::Status::Partial
+            : status == "failed" ? ToolActivity::Status::Failed
+            : (status == "cancelled" || status == "paused") ? ToolActivity::Status::Cancelled
+            : ToolActivity::Status::Succeeded;
+        set_result_summary(core::utils::json::first_string_field(object, {"result", "output", "summary"})
+            .value_or(std::string(result_payload)));
+        return;
+    }
+
     if (core::tools::names::is_terminal_tool(tool.name)) {
         if (const auto exit_code = core::utils::json::optional_int_field_clamped(object, "exit_code")) {
             tool.result.exit_code = *exit_code;
@@ -2495,6 +2510,7 @@ bool tool_disclosure_defaults_expanded(const ToolActivity& tool) {
         case ToolActivity::Status::Failed:
         case ToolActivity::Status::Denied:
         case ToolActivity::Status::Cancelled:
+        case ToolActivity::Status::Partial:
             // Anything that went wrong is worth reading without a click.
             return true;
         case ToolActivity::Status::Executing:
@@ -3377,6 +3393,7 @@ Color tool_status_color(ToolActivity::Status status) {
         case ToolActivity::Status::Pending:    return ColorToolPending;
         case ToolActivity::Status::Executing:  return ColorYellowBright;
         case ToolActivity::Status::Succeeded:  return ColorToolDone;
+        case ToolActivity::Status::Partial:    return ColorYellowBright;
         case ToolActivity::Status::Failed:     return ColorToolFail;
         case ToolActivity::Status::Denied:     return ColorTextSecondary;
         case ToolActivity::Status::Cancelled:  return ColorTextSecondary;
@@ -3389,6 +3406,7 @@ std::string_view tool_status_icon(ToolActivity::Status status) {
         case ToolActivity::Status::Pending:    return "○";
         case ToolActivity::Status::Executing:  return "◐";
         case ToolActivity::Status::Succeeded:  return "✓";
+        case ToolActivity::Status::Partial:    return "~";
         case ToolActivity::Status::Failed:     return "✗";
         case ToolActivity::Status::Denied:     return "⊘";
         case ToolActivity::Status::Cancelled:  return "⊘";
@@ -3408,6 +3426,7 @@ std::string_view tool_status_label(ToolActivity::Status status) {
         case ToolActivity::Status::Pending:    return "Pending";
         case ToolActivity::Status::Executing:  return "Running";
         case ToolActivity::Status::Succeeded:  return "Done";
+        case ToolActivity::Status::Partial:    return "Partial";
         case ToolActivity::Status::Failed:     return "Failed";
         case ToolActivity::Status::Denied:     return "Denied";
         case ToolActivity::Status::Cancelled:  return "Cancelled";

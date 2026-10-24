@@ -14,6 +14,7 @@ struct SubagentEvent {
         Finished,
         Failed,
         Cancelled,
+        Partial,
     };
 
     Kind kind = Kind::Progress;

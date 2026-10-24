@@ -69,6 +69,8 @@ public:
         int max_steps_per_turn = kDefaultMaxStepsPerTurn;
     };
 
+    enum class StepBudgetEvent { Handoff, Exhausted };
+
     struct TurnCallbacks {
         std::function<void()> on_step_begin = {};
         std::function<void(const core::llm::ToolCall&)> on_tool_start = {};
@@ -114,6 +116,14 @@ public:
         bool allow_background_memory_review = true;
         // Rotate only when current context usage reaches this fraction [0.0, 1.0].
         double min_context_utilization_for_rotation = 0.0;
+        // Bounded workers reserve their last model step for a useful handoff.
+        bool reserve_final_step = false;
+        std::function<void(StepBudgetEvent)> on_step_budget_event = {};
+        // Explicit capability switch; an empty allowlist still means unrestricted.
+        bool allow_tool_calls = true;
+        // Raised only for an accepted final answer, after completion hooks pass.
+        std::function<void(const std::string&)> on_final_response = {};
+        std::function<bool()> cancellation_requested = {};
     };
 
     /// Dependency-injection constructor. Execution roots that run concurrent

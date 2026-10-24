@@ -7211,7 +7211,9 @@ RunResult run(RunOptions opts) {
                             parent_tool->status = ToolActivity::Status::Executing;
                             break;
                         case core::agent::SubagentEvent::Kind::Finished:
-                            subagent->status = ToolActivity::Status::Succeeded;
+                        case core::agent::SubagentEvent::Kind::Partial:
+                            subagent->status = event.kind == core::agent::SubagentEvent::Kind::Partial
+                                ? ToolActivity::Status::Partial : ToolActivity::Status::Succeeded;
                             subagent->summary = event.summary;
                             break;
                         case core::agent::SubagentEvent::Kind::Failed:

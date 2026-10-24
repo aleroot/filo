@@ -321,6 +321,10 @@ struct HookFieldPayload {
 
 [[nodiscard]] bool tool_is_allowed_for_turn(std::string_view tool_name,
                                             const Agent::TurnCallbacks& turn_callbacks) {
+    if (!turn_callbacks.allow_tool_calls) return false;
+    // The persistent MCP interface has a different identity/lifecycle contract.
+    // A shared registry must not expose it as a second internal delegation API.
+    if (tool_name == core::tools::names::kDelegateTask) return false;
     if (turn_callbacks.allowed_tools.empty()) {
         return true;
     }
@@ -1778,6 +1782,11 @@ void Agent::send_message(core::llm::Message user_message,
 
     clear_stop_request();  // Reset cancellation flag for new turn
     turn_failed_.store(false, std::memory_order_release);  // Reset outcome for new turn
+    if (turn_callbacks.cancellation_requested && turn_callbacks.cancellation_requested()) {
+        request_stop();
+        finish_turn();
+        return;
+    }
     if (user_message.role.empty()) {
         user_message.role = "user";
     }
@@ -1941,6 +1950,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
     }
 
+    if (turn_callbacks.cancellation_requested && turn_callbacks.cancellation_requested()) {
+        request_stop();
+    }
     if (!is_turn_current(turn_state) || is_stop_requested()) {
         done_callback();
         return;
@@ -1958,6 +1970,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
           : BoostPipeline::kMaxSteps;
     }
     if (turn_state->max_steps > 0 && turn_state->steps_taken >= turn_state->max_steps) {
+        if (turn_callbacks.on_step_budget_event) turn_callbacks.on_step_budget_event(StepBudgetEvent::Exhausted);
         turn_failed_.store(true, std::memory_order_release);
         const std::string message = std::format(
             "Stopped after reaching the per-turn step limit ({} model steps) without a final response.",
@@ -2071,11 +2084,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
     if (provider->capabilities().supports_tool_calls) {
         request.tools = skill_manager_.get_all_tools(session_context_snapshot().transport);
-        if (!turn_callbacks.allowed_tools.empty()) {
-            std::erase_if(request.tools, [&](const core::llm::Tool& tool) {
-                return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks);
-            });
-        }
+        std::erase_if(request.tools, [&](const core::llm::Tool& tool) {
+            return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks);
+        });
         if (tool_is_allowed_for_turn(SubagentOrchestrator::kTaskToolName, turn_callbacks)) {
             request.tools.push_back(orchestrator_.task_tool_definition());
         }
@@ -2089,6 +2100,24 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 .function = read_tool_result_tool_.get_definition(),
             });
         }
+    }
+
+    if (turn_callbacks.reserve_final_step && turn_state->max_steps > 0
+        && turn_state->steps_taken == turn_state->max_steps) {
+        // Keep this instruction request-local: a resume must be free to work
+        // again, and the saved tool transcript must remain intact.
+        request.messages.push_back(core::llm::Message{
+            .role = "user",
+            .content = "This is your final model step for this run. Return a concise handoff "
+                       "using the evidence already collected: findings with file:line references, "
+                       "work completed, and anything still unresolved. If unfinished, say partial. "
+                       "Do not call tools or claim unverified work is complete.",
+            .synthetic = true,
+        });
+        request.tools.clear();
+        // Also reject unsolicited tool calls during the final handoff.
+        turn_callbacks.allow_tool_calls = false;
+        if (turn_callbacks.on_step_budget_event) turn_callbacks.on_step_budget_event(StepBudgetEvent::Handoff);
     }
 
     if (turn_callbacks.on_step_begin) {
@@ -2576,6 +2605,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return;
           }
           // Pure text response — we're done
+          if (turn_callbacks.on_final_response) turn_callbacks.on_final_response(asst_msg.content);
           if (turn_callbacks.allow_efficiency_rotation) {
             self->run_efficiency_rotation_if_needed(
                 turn_callbacks.min_context_utilization_for_rotation);
@@ -3251,11 +3281,19 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 return;
             }
 
+            // An unsolicited tool call cannot extend a worker's final handoff.
+            // Its rejection has been paired in history, so this is resumable.
+            if (turn_callbacks.reserve_final_step && !turn_callbacks.allow_tool_calls
+                && turn_state->max_steps > 0 && turn_state->steps_taken >= turn_state->max_steps) {
+                done_callback();
+                return;
+            }
+
             if (dedup_requested_stop) {
                 if (!turn_state->final_response_after_repeat_stop_requested) {
                     turn_state->final_response_after_repeat_stop_requested = true;
                     auto final_callbacks = turn_callbacks;
-                    final_callbacks.allowed_tools = {"__filo_no_tools__"};
+                    final_callbacks.allow_tool_calls = false;
                     self->step(
                         text_callback,
                         tool_callback,

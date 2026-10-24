@@ -33,7 +33,8 @@ struct ToolActivity {
         Succeeded,    // Completed successfully
         Failed,       // Error occurred
         Denied,       // User denied permission
-        Cancelled     // Cancelled by user/system
+        Cancelled,    // Cancelled by user/system
+        Partial       // Stopped with a resumable handoff
     };
 
     struct Result {

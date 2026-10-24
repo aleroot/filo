@@ -1,6 +1,7 @@
 #include "DelegatedAgentRunner.hpp"
 
 #include "AgentMode.hpp"
+#include "ToolRecovery.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../memory/MemorySystem.hpp"
 
@@ -13,26 +14,47 @@ namespace core::agent {
 
 namespace {
 
-[[nodiscard]] bool is_tool_error_payload(std::string_view payload) noexcept {
-    return payload.find("\"error\"") != std::string_view::npos;
-}
-
 struct RunState {
     std::mutex done_mutex;
     std::condition_variable done_cv;
     bool done = false;
+    bool turn_returned = false;
+    bool settled_signalled = false;
+    std::promise<void> settled;
+    std::shared_ptr<void> execution_lease;
+
+    void finish(bool returned) {
+        std::lock_guard lock(done_mutex);
+        if (returned) turn_returned = true;
+        else done = true;
+        if (done && turn_returned && !settled_signalled) {
+            settled_signalled = true;
+            execution_lease.reset();
+            settled.set_value();
+        }
+        done_cv.notify_all();
+    }
 
     std::mutex streamed_mutex;
     std::string streamed_text;
+    std::string final_text;
+    bool has_final_response = false;
+    bool threw = false;
+
+    std::mutex event_mutex;
+    bool events_closed = false;
 
     std::atomic<int> steps{0};
     std::atomic<int> tool_calls_total{0};
     std::atomic<int> tool_calls_success{0};
     std::atomic<int> failed_tool_calls{0};
+    std::atomic<bool> budget_exhausted{false};
+    std::atomic<bool> hard_step_limit{false};
+    std::atomic<bool> stop_requested{false};
 };
 
 [[nodiscard]] std::string build_delegated_prompt(const DelegatedAgentRunner::Request& request) {
-    if (request.worker_name.empty()
+    if (request.max_steps <= 0 && request.worker_name.empty()
         && request.worker_description.empty()
         && request.worker_prompt.empty()) {
         return request.prompt;
@@ -61,6 +83,12 @@ struct RunState {
         prompt += "Instructions:\n";
         prompt += request.worker_prompt;
         prompt += "\n\n";
+    }
+    if (request.max_steps > 0) {
+        prompt += "Budget: " + std::to_string(request.max_steps)
+            + " model steps, including a final step reserved for your summary. "
+              "Batch independent searches and reads. Prioritize the task's main question "
+              "and return partial findings if the budget is insufficient.\n\n";
     }
     prompt += "[Task]\n";
     prompt += request.prompt;
@@ -121,16 +149,24 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     }
 
     auto run_state = std::make_shared<RunState>();
+    run_state->execution_lease = std::move(request.execution_lease);
+    result.settled = run_state->settled.get_future().share();
+    auto worker_cancel_requested = [run_state, check = request.cancellation_requested]() {
+        return run_state->stop_requested.load(std::memory_order_acquire) || (check && check());
+    };
     const std::string delegated_prompt = build_delegated_prompt(request);
     std::string ledger_actor = request.worker_name.empty() ? std::string("subagent") : std::string("subagent:") + request.worker_name;
 
-    auto emit_event = [callback = request.on_event,
+    auto emit_event = [run_state, callback = request.on_event,
                        parent_tool_call_id = request.parent_tool_call_id,
                        task_id = request.task_id,
                        worker_name = request.worker_name,
                        description = request.task_description,
                        provider_name = request.provider_name,
-                       model_name = request.model](SubagentEvent event) {
+                       model_name = request.model](SubagentEvent event, bool terminal = false) {
+        std::lock_guard lock(run_state->event_mutex);
+        if (run_state->events_closed) return;
+        if (terminal) run_state->events_closed = true;
         if (!callback) return;
         event.parent_tool_call_id = parent_tool_call_id;
         event.task_id = task_id;
@@ -153,13 +189,17 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          effort = request.effort,
          response_format = std::move(request.response_format),
          allowed_tools = std::move(request.allowed_tools),
+         cancellation_requested = std::move(worker_cancel_requested),
          ledger_actor = std::move(ledger_actor),
          emit_event]() mutable {
+          try {
             agent->send_message(
                 delegated_prompt,
                 [run_state, emit_event](const std::string& chunk) {
-                    std::lock_guard lock(run_state->streamed_mutex);
-                    run_state->streamed_text += chunk;
+                    {
+                        std::lock_guard lock(run_state->streamed_mutex);
+                        run_state->streamed_text += chunk;
+                    }
                     emit_event(SubagentEvent{
                         .kind = SubagentEvent::Kind::TextDelta,
                         .text_delta = chunk,
@@ -170,9 +210,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                 },
                 [](const std::string&, const std::string&) {},
                 [run_state]() {
-                    std::lock_guard lock(run_state->done_mutex);
-                    run_state->done = true;
-                    run_state->done_cv.notify_all();
+                    run_state->finish(false);
                 },
                 core::agent::Agent::TurnCallbacks{
                     .on_step_begin = [run_state, emit_event]() {
@@ -198,7 +236,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                     .on_tool_finish = [run_state, emit_event](const core::llm::ToolCall& tool_call,
                                                   const core::llm::Message& tool_result) {
                         const int total = run_state->tool_calls_total.fetch_add(1, std::memory_order_relaxed) + 1;
-                        if (!is_tool_error_payload(tool_result.content)) {
+                        if (!recovery::result_indicates_error(tool_result.content)) {
                             run_state->tool_calls_success.fetch_add(1, std::memory_order_relaxed);
                         } else {
                             run_state->failed_tool_calls.fetch_add(1, std::memory_order_relaxed);
@@ -222,7 +260,36 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                     .allowed_tools = std::move(allowed_tools),
                     .ledger_actor = std::move(ledger_actor),
                     .allow_efficiency_rotation = false,
+                    .reserve_final_step = true,
+                    .on_step_budget_event = [run_state](Agent::StepBudgetEvent event) {
+                        run_state->budget_exhausted.store(true, std::memory_order_relaxed);
+                        if (event == Agent::StepBudgetEvent::Exhausted) {
+                            run_state->hard_step_limit.store(true, std::memory_order_relaxed);
+                        }
+                    },
+                    .on_final_response = [run_state](const std::string& text) {
+                        std::lock_guard lock(run_state->streamed_mutex);
+                        run_state->has_final_response = true;
+                        run_state->final_text = text;
+                    },
+                    .cancellation_requested = std::move(cancellation_requested),
                 });
+          } catch (const std::exception& error) {
+            {
+                std::lock_guard lock(run_state->streamed_mutex);
+                run_state->threw = true;
+                run_state->streamed_text += std::string("Worker execution failed: ") + error.what();
+            }
+            run_state->finish(false);
+          } catch (...) {
+            {
+                std::lock_guard lock(run_state->streamed_mutex);
+                run_state->threw = true;
+                run_state->streamed_text += "Worker execution failed with an unknown exception.";
+            }
+            run_state->finish(false);
+          }
+          run_state->finish(true);
         });
 
     {
@@ -230,15 +297,18 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
         const auto deadline = std::chrono::steady_clock::now() + request.timeout;
         while (!run_state->done) {
             if (request.cancellation_requested && request.cancellation_requested()) {
+                result.stop_reason = Result::StopReason::Cancelled;
+                run_state->stop_requested.store(true, std::memory_order_release);
+                lock.unlock();
                 agent->request_stop();
-                result.cancelled = true;
                 break;
             }
 
             if (std::chrono::steady_clock::now() >= deadline) {
+                result.stop_reason = Result::StopReason::TimedOut;
+                run_state->stop_requested.store(true, std::memory_order_release);
+                lock.unlock();
                 agent->request_stop();
-                result.timed_out = true;
-                result.cancelled = true;
                 break;
             }
 
@@ -247,8 +317,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     }
 
     if (turn_thread.joinable()) {
-        std::lock_guard lock(run_state->done_mutex);
-        if (run_state->done) {
+        if (result.settled.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
             turn_thread.join();
         } else {
             turn_thread.detach();
@@ -258,26 +327,41 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     {
         std::lock_guard lock(run_state->streamed_mutex);
         result.streamed_text = run_state->streamed_text;
+        result.final_text = run_state->final_text;
+        if (result.stop_reason == Result::StopReason::Interrupted) {
+            const bool hard_limit = run_state->hard_step_limit.load(std::memory_order_acquire);
+            if (agent->is_stop_requested()) {
+                result.stop_reason = Result::StopReason::Cancelled;
+            } else if (run_state->threw || (agent->last_turn_failed() && !hard_limit)) {
+                result.stop_reason = Result::StopReason::Failed;
+            } else if (run_state->budget_exhausted.load(std::memory_order_acquire)) {
+                result.stop_reason = Result::StopReason::StepLimit;
+            } else if (run_state->has_final_response) {
+                result.stop_reason = Result::StopReason::Completed;
+            }
+        }
     }
     result.context_summary = agent->get_context_summary();
     result.history = agent->get_history();
     result.steps = run_state->steps.load(std::memory_order_acquire);
     result.tool_calls_total = run_state->tool_calls_total.load(std::memory_order_acquire);
     result.tool_calls_success = run_state->tool_calls_success.load(std::memory_order_acquire);
-    result.cancelled = result.cancelled
-        || result.timed_out
-        || (request.cancellation_requested && request.cancellation_requested())
-        || agent->is_stop_requested();
+    if (result.final_text.empty()) {
+        result.final_text = result.streamed_text.empty()
+            ? "The worker stopped before producing a final answer; resume from the saved state."
+            : result.streamed_text;
+    }
+    if (result.timed_out()) result.final_text = "Worker timed out. Progress was saved; resume when the worker has stopped.";
 
     emit_event(SubagentEvent{
-        .kind = result.cancelled
-            ? (result.timed_out ? SubagentEvent::Kind::Failed : SubagentEvent::Kind::Cancelled)
-            : SubagentEvent::Kind::Finished,
-        .summary = result.streamed_text,
+        .kind = result.cancelled() ? SubagentEvent::Kind::Cancelled
+            : result.status() == "failed" ? SubagentEvent::Kind::Failed
+            : result.status() == "partial" ? SubagentEvent::Kind::Partial : SubagentEvent::Kind::Finished,
+        .summary = result.final_text,
         .steps = result.steps,
         .tool_calls = result.tool_calls_total,
         .failed_tool_calls = result.tool_calls_total - result.tool_calls_success,
-    });
+    }, true);
 
     return result;
 }

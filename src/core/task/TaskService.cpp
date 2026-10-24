@@ -1,6 +1,7 @@
 #include "TaskService.hpp"
 
 #include "../agent/DelegatedAgentRunner.hpp"
+#include "../agent/DelegationBudget.hpp"
 #include "../agent/SubagentOrchestrator.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../session/SessionHandoff.hpp"
@@ -18,8 +19,10 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <future>
 #include <initializer_list>
 #include <optional>
+#include <mutex>
 #include <ranges>
 #include <span>
 #include <string>
@@ -47,17 +50,26 @@ struct ParsedRequest {
     int max_steps = 0;
 };
 
-struct RunOutcome {
-    std::string final_text;
-    std::string handoff_summary;
-    std::vector<core::llm::Message> history;
-    int steps = 0;
-    int tool_calls = 0;
-    int failed_tool_calls = 0;
+struct RunEvidence {
     std::vector<std::string> files_touched;
     std::vector<std::string> commands_run;
-    bool cancelled = false;
 };
+
+struct WorkRunGate {
+    std::timed_mutex mutex;
+    std::shared_future<void> pending_run;
+};
+
+[[nodiscard]] std::shared_ptr<WorkRunGate> work_run_gate(const std::filesystem::path& path) {
+    static std::mutex registry_mutex;
+    static std::unordered_map<std::string, std::weak_ptr<WorkRunGate>> gates;
+    std::lock_guard lock(registry_mutex);
+    std::erase_if(gates, [](const auto& entry) { return entry.second.expired(); });
+    auto& entry = gates[path.lexically_normal().string()];
+    auto gate = entry.lock();
+    if (!gate) entry = gate = std::make_shared<WorkRunGate>();
+    return gate;
+}
 
 [[nodiscard]] std::string normalize_mode(std::string_view input) {
     std::string mode = core::utils::str::to_lower_ascii_copy(
@@ -125,10 +137,9 @@ void append_unique(std::vector<std::string>& values,
     if (obj["status"].get(text) == simdjson::SUCCESS) parsed.status_filter = core::utils::str::to_lower_ascii_copy(text);
     if (obj["cwd"].get(text) == simdjson::SUCCESS) parsed.cwd = std::string(text);
 
-    int64_t max_steps = 0;
-    if (obj["max_steps"].get(max_steps) == simdjson::SUCCESS) {
-        parsed.max_steps = static_cast<int>(max_steps);
-    }
+    const auto max_steps = core::agent::DelegationBudget::parse(obj);
+    if (!max_steps) { error_out = max_steps.error(); return std::nullopt; }
+    parsed.max_steps = max_steps->value_or(0);
 
     if (parsed.action.empty()) {
         error_out = "Missing required 'action' for task.";
@@ -153,7 +164,11 @@ void append_unique(std::vector<std::string>& values,
         return std::nullopt;
     }
     if (parsed.action == "resume" && !WorkStore::is_valid_work_id(parsed.work_id)) {
-        error_out = "Invalid work_id for task resume.";
+        error_out = parsed.work_id.starts_with("task_")
+            ? "Invalid work_id for task resume. This is a subagent task_id: resume it with "
+              "the task tool, passing task_id, the same subagent_type, description and a "
+              "follow-up prompt; optionally increase max_steps (1-64)."
+            : "Invalid work_id for task resume. Use the exact work_id returned by delegate_task.";
         return std::nullopt;
     }
     return parsed;
@@ -198,14 +213,9 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
     }
 }
 
-[[nodiscard]] RunOutcome summarize_run(const std::vector<core::llm::Message>& history,
-                                       std::size_t history_before,
-                                       const std::string& streamed_text,
-                                       const core::context::SessionContext& context,
-                                       bool cancelled) {
-    RunOutcome outcome;
-    outcome.cancelled = cancelled;
-    outcome.history = history;
+[[nodiscard]] RunEvidence collect_run_evidence(const std::vector<core::llm::Message>& history,
+                                               const core::context::SessionContext& context) {
+    RunEvidence outcome;
 
     std::unordered_map<std::string, core::llm::ToolCall> tool_calls_by_id;
     for (const auto& message : history) {
@@ -264,21 +274,6 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
         }
     }
 
-    if (history.size() >= history_before) {
-        for (const auto& message : std::span<const core::llm::Message>(
-                 history.data() + history_before,
-                 history.size() - history_before)) {
-            if (message.role == "assistant" && !message.content.empty()) {
-                if (!outcome.final_text.empty()) outcome.final_text += "\n";
-                outcome.final_text += message.content;
-            }
-        }
-    }
-    if (outcome.final_text.empty()) {
-        outcome.final_text = streamed_text;
-    }
-
-    outcome.handoff_summary = core::session::build_handoff_summary(history, {}, "BUILD");
     return outcome;
 }
 
@@ -323,13 +318,16 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
 }
 
 [[nodiscard]] std::string build_result_json(const ParsedRequest& request,
-                                            const WorkItem& item) {
+                                            const WorkItem& item, bool resumable) {
     core::utils::JsonWriter writer(2048 + item.result.size() + item.summary.size());
     {
         auto root = writer.object();
         writer.kv_str("action", request.action).comma();
         writer.kv_str("work_id", item.work_id).comma();
         writer.kv_str("status", item.status).comma();
+        writer.kv_str("stop_reason", item.stop_reason).comma();
+        writer.kv_num("max_steps", item.max_steps).comma();
+        writer.kv_bool("resumable", resumable).comma();
         writer.kv_str("title", item.title).comma();
         writer.kv_str("worker", item.worker).comma();
         writer.kv_str("mode", item.mode).comma();
@@ -426,6 +424,9 @@ std::string TaskService::execute(std::string_view json_args,
     if (!request.has_value()) {
         return error_json(parse_error);
     }
+    if (control && control->cancel_requested()) {
+        return error_json("Delegated task was cancelled before it started; no saved work was changed.");
+    }
 
     const auto config = core::config::ConfigManager::get_instance().get_config();
     WorkStore work_store(WorkStore::default_work_dir(context));
@@ -454,6 +455,16 @@ std::string TaskService::execute(std::string_view json_args,
     WorkItem item;
     core::session::SessionStore session_store(core::session::SessionStore::default_sessions_dir());
     std::optional<core::session::SessionData> existing_session;
+    const std::string work_id = request->action == "resume" ? request->work_id : WorkStore::generate_work_id();
+    const auto gate = work_run_gate(work_store.compute_path(work_id));
+    std::unique_lock run_lock(gate->mutex, std::defer_lock);
+    do {
+        if (control && control->cancel_requested()) return error_json("Delegated task was cancelled while waiting to resume.");
+    } while (!run_lock.try_lock_for(std::chrono::milliseconds(25)));
+    if (gate->pending_run.valid()
+        && gate->pending_run.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return error_json("This work item's previous worker is still stopping. Retry the same work_id after it has stopped.");
+    }
 
     if (request->action == "resume") {
         const auto loaded = work_store.load(request->work_id);
@@ -469,7 +480,7 @@ std::string TaskService::execute(std::string_view json_args,
                 item.session_id));
         }
     } else {
-        item.work_id = WorkStore::generate_work_id();
+        item.work_id = work_id;
         item.session_id = item.work_id;
         item.title = core::utils::str::trim_ascii_copy(request->title);
         item.created_at = core::session::SessionStore::now_iso8601();
@@ -490,17 +501,6 @@ std::string TaskService::execute(std::string_view json_args,
     }
     item.working_dir = worker_context->effective_workspace().primary.string();
 
-    if (control && control->cancel_requested()) {
-        item.status = "paused";
-        item.updated_at = core::session::SessionStore::now_iso8601();
-        item.summary = "Execution cancelled before it started.";
-        item.result.clear();
-        item.handoff_summary = item.summary;
-        std::string save_error;
-        (void)work_store.save(item, &save_error);
-        return build_result_json(*request, item);
-    }
-
     auto& tool_manager = core::tools::ToolManager::get_instance();
     core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
     const auto plan = orchestrator.build_execution_plan(core::agent::SubagentOrchestrator::ExecutionRequest{
@@ -510,7 +510,8 @@ std::string TaskService::execute(std::string_view json_args,
         .inherited_model = item.model,
         .provider_override = request->provider.empty() ? std::string_view(item.provider) : std::string_view(request->provider),
         .model_override = request->model.empty() ? std::string_view(item.model) : std::string_view(request->model),
-        .max_steps_override = request->max_steps > 0 ? std::optional<int>{request->max_steps} : std::nullopt,
+        .max_steps_override = request->max_steps > 0 ? std::optional<int>{request->max_steps}
+            : item.max_steps > 0 ? std::optional<int>{item.max_steps} : std::nullopt,
     });
     if (!plan) {
         return error_json(plan.error());
@@ -519,6 +520,7 @@ std::string TaskService::execute(std::string_view json_args,
     item.worker = plan->worker_name;
     item.provider = plan->provider_name;
     item.model = plan->model_name;
+    item.max_steps = plan->max_steps;
 
     const std::string prompt = request->action == "resume"
         ? (core::utils::str::trim_ascii_copy(request->instructions).empty()
@@ -533,12 +535,15 @@ std::string TaskService::execute(std::string_view json_args,
         .session_context = *worker_context,
         .mode = item.mode,
         .model = plan->model_name,
+        .response_format = plan->response_format,
         .allowed_tools = plan->allowed_tool_names(),
         .max_steps = plan->max_steps,
         .prompt = prompt,
         .worker_name = plan->worker_name,
         .worker_description = plan->worker_description,
         .worker_prompt = plan->worker_prompt,
+        .task_id = item.work_id,
+        .task_description = item.title,
         .resume_state = existing_session.has_value()
             ? std::optional<core::agent::DelegatedAgentRunner::ResumeState>{{
                   .messages = existing_session->messages,
@@ -557,27 +562,10 @@ std::string TaskService::execute(std::string_view json_args,
             ? std::function<bool()>{[control]() { return control->cancel_requested(); }}
             : std::function<bool()>{},
         .execution_journal = std::make_shared<core::session::ExecutionJournal>(),
+        .execution_lease = gate,
     });
-    if (run_result.timed_out) {
-        if (control) {
-            control->request_cancel();
-        }
-        item.status = "failed";
-        item.updated_at = core::session::SessionStore::now_iso8601();
-        item.summary = "Delegated task timed out while waiting for the worker response.";
-        item.result = item.summary;
-        item.handoff_summary = item.summary;
-        std::string save_error;
-        (void)work_store.save(item, &save_error);
-        return build_result_json(*request, item);
-    }
-
-    const RunOutcome outcome = summarize_run(
-        run_result.history,
-        existing_session.has_value() ? existing_session->messages.size() : std::size_t{0},
-        run_result.streamed_text,
-        *worker_context,
-        run_result.cancelled);
+    gate->pending_run = run_result.settled;
+    const auto evidence = collect_run_evidence(run_result.history, *worker_context);
 
     core::session::SessionData session_data;
     session_data.session_id = item.session_id;
@@ -597,23 +585,17 @@ std::string TaskService::execute(std::string_view json_args,
     session_data.handoff_summary = core::session::build_handoff_summary(session_data);
 
     item.updated_at = session_data.last_active_at;
-    item.summary = summary_from_text(outcome.final_text);
-    item.result = outcome.final_text;
+    item.summary = summary_from_text(run_result.final_text);
+    item.result = run_result.final_text;
     item.handoff_summary = session_data.handoff_summary;
     item.steps = session_data.stats.turn_count;
     item.tool_calls = session_data.stats.tool_calls_total;
     item.failed_tool_calls =
         session_data.stats.tool_calls_total - session_data.stats.tool_calls_success;
-    item.files_touched = outcome.files_touched;
-    item.commands_run = outcome.commands_run;
-    item.status = outcome.cancelled ? "paused" : "completed";
-
-    if (item.result.empty()) {
-        item.result = outcome.cancelled
-            ? "Execution was cancelled before the worker produced a final result."
-            : "The worker completed without producing final text.";
-        item.summary = summary_from_text(item.result);
-    }
+    item.files_touched = evidence.files_touched;
+    item.commands_run = evidence.commands_run;
+    item.status = run_result.cancelled() ? "paused" : std::string(run_result.status());
+    item.stop_reason = run_result.reason();
 
     std::string save_error;
     if (!session_store.save(session_data, &save_error)) {
@@ -627,7 +609,8 @@ std::string TaskService::execute(std::string_view json_args,
             : save_error);
     }
 
-    return build_result_json(*request, item);
+    return build_result_json(*request, item,
+        !run_result.settled.valid() || run_result.settled.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
 }
 
 } // namespace core::task

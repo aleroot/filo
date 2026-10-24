@@ -2,14 +2,17 @@
 
 #include "AgentMode.hpp"
 #include "DelegatedAgentRunner.hpp"
+#include "DelegationBudget.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderFactory.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../logging/Logger.hpp"
+#include "../session/SessionStore.hpp"
 #include "../tools/TaskTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/StringUtils.hpp"
 
 #include <simdjson.h>
 
@@ -27,25 +30,32 @@ namespace core::agent {
 
 namespace {
 
-constexpr int kMinSubagentSteps = 1;
-constexpr int kMaxSubagentSteps = 64;
+[[nodiscard]] bool acquire_run_lock(std::unique_lock<std::timed_mutex>& lock,
+                                    const std::function<bool()>& cancelled) {
+    using namespace std::chrono_literals;
+    do {
+        if (cancelled && cancelled()) return false;
+        if (lock.try_lock_for(25ms)) return true;
+    } while (true);
+}
 
 class ReadOnlySlot final {
 public:
     explicit ReadOnlySlot(
-        std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>& slots)
-        : slots_(slots) {}
+        std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>> slots)
+        : slots_(std::move(slots)) {}
 
     ReadOnlySlot(const ReadOnlySlot&) = delete;
     ReadOnlySlot& operator=(const ReadOnlySlot&) = delete;
 
     ~ReadOnlySlot() {
-        if (acquired_) slots_.release();
+        if (acquired_) slots_->release();
     }
 
     [[nodiscard]] bool acquire(const std::function<bool()>& cancellation_requested) {
         using namespace std::chrono_literals;
-        while (!slots_.try_acquire_for(25ms)) {
+        if (cancellation_requested && cancellation_requested()) return false;
+        while (!slots_->try_acquire_for(25ms)) {
             if (cancellation_requested && cancellation_requested()) return false;
         }
         acquired_ = true;
@@ -53,7 +63,7 @@ public:
     }
 
 private:
-    std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>& slots_;
+    std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>> slots_;
     bool acquired_ = false;
 };
 
@@ -62,9 +72,7 @@ private:
 }
 
 [[nodiscard]] int sanitize_max_steps(int value, int fallback) {
-    if (value < kMinSubagentSteps) return fallback;
-    if (value > kMaxSubagentSteps) return kMaxSubagentSteps;
-    return value;
+    return DelegationBudget::sanitize(value, fallback);
 }
 
 [[nodiscard]] bool is_filo_task_id(std::string_view value) {
@@ -77,6 +85,16 @@ private:
     return std::ranges::all_of(value.substr(kPrefix.size()), [](unsigned char ch) {
         return std::isxdigit(ch) != 0;
     });
+}
+
+[[nodiscard]] bool is_provider_generated_uuid(std::string_view value) {
+    if (value.size() != 36) return false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(value[i]))) return false;
+    }
+    return true;
 }
 
 [[nodiscard]] DelegatedAgentRunner::PermissionCheck adapt_permission_check(
@@ -206,6 +224,14 @@ core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
             .required = false,
         },
         {
+            .name = "max_steps",
+            .type = "integer",
+            .description = "Optional model-step budget for this run (1-64, including the final summary). "
+                           "Omit to use the profile default; increase when resuming partial work.",
+            .required = false,
+            .schema = R"({"type":"integer","minimum":1,"maximum":64,"description":"Model-step budget for this run, including the final summary. Omit to keep the profile or previous run's budget; increase when resuming partial work."})",
+        },
+        {
             .name = "command",
             .type = "string",
             .description = "Optional command or trigger label for traceability.",
@@ -240,7 +266,10 @@ std::string SubagentOrchestrator::execute_task(
     if (obj["description"].get(value) == simdjson::SUCCESS) description = std::string(value);
     if (obj["prompt"].get(value) == simdjson::SUCCESS) prompt = std::string(value);
     if (obj["subagent_type"].get(value) == simdjson::SUCCESS) subagent_type = std::string(value);
-    if (obj["task_id"].get(value) == simdjson::SUCCESS) task_id = std::string(value);
+    if (obj["task_id"].get(value) == simdjson::SUCCESS) task_id = core::utils::str::trim_ascii_copy(value);
+
+    const auto max_steps = DelegationBudget::parse(obj);
+    if (!max_steps) return render_error_json(max_steps.error());
 
     if (description.empty()) {
         return render_error_json("Missing required 'description' for task.");
@@ -252,7 +281,7 @@ std::string SubagentOrchestrator::execute_task(
         return render_error_json("Missing required 'subagent_type' for task.");
     }
 
-    const auto plan = build_execution_plan(ExecutionRequest{
+    auto plan = build_execution_plan(ExecutionRequest{
         .worker = subagent_type,
         .worker_label = "subagent_type",
         .parent_mode = context.parent_mode,
@@ -260,6 +289,7 @@ std::string SubagentOrchestrator::execute_task(
         .inherited_provider_name = context.active_provider_name,
         .inherited_model = context.active_model,
         .prefer_inherited_provider = true,
+        .max_steps_override = *max_steps,
     });
     if (!plan) {
         return render_error_json(plan.error());
@@ -291,10 +321,19 @@ std::string SubagentOrchestrator::execute_task(
 
     // A task_id identifies mutable conversational state. Only one invocation may
     // advance that state at a time, even when the parent emits duplicate resumes.
-    std::unique_lock session_run_lock(session->run_mutex);
-    ReadOnlySlot read_only_slot(read_only_slots_);
+    std::unique_lock session_run_lock(session->run_mutex, std::defer_lock);
+    if (!acquire_run_lock(session_run_lock, context.cancellation_requested)) {
+        return render_error_json("Delegated task was cancelled while waiting to resume.");
+    }
+    if (session->pending_run.valid()
+        && session->pending_run.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return render_error_json("This task's previous worker is still stopping. Retry the same task_id after it has stopped.");
+    }
+    // A resume keeps an explicitly chosen budget unless this call overrides it.
+    if (!max_steps->has_value() && session->max_steps > 0) plan->max_steps = session->max_steps;
+    auto read_only_slot = std::make_shared<ReadOnlySlot>(read_only_slots_);
     if (plan->read_only
-        && !read_only_slot.acquire(context.cancellation_requested)) {
+        && !read_only_slot->acquire(context.cancellation_requested)) {
         return render_error_json("Delegated task was cancelled while waiting to run.");
     }
 
@@ -306,7 +345,13 @@ std::string SubagentOrchestrator::execute_task(
                 execution_provider = std::move(isolated);
             }
         } else {
-            serial_provider_lock.lock();
+            if (!acquire_run_lock(serial_provider_lock, context.cancellation_requested)) {
+                return render_error_json("Delegated task was cancelled while waiting for its provider.");
+            }
+            if (pending_serial_run_.valid()
+                && pending_serial_run_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+                return render_error_json("The provider's previous worker is still stopping. Retry after it has stopped.");
+            }
         }
     }
 
@@ -353,20 +398,11 @@ std::string SubagentOrchestrator::execute_task(
         .on_event = context.on_subagent_event,
         .effort = context.effort,
         .execution_journal = context.execution_journal,
+        .execution_lease = read_only_slot,
     });
-    if (result.timed_out) {
-        return render_error_json("Delegated task timed out while waiting for the worker response.");
-    }
-
-    std::string final_text = result.streamed_text;
-    if (!result.history.empty()) {
-        for (auto it = result.history.rbegin(); it != result.history.rend(); ++it) {
-            if (it->role == "assistant" && !it->content.empty()) {
-                final_text = it->content;
-                break;
-            }
-        }
-    }
+    session->pending_run = result.settled;
+    session->max_steps = plan->max_steps;
+    if (serial_provider_lock.owns_lock()) pending_serial_run_ = result.settled;
 
     {
         std::lock_guard session_lock(session->mutex);
@@ -378,7 +414,10 @@ std::string SubagentOrchestrator::execute_task(
     return render_success_json(
         *session,
         *plan,
-        final_text,
+        result.final_text,
+        result.status(),
+        result.reason(),
+        !result.settled.valid() || result.settled.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready,
         result.steps,
         result.tool_calls_total,
         result.tool_calls_total - result.tool_calls_success);
@@ -639,11 +678,12 @@ std::string SubagentOrchestrator::build_task_description() const {
                 ? "inherit parent"
                 : std::string_view(profile.model_override);
             description += std::format(
-                "- {}: {} [provider: {}; model: {}]\\n",
+                "- {}: {} [provider: {}; model: {}; model steps: {}]\\n",
                 profile.name,
                 profile.description,
                 provider,
-                model);
+                model,
+                profile.max_steps);
         }
     }
 
@@ -651,6 +691,12 @@ std::string SubagentOrchestrator::build_task_description() const {
         "\\nWhen finished, the subagent returns a concise final result to this conversation. "
         "For a new task, omit task_id. To resume the same delegated thread later, pass "
         "the exact task_id returned by its earlier successful call; never invent one. "
+        "Resume with this same task tool and the same subagent_type, prompt with follow-up "
+        "instructions, and optionally a larger max_steps (up to 64). A partial status means "
+        "the run used its budget; its findings and history are preserved. Do not pass task_id "
+        "to delegate_task: that tool only resumes its own work_id values. "
+        "Each task should answer a concrete question with specific evidence. Split large "
+        "investigations into focused tasks, or request a larger max_steps budget. "
         "Select the matching profile with subagent_type. A profile's provider and model are "
         "fixed by user configuration and cannot be overridden in a task prompt. For multiple "
         "independent read-only investigations, issue several explore task calls together in one "
@@ -660,8 +706,12 @@ std::string SubagentOrchestrator::build_task_description() const {
 }
 
 std::string SubagentOrchestrator::create_task_id() {
-    const uint64_t id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
-    return std::format("task_{:08x}", id);
+    // Called under sessions_mutex_. IDs must not alias an old conversation
+    // after reload/recreation of an orchestrator.
+    std::string id;
+    do { id = "task_" + core::session::SessionStore::generate_id(); }
+    while (sessions_.contains(id));
+    return id;
 }
 
 std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_create_session(
@@ -677,6 +727,13 @@ std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_
     // the first call. Such a value cannot name a Filo session: our IDs live in
     // the `task_XXXXXXXX` namespace. Treat foreign identifiers like an omitted
     // optional field, while preserving a hard error for stale/mistyped Filo IDs.
+    if (!requested_task_id.empty() && !is_filo_task_id(requested_task_id)
+        && !is_provider_generated_uuid(requested_task_id)) {
+        error_out = requested_task_id.starts_with("work_")
+            ? "This is a persistent work_id. Resume it with delegate_task, action=resume and work_id."
+            : "Invalid task_id. Use the exact task_id returned by task; omit it when starting new work.";
+        return nullptr;
+    }
     if (is_filo_task_id(requested_task_id)) {
         const std::string requested(requested_task_id);
         const auto it = sessions_.find(requested);
@@ -717,12 +774,10 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
         });
     }
 
-    if (!profile.allow_task_tool) {
-        std::erase_if(tools, [](const core::llm::Tool& tool) {
-            return tool.function.name == kTaskToolName
-                || tool.function.name == core::tools::TaskTool::kToolName;
-        });
-    }
+    std::erase_if(tools, [&](const core::llm::Tool& tool) {
+        return tool.function.name == core::tools::TaskTool::kToolName
+            || (!profile.allow_task_tool && tool.function.name == kTaskToolName);
+    });
 
     const std::string mode = normalize_mode(parent_mode);
     if (mode == "PLAN" || mode == "RESEARCH") {
@@ -738,6 +793,9 @@ std::string SubagentOrchestrator::render_success_json(
     const TaskSession& session,
     const ExecutionPlan& plan,
     std::string_view result_text,
+    std::string_view status,
+    std::string_view stop_reason,
+    bool resumable,
     int steps,
     int tool_calls,
     int failed_tool_calls) const {
@@ -751,6 +809,19 @@ std::string SubagentOrchestrator::render_success_json(
     {
         auto _obj = writer.object();
         writer.kv_str("task_id", session.id);
+        writer.comma();
+        writer.kv_str("status", status);
+        writer.comma().kv_str("stop_reason", stop_reason);
+        writer.comma().kv_bool("resumable", resumable);
+        writer.comma();
+        writer.kv_num("max_steps", plan.max_steps);
+        if (status == "partial") {
+            writer.comma().kv_num("suggested_max_steps", std::min(plan.max_steps * 2, DelegationBudget::kMaxSteps));
+            writer.comma();
+            writer.kv_str("resume_hint", "Call task with this task_id, the same subagent_type, "
+                          "description and a follow-up prompt; optionally increase max_steps (1-64). "
+                          "Do not use delegate_task or work_id for this task.");
+        }
         writer.comma();
         writer.kv_str("subagent_type", plan.worker_name);
         writer.comma();

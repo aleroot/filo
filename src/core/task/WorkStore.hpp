@@ -16,6 +16,8 @@ struct WorkItem {
     std::string work_id;
     std::string title;
     std::string status;
+    std::string stop_reason;
+    int max_steps = 0;
     std::string worker;
     std::string mode;
     std::string provider;

@@ -9,6 +9,7 @@
 #include "core/llm/ProviderManager.hpp"
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/task/WorkStore.hpp"
+#include "core/task/TaskService.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/workspace/Workspace.hpp"
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -102,10 +104,15 @@ public:
         release_cv_.notify_all();
     }
 
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
 private:
     int expected_starts_;
     std::string response_text_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable started_cv_;
     std::condition_variable release_cv_;
     int started_ = 0;
@@ -681,8 +688,8 @@ TEST_CASE("Delegated agent runner observes cancellation while provider start is 
     canceller.join();
 
     REQUIRE(provider_started.load(std::memory_order_acquire));
-    REQUIRE(result.cancelled);
-    REQUIRE_FALSE(result.timed_out);
+    REQUIRE(result.cancelled());
+    REQUIRE_FALSE(result.timed_out());
     REQUIRE(elapsed < std::chrono::seconds(2));
 }
 
@@ -859,6 +866,127 @@ TEST_CASE("MCP delegate work items are scoped to the current workspace", "[mcp][
         context_b);
     REQUIRE_THAT(traversal_response, ContainsSubstring("Invalid work_id"));
     REQUIRE_THAT(traversal_response, ContainsSubstring(R"("isError":true)"));
+}
+
+TEST_CASE("Delegate redirects subagent task ids to the correct resume tool", "[mcp][tasks]") {
+    const auto context = test_support::make_workspace_session_context();
+    const auto response = core::task::TaskService::get_instance().execute(
+        R"({"action":"resume","work_id":"task_0123abcd"})",
+        context);
+    REQUIRE_THAT(response, ContainsSubstring("This is a subagent task_id"));
+    REQUIRE_THAT(response, ContainsSubstring("the task tool"));
+    REQUIRE_THAT(response, ContainsSubstring("max_steps"));
+}
+
+TEST_CASE("Persistent delegation preserves partial work for a larger-budget resume", "[mcp][tasks][budget]") {
+    TaskTestSandbox sandbox("budget_resume");
+    auto provider = std::make_shared<RecordingProvider>("collected evidence");
+    core::llm::ProviderManager::get_instance().register_provider("budget-worker", provider);
+    load_project_config(sandbox.project_dir, R"({
+        "default_provider":"budget-worker",
+        "providers":{"budget-worker":{"api_type":"openai","base_url":"https://example.test/v1","model":"budget-model"}}
+    })");
+    auto& service = core::task::TaskService::get_instance();
+    const auto first = service.execute(
+        R"({"action":"start","title":"Investigate","instructions":"Inspect evidence","max_steps":1})",
+        sandbox.context);
+    INFO(first);
+    const auto first_doc = parse_json(first);
+    CHECK(string_at(first_doc, {"status"}) == "partial");
+    const auto work_id = string_at(first_doc, {"work_id"});
+    REQUIRE_FALSE(work_id.empty());
+    CHECK_THAT(service.execute(R"({"action":"list","status":"partial"})", sandbox.context),
+               ContainsSubstring(work_id));
+
+    const auto resumed = service.execute(std::format(
+        R"({{"action":"resume","work_id":"{}","max_steps":3}})", work_id), sandbox.context);
+    INFO(resumed);
+    CHECK(string_at(parse_json(resumed), {"status"}) == "completed");
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    CHECK(requests.front().tools.empty());
+    CHECK_FALSE(requests.back().tools.empty());
+    CHECK(std::ranges::any_of(requests.back().messages, [](const auto& message) {
+        return message.role == "assistant" && message.content == "collected evidence";
+    }));
+    const auto third = service.execute(std::format(
+        R"({{"action":"resume","work_id":"{}"}})", work_id), sandbox.context);
+    CHECK(int_at(parse_json(third), {"max_steps"}) == 3);
+    core::task::WorkStore store(core::task::WorkStore::default_work_dir(sandbox.context));
+    const auto saved = store.load(work_id);
+    REQUIRE(saved.has_value());
+    CHECK(saved->max_steps == 3);
+    CHECK(saved->stop_reason == "completed");
+}
+
+TEST_CASE("Persistent delegation validates budgets before provider selection", "[mcp][tasks][budget]") {
+    const auto context = test_support::make_workspace_session_context();
+    for (const auto value : {"0", "-1", "65", "4294967297", "1.5", "\"invalid\""}) {
+        const auto result = core::task::TaskService::get_instance().execute(std::format(
+            R"({{"action":"start","title":"Inspect","instructions":"Inspect files","max_steps":{}}})", value), context);
+        INFO(value);
+        CHECK_THAT(result, ContainsSubstring("max_steps must be an integer"));
+    }
+}
+
+TEST_CASE("Cancelled persistent resumes preserve the last saved checkpoint", "[mcp][tasks][cancellation]") {
+    TaskTestSandbox sandbox("cancelled_resume_checkpoint");
+    auto provider = std::make_shared<RecordingProvider>("saved evidence");
+    core::llm::ProviderManager::get_instance().register_provider("checkpoint-worker", provider);
+    load_project_config(sandbox.project_dir, R"({
+        "default_provider":"checkpoint-worker",
+        "providers":{"checkpoint-worker":{"api_type":"openai","base_url":"https://example.test/v1","model":"checkpoint-model"}}
+    })");
+    auto& service = core::task::TaskService::get_instance();
+    const auto first = service.execute(
+        R"({"action":"start","title":"Investigate","instructions":"Inspect evidence","max_steps":8})", sandbox.context);
+    const auto id = string_at(parse_json(first), {"work_id"});
+    REQUIRE_FALSE(id.empty());
+    auto control = std::make_shared<core::task::TaskService::ExecutionControl>();
+    control->request_cancel();
+    const auto cancelled = service.execute(std::format(
+        R"({{"action":"resume","work_id":"{}"}})", id), sandbox.context, control);
+    CHECK_THAT(cancelled, ContainsSubstring("cancelled before it started"));
+    core::task::WorkStore store(core::task::WorkStore::default_work_dir(sandbox.context));
+    const auto saved = store.load(id);
+    REQUIRE(saved.has_value());
+    CHECK(saved->result == "saved evidence");
+    CHECK(saved->status == "completed");
+    CHECK(saved->max_steps == 8);
+    CHECK(provider->requests_snapshot().size() == 1);
+}
+
+TEST_CASE("Concurrent persistent resumes advance one saved history in order", "[mcp][tasks][concurrency]") {
+    TaskTestSandbox sandbox("serial_resume_history");
+    auto initial_provider = std::make_shared<RecordingProvider>("initial evidence");
+    core::llm::ProviderManager::get_instance().register_provider("serial-resume-worker", initial_provider);
+    load_project_config(sandbox.project_dir, R"({
+        "default_provider":"serial-resume-worker",
+        "providers":{"serial-resume-worker":{"api_type":"openai","base_url":"https://example.test/v1","model":"serial-model"}}
+    })");
+    auto& service = core::task::TaskService::get_instance();
+    const auto first = service.execute(
+        R"({"action":"start","title":"Investigate","instructions":"Inspect evidence"})", sandbox.context);
+    const auto id = string_at(parse_json(first), {"work_id"});
+    REQUIRE_FALSE(id.empty());
+    auto provider = std::make_shared<BlockingProvider>(1, "resumed evidence");
+    core::llm::ProviderManager::get_instance().register_provider("serial-resume-worker", provider);
+    const auto args = std::format(R"({{"action":"resume","work_id":"{}"}})", id);
+    auto owner = std::async(std::launch::async, [&] { return service.execute(args, sandbox.context); });
+    const bool started = provider->wait_until_all_started(std::chrono::seconds(3));
+    auto queued = std::async(std::launch::async, [&] { return service.execute(args, sandbox.context); });
+    const bool serialized = queued.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+    provider->release_all();
+    const auto owner_result = owner.get();
+    const auto queued_result = queued.get();
+    INFO(queued_result);
+    CHECK(started);
+    CHECK(serialized);
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    CHECK(std::ranges::any_of(requests.back().messages, [](const auto& message) {
+        return message.role == "assistant" && message.content == "resumed evidence";
+    }));
 }
 
 TEST_CASE("WorkStore rejects unsafe work ids before filesystem access", "[mcp][tasks]") {

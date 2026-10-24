@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <expected>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -144,7 +145,9 @@ private:
         std::string context_summary;
         std::vector<core::llm::Message> history;
         std::mutex mutex;
-        std::mutex run_mutex;
+        std::timed_mutex run_mutex;
+        std::shared_future<void> pending_run;
+        int max_steps = 0;
     };
 
     [[nodiscard]] std::optional<Profile> find_profile(std::string_view name) const;
@@ -167,6 +170,9 @@ private:
         const TaskSession& session,
         const ExecutionPlan& plan,
         std::string_view result_text,
+        std::string_view status,
+        std::string_view stop_reason,
+        bool resumable,
         int steps,
         int tool_calls,
         int failed_tool_calls) const;
@@ -182,13 +188,13 @@ private:
     mutable std::mutex profiles_mutex_;
     const core::config::AppConfig* app_config_ = nullptr;
 
-    std::atomic<uint64_t> next_task_id_{1};
-
     mutable std::mutex sessions_mutex_;
     std::unordered_map<std::string, std::shared_ptr<TaskSession>> sessions_;
-    std::counting_semaphore<kMaxParallelReadOnlySubagents> read_only_slots_{
-        kMaxParallelReadOnlySubagents};
-    std::mutex serial_provider_mutex_;
+    using ReadOnlySlots = std::counting_semaphore<kMaxParallelReadOnlySubagents>;
+    std::shared_ptr<ReadOnlySlots> read_only_slots_ =
+        std::make_shared<ReadOnlySlots>(kMaxParallelReadOnlySubagents);
+    std::timed_mutex serial_provider_mutex_;
+    std::shared_future<void> pending_serial_run_;
 };
 
 } // namespace core::agent

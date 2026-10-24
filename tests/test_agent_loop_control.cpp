@@ -16,6 +16,7 @@
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/TaskTool.hpp"
 #include "core/tools/VerificationTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 
@@ -1294,6 +1295,20 @@ TEST_CASE("Appending assistant tool history scrubs malformed arguments",
     REQUIRE(history.size() == 2);
     REQUIRE(history.front().tool_calls.size() == 1);
     CHECK(history.front().tool_calls.front().function.arguments == "{}");
+}
+
+TEST_CASE("Agent exposes one delegation API even when the MCP registry is shared",
+          "[agent][orchestration][tools]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tools = core::tools::ToolManager::get_instance();
+    tools.register_tool(std::make_shared<core::tools::TaskTool>());
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context());
+    send_and_wait(agent, "Inspect the available tools");
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    CHECK(std::ranges::any_of(requests.front().tools, [](const auto& tool) { return tool.function.name == "task"; }));
+    CHECK(std::ranges::none_of(requests.front().tools, [](const auto& tool) { return tool.function.name == "delegate_task"; }));
 }
 
 TEST_CASE("Agent runs independent explore subagents concurrently with a bounded fan-out",

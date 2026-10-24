@@ -213,7 +213,11 @@ std::string WorkStore::to_json(const WorkItem& item) {
     core::utils::append_escaped(out, item.title);
     out += "\",\"status\":\"";
     core::utils::append_escaped(out, item.status);
-    out += "\",\"worker\":\"";
+    out += "\",\"stop_reason\":\"";
+    core::utils::append_escaped(out, item.stop_reason);
+    out += "\",\"max_steps\":";
+    out += std::to_string(item.max_steps);
+    out += ",\"worker\":\"";
     core::utils::append_escaped(out, item.worker);
     out += "\",\"mode\":\"";
     core::utils::append_escaped(out, item.mode);
@@ -271,6 +275,7 @@ std::optional<WorkItem> WorkStore::from_json(std::string_view json) {
     get_string("work_id", item.work_id);
     get_string("title", item.title);
     get_string("status", item.status);
+    get_string("stop_reason", item.stop_reason);
     get_string("worker", item.worker);
     get_string("mode", item.mode);
     get_string("provider", item.provider);
@@ -284,6 +289,9 @@ std::optional<WorkItem> WorkStore::from_json(std::string_view json) {
     get_string("handoff_summary", item.handoff_summary);
 
     int64_t value = 0;
+    if (doc["max_steps"].get(value) == simdjson::SUCCESS && value >= 1 && value <= 64) {
+        item.max_steps = static_cast<int>(value);
+    }
     if (doc["steps"].get(value) == simdjson::SUCCESS) item.steps = static_cast<int32_t>(value);
     if (doc["tool_calls"].get(value) == simdjson::SUCCESS) item.tool_calls = static_cast<int32_t>(value);
     if (doc["failed_tool_calls"].get(value) == simdjson::SUCCESS) {
