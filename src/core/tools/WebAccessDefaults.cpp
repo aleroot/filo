@@ -11,6 +11,7 @@ WebAccess make_default_web_access() {
             make_zai_web_search_backend(),
             make_kimi_web_search_backend(),
             make_minimax_web_search_backend(),
+            make_mimo_web_search_backend(),
             make_anthropic_web_search_backend(),
             make_openai_web_search_backend(),
             make_grok_web_search_backend(),

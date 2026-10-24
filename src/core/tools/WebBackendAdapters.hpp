@@ -42,6 +42,11 @@ struct MiniMaxWebSearchOptions {
 };
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_minimax_web_search_backend(
     MiniMaxWebSearchOptions options = {});
+struct MimoWebSearchOptions {
+    int timeout_ms = 30000;
+};
+[[nodiscard]] std::shared_ptr<IWebSearchBackend> make_mimo_web_search_backend(
+    MimoWebSearchOptions options = {});
 [[nodiscard]] std::string minimax_web_search_request_json(const SearchRequest& request);
 [[nodiscard]] std::expected<SearchResponse, std::string>
 parse_minimax_web_search_response(std::string_view body, const SearchRequest& request);

@@ -18,6 +18,8 @@
 #include "core/utils/Base64.hpp"
 #include "core/utils/Crypto.hpp"
 #include "core/version/Version.hpp"
+#include "core/tools/WebBackendAdapters.hpp"
+#include "TestSessionContext.hpp"
 
 #include <cpr/cpr.h>
 
@@ -27,6 +29,27 @@
 
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+TEST_CASE("MiMo web search recognizes pay-as-you-go and regional Token Plan providers",
+          "[mimo][web]") {
+    const auto backend = core::tools::web::make_mimo_web_search_backend();
+    for (const auto name : {"mimo", "mimo-token-plan", "mimo-token-plan-sgp", "mimo-token-plan-cn"}) {
+        CAPTURE(name);
+        core::config::ProviderConfig config;
+        config.api_key = "test-key";
+        config.model = "mimo-v2.6-pro";
+        const auto provider = ProviderFactory::create_provider(name, config);
+        REQUIRE(provider);
+        CHECK(backend->supports({.session_context = test_support::make_workspace_session_context(),
+                                 .provider = provider}));
+    }
+    CHECK_FALSE(backend->supports({.session_context = test_support::make_workspace_session_context()}));
+    core::config::ProviderConfig config;
+    config.api_key = "test-key";
+    config.model = "gpt-5.5";
+    CHECK_FALSE(backend->supports({.session_context = test_support::make_workspace_session_context(),
+        .provider = ProviderFactory::create_provider("openai", config)}));
+}
 
 namespace {
 

@@ -455,6 +455,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/DirectWebFetchBackend.cpp
     src/core/tools/KimiWebSearchBackend.cpp
     src/core/tools/MiniMaxWebSearchBackend.cpp
+    src/core/tools/MimoWebSearchBackend.cpp
     src/core/tools/OpenAIWebSearchBackend.cpp
     src/core/tools/GrokWebSearchBackend.cpp
     src/core/tools/ZaiWebBackend.cpp
@@ -853,6 +854,7 @@ set(FILO_INTEGRATION_TEST_SOURCES
     tests/test_integration_provider_http.cpp
     tests/test_integration_qwen.cpp
     tests/test_integration_minimax.cpp
+    tests/test_integration_mimo.cpp
     tests/test_integration_shell_tool.cpp
     tests/test_integration_web_tools.cpp
     tests/test_curl_websocket_transport.cpp
@@ -1064,6 +1066,7 @@ source_group(
         tests/test_integration_provider_http.cpp
         tests/test_integration_qwen.cpp
         tests/test_integration_minimax.cpp
+        tests/test_integration_mimo.cpp
         tests/test_integration_shell_tool.cpp
         tests/test_integration_web_tools.cpp
         tests/test_curl_websocket_transport.cpp
