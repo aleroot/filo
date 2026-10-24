@@ -216,6 +216,14 @@ bool RecoveryStore::has_object(const RecoveryImage& image) const {
     return !image.hash.empty() && core::utils::FileStamp::of(object_path(image.hash)).regular();
 }
 
+void RecoveryStore::mark_ambiguous() const {
+    fs::create_directories(directory_);
+    fs::permissions(directory_, fs::perms::owner_all);
+    std::string error;
+    if (!core::utils::atomic_write_file(directory_ / "ambiguous", "ambiguous\n", &error))
+        throw std::runtime_error(error);
+}
+
 void RecoveryStore::save(const RecoveryManifest& manifest) const {
     fs::create_directories(directory_);
     fs::permissions(directory_, fs::perms::owner_all);
@@ -224,6 +232,7 @@ void RecoveryStore::save(const RecoveryManifest& manifest) const {
         auto object = json.object();
         json.kv_num("version", 1).comma().kv_str("workspace", manifest.workspace.string()).comma();
         json.kv_str("phase", phase_name(manifest.phase)).comma().kv_bool("partial", manifest.partial).comma();
+        json.kv_bool("ambiguous_ownership", manifest.ambiguous_ownership).comma();
         json.kv_bool("inventory_complete", manifest.inventory_complete).comma().key("roots");
         {
             auto array = json.array();
@@ -289,6 +298,9 @@ std::expected<RecoveryManifest, std::string> RecoveryStore::load(const fs::path&
     if (!parsed_phase) return std::unexpected("Invalid recovery phase.");
     result.phase = *parsed_phase;
     (void)doc["partial"].get(result.partial);
+    (void)doc["ambiguous_ownership"].get(result.ambiguous_ownership);
+    std::error_code marker_error;
+    result.ambiguous_ownership |= fs::exists(directory_ / "ambiguous", marker_error) || bool(marker_error);
     simdjson::dom::array uncaptured;
     if (!doc["uncaptured"].get(uncaptured)) for (auto item : uncaptured) {
         std::string_view path;

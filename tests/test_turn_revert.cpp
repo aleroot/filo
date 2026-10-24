@@ -8,6 +8,7 @@
 #include "core/changes/TurnRecovery.hpp"
 #include "core/changes/WorkspaceInventory.hpp"
 #include "core/changes/RecoveryStore.hpp"
+#include "core/changes/FileChangeJson.hpp"
 #include "core/changes/StoredDiff.hpp"
 #include "core/utils/FileStamp.hpp"
 #include "core/utils/InterprocessFile.hpp"
@@ -15,6 +16,8 @@
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WriteFileTool.hpp"
+#include "core/tools/ListDirectoryTool.hpp"
+#include "tui/DirectShellState.hpp"
 #include "TestSessionContext.hpp"
 #include <sys/wait.h>
 #include <signal.h>
@@ -25,6 +28,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <map>
 #include <set>
 #include <random>
@@ -32,6 +36,7 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <simdjson.h>
 
 using core::changes::FileChange;
 using core::changes::FileChangeContent;
@@ -64,6 +69,18 @@ struct TempDir {
     TempDir(const TempDir&) = delete;
     TempDir& operator=(const TempDir&) = delete;
 };
+
+struct ReleaseCommand {
+    fs::path path;
+    ~ReleaseCommand() { std::ofstream(path) << "release"; }
+};
+
+bool wait_for_file(const fs::path& path) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!fs::exists(path) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return fs::exists(path);
+}
 
 void put(const fs::path& path, std::string_view content) {
     fs::create_directories(path.parent_path());
@@ -444,10 +461,9 @@ TEST_CASE("A revert refuses another thread's workspace writer before touching fi
     put(file, "before\n");
     TurnChangeTracker tracker(dir.path);
     edit(tracker, scope_of({file}), [&] { put(file, "after\n"); });
-    using Gate = core::changes::WorkspaceMutationGate;
     const std::vector<fs::path> roots{dir.path};
     {
-        auto writer = mutations.acquire(roots, Gate::Access::ScopedWrite);
+        auto writer = mutations.acquire(roots);
         REQUIRE(writer);
         const auto result = revert_turn(tracker.changes(), dir.path, mutations);
         REQUIRE_FALSE(result.reverted());
@@ -458,20 +474,70 @@ TEST_CASE("A revert refuses another thread's workspace writer before touching fi
     CHECK(read(file) == "before\n");
 }
 
+TEST_CASE("Reverting one file does not reserve other files in the same workspace",
+          "[changes][revert][concurrency][regression]") {
+    TempDir dir;
+    const auto changed = dir.path / "changed.txt", unrelated = dir.path / "unrelated.txt";
+    put(changed, "before");
+    put(unrelated, "other work");
+    TurnChangeTracker tracker(dir.path);
+    edit(tracker, scope_of({changed}), [&] { put(changed, "after"); });
+    core::changes::WorkspaceMutationGate mutations;
+    const std::vector<fs::path> other_target{unrelated};
+    auto writer = mutations.acquire(other_target);
+    REQUIRE(writer);
+    CHECK(revert_turn(tracker.changes(), dir.path, mutations).reverted());
+    CHECK(read(changed) == "before");
+    CHECK(read(unrelated) == "other work");
+}
+
+TEST_CASE("Durable restoration reserves its actual changed files even when the summary omits one",
+          "[changes][revert][recovery][concurrency][regression]") {
+    TempDir dir, storage;
+    const auto a = dir.path / "a", b = dir.path / "b", c = dir.path / "c";
+    for (const auto& file : {a, b, c}) put(file, "before");
+    const auto checkpoint = storage.path / "turn";
+    core::changes::TurnRecovery recovery(checkpoint, dir.path);
+    const std::vector<fs::path> captured{a, b, c};
+    recovery.before(captured);
+    put(a, "after");
+    put(b, "after");
+    recovery.after(captured);
+    recovery.finish();
+    TurnChanges summary;
+    summary.recovery_path = checkpoint.string();
+    summary.files.push_back({.path = "a"});
+    core::changes::WorkspaceMutationGate mutations;
+    const std::vector<fs::path> omitted_target{b}, unrelated_target{c};
+    {
+        auto writer = mutations.acquire(omitted_target);
+        REQUIRE(writer);
+        CHECK_FALSE(revert_turn(summary, dir.path, mutations).reverted());
+        CHECK(read(a) == "after");
+        CHECK(read(b) == "after");
+    }
+    auto unrelated = mutations.acquire(unrelated_target);
+    REQUIRE(unrelated);
+    put(c, "independent work");
+    CHECK(revert_turn(summary, dir.path, mutations).reverted());
+    CHECK(read(a) == "before");
+    CHECK(read(b) == "before");
+    CHECK(read(c) == "independent work");
+}
+
 TEST_CASE("Workspace mutation tokens can be transferred and cancel waiting writers",
           "[changes][revert][concurrency]") {
     core::changes::WorkspaceMutationGate mutations;
     TempDir dir;
-    using Gate = core::changes::WorkspaceMutationGate;
     const std::vector<fs::path> roots{dir.path};
-    auto restore = mutations.acquire(roots, Gate::Access::Exclusive);
+    auto restore = mutations.acquire(roots);
     REQUIRE(restore);
-    const auto blocked = mutations.acquire(roots, Gate::Access::ScopedWrite,
+    const auto blocked = mutations.acquire(roots,
         std::chrono::seconds(1), [] { return true; });
     CHECK_FALSE(blocked);
     std::thread release([token = std::move(*restore)] {});
     release.join();
-    CHECK(mutations.acquire(roots, Gate::Access::Exclusive, std::chrono::milliseconds(0)));
+    CHECK(mutations.acquire(roots, std::chrono::milliseconds(0)));
 }
 
 TEST_CASE("Durable recovery restores binary bytes and executable modes without a display diff",
@@ -660,12 +726,394 @@ TEST_CASE("Writer exclusion follows overlapping native roots and leaves unrelate
     core::changes::WorkspaceMutationGate mutations;
     TempDir dir, unrelated;
     fs::create_directories(dir.path / "nested");
-    using Gate = core::changes::WorkspaceMutationGate;
     const std::vector<fs::path> nested{dir.path / "nested"}, parent{dir.path}, other{unrelated.path};
-    auto writer = mutations.acquire(nested, Gate::Access::ScopedWrite);
+    auto writer = mutations.acquire(nested);
     REQUIRE(writer);
-    CHECK_FALSE(mutations.acquire(parent, Gate::Access::Exclusive, std::chrono::milliseconds(0)));
-    CHECK(mutations.acquire(other, Gate::Access::Exclusive, std::chrono::milliseconds(0)));
+    CHECK_FALSE(mutations.acquire(parent, std::chrono::milliseconds(0)));
+    CHECK(mutations.acquire(other, std::chrono::milliseconds(0)));
+}
+
+TEST_CASE("File writer reservations do not expand to sibling attachments",
+          "[changes][concurrency][regression][attachments]") {
+    TempDir desktop;
+    const auto first = desktop.path / "first.png", second = desktop.path / "second.png";
+    put(first, "first");
+    put(second, "second");
+    using Gate = core::changes::WorkspaceMutationGate;
+    Gate mutations;
+    const std::vector<fs::path> a{first}, b{second}, parent{desktop.path};
+    auto writer = mutations.acquire(a);
+    REQUIRE(writer);
+    // Deletion must not widen an existing or newly requested file scope.
+    REQUIRE(fs::remove(first));
+    REQUIRE(fs::remove(second));
+    CHECK(mutations.acquire(b, std::chrono::milliseconds(0)));
+    CHECK_FALSE(mutations.acquire(a, std::chrono::milliseconds(0)));
+    CHECK_FALSE(mutations.acquire(parent, std::chrono::milliseconds(0)));
+    writer->reset();
+    auto directory_writer = mutations.acquire(parent);
+    REQUIRE(directory_writer);
+    CHECK_FALSE(mutations.acquire(b, std::chrono::milliseconds(0)));
+}
+
+TEST_CASE("A new project tab does not contend on screenshots inherited from its source tab",
+          "[changes][concurrency][regression][attachments]") {
+    TempDir first, second, desktop;
+    const auto screenshot = desktop.path / "screenshot.png";
+    put(screenshot, "image");
+    core::workspace::SessionWorkspace original{core::workspace::WorkspaceSnapshot{
+        .primary = first.path, .enforce = true}};
+    REQUIRE(original.add_additional_paths({screenshot}) == 1);
+    auto fresh = original.without_attachments();
+    REQUIRE(fresh.set_primary(second.path));
+
+    using Gate = core::changes::WorkspaceMutationGate;
+    Gate mutations;
+    auto running_tests = mutations.acquire(fresh.ordered_roots());
+    REQUIRE(running_tests);
+    CHECK(mutations.acquire(original.ordered_roots(),
+                            std::chrono::milliseconds(0)));
+}
+
+TEST_CASE("Tool dispatch reserves targets rather than unrelated access grants",
+          "[changes][concurrency][regression][tools]") {
+    TempDir first, second, desktop;
+    const auto screenshot = desktop.path / "screenshot.png";
+    put(screenshot, "image");
+    auto mutations = std::make_shared<core::changes::WorkspaceMutationGate>();
+    core::tools::ToolManager tools(mutations);
+    tools.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    tools.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
+    const auto context = test_support::make_session_context({
+        .primary = second.path, .additional = {first.path, screenshot}, .enforce = true},
+        core::context::SessionTransport::cli, "second-tab");
+    const std::vector<fs::path> occupied{first.path, screenshot};
+    auto writer = mutations->acquire(occupied);
+    REQUIRE(writer);
+    const auto invoke = [&](const std::string& name, const std::string& args) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        return tools.execute_tool(name, args, core::tools::ToolInvocationContext{
+            .session_context = context,
+            .cancellation_requested = [deadline] { return std::chrono::steady_clock::now() >= deadline; },
+        });
+    };
+    CHECK_THAT(invoke("write_file", R"({"file_path":"result.txt","content":"independent"})"),
+               !ContainsSubstring("error"));
+    CHECK(read(second.path / "result.txt") == "independent");
+    CHECK_THAT(invoke("list_directory", std::format(R"({{"path":"{}"}})", first.path.string())),
+               !ContainsSubstring("error"));
+    const auto blocked = invoke("write_file", std::format(
+        R"({{"file_path":"{}","content":"must not change"}})", screenshot.string()));
+    CHECK_THAT(blocked, ContainsSubstring("cancelled"));
+    CHECK_THAT(blocked, !ContainsSubstring("active writer"));
+    CHECK(read(screenshot) == "image");
+}
+
+TEST_CASE("An active shell in one tab does not block another project's shell",
+          "[changes][concurrency][regression][tools][shell]") {
+    TempDir first, second, desktop;
+    const auto first_shot = desktop.path / "first.png", second_shot = desktop.path / "second.png";
+    put(first_shot, "first");
+    put(second_shot, "second");
+    auto first_context = test_support::make_session_context({
+        .primary = first.path, .additional = {first_shot}, .enforce = true},
+        core::context::SessionTransport::cli, "first-tab");
+    auto second_workspace = first_context.workspace_view().without_attachments();
+    REQUIRE(second_workspace.set_primary(second.path));
+    SECTION("a new conversation inherits no file attachments") {}
+    SECTION("separate conversations attach different files in the same folder") {
+        REQUIRE(second_workspace.add_additional_paths({second_shot}) == 1);
+    }
+    SECTION("two conversations work on different files in the same project") {
+        REQUIRE(second_workspace.set_primary(first.path));
+    }
+    const auto second_context = test_support::make_session_context(second_workspace.snapshot(),
+        core::context::SessionTransport::cli, "second-tab");
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<core::tools::ShellTool>(tools.shell_sessions()));
+    tools.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    auto first_tracker = std::make_shared<TurnChangeTracker>(first.path, tools.mutation_observations());
+    auto second_tracker = std::make_shared<TurnChangeTracker>(second_context.workspace_view().primary(),
+                                                           tools.mutation_observations());
+    auto running = std::async(std::launch::async, [&] {
+        return tools.execute_tool("run_terminal_command",
+            R"({"command":"export FILO_TAB_SECRET=first; : > running; while [ ! -e release ]; do sleep 0.01; done; printf first_done","timeout_seconds":5})",
+            core::tools::ToolInvocationContext{.session_context = first_context, .change_tracker = first_tracker});
+    });
+    ReleaseCommand release{first.path / "release"};
+    REQUIRE(wait_for_file(first.path / "running"));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    CHECK_THAT(tools.execute_tool("write_file", R"({"file_path":"unrelated.txt","content":"independent"})",
+        core::tools::ToolInvocationContext{
+            .session_context = first_context,
+            .cancellation_requested = [deadline] { return std::chrono::steady_clock::now() >= deadline; },
+        }), !ContainsSubstring("error"));
+    auto independent = std::async(std::launch::async, [&] {
+        return tools.execute_tool("run_terminal_command",
+            R"({"command":"printf second > second.out; printf 'second_done[%s]' \"${FILO_TAB_SECRET-}\"","timeout_seconds":5})",
+            core::tools::ToolInvocationContext{.session_context = second_context, .change_tracker = second_tracker});
+    });
+    CHECK(independent.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto result = independent.get();
+    auto settled = std::async(std::launch::async, [&] { second_tracker->settle(); });
+    CHECK(settled.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    put(release.path, "release");
+    settled.get();
+    CHECK_THAT(running.get(), ContainsSubstring("first_done"));
+    CHECK_THAT(result, ContainsSubstring("second_done[]"));
+    CHECK_THAT(result, ContainsSubstring(R"("exit_code":0)"));
+    CHECK_THAT(tools.execute_tool("run_terminal_command",
+        R"({"command":"printf '%s' \"$FILO_TAB_SECRET\""})", first_context), ContainsSubstring("first"));
+    CHECK_THAT(tools.execute_tool("run_terminal_command",
+        R"({"command":"exit 9"})", first_context), ContainsSubstring(R"("exit_code":9)"));
+    CHECK_THAT(tools.execute_tool("run_terminal_command",
+        R"({"command":"printf recovered"})", first_context), ContainsSubstring("recovered"));
+}
+
+TEST_CASE("Concurrent snapshot ownership cannot authorize reverting another conversation's edits",
+          "[changes][recovery][concurrency][regression]") {
+    TempDir dir, storage;
+    const auto own = dir.path / "own.txt", foreign = dir.path / "foreign.txt";
+    put(own, "before");
+    put(foreign, "before");
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    TurnChangeTracker tracker(dir.path, tools.mutation_observations());
+    const auto checkpoint = storage.path / "turn";
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(checkpoint, dir.path));
+    edit(tracker, MutationScope{.unbounded = true, .tool = "shell"}, [&] { put(own, "own edit"); });
+    const auto context = test_support::make_session_context({.primary = dir.path, .enforce = true},
+        core::context::SessionTransport::cli, "other-conversation");
+    CHECK_THAT(tools.execute_tool("write_file", R"({"file_path":"foreign.txt","content":"foreign edit"})", context),
+               !ContainsSubstring("error"));
+    tracker.settle();
+    tracker.finish_recovery();
+    auto changes = tracker.changes();
+    REQUIRE(changes.ambiguous_ownership);
+    CHECK_FALSE(revert_turn(changes, dir.path, *tools.mutation_gate()).reverted());
+    CHECK(read(own) == "own edit");
+    CHECK(read(foreign) == "foreign edit");
+
+    std::string json;
+    core::changes::append_turn_changes_json(json, changes);
+    simdjson::dom::parser parser;
+    auto saved = core::changes::parse_turn_changes_json(parser.parse(json).get_object());
+    CHECK(saved.ambiguous_ownership);
+    const auto recovered = core::changes::TurnRecovery::reconcile(checkpoint, dir.path, *tools.mutation_gate());
+    REQUIRE(recovered);
+    CHECK(recovered->ambiguous_ownership);
+    // Even an older or altered summary cannot bypass the durable marker.
+    changes.ambiguous_ownership = false;
+    CHECK_FALSE(revert_turn(changes, dir.path, *tools.mutation_gate()).reverted());
+    CHECK(read(foreign) == "foreign edit");
+}
+
+TEST_CASE("Scoped ownership and unrelated work remain independently revertible",
+          "[changes][revert][concurrency][regression]") {
+    TempDir dir, other;
+    auto observations = std::make_shared<core::changes::MutationObservations>();
+    TurnChangeTracker first(dir.path, observations), second(dir.path, observations), third(other.path, observations);
+    put(dir.path / "a", "before a");
+    put(dir.path / "b", "before b");
+    put(other.path / "c", "before c");
+    edit(first, scope_of({dir.path / "a"}), [&] { put(dir.path / "a", "after a"); });
+    edit(second, scope_of({dir.path / "b"}), [&] { put(dir.path / "b", "after b"); });
+    edit(third, MutationScope{.unbounded = true}, [&] { put(other.path / "c", "after c"); });
+    first.finish_recovery();
+    second.finish_recovery();
+    third.finish_recovery();
+    CHECK_FALSE(first.changes().ambiguous_ownership);
+    CHECK_FALSE(second.changes().ambiguous_ownership);
+    CHECK_FALSE(third.changes().ambiguous_ownership);
+    core::changes::WorkspaceMutationGate mutations;
+    CHECK(revert_turn(first.changes(), dir.path, mutations).reverted());
+    CHECK(read(dir.path / "b") == "after b");
+    CHECK(revert_turn(second.changes(), dir.path, mutations).reverted());
+    CHECK(revert_turn(third.changes(), other.path, mutations).reverted());
+}
+
+TEST_CASE("A turn's delegated mutations do not make its own snapshots ambiguous",
+          "[changes][concurrency][regression]") {
+    TempDir dir;
+    TurnChangeTracker tracker(dir.path);
+    put(dir.path / "a", "before");
+    edit(tracker, MutationScope{.unbounded = true}, [&] { put(dir.path / "a", "one"); });
+    edit(tracker, scope_of({dir.path / "a"}), [&] { put(dir.path / "a", "two"); });
+    tracker.finish_recovery();
+    CHECK_FALSE(tracker.changes().ambiguous_ownership);
+}
+
+TEST_CASE("Unbounded overlap invalidates both conversations' snapshot ownership",
+          "[changes][concurrency][regression]") {
+    TempDir dir;
+    put(dir.path / "a", "before");
+    auto observations = std::make_shared<core::changes::MutationObservations>();
+    TurnChangeTracker scoped(dir.path, observations), unbounded(dir.path, observations);
+    const auto scoped_edit = [&] {
+        edit(scoped, scope_of({dir.path / "a"}), [&] { put(dir.path / "a", "scoped"); });
+    };
+    const auto unbounded_edit = [&] {
+        edit(unbounded, MutationScope{.unbounded = true}, [&] { put(dir.path / "a", "unbounded"); });
+    };
+    SECTION("scoped mutation starts first") { scoped_edit(); unbounded_edit(); }
+    SECTION("unbounded mutation starts first") { unbounded_edit(); scoped_edit(); }
+    scoped.finish_recovery();
+    unbounded.finish_recovery();
+    CHECK(scoped.changes().ambiguous_ownership);
+    CHECK(unbounded.changes().ambiguous_ownership);
+}
+
+TEST_CASE("Slow attribution persistence does not hold the shared observation registry",
+          "[changes][concurrency][regression]") {
+    TempDir dir, unrelated;
+    core::changes::MutationObservations observations;
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto released = release.get_future().share();
+    auto owner = std::make_shared<core::changes::MutationObservations::Owner>([&] {
+        entered.set_value();
+        if (released.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
+            throw std::runtime_error("Test attribution persistence was not released");
+    });
+    const std::vector<fs::path> roots{dir.path}, other{unrelated.path};
+    const auto window = observations.observe(owner, roots, true);
+    auto overlapping = std::async(std::launch::async, [&] { return observations.observe({}, roots); });
+    CHECK(started.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    auto independent = std::async(std::launch::async, [&] { return observations.observe({}, other); });
+    CHECK(independent.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    auto closing = std::async(std::launch::async, [&] { observations.close(owner); });
+    CHECK(closing.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    release.set_value();
+    CHECK(owner->ambiguous());
+    CHECK(overlapping.get());
+    CHECK(independent.get());
+    closing.get();
+}
+
+TEST_CASE("Failed attribution persistence cannot be published as a safe snapshot",
+          "[changes][recovery][concurrency][regression]") {
+    TempDir dir;
+    core::changes::MutationObservations observations;
+    auto owner = std::make_shared<core::changes::MutationObservations::Owner>([] {
+        throw std::runtime_error("checkpoint unavailable");
+    });
+    const std::vector<fs::path> roots{dir.path};
+    const auto window = observations.observe(owner, roots, true);
+    CHECK_THROWS_AS(observations.observe({}, roots), std::runtime_error);
+    CHECK(owner->ambiguous());
+    CHECK_THROWS_AS(observations.close(owner), std::runtime_error);
+}
+
+TEST_CASE("Direct shell ownership and cleanup are isolated by session and resource",
+          "[changes][concurrency][regression][tui][shell]") {
+    TempDir tree;
+    const auto first = tree.path / "first", second = tree.path / "second";
+    fs::create_directories(first);
+    fs::create_directories(second);
+    tui::DirectShellState shells;
+    auto running = std::async(std::launch::async, [&] {
+        return shells.run("export FILO_DIRECT_SECRET=first; : > running; while [ ! -e release ]; do sleep 0.01; done",
+                          first.string(), "first-tab", std::chrono::seconds(5));
+    });
+    ReleaseCommand release{first / "release"};
+    REQUIRE(wait_for_file(first / "running"));
+    CHECK(shells.has_active_for("first-tab"));
+    CHECK_FALSE(shells.has_active_for("second-tab"));
+    CHECK(shells.quiesce_session("second-tab"));
+    CHECK_FALSE(shells.quiesce_session("first-tab"));
+    auto independent = std::async(std::launch::async, [&] {
+        return shells.run("printf 'second[%s]' \"${FILO_DIRECT_SECRET-}\"", second.string(),
+                          "second-tab", std::chrono::seconds(5));
+    });
+    CHECK(independent.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto result = independent.get();
+    shells.clear_session_state("second-tab");
+    CHECK(shells.has_active_for("first-tab"));
+    put(release.path, "release");
+    CHECK(running.get().exit_code == 0);
+    CHECK(result.exit_code == 0);
+    CHECK(result.output == "second[]");
+    CHECK(shells.run("printf recovered", first.string(), "first-tab").output == "recovered");
+    CHECK_FALSE(shells.has_active_for("first-tab"));
+    CHECK(shells.run("true", first.string(), "").exit_code == -1);
+}
+
+TEST_CASE("Session identity changes preserve shell ownership without replacing another session",
+          "[changes][concurrency][regression][tui][shell]") {
+    TempDir dir;
+    tui::DirectShellState shells;
+    auto running = std::async(std::launch::async, [&] {
+        return shells.run("printf '%s' \"$$\" > shell-pid; : > running; while [ ! -e release ]; do sleep 0.01; done",
+                          dir.path.string(), "original", std::chrono::seconds(5));
+    });
+    ReleaseCommand release{dir.path / "release"};
+    REQUIRE(wait_for_file(dir.path / "running"));
+    const auto original_process = read(dir.path / "shell-pid");
+    REQUIRE_FALSE(original_process.empty());
+    shells.move_session_state("original", "rotated");
+    CHECK_FALSE(shells.has_active_for("original"));
+    CHECK(shells.has_active_for("rotated"));
+    shells.clear_session_state("original");
+    CHECK(shells.has_active_for("rotated"));
+    const auto other_process = shells.run("printf '%s' \"$$\"", dir.path.string(), "other").output;
+    CHECK_FALSE(other_process.empty());
+    CHECK(other_process != original_process);
+    CHECK_THROWS_AS(shells.move_session_state("rotated", "other"), std::logic_error);
+    put(release.path, "release");
+    CHECK(running.get().exit_code == 0);
+    CHECK_FALSE(shells.has_active_for("rotated"));
+    CHECK(shells.run("printf '%s' \"$$\"", dir.path.string(), "rotated").output == original_process);
+    CHECK(shells.run("printf '%s' \"$$\"", dir.path.string(), "other").output == other_process);
+
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<core::tools::ShellTool>(tools.shell_sessions()));
+    const auto context = [&](std::string id) {
+        return test_support::make_session_context({.primary = dir.path, .enforce = true},
+            core::context::SessionTransport::cli, std::move(id));
+    };
+    CHECK_THAT(tools.execute_tool("run_terminal_command", R"({"command":"export FILO_AGENT_ROTATED=retained"})",
+                                context("agent-original")), ContainsSubstring(R"("exit_code":0)"));
+    tools.move_session_state("agent-original", "agent-rotated");
+    tools.clear_session_state("agent-original");
+    CHECK_THAT(tools.execute_tool("run_terminal_command", R"({"command":"printf '%s' \"$FILO_AGENT_ROTATED\""})",
+                                context("agent-rotated")), ContainsSubstring("retained"));
+}
+
+TEST_CASE("Cancelled and timed out reservations leave no stale workspace ownership",
+          "[changes][concurrency][regression]") {
+    using Gate = core::changes::WorkspaceMutationGate;
+    TempDir first, second;
+    Gate mutations;
+    const std::vector<fs::path> roots{first.path}, other{second.path};
+    const auto cancelled = mutations.acquire(roots,
+        std::chrono::milliseconds(0), [] { return true; });
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error() == Gate::Failure::Cancelled);
+    auto writer = mutations.acquire(roots);
+    REQUIRE(writer);
+    const auto busy = mutations.acquire(roots, std::chrono::milliseconds(0));
+    REQUIRE_FALSE(busy);
+    CHECK(busy.error() == Gate::Failure::Busy);
+    std::promise<void> waiting;
+    auto started = waiting.get_future();
+    std::promise<decltype(writer)> outcome;
+    auto result = outcome.get_future();
+    std::jthread waiter([&](std::stop_token stop) {
+        bool announced = false;
+        outcome.set_value(mutations.acquire(roots, std::chrono::seconds(2), [&] {
+            if (!announced) { waiting.set_value(); announced = true; }
+            return stop.stop_requested();
+        }));
+    });
+    REQUIRE(started.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    CHECK(mutations.acquire(other, std::chrono::milliseconds(0)));
+    waiter.request_stop();
+    REQUIRE(result.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto stopped = result.get();
+    REQUIRE_FALSE(stopped);
+    CHECK(stopped.error() == Gate::Failure::Cancelled);
+    writer->reset();
+    CHECK(mutations.acquire(roots, std::chrono::milliseconds(0)));
 }
 
 TEST_CASE("Incomplete native inventories never invent originals for files outside the capture budget",
@@ -728,10 +1176,8 @@ TEST_CASE("A revert stops an idle managed shell's background writer before resto
         return shell.execute(R"({"command":"(sleep 0.5; printf 'late write\\n' >> source.cpp) >/dev/null 2>&1 &"})", invocation);
     });
     tracker->finish_recovery();
-    const auto result = revert_turn(tracker->changes(), dir.path, mutations, [&shell](auto roots) {
-        return std::ranges::all_of(roots, [&shell](const auto& root) {
-            return shell.sessions().quiesce_workspace(root);
-        });
+    const auto result = revert_turn(tracker->changes(), dir.path, mutations, [&](auto) {
+        return shell.sessions().quiesce_session(id);
     });
     INFO(result.error.value_or(""));
     std::string refusals;
@@ -792,11 +1238,11 @@ TEST_CASE("Independent execution runtimes do not share hidden writer state", "[c
     TempDir dir;
     const std::vector<fs::path> roots{dir.path};
     core::changes::WorkspaceMutationGate first, second;
-    auto writer = first.acquire(roots, core::changes::WorkspaceMutationGate::Access::Exclusive);
+    auto writer = first.acquire(roots);
     REQUIRE(writer);
-    CHECK_FALSE(first.acquire(roots, core::changes::WorkspaceMutationGate::Access::ScopedWrite,
+    CHECK_FALSE(first.acquire(roots,
                               std::chrono::milliseconds(0)));
-    CHECK(second.acquire(roots, core::changes::WorkspaceMutationGate::Access::Exclusive,
+    CHECK(second.acquire(roots,
                          std::chrono::milliseconds(0)));
 }
 
@@ -804,7 +1250,7 @@ TEST_CASE("Detached writer reservations safely outlive their runtime owner", "[c
     TempDir dir;
     const std::vector<fs::path> roots{dir.path};
     auto runtime = std::make_unique<core::changes::WorkspaceMutationGate>();
-    auto reservation = runtime->acquire(roots, core::changes::WorkspaceMutationGate::Access::Exclusive);
+    auto reservation = runtime->acquire(roots);
     REQUIRE(reservation);
     runtime.reset();
     std::thread worker([lease = std::move(*reservation)] {});
@@ -837,7 +1283,7 @@ TEST_CASE("Tool dispatch and revert use the injected writer coordinator", "[chan
     auto mutations = std::make_shared<core::changes::WorkspaceMutationGate>();
     core::tools::ToolManager tools(mutations);
     tools.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    auto tracker = std::make_shared<TurnChangeTracker>(dir.path, mutations);
+    auto tracker = std::make_shared<TurnChangeTracker>(dir.path);
     tracker->set_recovery(std::make_shared<core::changes::TurnRecovery>(storage.path / "checkpoint", dir.path));
     auto context = test_support::make_session_context({dir.path, {}});
     core::tools::ToolInvocationContext invocation{
@@ -848,7 +1294,7 @@ TEST_CASE("Tool dispatch and revert use the injected writer coordinator", "[chan
     const std::string arguments = R"({"file_path":"app.txt","content":"after"})";
     const std::vector<fs::path> roots{dir.path};
     {
-        auto writer = mutations->acquire(roots, core::changes::WorkspaceMutationGate::Access::Exclusive);
+        auto writer = mutations->acquire(roots);
         REQUIRE(writer);
         const auto blocked = tools.execute_tool("write_file", arguments, invocation);
         CHECK(blocked.find("error") != std::string::npos);
@@ -920,7 +1366,7 @@ TEST_CASE("Interruption reconciliation fences every recorded workspace", "[chang
     recovery.finish();
     core::changes::WorkspaceMutationGate mutations;
     const std::vector<fs::path> roots{other.path};
-    auto writer = mutations.acquire(roots, core::changes::WorkspaceMutationGate::Access::ScopedWrite);
+    auto writer = mutations.acquire(roots);
     REQUIRE(writer);
     CHECK_FALSE(core::changes::TurnRecovery::reconcile(recovery.directory(), dir.path, mutations));
     CHECK(read(file) == "after");

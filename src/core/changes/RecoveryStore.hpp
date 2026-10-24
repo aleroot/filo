@@ -49,6 +49,7 @@ struct RecoveryManifest {
     std::filesystem::path workspace;
     RecoveryPhase phase = RecoveryPhase::Recording;
     bool partial = false;
+    bool ambiguous_ownership = false;
     bool inventory_complete = false;
     std::vector<std::filesystem::path> roots;
     std::set<std::filesystem::path, core::utils::path::NativeLess> uncaptured;
@@ -85,6 +86,9 @@ public:
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return directory_; }
     [[nodiscard]] static std::expected<RecoverySnapshot, std::string> read(const std::filesystem::path& path);
     void save(const RecoveryManifest& manifest) const;
+    // An independent marker avoids waiting on a turn's inventory/checkpoint
+    // mutex when another writer invalidates ownership of its observations.
+    void mark_ambiguous() const;
     [[nodiscard]] std::expected<RecoveryManifest, std::string> load(const std::filesystem::path& workspace) const;
     /// The image of the file at `path`, hashed a chunk at a time: its bytes are
     /// never held whole.

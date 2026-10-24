@@ -64,6 +64,7 @@ public:
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
     std::string execute(const std::string& json_args, const ToolInvocationContext& invocation) override;
     void clear_session_state(std::string_view session_id) override;
+    void move_session_state(std::string_view from, std::string_view to) override;
 
 private:
     std::string execute_impl(const std::string& json_args,

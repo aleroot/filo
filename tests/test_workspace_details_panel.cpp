@@ -204,6 +204,20 @@ TEST_CASE("Attached files never count as workspaces, even after the file is gone
         CHECK(copy.snapshot().attached_files.size() == 2);
         CHECK(tui::workspace_details_workspace_count(copy.snapshot()) == 2);
     }
+
+    SECTION("a fresh conversation inherits directories without the previous attachments") {
+        REQUIRE(fs::remove(screenshot));
+        const auto fresh = workspace.without_attachments();
+        CHECK(fresh.primary() == workspace.primary());
+        CHECK(fresh.additional() == workspace.additional_directories());
+        CHECK(fresh.snapshot().attached_files.empty());
+        CHECK(fresh.enforce() == workspace.enforce());
+        CHECK(fresh.allows_read(sandbox.path / "library" / "source.swift"));
+        CHECK_FALSE(fresh.allows_read(screenshot));
+        CHECK_FALSE(fresh.allows_write(second));
+        CHECK(workspace.snapshot().attached_files.size() == 2);
+        CHECK(workspace.allows_read(screenshot));
+    }
 }
 
 TEST_CASE("Unrecorded roots are classified by probing the filesystem",

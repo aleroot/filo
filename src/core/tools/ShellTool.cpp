@@ -28,6 +28,7 @@ ShellTool::ShellTool(std::shared_ptr<shell::ShellSessions> sessions) : sessions_
     if (!sessions_) throw std::invalid_argument("ShellTool requires a session owner");
 }
 void ShellTool::clear_session_state(std::string_view session_id) { sessions_->clear(session_id); }
+void ShellTool::move_session_state(std::string_view from, std::string_view to) { sessions_->move(from, to); }
 
 ToolDefinition ShellTool::get_definition() const {
     return {

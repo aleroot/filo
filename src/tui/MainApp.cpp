@@ -1,5 +1,6 @@
 #include "core/tools/shell/ShellSessions.hpp"
 #include "MainApp.hpp"
+#include "DirectShellState.hpp"
 #include "Autocomplete.hpp"
 #include "ActivityTimer.hpp"
 #include "Constants.hpp"
@@ -199,138 +200,6 @@ public:
 private:
     using Handler = void (*)(int);
     Handler previous_ = SIG_DFL;
-};
-
-struct DirectShellState {
-    explicit DirectShellState(std::shared_ptr<core::changes::WorkspaceMutationGate> gate)
-        : mutations(std::move(gate)) {}
-    std::shared_ptr<core::changes::WorkspaceMutationGate> mutations;
-    std::unique_ptr<core::tools::shell::IShellExecutor> executor{
-        core::tools::shell::make_shell_executor()};
-    std::mutex run_mutex;
-    mutable std::mutex active_mutex;
-    std::condition_variable active_cv;
-    std::optional<core::commands::ActiveTerminalInfo> active_command;
-    std::chrono::steady_clock::time_point active_started_at{};
-    std::size_t workers_in_flight = 0;
-    std::vector<std::filesystem::path> execution_roots;
-
-    void begin_worker() {
-        std::lock_guard lock(active_mutex);
-        ++workers_in_flight;
-    }
-
-    void finish_worker() {
-        {
-            std::lock_guard lock(active_mutex);
-            if (workers_in_flight > 0) {
-                --workers_in_flight;
-            }
-        }
-        active_cv.notify_all();
-    }
-
-    void mark_active(std::string session_id,
-                     std::string command,
-                     std::string working_dir) {
-        std::lock_guard lock(active_mutex);
-        active_started_at = std::chrono::steady_clock::now();
-        active_command = core::commands::ActiveTerminalInfo{
-            .session_id = std::move(session_id),
-            .command = std::move(command),
-            .working_dir = std::move(working_dir),
-            .tool_call_id = {},
-            .elapsed = std::chrono::seconds{0},
-        };
-    }
-
-    void clear_active() {
-        {
-            std::lock_guard lock(active_mutex);
-            active_command.reset();
-            active_started_at = {};
-        }
-        active_cv.notify_all();
-    }
-
-    [[nodiscard]] std::optional<core::commands::ActiveTerminalInfo>
-    active_info(std::chrono::steady_clock::time_point now) const {
-        std::lock_guard lock(active_mutex);
-        if (!active_command.has_value()) {
-            return std::nullopt;
-        }
-
-        auto info = *active_command;
-        info.elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            now - active_started_at);
-        return info;
-    }
-
-    [[nodiscard]] bool has_active_for(std::string_view session_id) const {
-        std::lock_guard lock(active_mutex);
-        return active_command.has_value() && active_command->session_id == session_id;
-    }
-
-    bool interrupt_active_for(std::string_view session_id) {
-        std::lock_guard lock(active_mutex);
-        if (!active_command.has_value() || active_command->session_id != session_id) {
-            return false;
-        }
-        if (!executor) {
-            return false;
-        }
-        return executor->interrupt();
-    }
-
-    void interrupt_active() {
-        std::lock_guard lock(active_mutex);
-        if (active_command.has_value() && executor) {
-            static_cast<void>(executor->interrupt());
-        }
-    }
-
-    void wait_until_idle() {
-        std::unique_lock lock(active_mutex);
-        active_cv.wait(lock, [&]() {
-            return !active_command.has_value() && workers_in_flight == 0;
-        });
-    }
-
-    bool quiesce(const std::filesystem::path& root) {
-        std::unique_lock lock(run_mutex, std::try_to_lock);
-        if (!lock.owns_lock()) return false;
-        const auto target = core::utils::path::directory_for(root);
-        if (!std::ranges::any_of(execution_roots, [&](const auto& path) {
-                return core::utils::path::overlaps(path, target);
-            })) return true;
-        if (executor && !executor->quiesce()) return false;
-        execution_roots.clear();
-        return true;
-    }
-
-    core::tools::shell::IShellExecutor::Result run(std::string_view command,
-                                                   std::string_view working_dir,
-                                                   std::string session_id) {
-        const std::vector<std::filesystem::path> roots{std::filesystem::path(working_dir)};
-        auto lease = mutations->acquire(
-            roots, core::changes::WorkspaceMutationGate::Access::Exclusive);
-        if (!lease) return {lease.error(), -1};
-        std::lock_guard lock(run_mutex);
-        const auto root = core::utils::path::directory_for(std::filesystem::path(working_dir));
-        if (!std::ranges::contains(execution_roots, root)) execution_roots.push_back(root);
-        mark_active(std::move(session_id), std::string(command), std::string(working_dir));
-
-        struct ActiveGuard {
-            DirectShellState* state = nullptr;
-            ~ActiveGuard() {
-                if (state) {
-                    state->clear_active();
-                }
-            }
-        } guard{this};
-
-        return executor->run(command, working_dir);
-    }
 };
 
 constexpr std::size_t kDirectShellHistoryMaxOutputLength = 10'000;
@@ -1004,7 +873,7 @@ RunResult run(RunOptions opts) {
     std::chrono::steady_clock::time_point quit_confirm_deadline =
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
-    auto direct_shell_state = std::make_shared<DirectShellState>(tool_manager.mutation_gate());
+    auto direct_shell_state = std::make_shared<DirectShellState>(tool_manager.mutation_observations());
     std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAuthenticationRecovery {
         ThreadRuntime::Ptr runtime;
@@ -2027,6 +1896,7 @@ RunResult run(RunOptions opts) {
         // /clear starts over: drop what tools kept for the old conversation
         // (the Python namespace, the shell session) instead of orphaning it.
         core::tools::ToolManager::get_instance().clear_session_state(previous_session_id);
+        direct_shell_state->clear_session_state(previous_session_id);
         session_leases.release(previous_session_id);
         wake_ui();
     };
@@ -2065,9 +1935,14 @@ RunResult run(RunOptions opts) {
                     now - command.started_at),
             });
         }
-        if (const auto direct_shell = direct_shell_state->active_info(now);
-            direct_shell.has_value() && direct_shell->session_id == session_id) {
-            terminals.push_back(*direct_shell);
+        if (const auto direct_shell = direct_shell_state->active_info(session_id)) {
+            terminals.push_back({
+                .session_id = direct_shell->session_id,
+                .command = direct_shell->command,
+                .working_dir = direct_shell->working_dir,
+                .tool_call_id = direct_shell->tool_call_id,
+                .elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - direct_shell->started_at),
+            });
         }
         return terminals;
     };
@@ -2589,7 +2464,7 @@ RunResult run(RunOptions opts) {
         }
 
         auto context = core::context::make_session_context(
-            agent->session_context_snapshot().effective_workspace(),
+            agent->workspace_snapshot().without_attachments().snapshot(),
             core::context::SessionTransport::cli,
             data.session_id);
         context.steering_policy = agent ? agent->session_context_snapshot().steering_policy : opts.steering_policy;
@@ -3157,6 +3032,7 @@ RunResult run(RunOptions opts) {
         // goes with it.
         core::tools::ToolManager::get_instance().move_session_state(
             old_session_id, new_session_id);
+        direct_shell_state->move_session_state(old_session_id, new_session_id);
         current_runtime->set_lease(session_leases.retain(new_session_id));
         sync_runtime_metadata();
         if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
@@ -3181,7 +3057,7 @@ RunResult run(RunOptions opts) {
     configure_runtime_efficiency = [&](const ThreadRuntime::Ptr& runtime) {
       auto runtime_agent = runtime->agent();
       runtime_agent->set_efficiency_decision_fn(
-        [runtime, runtime_agent, session_store, session_stats_registry,
+        [runtime, runtime_agent, session_store, session_stats_registry, direct_shell_state,
          &thread_runtimes, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
          &wake_ui, &goal_manager,
@@ -3267,6 +3143,7 @@ RunResult run(RunOptions opts) {
             // Compaction continues the same conversation: keep its tool state.
             core::tools::ToolManager::get_instance().move_session_state(
                 old_session_id, new_session_id);
+            direct_shell_state->move_session_state(old_session_id, new_session_id);
 
             // TOCTOU guard: the selected-thread check at the top of this
             // lambda is advisory only. Re-validate under ui_mutex that this
@@ -6257,6 +6134,7 @@ RunResult run(RunOptions opts) {
         runtime->set_lease(nullptr);
         session_leases.release(target);
         core::tools::ToolManager::get_instance().clear_session_state(target);
+        direct_shell_state->clear_session_state(target);
         session_stats_registry->reset(target);
         core::budget::BudgetTracker::get_instance().reset_session(target);
         return std::nullopt;
@@ -6509,12 +6387,9 @@ RunResult run(RunOptions opts) {
 
         const auto result = core::changes::revert_turn(
             changes, agent->workspace_snapshot().primary(), *tool_manager.mutation_gate(),
-            [&](std::span<const std::filesystem::path> roots) {
-                for (const auto& root : roots) {
-                    if (!tool_manager.shell_sessions()->quiesce_workspace(root) ||
-                        (direct_shell_state && !direct_shell_state->quiesce(root))) return false;
-                }
-                return true;
+            [&](std::span<const std::filesystem::path>) {
+                return tool_manager.shell_sessions()->quiesce_session(session_id)
+                    && direct_shell_state->quiesce_session(session_id);
             });
         if (!result.reverted()) {
             return {.ok = false, .message = describe_revert(result)};
@@ -7769,16 +7644,8 @@ RunResult run(RunOptions opts) {
                 std::shared_ptr<DirectShellState> state;
                 ~WorkerCompletion() { state->finish_worker(); }
             } completion{direct_shell_state};
-            core::tools::shell::IShellExecutor::Result result;
-            if (direct_shell_state && direct_shell_state->executor) {
-                result = direct_shell_state->run(
-                    command,
-                    working_dir,
-                    std::move(direct_shell_session_id));
-            } else {
-                result.output = "Direct shell executor is unavailable.\n";
-                result.exit_code = -1;
-            }
+            auto result = direct_shell_state->run(
+                command, working_dir, std::move(direct_shell_session_id));
 
             if (result.exit_code != 0) {
                 if (!result.output.empty() && result.output.back() != '\n') {

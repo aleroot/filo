@@ -131,6 +131,7 @@ void unwind(Lineage& lineage, const FileChange& change) {
 
 void merge_flags(TurnChanges& into, const TurnChanges& turn) {
     into.partial_enumeration = into.partial_enumeration || turn.partial_enumeration;
+    into.ambiguous_ownership = into.ambiguous_ownership || turn.ambiguous_ownership;
     if (turn.unscoped_mutations) {
         // Workspace coverage holds only if every unscoped turn had an
         // inventory. Scoped-only turns do not weaken that coverage.

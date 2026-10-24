@@ -117,6 +117,7 @@ void append_turn_changes_json(std::string& out, const TurnChanges& changes) {
     if (changes.unscoped_mutations) {
         append_bool_field(out, "unscoped_mutations", true);
     }
+    if (changes.ambiguous_ownership) append_bool_field(out, "ambiguous_ownership", true);
     if (!changes.unscoped_tools.empty()) {
         out += ",\"unscoped_tools\":";
         core::utils::append_string_array(out, changes.unscoped_tools);
@@ -145,6 +146,7 @@ TurnChanges parse_turn_changes_json(simdjson::dom::object object) {
         core::utils::json::bool_field(object, "partial_enumeration");
     changes.unscoped_mutations =
         core::utils::json::bool_field(object, "unscoped_mutations");
+    changes.ambiguous_ownership = core::utils::json::bool_field(object, "ambiguous_ownership");
     // A summary written before tool names were kept still carries the flag, so
     // the gap survives a resume even when nothing can be named for it.
     if (simdjson::dom::array tools;

@@ -635,7 +635,7 @@ std::shared_ptr<core::changes::TurnChangeTracker> Agent::make_change_tracker(
         return inherited_change_tracker_;
     }
     auto tracker = std::make_shared<core::changes::TurnChangeTracker>(
-        session_context.workspace_view().primary(), skill_manager_.mutation_gate());
+        session_context.workspace_view().primary(), skill_manager_.mutation_observations());
     tracker->set_workspace_roots(session_context.workspace_view().ordered_roots());
     tracker->set_observation_filter([session_context](const std::filesystem::path& path, bool canonical) {
         return !core::tools::detail::check_workspace_access(
@@ -1864,7 +1864,7 @@ void Agent::send_message(core::llm::Message user_message,
     core::hooks::dispatch(
         core::hooks::HookEvent::UserPromptSubmit,
         build_user_prompt_hook_payload(hook_message, mode_snapshot),
-        session_context, *skill_manager_.mutation_gate(), {}, turn_state->change_tracker);
+        session_context, {}, turn_state->change_tracker);
     if (turn_state->auto_turn &&
         turn_callbacks.on_status_log) {
       turn_callbacks.on_status_log(std::format(
@@ -2535,7 +2535,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return core::hooks::evaluate_completion(
                 build_stop_hook_payload(
                     asst_msg, self->get_mode(), mutation_observed),
-                context, *self->skill_manager_.mutation_gate(), turn_state->completion_hooks, {}, turn_state->change_tracker);
+                context, turn_state->completion_hooks, {}, turn_state->change_tracker);
           };
 
           if (turn_state->auto_turn &&
@@ -2706,7 +2706,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                 const auto hook_decision = core::hooks::run_pre_tool_use(
                     build_tool_hook_payload(tc),
-                    step_session_context, *self->skill_manager_.mutation_gate(), {}, turn_state->change_tracker);
+                    step_session_context, {}, turn_state->change_tracker);
                 if (!hook_decision.allowed) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::BlockedByHook;
@@ -3117,7 +3117,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         if (core::hooks::dispatch(
                                 core::hooks::HookEvent::PostToolUse,
                                 build_tool_hook_payload(tc, &message),
-                                session_context, *self->skill_manager_.mutation_gate(), {}, recovery_turn_state->change_tracker) > 0
+                                session_context, {}, recovery_turn_state->change_tracker) > 0
                             && recovery_turn_state->change_tracker) {
                             recovery_turn_state->change_tracker->note_unscoped_mutation(
                                 "a post-tool hook");
@@ -3149,7 +3149,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             if (core::hooks::dispatch(
                     core::hooks::HookEvent::PostToolBatch,
                     build_tool_batch_hook_payload(*tool_calls_accum, tool_messages),
-                    step_session_context, *self->skill_manager_.mutation_gate(), {}, turn_state->change_tracker) > 0
+                    step_session_context, {}, turn_state->change_tracker) > 0
                 && turn_state->change_tracker) {
                 turn_state->change_tracker->note_unscoped_mutation("a post-batch hook");
             }

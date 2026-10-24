@@ -97,6 +97,14 @@ public:
     [[nodiscard]] std::vector<std::filesystem::path> additional_directories() const {
         return core::workspace::additional_directories(snapshot_);
     }
+    /// A fresh conversation inherits project directories and sandbox scope,
+    /// but attachments belong to the conversation that granted them.
+    [[nodiscard]] SessionWorkspace without_attachments() const {
+        auto snapshot = snapshot_;
+        snapshot.additional = additional_directories();
+        snapshot.attached_files.clear();
+        return SessionWorkspace(std::move(snapshot));
+    }
     [[nodiscard]] bool enforce() const noexcept { return snapshot_.enforce; }
     [[nodiscard]] std::uint64_t version() const noexcept { return snapshot_.version; }
 

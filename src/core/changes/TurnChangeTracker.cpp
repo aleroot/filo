@@ -1,7 +1,6 @@
 #include "TurnChangeTracker.hpp"
 #include "TurnRecovery.hpp"
 #include "WorkspaceInventory.hpp"
-#include "WorkspaceMutationGate.hpp"
 
 #include "../tools/ToolDiffUtils.hpp"
 #include "../utils/FileStamp.hpp"
@@ -9,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <fstream>
 #include <iterator>
 #include <ranges>
@@ -62,12 +62,38 @@ std::size_t count_lines(std::string_view text) {
 
 } // namespace
 
-TurnChangeTracker::TurnChangeTracker(fs::path display_root, std::shared_ptr<WorkspaceMutationGate> mutations)
-    : TurnChangeTracker(std::move(display_root), Limits{}, std::move(mutations)) {}
+struct TurnChangeTracker::BackgroundState {
+    std::mutex mutex;
+    std::condition_variable finished;
+    std::size_t active = 0;
+};
+
+TurnChangeTracker::BackgroundWork::BackgroundWork(std::shared_ptr<BackgroundState> state)
+    : state_(std::move(state)) {
+    std::lock_guard lock(state_->mutex);
+    ++state_->active;
+}
+
+TurnChangeTracker::BackgroundWork::~BackgroundWork() {
+    {
+        std::lock_guard lock(state_->mutex);
+        --state_->active;
+    }
+    state_->finished.notify_all();
+}
+
+std::unique_ptr<TurnChangeTracker::BackgroundWork> TurnChangeTracker::reserve_background_work() {
+    return std::unique_ptr<BackgroundWork>(new BackgroundWork(background_));
+}
+
+TurnChangeTracker::TurnChangeTracker(fs::path display_root, std::shared_ptr<MutationObservations> observations)
+    : TurnChangeTracker(std::move(display_root), Limits{}, std::move(observations)) {}
 
 TurnChangeTracker::TurnChangeTracker(fs::path display_root, Limits limits,
-                                   std::shared_ptr<WorkspaceMutationGate> mutations)
-    : mutations_(mutations ? std::move(mutations) : std::make_shared<WorkspaceMutationGate>()), display_root_(canonical_string(display_root)),
+                                   std::shared_ptr<MutationObservations> observations)
+    : background_(std::make_shared<BackgroundState>()),
+      observations_(observations ? std::move(observations) : std::make_shared<MutationObservations>()),
+      display_root_(canonical_string(display_root)),
       limits_(limits), workspace_roots_{display_root_} {
 }
 
@@ -82,6 +108,11 @@ void TurnChangeTracker::set_observation_filter(ObservationFilter filter) {
 
 void TurnChangeTracker::set_recovery(std::shared_ptr<TurnRecovery> recovery) {
     std::lock_guard lock(mutex_);
+    if (!observation_windows_.empty())
+        throw std::logic_error("Recovery must be configured before observing mutations.");
+    observation_owner_ = std::make_shared<MutationObservations::Owner>([recovery] {
+        if (recovery) recovery->mark_ambiguous();
+    });
     recovery_ = std::move(recovery);
 }
 void TurnChangeTracker::note_process_group(int group) {
@@ -90,6 +121,9 @@ void TurnChangeTracker::note_process_group(int group) {
 }
 void TurnChangeTracker::finish_recovery() {
     std::lock_guard lock(mutex_);
+    observations_->close(observation_owner_);
+    observation_windows_.clear();
+    unbounded_observed_ = false;
     if (recovery_) recovery_->finish();
 }
 
@@ -362,6 +396,14 @@ void TurnChangeTracker::reconcile_known_unlocked() {
 
 void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
     std::lock_guard lock(mutex_);
+    if (when == Observation::Before) {
+        if (scope.unbounded && !unbounded_observed_) {
+            observation_windows_.push_back(observations_->observe(observation_owner_, workspace_roots_, true));
+            unbounded_observed_ = true;
+        }
+        if (!scope.paths.empty())
+            observation_windows_.push_back(observations_->observe(observation_owner_, scope.paths));
+    }
     if (scope.unbounded) {
         // The tool could have written anywhere. Everything the turn already
         // knows is brought up to date; what it created from nothing cannot be
@@ -457,16 +499,12 @@ void TurnChangeTracker::note_unscoped_mutation(std::string tool) {
 }
 
 void TurnChangeTracker::settle() {
-    std::vector<fs::path> roots;
     {
-        std::lock_guard lock(mutex_);
-        if (!unscoped_mutations_) return;
-        roots = workspace_roots_;
+        std::unique_lock lock(background_->mutex);
+        if (!background_->finished.wait_for(lock, std::chrono::seconds(30),
+                [this] { return background_->active == 0; }))
+            throw std::runtime_error("This turn still has active background work.");
     }
-    // Detached hooks reserve the gate before launch. Waiting here keeps the
-    // published post-image and durable recovery record on the same boundary.
-    auto lease = mutations_->acquire(roots, WorkspaceMutationGate::Access::Exclusive);
-    if (!lease) throw std::runtime_error(lease.error());
     std::lock_guard lock(mutex_);
     if (!unscoped_mutations_) {
         return;
@@ -664,6 +702,7 @@ TurnChanges TurnChangeTracker::changes() const {
     }
     result.partial_enumeration |= partial_enumeration_;
     result.unscoped_mutations = unscoped_mutations_;
+    result.ambiguous_ownership = observation_owner_->ambiguous();
     result.workspace_observed = workspace_observed_;
     result.unscoped_tools = unscoped_tools_;
     ReportBudget budget{.diff_bytes = limits_.max_diff_bytes,

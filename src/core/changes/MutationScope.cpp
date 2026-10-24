@@ -90,6 +90,8 @@ constexpr std::array kRules{
     ScopeRule{names::kApplyPatch, apply_patch},
     ScopeRule{names::kCreateDirectory, inert},
     ScopeRule{names::kMemory, inert},
+    // The worker scopes and records its own writes.
+    ScopeRule{names::kDelegateTask, inert},
 };
 
 } // namespace

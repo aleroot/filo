@@ -20,7 +20,7 @@
 #include "../utils/JsonUtils.hpp"
 #include "../llm/Models.hpp"
 
-namespace core::changes { class WorkspaceMutationGate; }
+namespace core::changes { class WorkspaceMutationGate; class MutationObservations; }
 namespace core::tools::shell { class ShellSessions; }
 
 namespace core::tools {
@@ -29,13 +29,17 @@ class ToolManager {
 public:
     // Omitted services are owned per instance; callers may explicitly share them.
     explicit ToolManager(std::shared_ptr<core::changes::WorkspaceMutationGate> mutations = {},
-                         std::shared_ptr<shell::ShellSessions> shells = {});
+                         std::shared_ptr<shell::ShellSessions> shells = {},
+                         std::shared_ptr<core::changes::MutationObservations> observations = {});
 
     [[nodiscard]] const std::shared_ptr<core::changes::WorkspaceMutationGate>& mutation_gate() const noexcept {
         return mutations_;
     }
 
     [[nodiscard]] const std::shared_ptr<shell::ShellSessions>& shell_sessions() const noexcept { return shells_; }
+    [[nodiscard]] const std::shared_ptr<core::changes::MutationObservations>& mutation_observations() const noexcept {
+        return observations_;
+    }
 
     static ToolManager& get_instance() {
         static ToolManager instance;
@@ -185,6 +189,7 @@ private:
 
     std::shared_ptr<core::changes::WorkspaceMutationGate> mutations_;
     std::shared_ptr<shell::ShellSessions> shells_;
+    std::shared_ptr<core::changes::MutationObservations> observations_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, RegisteredTool> tools_;
 };

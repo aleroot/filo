@@ -2,6 +2,7 @@
 
 #include "FileChange.hpp"
 #include "MutationScope.hpp"
+#include "MutationObservations.hpp"
 #include "../tools/ToolDiffUtils.hpp"
 
 #include <cstdint>
@@ -21,7 +22,6 @@
 namespace core::changes {
 
 class TurnRecovery;
-class WorkspaceMutationGate;
 
 /// Net file changes made during one agent turn.
 ///
@@ -47,7 +47,22 @@ class WorkspaceMutationGate;
 ///
 /// Thread-safe: tool calls with disjoint scopes may run concurrently.
 class TurnChangeTracker {
+    struct BackgroundState;
 public:
+    class BackgroundWork final {
+    public:
+        ~BackgroundWork();
+        BackgroundWork(const BackgroundWork&) = delete;
+        BackgroundWork& operator=(const BackgroundWork&) = delete;
+    private:
+        friend class TurnChangeTracker;
+        explicit BackgroundWork(std::shared_ptr<BackgroundState> state);
+        std::shared_ptr<BackgroundState> state_;
+    };
+
+    // Reserved before launching a detached hook; settlement waits only for
+    // work owned by this turn, independently of any other conversation.
+    [[nodiscard]] std::unique_ptr<BackgroundWork> reserve_background_work();
     /// Only the first `kMaxFilesPerDirectory` files of a directory in a scope
     /// are enumerated.
     static constexpr std::size_t kMaxFilesPerDirectory = 1000;
@@ -93,10 +108,10 @@ public:
 
     /// Files beneath `display_root` are reported relative to it.
     explicit TurnChangeTracker(std::filesystem::path display_root,
-        std::shared_ptr<WorkspaceMutationGate> mutations = {});
+        std::shared_ptr<MutationObservations> observations = {});
     /// Same, with the resource bounds overridden.
     TurnChangeTracker(std::filesystem::path display_root, Limits limits,
-        std::shared_ptr<WorkspaceMutationGate> mutations = {});
+        std::shared_ptr<MutationObservations> observations = {});
     void set_recovery(std::shared_ptr<TurnRecovery> recovery);
     void set_workspace_roots(std::vector<std::filesystem::path> roots);
     /// Decides whether a path may be observed. `canonical` is true only for a
@@ -298,7 +313,11 @@ private:
                                       const Key& to,
                                       ReportBudget& budget) const;
 
-    std::shared_ptr<WorkspaceMutationGate> mutations_;
+    std::shared_ptr<BackgroundState> background_;
+    std::shared_ptr<MutationObservations> observations_;
+    std::shared_ptr<MutationObservations::Owner> observation_owner_ = std::make_shared<MutationObservations::Owner>();
+    std::vector<std::shared_ptr<MutationObservations::Observation>> observation_windows_;
+    bool unbounded_observed_ = false;
     std::filesystem::path display_root_;
     Limits limits_;
     mutable std::mutex mutex_;

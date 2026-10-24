@@ -194,6 +194,10 @@ void TurnRecovery::finish() {
     store_.retain(manifest_.workspace);
 }
 
+void TurnRecovery::mark_ambiguous() {
+    store_.mark_ambiguous();
+}
+
 std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
     const fs::path& directory, const fs::path& workspace, WorkspaceMutationGate& mutations,
     const std::function<bool(const fs::path&)>& observable) {
@@ -208,12 +212,11 @@ TurnRecovery::TurnRecovery(RecoveryStore store, RecoveryManifest manifest)
 
 std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
     WorkspaceMutationGate& mutations, const std::function<bool(const fs::path&)>& observable) {
-    auto roots = manifest_.roots;
-    roots.push_back(manifest_.workspace);
+    std::vector<fs::path> roots;
     for (const auto& [path, _] : manifest_.entries) roots.push_back(path);
-    auto lease = mutations.acquire(roots, WorkspaceMutationGate::Access::Exclusive,
+    auto lease = mutations.acquire(roots,
                                    std::chrono::milliseconds(0));
-    if (!lease) return std::unexpected(lease.error());
+    if (!lease) return std::unexpected(WorkspaceMutationGate::failure_message(lease.error()));
     for (int group : manifest_.groups) {
         if (core::utils::process::group_may_exist(group))
             return std::unexpected("Interrupted work still has a possibly live process group; stop it before recovery.");
@@ -231,6 +234,7 @@ std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
     changes.recovery_path = store_.directory().string();
     changes.partial_enumeration = manifest_.partial;
     changes.unscoped_mutations = true; // Interruption cannot establish exclusive authorship.
+    changes.ambiguous_ownership = manifest_.ambiguous_ownership;
     changes.workspace_observed = !manifest_.roots.empty();
     std::size_t diff_budget = 1024 * 1024;
     for (auto& [path, entry] : manifest_.entries) {

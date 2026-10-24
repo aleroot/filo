@@ -466,6 +466,28 @@ TEST_CASE("Delegated subagents honor the parent permission gate for destructive 
     REQUIRE(requests.front().messages.back().role == "user");
 }
 
+TEST_CASE("Synchronous delegation does not reserve the workspace against its own worker",
+          "[mcp][tasks][changes][concurrency][regression]") {
+    TaskTestSandbox sandbox("delegate_writer_reservation");
+    auto& tools = core::tools::ToolManager::get_instance();
+    tools.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    auto provider = std::make_shared<ToolCallingProvider>(
+        R"({"file_path":"worker-result.txt","content":"worker completed"})");
+    core::llm::ProviderManager::get_instance().register_provider("mcp-task-writer", provider);
+    load_project_config(sandbox.project_dir, R"({
+        "default_provider":"mcp-task-writer",
+        "providers":{"mcp-task-writer":{"api_type":"openai","base_url":"https://example.test/v1","model":"writer-model"}}
+    })");
+    const auto result = tools.execute_tool("delegate_task",
+        R"({"action":"start","title":"Write a result","instructions":"Write the requested file.","worker":"general"})",
+        sandbox.context);
+    INFO(result);
+    CHECK_THAT(result, ContainsSubstring(R"("failed_tool_calls":0)"));
+    REQUIRE(fs::exists(sandbox.project_dir / "worker-result.txt"));
+    std::ifstream written(sandbox.project_dir / "worker-result.txt");
+    CHECK(std::string(std::istreambuf_iterator<char>(written), {}) == "worker completed");
+}
+
 TEST_CASE("Delegated subagents do not inherit the persistent delegate task tool by default",
           "[mcp][tasks]") {
     TaskTestSandbox sandbox("subagent_delegate_task_filter");

@@ -152,6 +152,7 @@ std::size_t message_fingerprint(const UiMessage& msg) {
     add_value(msg.turn_changes.files.size());
     add_value(msg.turn_changes.partial_enumeration ? 1 : 0);
     add_value(msg.turn_changes.unscoped_mutations ? 1 : 0);
+    add_value(msg.turn_changes.ambiguous_ownership ? 1 : 0);
     for (const auto& change : msg.turn_changes.files) {
         add_value(static_cast<std::size_t>(change.kind));
         add_value(static_cast<std::size_t>(change.content));
@@ -208,7 +209,8 @@ int estimate_height(const UiMessage& message, int width) {
         lines += static_cast<int>(listed) + 3
             + (listed < changes.files.size() ? 1 : 0)
             + (changes.partial_enumeration ? 1 : 0)
-            + (changes.unscoped_mutations ? 1 : 0);
+            + (changes.unscoped_mutations ? 1 : 0)
+            + (changes.ambiguous_ownership ? 1 : 0);
     }
     return std::max(lines + message.margin_top + message.margin_bottom + 1, 1);
 }

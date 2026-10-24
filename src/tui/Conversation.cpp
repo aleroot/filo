@@ -2810,6 +2810,8 @@ namespace {
 [[nodiscard]] std::vector<std::string> turn_change_caveats(
     const core::changes::TurnChanges& changes) {
     std::vector<std::string> caveats;
+    if (changes.ambiguous_ownership)
+        caveats.emplace_back("concurrent work may be included; automatic revert is unavailable");
     if (changes.partial_enumeration) {
         caveats.emplace_back("too many files to detail fully");
     }

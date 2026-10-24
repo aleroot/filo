@@ -10,7 +10,7 @@
 #include <vector>
 #include <memory>
 
-namespace core::changes { class TurnChangeTracker; class WorkspaceMutationGate; }
+namespace core::changes { class TurnChangeTracker; }
 
 namespace core::hooks {
 
@@ -53,21 +53,18 @@ struct CompletionGateState {
 std::size_t dispatch(HookEvent event,
                      std::string payload_json,
                      const core::context::SessionContext& session_context,
-                     core::changes::WorkspaceMutationGate& mutations,
                      std::vector<std::pair<std::string, std::string>> extra_env = {},
                      std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
 
 [[nodiscard]] HookDecision run_pre_tool_use(
     std::string payload_json,
     const core::context::SessionContext& session_context,
-    core::changes::WorkspaceMutationGate& mutations,
     std::vector<std::pair<std::string, std::string>> extra_env = {},
     std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
 
 [[nodiscard]] StopDecision run_stop(
     std::string payload_json,
     const core::context::SessionContext& session_context,
-    core::changes::WorkspaceMutationGate& mutations,
     std::vector<std::pair<std::string, std::string>> extra_env = {},
     std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
 
@@ -76,7 +73,6 @@ std::size_t dispatch(HookEvent event,
 [[nodiscard]] core::session::TurnCompletionResult evaluate_completion(
     std::string payload_json,
     const core::context::SessionContext& session_context,
-    core::changes::WorkspaceMutationGate& mutations,
     CompletionGateState& state,
     std::vector<std::pair<std::string, std::string>> extra_env = {},
     std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});

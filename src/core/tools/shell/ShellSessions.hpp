@@ -36,9 +36,10 @@ public:
         const std::filesystem::path& workspace, const core::landrun::LandrunPolicy& policy,
         std::chrono::milliseconds timeout, const std::function<void(int)>& before_dispatch = {});
     void clear(std::string_view session_id);
+    void move(std::string_view from, std::string_view to);
     bool interrupt(std::string_view session_id);
     [[nodiscard]] std::vector<ActiveCommand> active_commands() const;
-    [[nodiscard]] bool quiesce_workspace(const std::filesystem::path& root);
+    [[nodiscard]] bool quiesce_session(std::string_view session_id);
     // Only listed, idle sessions are retired. Destruction occurs outside the
     // registry lock; a running command keeps its session alive independently.
     std::optional<std::chrono::steady_clock::time_point> reap_idle(

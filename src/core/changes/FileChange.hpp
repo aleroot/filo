@@ -61,6 +61,9 @@ struct TurnChanges {
     /// afterwards. `workspace_observed` says a native inventory also covered
     /// new paths; effects beyond that inventory remain outside coverage.
     bool unscoped_mutations = false;
+    /// Another owner wrote within an unscoped observation window. Execution
+    /// remains independent, but these observations cannot authorize a revert.
+    bool ambiguous_ownership = false;
     /// The tools that set `unscoped_mutations`, in the order they first ran, so
     /// a summary can name what to weigh: a verification build leaves artifacts,
     /// a shell command may have edited source. Bounded by
@@ -80,7 +83,7 @@ struct TurnChanges {
 
     [[nodiscard]] bool empty() const noexcept { return files.empty(); }
     [[nodiscard]] bool complete() const noexcept {
-        return !partial_enumeration && !unscoped_mutations;
+        return !partial_enumeration && !unscoped_mutations && !ambiguous_ownership;
     }
 
     bool operator==(const TurnChanges&) const = default;

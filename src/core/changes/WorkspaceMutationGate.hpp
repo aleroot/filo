@@ -11,12 +11,18 @@
 
 namespace core::changes {
 
-// Owned by the execution runtime and shared explicitly with its tools, hooks
-// and recovery operations. Independent runtimes have independent coordinators.
+// Runtime-owned reservations for declared mutation and restoration targets.
+// Permission grants and unscoped execution never enter this coordinator.
 class WorkspaceMutationGate final {
     struct State;
 public:
-    enum class Access { ScopedWrite, Exclusive };
+    enum class Failure { Busy, Cancelled };
+
+    [[nodiscard]] static constexpr const char* failure_message(Failure failure) noexcept {
+        return failure == Failure::Cancelled
+            ? "Workspace mutation cancelled."
+            : "A target path has an active writer; retry after it stops.";
+    }
 
     // A reservation can move between threads and outlive its coordinator.
     class Lease final {
@@ -26,19 +32,17 @@ public:
         Lease& operator=(const Lease&) = delete;
     private:
         friend class WorkspaceMutationGate;
-        explicit Lease(std::shared_ptr<State> state, Access access);
+        explicit Lease(std::shared_ptr<State> state);
         std::shared_ptr<State> state_;
-        Access access_;
         std::vector<std::filesystem::path> roots_;
-        bool registered_ = false;
     };
 
     WorkspaceMutationGate();
     WorkspaceMutationGate(const WorkspaceMutationGate&) = delete;
     WorkspaceMutationGate& operator=(const WorkspaceMutationGate&) = delete;
 
-    [[nodiscard]] std::expected<std::shared_ptr<Lease>, std::string>
-    acquire(std::span<const std::filesystem::path> roots, Access access,
+    [[nodiscard]] std::expected<std::shared_ptr<Lease>, Failure>
+    acquire(std::span<const std::filesystem::path> roots,
             std::chrono::milliseconds timeout = std::chrono::seconds(30),
             const std::function<bool()>& cancelled = {});
 

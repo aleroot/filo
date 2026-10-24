@@ -6,9 +6,11 @@
 
 namespace core::tools {
 ToolManager::ToolManager(std::shared_ptr<core::changes::WorkspaceMutationGate> mutations,
-                         std::shared_ptr<shell::ShellSessions> shells)
+                         std::shared_ptr<shell::ShellSessions> shells,
+                         std::shared_ptr<core::changes::MutationObservations> observations)
     : mutations_(mutations ? std::move(mutations) : std::make_shared<core::changes::WorkspaceMutationGate>()),
-      shells_(shells ? std::move(shells) : std::make_shared<shell::ShellSessions>()) {}
+      shells_(shells ? std::move(shells) : std::make_shared<shell::ShellSessions>()),
+      observations_(observations ? std::move(observations) : std::make_shared<core::changes::MutationObservations>()) {}
 
 std::string ToolManager::execute_tool(
     const std::string& name,
@@ -56,6 +58,8 @@ std::string ToolManager::execute_tool(
             + "\"}";
     }
     try {
+        if (invocation.cancellation_requested && invocation.cancellation_requested())
+            return R"({"error":"Tool execution cancelled."})";
         const auto scope = core::changes::mutation_scope(
             definition.name, *normalized, invocation.session_context, definition.annotations);
         for (const auto& path : scope.paths) {
@@ -63,17 +67,21 @@ std::string ToolManager::execute_tool(
                     path, path.string(), invocation.session_context, nullptr, definition.name)) return *denied;
         }
         std::shared_ptr<core::changes::WorkspaceMutationGate::Lease> lease;
-        if (!scope.empty()) {
-            auto roots = invocation.session_context.workspace_view().ordered_roots();
-            roots.insert(roots.end(), scope.paths.begin(), scope.paths.end());
+        if (!scope.paths.empty()) {
+            // Reserve declared mutations, never permission grants. Arbitrary
+            // commands have no declared targets and cannot lock a workspace.
             auto acquired = mutations_->acquire(
-                roots, scope.unbounded ? core::changes::WorkspaceMutationGate::Access::Exclusive
-                                       : core::changes::WorkspaceMutationGate::Access::ScopedWrite,
+                scope.paths,
                 std::chrono::seconds(30), invocation.cancellation_requested);
-            if (!acquired) return "{\"error\":\"" + acquired.error() + "\"}";
+            if (!acquired) return std::string("{\"error\":\"")
+                + core::changes::WorkspaceMutationGate::failure_message(acquired.error()) + "\"}";
             lease = std::move(*acquired);
         }
         const auto execute = [&] { return tool->execute(*normalized, invocation); };
+        // MCP and other callers without a turn tracker still participate in
+        // attribution without reserving any additional execution resources.
+        const auto observation = invocation.change_tracker ? nullptr : observations_->observe({},
+            scope.unbounded ? invocation.session_context.workspace_view().ordered_roots() : scope.paths);
         return invocation.change_tracker ? invocation.change_tracker->track(scope, execute)
                                          : execute();
     } catch (const std::exception& e) {

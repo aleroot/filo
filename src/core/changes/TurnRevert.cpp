@@ -285,16 +285,18 @@ bool perform(const Restoration& step, std::string& error) {
     return false;
 }
 
-// The caller already holds the exclusive workspace lease and has stopped shells.
-RevertResult restore_checkpoint(const TurnChanges& changes, const fs::path& workspace) {
+// The caller holds reservations for the restore targets and has stopped its own shells.
+RevertResult restore_checkpoint(const TurnChanges& changes, const fs::path& workspace,
+                                RecoveryManifest manifest) {
     RevertResult result;
     const auto fail = [&](std::string path, std::string reason) {
         result.refused.push_back({.path = std::move(path), .reason = std::move(reason)});
     };
     RecoveryStore store(changes.recovery_path);
-    auto loaded = store.load(workspace);
-    if (!loaded) { fail(changes.recovery_path, loaded.error()); return result; }
-    auto& manifest = *loaded;
+    if (manifest.ambiguous_ownership) {
+        fail(changes.recovery_path, "includes concurrent work whose ownership cannot be established");
+        return result;
+    }
     if (manifest.phase == RecoveryPhase::Recording || manifest.phase == RecoveryPhase::Reverted) {
         fail(changes.recovery_path, "requires interruption reconciliation or was already reverted");
         return result;
@@ -361,13 +363,31 @@ RevertResult revert_turn(const TurnChanges& changes, const fs::path& workspace_r
                          const QuiesceWriters& quiesce_writers) {
     RevertResult result;
     if (changes.files.empty()) return result;
-    std::vector<fs::path> roots{workspace_root};
-    for (const auto& file : changes.files) {
-        roots.push_back(absolute_in(workspace_root, file.path));
-        if (!file.previous_path.empty()) roots.push_back(absolute_in(workspace_root, file.previous_path));
+    if (changes.ambiguous_ownership) {
+        result.refused.push_back({.path = workspace_root.string(),
+            .reason = "includes concurrent work whose ownership cannot be established"});
+        return result;
+    }
+    std::vector<fs::path> roots;
+    std::optional<RecoveryManifest> manifest;
+    if (!changes.recovery_path.empty() && fs::exists(fs::path(changes.recovery_path) / "manifest.json")) {
+        auto loaded = RecoveryStore(changes.recovery_path).load(workspace_root);
+        if (!loaded) {
+            result.refused.push_back({.path = changes.recovery_path, .reason = loaded.error()});
+            return result;
+        }
+        manifest = std::move(*loaded);
+        // Durable restoration may include files omitted from the display summary.
+        for (const auto& [path, entry] : manifest->entries)
+            if (entry.before != entry.after) roots.push_back(path);
+    } else {
+        for (const auto& file : changes.files) {
+            roots.push_back(absolute_in(workspace_root, file.path));
+            if (!file.previous_path.empty()) roots.push_back(absolute_in(workspace_root, file.previous_path));
+        }
     }
     auto lease = mutations.acquire(
-        roots, WorkspaceMutationGate::Access::Exclusive, std::chrono::milliseconds(0));
+        roots, std::chrono::milliseconds(0));
     if (!lease) {
         result.refused.push_back({.path = workspace_root.string(), .reason = "has an active writer"});
         return result;
@@ -376,8 +396,7 @@ RevertResult revert_turn(const TurnChanges& changes, const fs::path& workspace_r
         result.refused.push_back({.path = workspace_root.string(), .reason = "still has a managed writer"});
         return result;
     }
-    if (!changes.recovery_path.empty() && fs::exists(fs::path(changes.recovery_path) / "manifest.json"))
-        return restore_checkpoint(changes, workspace_root);
+    if (manifest) return restore_checkpoint(changes, workspace_root, std::move(*manifest));
     std::vector<Restoration> plan;
     std::map<fs::path, FileState> observed;
     plan.reserve(changes.files.size());

@@ -1,14 +1,16 @@
-#include "core/changes/WorkspaceMutationGate.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/config/ConfigManager.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/hooks/HookManager.hpp"
+#include "core/changes/TurnChangeTracker.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <thread>
 #include <optional>
 #include <string>
 
@@ -83,10 +85,9 @@ core::hooks::HookDecision run_pre_tool_use_with_config(
     const auto project_dir = sandbox / "project";
     load_hook_config(project_dir, std::move(hook_command));
 
-    core::changes::WorkspaceMutationGate mutations;
     const auto decision = core::hooks::run_pre_tool_use(
         std::move(payload_json),
-        make_hook_test_context(project_dir), mutations);
+        make_hook_test_context(project_dir));
 
     reset_config(sandbox);
     fs::remove_all(sandbox);
@@ -105,9 +106,8 @@ core::hooks::StopDecision run_stop_with_config(
         R"({"hooks":{"stop":[)" + std::move(hook_config) + R"(]}})");
     core::config::ConfigManager::get_instance().load(project_dir);
 
-    core::changes::WorkspaceMutationGate mutations;
     const auto decision = core::hooks::run_stop(
-        std::move(payload_json), make_hook_test_context(project_dir), mutations);
+        std::move(payload_json), make_hook_test_context(project_dir));
 
     reset_config(sandbox);
     fs::remove_all(sandbox);
@@ -262,7 +262,6 @@ TEST_CASE("Hook matcher limits lifecycle execution", "[hooks]") {
 }
 
 TEST_CASE("Completion hook gate bounds repeated feedback", "[hooks]") {
-    core::changes::WorkspaceMutationGate mutations;
     const auto sandbox = make_temp_dir("filo_hook_completion_gate");
     const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
     const auto project_dir = sandbox / "project";
@@ -274,12 +273,12 @@ TEST_CASE("Completion hook gate bounds repeated feedback", "[hooks]") {
     core::hooks::CompletionGateState state;
 
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const auto result = core::hooks::evaluate_completion("{}", context, mutations, state);
+        const auto result = core::hooks::evaluate_completion("{}", context, state);
         REQUIRE(result.action ==
                 core::session::TurnCompletionAction::Continue);
         REQUIRE(result.message == "retry");
     }
-    const auto exhausted = core::hooks::evaluate_completion("{}", context, mutations, state);
+    const auto exhausted = core::hooks::evaluate_completion("{}", context, state);
     REQUIRE(exhausted.action ==
             core::session::TurnCompletionAction::Fail);
     REQUIRE_THAT(exhausted.message,
@@ -290,7 +289,6 @@ TEST_CASE("Completion hook gate bounds repeated feedback", "[hooks]") {
 }
 
 TEST_CASE("dispatch counts the hooks it started", "[hooks]") {
-    core::changes::WorkspaceMutationGate mutations;
     const auto sandbox = make_temp_dir("filo_hook_dispatch_count");
     const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
     const auto project_dir = sandbox / "project";
@@ -304,13 +302,49 @@ TEST_CASE("dispatch counts the hooks it started", "[hooks]") {
 
     // One enabled hook starts; a disabled one is neither started nor counted.
     CHECK(core::hooks::dispatch(core::hooks::HookEvent::PostToolUse,
-                                R"({"tool_name":"write_file"})", context, mutations) == 1);
+                                R"({"tool_name":"write_file"})", context) == 1);
     // An event nothing is configured for starts nothing. That count is what
     // lets a change tracker tell a hook ran behind its back from an ordinary
     // tool call, instead of flagging every turn that has hooks configured.
     CHECK(core::hooks::dispatch(core::hooks::HookEvent::PostToolBatch,
-                                R"({"tool_calls":[]})", context, mutations) == 0);
+                                R"({"tool_calls":[]})", context) == 0);
 
+    reset_config(sandbox);
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Turn settlement waits for its own hooks without blocking another turn in the same project",
+          "[hooks][changes][concurrency][regression]") {
+    const auto sandbox = make_temp_dir("filo_hook_turn_ownership");
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
+    const auto project = sandbox / "project";
+    write_text(project / ".filo" / "config.json", R"({"hooks":{"post_tool_use":[{
+        "command":": > hook-started; while [ ! -e hook-release ]; do sleep 0.01; done; printf done > hook-result",
+        "timeout_seconds":5
+    }]}})");
+    core::config::ConfigManager::get_instance().load(project);
+    auto first = std::make_shared<core::changes::TurnChangeTracker>(project);
+    auto second = std::make_shared<core::changes::TurnChangeTracker>(project);
+    REQUIRE(core::hooks::dispatch(core::hooks::HookEvent::PostToolUse, "{}",
+                                  make_hook_test_context(project), {}, first) == 1);
+    struct Release {
+        fs::path path;
+        ~Release() { std::ofstream(path) << "release"; }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!fs::exists(project / "hook-started") && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto own = std::async(std::launch::async, [&] { first->settle(); });
+    Release release{project / "hook-release"};
+    REQUIRE(fs::exists(project / "hook-started"));
+    CHECK(own.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    auto unrelated = std::async(std::launch::async, [&] { second->settle(); });
+    CHECK(unrelated.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    write_text(release.path, "release");
+    own.get();
+    unrelated.get();
+    CHECK(fs::exists(project / "hook-result"));
+    CHECK_FALSE(first->changes().empty());
     reset_config(sandbox);
     fs::remove_all(sandbox);
 }

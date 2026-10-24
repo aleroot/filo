@@ -40,6 +40,7 @@ public:
                std::span<const std::filesystem::path> created = {});
     void process_group(int group);
     void finish();
+    void mark_ambiguous();
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return store_.directory(); }
     [[nodiscard]] bool partial() const;
     /// The pre-image held for `path`, when this turn can give its bytes back:
