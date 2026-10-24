@@ -30,4 +30,13 @@ std::string PromptPlan::render_through(PromptStability stability) const {
     return result;
 }
 
+std::string PromptPlan::render_from(PromptStability stability) const {
+    std::string result;
+    for (const auto& layer : layers_) {
+        if (static_cast<int>(layer.stability) < static_cast<int>(stability)) continue;
+        result += layer.content;
+    }
+    return result;
+}
+
 } // namespace core::context

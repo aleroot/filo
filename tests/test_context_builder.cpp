@@ -338,6 +338,36 @@ TEST_CASE("PromptPlan exposes a cacheable prefix without mutable project facts",
     CHECK(stable_plan.render().find("[Project Context]") == std::string::npos);
 }
 
+TEST_CASE("PromptPlan splits the prompt at a stability boundary",
+          "[context][prompt-plan]") {
+    core::context::PromptPlan plan;
+    plan.append({
+        .kind = core::context::ContextLayerKind::RuntimeInstructions,
+        .stability = core::context::PromptStability::Stable,
+        .name = "runtime",
+        .content = "A",
+    });
+    plan.append({
+        .kind = core::context::ContextLayerKind::Memory,
+        .stability = core::context::PromptStability::Session,
+        .name = "memory",
+        .content = "B",
+    });
+    plan.append({
+        .kind = core::context::ContextLayerKind::ConversationState,
+        .stability = core::context::PromptStability::Dynamic,
+        .name = "conversation_state",
+        .content = "C",
+    });
+
+    CHECK(plan.render_through(core::context::PromptStability::Session) == "AB");
+    CHECK(plan.render_from(core::context::PromptStability::Dynamic) == "C");
+    // The two halves are complements: together they reconstruct the prompt.
+    CHECK(plan.render_through(core::context::PromptStability::Session)
+              + plan.render_from(core::context::PromptStability::Dynamic)
+          == plan.render());
+}
+
 TEST_CASE("Project fact updates render only materially changed sections",
           "[context][prompt-plan][project-facts]") {
     const core::context::ProjectFactsSnapshot previous{

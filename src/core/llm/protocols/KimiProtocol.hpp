@@ -94,10 +94,28 @@ kimi_stream_timeouts() noexcept {
 class KimiProtocol : public OpenAIProtocol {
 public:
     // Match official kimi-cli behavior: always request usage in streaming mode.
-    KimiProtocol() : OpenAIProtocol(/*stream_usage=*/true) {}
+    explicit KimiProtocol(
+        PromptCacheTtl cache_ttl = PromptCacheTtl::Standard)
+        : OpenAIProtocol(/*stream_usage=*/true), cache_ttl_(cache_ttl) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "kimi"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
+
+    /**
+     * @brief Moonshot's prompt cache economics.
+     *
+     * A hit is billed at 0.1x input and renews the entry for free under its
+     * original TTL; the write is billed separately at 1x input (5-minute TTL)
+     * or 2x (1h) for the K3 series. The TTL is requested on the wire via
+     * `prompt_cache_options` (omitted for the documented 5-minute default),
+     * and a replay of the last request is a hit, so it can keep a cache warm.
+     * The profile uses the conservative 5-minute lifetime and write price:
+     * existing prefixes retain their original tier, which the API omits.
+     * Non-K3 Kimi models publish no cache prices, so their cost ratios stay
+     * zero and only manual renewal is offered.
+     */
+    [[nodiscard]] PromptCacheProfile prompt_cache_profile(
         std::string_view model) const noexcept override;
 
     /// K3/K2 thinking can sit silent for minutes. Match the OpenAI SDK's
@@ -222,6 +240,7 @@ protected:
 
 private:
     RateLimitInfo last_rate_limit_;
+    PromptCacheTtl cache_ttl_ = PromptCacheTtl::Standard;
 };
 
 } // namespace core::llm::protocols

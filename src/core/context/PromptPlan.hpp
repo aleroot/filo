@@ -40,6 +40,9 @@ public:
     [[nodiscard]] bool empty() const noexcept { return layers_.empty(); }
     [[nodiscard]] std::string render() const;
     [[nodiscard]] std::string render_through(PromptStability stability) const;
+    /// The layers at or after @p stability, inclusive. Pair with
+    /// render_through() at the preceding stability to split the prompt.
+    [[nodiscard]] std::string render_from(PromptStability stability) const;
 
 private:
     std::vector<ContextLayer> layers_;

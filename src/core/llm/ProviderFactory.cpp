@@ -103,6 +103,20 @@ std::string resolve_key(
     return lowered.starts_with("coding.") || lowered.starts_with("coding-");
 }
 
+/// Shared by every wire that can ask the server for a cache TTL. A typo is
+/// named once, here, and falls back to the provider's 5-minute cache.
+[[nodiscard]] PromptCacheTtl resolve_prompt_cache_ttl(
+    const ProviderConfig& config, std::string_view name) {
+    const auto cache_ttl = parse_prompt_cache_ttl(config.prompt_cache_ttl);
+    if (!cache_ttl.has_value()) {
+        core::logging::warn(
+            "Provider '{}': unknown prompt_cache_ttl '{}'; using the 5-minute cache. "
+            "Accepted values are \"5m\" and \"1h\".",
+            name, config.prompt_cache_ttl);
+    }
+    return cache_ttl.value_or(PromptCacheTtl::Standard);
+}
+
 } // namespace
 
 std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
@@ -368,7 +382,12 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 // mimo-token-plan gateways, which all share this contract.
                 protocol = std::make_unique<protocols::MimoProtocol>();
             } else {
-                protocol = std::make_unique<protocols::OpenAIProtocol>(config.stream_usage);
+                const auto system_layout =
+                    openai_endpoint::extract_host_lower(base_url) == "api.openai.com"
+                    ? Serializer::SystemPromptLayout::DynamicTail
+                    : Serializer::SystemPromptLayout::Leading;
+                protocol = std::make_unique<protocols::OpenAIProtocol>(
+                    config.stream_usage, system_layout);
             }
         }
         break;
@@ -376,7 +395,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     case ApiType::Kimi:
         // Kimi uses OpenAI wire format but requires special X-Msh-* headers
         // for OAuth authentication to work properly
-        protocol = std::make_unique<protocols::KimiProtocol>();
+        protocol = std::make_unique<protocols::KimiProtocol>(
+            resolve_prompt_cache_ttl(config, name));
         break;
     case ApiType::DashScope:
         // QwenProvider owns request policy; the generic transport stays shared.
@@ -395,17 +415,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         if ((builtin && builtin->registry_provider == "anthropic")
             || normalized_auth_type == "oauth_claude"
             || (host && core::utils::ascii::iequals(*host, "api.anthropic.com"))) {
-            const auto cache_ttl = parse_prompt_cache_ttl(config.prompt_cache_ttl);
-            if (!cache_ttl.has_value()) {
-                core::logging::warn(
-                    "Provider '{}': unknown prompt_cache_ttl '{}'; using the 5-minute cache. "
-                    "Accepted values are \"5m\" and \"1h\".",
-                    name, config.prompt_cache_ttl);
-            }
             protocol = std::make_unique<protocols::ClaudeProtocol>(
                 thinking,
                 protocols::kAnthropicDefaultMaxTokens,
-                cache_ttl.value_or(PromptCacheTtl::Standard));
+                resolve_prompt_cache_ttl(config, name));
         } else {
             protocol = std::make_unique<protocols::AnthropicProtocol>();
         }

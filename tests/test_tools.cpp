@@ -3371,7 +3371,8 @@ TEST_CASE("PythonInterpreterTool clears the namespace with reset",
     const auto context = test_support::make_workspace_session_context();
 
     const auto definition = tool.get_definition();
-    const auto code_parameter = std::ranges::find(definition.parameters, "code", &ToolParameter::name);
+    const auto code_parameter = std::ranges::find(
+        definition.parameters, std::string{"code"}, &ToolParameter::name);
     REQUIRE(code_parameter != definition.parameters.end());
     CHECK_FALSE(code_parameter->required);
 

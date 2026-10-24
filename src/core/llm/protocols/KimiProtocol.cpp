@@ -1,4 +1,5 @@
 #include "KimiProtocol.hpp"
+#include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
 #include "../KimiModelTraits.hpp"
 #include "../ModelRegistry.hpp"
@@ -957,20 +958,17 @@ void merge_kimi_usage_snapshot(RateLimitInfo& info, const KimiUsageSnapshot& sna
         });
 }
 
+/// Reads one usage object through the shared OpenAI usage parser, so Kimi's
+/// cache read/write and reasoning counters stay wired exactly like every
+/// other OpenAI-compatible stream. A usage shell that reports no tokens keeps
+/// the caller looking at other candidates (e.g. `choices[i].usage`).
 [[nodiscard]] bool read_usage_object(simdjson::dom::object usage_obj,
-                                     int32_t& prompt_tokens,
-                                     int32_t& completion_tokens) {
-    int64_t pt = 0;
-    int64_t ct = 0;
-    [[maybe_unused]] const auto e1 = usage_obj["prompt_tokens"].get(pt);
-    [[maybe_unused]] const auto e2 = usage_obj["completion_tokens"].get(ct);
-
-    if (pt > 0 || ct > 0) {
-        prompt_tokens = static_cast<int32_t>(pt);
-        completion_tokens = static_cast<int32_t>(ct);
-        return true;
-    }
-    return false;
+                                     ParseResult& out) {
+    ParseResult parsed;
+    if (!parse_openai_usage(usage_obj, parsed)) return false;
+    if (parsed.prompt_tokens == 0 && parsed.completion_tokens == 0) return false;
+    out = parsed;
+    return true;
 }
 
 // ─── Completion budget ───────────────────────────────────────────────────────
@@ -994,10 +992,16 @@ void merge_kimi_usage_snapshot(RateLimitInfo& info, const KimiUsageSnapshot& sna
 /// the prompt plan and continuation items that budget does not.
 [[nodiscard]] std::size_t estimate_prompt_tokens(const ChatRequest& request) {
     std::size_t tokens = 4'096; // Framing the estimator cannot see.
+    // The wire carries the system prompt from the plan's layers when a plan is
+    // present (the shared Serializer and AnthropicSerializer agree on this),
+    // so the system message is skipped there: counting both would charge the
+    // same bytes twice and shrink the completion budget by a whole prompt.
+    const bool plan_owns_system = !request.prompt_plan.empty();
     for (const auto& layer : request.prompt_plan.layers()) {
         tokens += estimate_text_tokens(layer.content);
     }
     for (const auto& message : request.messages) {
+        if (plan_owns_system && message.role == "system") continue;
         tokens += 8 + estimate_text_tokens(message.content)
             + estimate_text_tokens(message.reasoning_content);
         for (const auto& call : message.tool_calls) {
@@ -1059,8 +1063,7 @@ struct KimiParseResult {
     std::string content;
     std::string reasoning_content;
     std::vector<ToolCall> tools;
-    int32_t prompt_tokens = 0;
-    int32_t completion_tokens = 0;
+    ParseResult usage;
 };
 
 [[nodiscard]] KimiParseResult parse_kimi_sse_chunk(std::string_view json_str) {
@@ -1079,7 +1082,7 @@ struct KimiParseResult {
     simdjson::dom::object usage_obj;
     bool has_usage = false;
     if (doc["usage"].get(usage_obj) == simdjson::SUCCESS
-        && read_usage_object(usage_obj, result.prompt_tokens, result.completion_tokens)) {
+        && read_usage_object(usage_obj, result.usage)) {
         has_usage = true;
     }
 
@@ -1092,8 +1095,7 @@ struct KimiParseResult {
         if (!has_usage) {
             simdjson::dom::object choice_usage;
             if (choice["usage"].get(choice_usage) == simdjson::SUCCESS
-                && read_usage_object(choice_usage, result.prompt_tokens,
-                                     result.completion_tokens)) {
+                && read_usage_object(choice_usage, result.usage)) {
                 has_usage = true;
             }
         }
@@ -1165,6 +1167,7 @@ struct KimiParseResult {
 
 std::string KimiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
+    options.system_prompt_layout = Serializer::SystemPromptLayout::DynamicTail;
     const KimiThinkingRequestPolicy thinking =
         resolve_kimi_thinking_policy(req);
     options.reasoning_content_policy = thinking.preserve_history
@@ -1302,6 +1305,13 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         payload += '"';
     }
 
+    // Pin the cache TTL the provider config asked for. Omitting the field is
+    // the documented 5-minute default, so only the extended TTL is spelled
+    // out (`prompt_cache_options.mode` supports just "implicit").
+    if (cache_ttl_ == PromptCacheTtl::Extended) {
+        payload += R"(,"prompt_cache_options":{"mode":"implicit","ttl":"1h"})";
+    }
+
     const KimiThinkingRequestPolicy thinking =
         resolve_kimi_thinking_policy(req);
     if (!thinking.supported || thinking.dialect == KimiThinkingDialect::None) {
@@ -1331,6 +1341,24 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
 ReasoningCapabilities KimiProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
     return kimi_reasoning_capabilities(model);
+}
+
+PromptCacheProfile KimiProtocol::prompt_cache_profile(
+    std::string_view model) const noexcept {
+    using namespace std::chrono_literals;
+    // A hit retains the TTL locked at the prefix's first write, even when a
+    // later request asks for 1h. The API does not report that effective TTL.
+    // Use the shortest supported lifetime and write price for expiry notices
+    // and renewal budgets; assuming the requested tier could miss a 5m expiry
+    // or authorize more replays than a cold write would cost.
+    auto profile = PromptCacheProfile::documented(
+        std::chrono::seconds{5min},
+        /*replay_renews=*/true);
+    if (is_kimi_k3_model(model)) {
+        profile = profile.with_costs(
+            /*read_percent=*/10, /*write_percent=*/100);
+    }
+    return profile;
 }
 
 cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const {
@@ -1559,8 +1587,12 @@ ParseResult KimiProtocol::parse_event(std::string_view raw_event) {
 
     ParseResult result;
     auto kimi_result = parse_kimi_sse_chunk(json_sv);
-    result.prompt_tokens = kimi_result.prompt_tokens;
-    result.completion_tokens = kimi_result.completion_tokens;
+    result.prompt_tokens = kimi_result.usage.prompt_tokens;
+    result.completion_tokens = kimi_result.usage.completion_tokens;
+    result.cached_prompt_tokens = kimi_result.usage.cached_prompt_tokens;
+    result.cache_creation_prompt_tokens =
+        kimi_result.usage.cache_creation_prompt_tokens;
+    result.reasoning_tokens = kimi_result.usage.reasoning_tokens;
     
     // Create chunk with content, reasoning_content, and tools
     // Kimi can send both reasoning_content and content/tool_calls in the same or different deltas

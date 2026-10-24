@@ -99,9 +99,14 @@ public:
      *                      streaming requests.  Set to `true` for the OpenAI
      *                      built-in endpoint; leave `false` for third-party
      *                      OpenAI-compatible APIs that may not support it.
+     * @param system_prompt_layout  Whether this endpoint accepts dynamic
+     *                              system state after the conversation.
      */
-    explicit OpenAIProtocol(bool stream_usage = false)
-        : stream_usage_(stream_usage) {}
+    explicit OpenAIProtocol(
+        bool stream_usage = false,
+        Serializer::SystemPromptLayout system_prompt_layout =
+            Serializer::SystemPromptLayout::Leading)
+        : stream_usage_(stream_usage), system_prompt_layout_(system_prompt_layout) {}
 
     [[nodiscard]] std::string   serialize(const ChatRequest& req) const override;
     [[nodiscard]] cpr::Header   build_headers(const core::auth::AuthInfo& auth) const override;
@@ -122,7 +127,7 @@ public:
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
-        return std::make_unique<OpenAIProtocol>(stream_usage_);
+        return std::make_unique<OpenAIProtocol>(stream_usage_, system_prompt_layout_);
     }
 
 protected:
@@ -142,6 +147,7 @@ protected:
     bool stream_usage_ = false; ///< Whether to request usage in the stream.
 
 private:
+    Serializer::SystemPromptLayout system_prompt_layout_;
     RateLimitInfo last_rate_limit_;
 };
 

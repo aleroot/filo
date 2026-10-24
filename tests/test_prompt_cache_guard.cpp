@@ -12,6 +12,7 @@
 #include "core/llm/PromptCacheProfile.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
+#include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OllamaProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
@@ -313,6 +314,12 @@ TEST_CASE("Cache hits are read from every usage dialect", "[prompt-cache][usage]
         const auto result = parse(R"({"prompt_tokens":5000,"completion_tokens":5,"cached_tokens":4096})");
         CHECK(result.cached_prompt_tokens == 4096);
     }
+    SECTION("Moonshot cache_write_tokens") {
+        const auto result = parse(
+            R"({"prompt_tokens":5000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":4000,"cache_write_tokens":900}})");
+        CHECK(result.cached_prompt_tokens == 4000);
+        CHECK(result.cache_creation_prompt_tokens == 900);
+    }
     SECTION("OpenAI details win over vendor fallbacks") {
         const auto result = parse(
             R"({"prompt_tokens":5000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3072},"cached_tokens":1})");
@@ -400,6 +407,29 @@ TEST_CASE("PromptCacheTracker restores a resumed session without a request to re
     auto local = std::make_shared<test_support::CachingProvider>(PromptCacheProfile::none());
     tracker.restore(kT0, local, "local", "cache-model");
     CHECK_FALSE(tracker.state(local, "cache-model", 200'000).last_exchange_at.has_value());
+}
+
+TEST_CASE("Kimi renewals protect an existing five-minute prefix after requesting one hour",
+          "[prompt-cache][tracker][kimi]") {
+    const auto profile = core::llm::protocols::KimiProtocol{
+        core::llm::PromptCacheTtl::Extended}.prompt_cache_profile("kimi-k3");
+    auto provider = std::make_shared<test_support::CachingProvider>(profile);
+    core::llm::PromptCacheCalibration calibration;
+    core::agent::PromptCacheTracker tracker{calibration};
+    tracker.restore(kT0, provider, "kimi", "kimi-k3");
+    const auto state = tracker.state(provider, "kimi-k3", 200'000);
+    const PromptCacheGuard guard{PromptCacheGuardSettings{
+        .keep_warm = core::agent::PromptCacheKeepWarm::Auto}};
+
+    const auto deadlines = guard.deadlines(state);
+    REQUIRE(deadlines.has_value());
+    CHECK(deadlines->notice == kT0 + 4min);
+    CHECK(deadlines->expiry == kT0 + 5min);
+    CHECK(guard.should_confirm_send(PromptCacheGuard::assess(state, kT0 + 6min)));
+    // A prefix locked to the cheaper write tier cannot justify the 1h tier's
+    // larger automatic replay budget.
+    CHECK(PromptCacheGuard::keep_warm_budget(profile) == 9);
+    CHECK_FALSE(guard.should_keep_warm(profile, 9));
 }
 
 // ── Agent bookkeeping ───────────────────────────────────────────────────────

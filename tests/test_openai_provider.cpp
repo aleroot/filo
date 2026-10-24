@@ -4,6 +4,10 @@
 #include "core/agent/RepositoryContextMessage.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/protocols/DashScopeProtocol.hpp"
+#include "core/llm/protocols/KimiProtocol.hpp"
+#include "core/llm/protocols/MistralProtocol.hpp"
+#include "core/llm/protocols/OllamaProtocol.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
@@ -15,6 +19,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <simdjson.h>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -47,6 +52,28 @@ static ChatRequest make_simple_request(std::string model    = "gpt-4o",
     req.model  = std::move(model);
     req.stream = true;
     req.messages.push_back(Message{.role = "user", .content = std::move(user_text)});
+    return req;
+}
+
+static ChatRequest make_prompt_plan_request(std::string_view task_state) {
+    auto req = make_simple_request("gpt-4o", "question");
+    req.messages.insert(req.messages.begin(), Message{
+        .role = "system", .content = "legacy carrier the plan replaces"});
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::RuntimeInstructions,
+        .stability = core::context::PromptStability::Stable,
+        .name = "runtime", .content = "STABLE_RUNTIME\n",
+    });
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::ConversationState,
+        .stability = core::context::PromptStability::Session,
+        .name = "conversation_summary", .content = "FROZEN_SUMMARY\n",
+    });
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::ConversationState,
+        .stability = core::context::PromptStability::Dynamic,
+        .name = "conversation_state", .content = std::string(task_state),
+    });
     return req;
 }
 
@@ -227,6 +254,90 @@ TEST_CASE("Serializer - system message role is preserved", "[openai][serializer]
     auto payload = Serializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"system")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("You are helpful."));
+}
+
+TEST_CASE("Serializer - dynamic prompt layers ride outside the cached prefix",
+          "[openai][serializer][prompt-cache]") {
+    const OpenAIProtocol protocol{
+        false, Serializer::SystemPromptLayout::DynamicTail};
+    const auto first = protocol.serialize(make_prompt_plan_request("TASK_ONE"));
+    const auto second = protocol.serialize(make_prompt_plan_request("TASK_TWO"));
+    CHECK(protocol.clone()->serialize(make_prompt_plan_request("TASK_ONE")) == first);
+    CHECK_THAT(KimiProtocol{}.serialize(make_prompt_plan_request("TASK_ONE")),
+               Catch::Matchers::ContainsSubstring(
+                   R"("role":"system","content":"TASK_ONE"}])"));
+
+    // Everything before the dynamic tail is byte-identical, so an implicit
+    // prefix cache keeps hitting while the task state churns.
+    const auto tail_at = [](const std::string& payload) {
+        return payload.find(R"({"role":"system","content":"TASK_)");
+    };
+    REQUIRE(tail_at(first) != std::string::npos);
+    REQUIRE(tail_at(second) != std::string::npos);
+    CHECK(first.substr(0, tail_at(first)) == second.substr(0, tail_at(second)));
+
+    // The plan owns the system prompt: the legacy carrier is dropped, the
+    // stable layers lead, and the dynamic layer is the last message.
+    CHECK_THAT(
+        first,
+        Catch::Matchers::ContainsSubstring(
+            R"({"role":"system","content":"STABLE_RUNTIME\nFROZEN_SUMMARY\n"})"));
+    CHECK_THAT(first, !Catch::Matchers::ContainsSubstring("legacy carrier"));
+    CHECK_THAT(
+        first,
+        Catch::Matchers::EndsWith(
+            R"("role":"system","content":"TASK_ONE"}]})"));
+}
+
+TEST_CASE("Compatible protocols keep task state ahead of tool transcripts",
+          "[openai][serializer][prompt-cache][mistral][qwen][ollama]") {
+    auto req = make_prompt_plan_request("TASK_STATE");
+    req.model = "qwen3.6-27b";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .tool_calls = {{.id = "abcdef123", .type = "function",
+                        .function = {.name = "list_files", .arguments = "{}"}}},
+    });
+    req.messages.push_back(Message{
+        .role = "tool", .content = "a.cpp", .tool_call_id = "abcdef123",
+    });
+
+    SECTION("a plan contains stable, session and dynamic layers") {}
+    SECTION("a plan can contain only dynamic state") {
+        req.prompt_plan = {};
+        req.prompt_plan.append({
+            .kind = core::context::ContextLayerKind::ConversationState,
+            .stability = core::context::PromptStability::Dynamic,
+            .name = "task_state", .content = "TASK_STATE",
+        });
+    }
+
+    for (const auto& payload : {
+             Serializer::serialize(req), OpenAIProtocol{}.serialize(req),
+             MistralProtocol{}.serialize(req), DashScopeProtocol{}.serialize(req),
+             OllamaProtocol{}.serialize(req)}) {
+        CAPTURE(payload);
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded{payload};
+        simdjson::dom::element document;
+        REQUIRE(parser.parse(padded).get(document) == simdjson::SUCCESS);
+        simdjson::dom::array messages;
+        REQUIRE(document["messages"].get(messages) == simdjson::SUCCESS);
+        REQUIRE(messages.size() == 4);
+        std::vector<std::string> roles;
+        for (auto message : messages) {
+            roles.emplace_back(message["role"].get_string().value());
+        }
+        CHECK(roles == std::vector<std::string>{"system", "user", "assistant", "tool"});
+        std::string_view system_text;
+        if (messages.at(0)["content"].get(system_text) != simdjson::SUCCESS) {
+            // DashScope annotates a text block with a cache anchor.
+            REQUIRE(messages.at(0)["content"].at(0)["text"].get(system_text)
+                    == simdjson::SUCCESS);
+        }
+        CHECK(system_text == req.prompt_plan.render());
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("legacy carrier"));
+    }
 }
 
 TEST_CASE("Serializer - temperature is included when set", "[openai][serializer]") {

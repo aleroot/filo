@@ -161,10 +161,12 @@ TEST_CASE("KimiSerializer - k2.7 code model is serialized correctly", "[kimi][se
 
 TEST_CASE("KimiSerializer - K3 public and subscription model IDs are preserved", "[kimi][serializer]") {
     for (const auto& [model, default_effort] :
-         std::array<std::pair<std::string_view, std::string_view>, 3>{{
+         std::array<std::pair<std::string_view, std::string_view>, 5>{{
              {"kimi-k3", "max"},
              {"k3", "high"},
              {"k3-256k", "high"},
+             {"k3.1-pro", "high"},
+             {"k3.1-pro-highspeed", "high"},
          }}) {
         const auto payload =
             KimiProtocol{}.serialize(make_simple_request(std::string(model)));
@@ -209,7 +211,7 @@ TEST_CASE("KimiProtocol - K3 maps supported reasoning effort levels",
              {"off", "high"},
          }}) {
         CAPTURE(requested);
-        for (const auto model : {"k3", "k3-256k"}) {
+        for (const auto model : {"k3", "k3-256k", "k3.1-pro"}) {
             auto req = make_simple_request(model);
             req.effort = requested;
             const auto payload = KimiProtocol{}.serialize(req);
@@ -420,6 +422,63 @@ TEST_CASE("KimiProtocol - explicit prompt cache key wins over session id",
 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("prompt_cache_key":"gateway-key")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("session-123"));
+}
+
+TEST_CASE("KimiProtocol - prompt cache profile documents Moonshot's cache",
+          "[kimi][prompt-cache]") {
+    const auto standard = KimiProtocol{}.prompt_cache_profile("k3");
+    CHECK(standard.ttl == std::chrono::minutes{5});
+    CHECK(standard.basis == core::llm::PromptCacheBasis::Documented);
+    CHECK(standard.replay_renews);
+    CHECK(standard.read_cost_percent == 10);
+    CHECK(standard.write_cost_percent == 100);
+
+    const auto extended = KimiProtocol{core::llm::PromptCacheTtl::Extended}
+                              .prompt_cache_profile("k3.1-pro");
+    CHECK(extended.ttl == std::chrono::minutes{5});
+    CHECK(extended.basis == core::llm::PromptCacheBasis::Documented);
+    CHECK(extended.replay_renews);
+    CHECK(extended.read_cost_percent == 10);
+    CHECK(extended.write_cost_percent == 100);
+    CHECK(extended == standard);
+
+    // Models without published cache prices never justify automatic replays.
+    const auto unpriced = KimiProtocol{}.prompt_cache_profile("kimi-for-coding");
+    CHECK(unpriced.ttl == std::chrono::minutes{5});
+    CHECK(unpriced.read_cost_percent == 0);
+    CHECK(unpriced.write_cost_percent == 0);
+}
+
+TEST_CASE("KimiProtocol - pins the extended prompt cache TTL on the wire",
+          "[kimi][serializer][cache]") {
+    auto req = make_simple_request("k3");
+
+    SECTION("the standard TTL follows the documented 5-minute default") {
+        const auto payload = KimiProtocol{}.serialize(req);
+        REQUIRE_THAT(
+            payload, !Catch::Matchers::ContainsSubstring("prompt_cache_options"));
+    }
+    SECTION("the extended TTL is requested explicitly") {
+        const KimiProtocol protocol{core::llm::PromptCacheTtl::Extended};
+        const auto payload = protocol.serialize(req);
+        CHECK(protocol.clone()->serialize(req) == payload);
+        REQUIRE_THAT(
+            payload,
+            Catch::Matchers::ContainsSubstring(
+                R"("prompt_cache_options":{"mode":"implicit","ttl":"1h"})"));
+    }
+}
+
+TEST_CASE("ProviderFactory keeps Kimi expiry tracking conservative with an extended TTL",
+          "[kimi][factory][cache]") {
+    core::config::ProviderConfig config;
+    config.model = "k3";
+    config.prompt_cache_ttl = "1h";
+    auto provider = core::llm::ProviderFactory::create_provider("kimi", config);
+    REQUIRE(provider != nullptr);
+    // The wire requests 1h, but the effective TTL of an existing prefix may
+    // still be 5m. The expiry guard must use that conservative lifetime.
+    CHECK(provider->prompt_cache_profile("k3").ttl == std::chrono::minutes{5});
 }
 
 TEST_CASE("KimiSerializer - user message content appears in payload", "[kimi][serializer]") {
@@ -1138,6 +1197,20 @@ TEST_CASE("KimiProtocol parse_event - extracts choice-level usage chunk", "[kimi
     REQUIRE(result.chunks.empty());
 }
 
+TEST_CASE("KimiProtocol parse_event - extracts the cache read/write breakdown",
+          "[kimi][parser][usage]") {
+    // Moonshot reports the cache split in `prompt_tokens_details`; the
+    // separately billed cache write is spelled `cache_write_tokens`.
+    KimiProtocol protocol;
+    std::string event = R"(data: {"id":"chatcmpl-usage","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":80},"completion_tokens_details":{"reasoning_tokens":5}}})";
+    auto result = protocol.parse_event(event);
+    REQUIRE(result.prompt_tokens == 1000);
+    REQUIRE(result.completion_tokens == 20);
+    REQUIRE(result.cached_prompt_tokens == 900);
+    REQUIRE(result.cache_creation_prompt_tokens == 80);
+    REQUIRE(result.reasoning_tokens == 5);
+}
+
 TEST_CASE("KimiProtocol::build_url avoids duplicate slash for trailing-slash base URL",
           "[kimi][protocol][url]") {
     KimiProtocol protocol;
@@ -1622,10 +1695,19 @@ TEST_CASE("Kimi traits - K3 series ids are matched exactly, never by prefix",
     CHECK_FALSE(is_kimi_k3_model("kimi-k3-turbo"));
     CHECK_FALSE(is_kimi_public_k3_model("kimi-k3-turbo"));
 
-    for (const auto model : {"k3", "k3-256k", "kimi-for-coding",
-                             "kimi-for-coding-highspeed"}) {
+    for (const auto model : {"k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed",
+                             "kimi-for-coding", "kimi-for-coding-highspeed"}) {
         CAPTURE(model);
         CHECK(is_kimi_code_model(model));
+    }
+    // The managed K3.1 ids are K3-series reasoning models, but they speak the
+    // managed `thinking` dialect, not the public `reasoning_effort` one.
+    for (const auto model : {"k3.1-pro", "k3.1-pro-highspeed"}) {
+        CAPTURE(model);
+        CHECK(is_kimi_k3_model(model));
+        CHECK_FALSE(is_kimi_public_k3_model(model));
+        CHECK(kimi_model_context_window(model) == 1'048'576);
+        CHECK(kimi_model_max_output_tokens(model) == 1'048'576);
     }
     // The whole K2 series is a 262,144-token window, and the completion
     // ceiling follows it because the API accepts max_completion_tokens up to

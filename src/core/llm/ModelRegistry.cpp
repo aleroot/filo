@@ -888,7 +888,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
         },
         {
             .canonical_id = "kimi-k3.1-pro-highspeed",
-            .aliases = {},
+            .aliases = {"k3.1-pro-highspeed"},
             .display_name = "Kimi K3.1 Pro HighSpeed",
             .provider = "kimi",
             .context_window = K3_WINDOW,

@@ -251,6 +251,7 @@ parse_openai_sse_chunk(std::string_view json_str) {
 
 std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
+    options.system_prompt_layout = system_prompt_layout_;
     options.strict_tools = configured_strict_tool_dialect(
         ToolSchemaWire::OpenAI, req.model);
     std::string payload = Serializer::serialize(req, options);

@@ -1783,6 +1783,72 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
           == unsigned_prefix(third_payload, third_messages));
 }
 
+TEST_CASE("Agent keeps live task state out of the cached prompt prefix",
+          "[agent][prompt][cache]") {
+    TempDir tmp{
+        std::filesystem::temp_directory_path()
+        / std::format("filo_prompt_task_state_{}",
+                      std::chrono::steady_clock::now().time_since_epoch().count())
+    };
+    ScopedCurrentPath scoped_cwd(tmp.path());
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = tmp.path(),
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "prompt-task-state-session");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        session_context);
+
+    std::string graph_state = "GRAPH_V1";
+    agent->set_goal_graph_context_fn([&graph_state] { return graph_state; });
+
+    send_and_wait(agent, "QUESTION_ALPHA");
+    graph_state = "GRAPH_V2";
+    send_and_wait(agent, "QUESTION_BETA");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    const auto& first_plan = requests[0].prompt_plan;
+    const auto& second_plan = requests[1].prompt_plan;
+
+    // The live task state is the plan's Dynamic tail ...
+    CHECK_THAT(first_plan.render_from(core::context::PromptStability::Dynamic),
+               Catch::Matchers::ContainsSubstring("GRAPH_V1"));
+    CHECK_THAT(second_plan.render_from(core::context::PromptStability::Dynamic),
+               Catch::Matchers::ContainsSubstring("GRAPH_V2"));
+    // ... and the prefix above it is byte-identical while that tail churns.
+    CHECK(first_plan.render_through(core::context::PromptStability::Session)
+          == second_plan.render_through(core::context::PromptStability::Session));
+    CHECK(first_plan.render_through(core::context::PromptStability::Session)
+              .find("GRAPH_") == std::string::npos);
+
+    // The system message keeps the full render for legacy consumers; the wire
+    // layout is the serializer's job.
+    CHECK(requests[0].messages[0].content == first_plan.render());
+
+    // On the wire the task state appears only after the conversation, as the
+    // trailing system message — outside the prefix an implicit cache keys on.
+    core::llm::Serializer::Options options;
+    options.system_prompt_layout =
+        core::llm::Serializer::SystemPromptLayout::DynamicTail;
+    const auto first_payload = core::llm::Serializer::serialize(requests[0], options);
+    const auto graph_at = first_payload.find("GRAPH_V1");
+    const auto question_at = first_payload.find("QUESTION_ALPHA");
+    REQUIRE(graph_at != std::string::npos);
+    REQUIRE(question_at != std::string::npos);
+    CHECK(graph_at > question_at);
+    CHECK(first_payload.find("GRAPH_V1", graph_at + 1) == std::string::npos);
+}
+
 TEST_CASE("Agent keeps attached files out of the stable prompt prefix",
           "[agent][prompt][attachments]") {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();

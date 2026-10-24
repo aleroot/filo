@@ -1136,18 +1136,24 @@ int Agent::sanitize_max_steps_per_turn(int value) noexcept {
         LoopLimits::kMaxMaxStepsPerTurn);
 }
 
-std::string Agent::build_dynamic_prompt_suffix() const {
-    std::string suffix = core::session::GoalManager::prompt_context(session_goal_);
+std::string Agent::build_session_state_prompt() const {
+    // Rarely changing: the summary is frozen at compaction, and compaction
+    // rewrites the history anyway, so it can ride the cached prompt prefix.
+    if (context_summary_.empty()) return {};
+    return "\n\nSummary of earlier conversation context:\n" + context_summary_;
+}
+
+std::string Agent::build_task_state_prompt() const {
+    // Goal, running DAG and todos change on most turns. A Dynamic layer lets
+    // compatible protocols place them after history to preserve prefix hits.
+    std::string block = core::session::GoalManager::prompt_context(session_goal_);
     // The graph engine renders its own (empty when no goal is active) block,
     // so a plain session goal and a running DAG compose without duplication.
     if (goal_graph_context_fn_) {
-        suffix += goal_graph_context_fn_();
+        block += goal_graph_context_fn_();
     }
-    suffix += todo_manager_.prompt_context();
-    if (!context_summary_.empty()) {
-        suffix += "\n\nSummary of earlier conversation context:\n" + context_summary_;
-    }
-    return suffix;
+    block += todo_manager_.prompt_context();
+    return block;
 }
 
 void Agent::append_project_facts_update_unlocked(
@@ -1235,7 +1241,8 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
 void Agent::ensure_system_prompt() {
     refresh_stable_prompt_prefix_unlocked();
     std::string prompt = stable_prompt_prefix_;
-    prompt += build_dynamic_prompt_suffix();
+    prompt += build_session_state_prompt();
+    prompt += build_task_state_prompt();
 
     if (history_.empty() || history_[0].role != "system") {
         history_.insert(history_.begin(), {"system", prompt, "", "", {}});
@@ -1996,7 +2003,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string mode_snapshot;
     std::string provider_name_snapshot;
-    std::string dynamic_prompt_suffix;
+    std::string session_state_prompt;
+    std::string task_state_prompt;
     std::vector<std::string> request_memory_entry_ids;
     bool stale_turn = false;
     {
@@ -2027,20 +2035,30 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.transport_turn_id = turn_state->transport_turn_id;
             provider = turn_state->provider;
             mode_snapshot = std::string(to_string(current_mode_));
-            dynamic_prompt_suffix = build_dynamic_prompt_suffix();
+            session_state_prompt = build_session_state_prompt();
+            task_state_prompt = build_task_state_prompt();
             if (turn_state->auto_turn) {
-              dynamic_prompt_suffix +=
+              task_state_prompt +=
                   self->auto_turn_coordinator_.prompt_suffix(
                       *turn_state->auto_turn);
             }
             if (!turn_state->prompt_plan.has_value()) {
                 auto plan = stable_prompt_plan_;
                 turn_state->memory_entry_ids = stable_memory_entry_ids_;
+                // Ordered stable -> dynamic (PromptPlan::append enforces it).
+                // The summary precedes live task state so each protocol can
+                // place its cache boundary without changing the plan itself.
+                plan.append(core::context::ContextLayer{
+                    .kind = core::context::ContextLayerKind::ConversationState,
+                    .stability = core::context::PromptStability::Session,
+                    .name = "conversation_summary",
+                    .content = std::move(session_state_prompt),
+                });
                 plan.append(core::context::ContextLayer{
                     .kind = core::context::ContextLayerKind::ConversationState,
                     .stability = core::context::PromptStability::Dynamic,
                     .name = "conversation_state",
-                    .content = std::move(dynamic_prompt_suffix),
+                    .content = std::move(task_state_prompt),
                 });
                 turn_state->prompt_plan = std::move(plan);
             }

@@ -848,6 +848,11 @@ struct Serializer {
         EmptyString,
     };
 
+    enum class SystemPromptLayout {
+        Leading,
+        DynamicTail,
+    };
+
     struct PromptCacheAnchors {
         bool first_system_message = false;
         bool latest_message = false;
@@ -884,6 +889,9 @@ struct Serializer {
         // wire contract; the shared serializer only applies the requested JSON
         // annotation to the selected content/tool objects.
         PromptCacheAnchors prompt_cache;
+        // A trailing system message is not universally accepted. Protocols
+        // must opt in after verifying their endpoint's message-order contract.
+        SystemPromptLayout system_prompt_layout = SystemPromptLayout::Leading;
     };
 
     static std::string serialize(const ChatRequest& req) {
@@ -981,6 +989,38 @@ struct Serializer {
         }
 
         payload += R"(,"messages":[)";
+        // When the request carries a structured prompt plan, the plan owns the
+        // system prompt (mirroring AnthropicProtocol::append_system_field).
+        // Keep all layers in one leading message unless the protocol supports
+        // moving Dynamic layers behind the conversation for prefix caching.
+        // System-role messages are legacy carriers of the same content.
+        const bool plan_owns_system = !req.prompt_plan.empty();
+        const bool split_system = options.system_prompt_layout
+            == SystemPromptLayout::DynamicTail;
+        const std::string plan_system = plan_owns_system
+            ? (split_system
+                   ? req.prompt_plan.render_through(
+                         core::context::PromptStability::Session)
+                   : req.prompt_plan.render())
+            : std::string{};
+        const std::string plan_dynamic = plan_owns_system && split_system
+            ? req.prompt_plan.render_from(
+                  core::context::PromptStability::Dynamic)
+            : std::string{};
+        const auto append_system_message = [&](std::string_view content,
+                                              bool cache_message) {
+            payload += R"({"role":"system")";
+            if (cache_message) {
+                payload += R"(,"content":[{"type":"text","text":")";
+                payload += core::utils::escape_json_string(content);
+                payload += R"(","cache_control":{"type":"ephemeral"}}])";
+            } else {
+                payload += R"(,"content":")";
+                payload += core::utils::escape_json_string(content);
+                payload += '"';
+            }
+            payload += '}';
+        };
         const auto first_system = std::ranges::find_if(
             req.messages, [](const Message& message) {
                 return message.role == "system";
@@ -988,9 +1028,19 @@ struct Serializer {
         const std::size_t first_system_index = first_system == req.messages.end()
             ? req.messages.size()
             : static_cast<std::size_t>(std::distance(req.messages.begin(), first_system));
+        bool wrote_message = false;
+        if (!plan_system.empty()) {
+            append_system_message(
+                plan_system, options.prompt_cache.first_system_message);
+            wrote_message = true;
+        }
         for (size_t i = 0; i < req.messages.size(); ++i) {
+            if (plan_owns_system && req.messages[i].role == "system") continue;
+            if (wrote_message) payload += ',';
+            wrote_message = true;
             const bool cache_message =
                 (options.prompt_cache.first_system_message
+                 && !plan_owns_system
                  && i == first_system_index)
                 || (options.prompt_cache.latest_message
                     && i + 1 == req.messages.size());
@@ -1163,7 +1213,13 @@ struct Serializer {
             }
 
             payload += "}";
-            if (i < req.messages.size() - 1) payload += ",";
+        }
+        // The dynamic tail goes last so its churn never moves the bytes the
+        // prefix cache matches on. It carries no cache anchor: it changes on
+        // most turns, so caching through it would only waste cache storage.
+        if (!plan_dynamic.empty()) {
+            if (wrote_message) payload += ',';
+            append_system_message(plan_dynamic, false);
         }
         payload += "]}";
         return payload;

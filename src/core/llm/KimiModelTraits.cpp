@@ -12,11 +12,25 @@
 namespace core::llm {
 namespace {
 
-constexpr std::array<std::string_view, 4> kCodeModelIds{{
+/// Model ids as the managed Kimi Code endpoint (the subscription service)
+/// spells them. A public-API id (`kimi-*`) is not a code id and vice versa:
+/// the two services name the same models differently.
+constexpr std::array<std::string_view, 6> kCodeModelIds{{
     "k3",
     "k3-256k",
+    "k3.1-pro",
+    "k3.1-pro-highspeed",
     "kimi-for-coding",
     "kimi-for-coding-highspeed",
+}};
+
+/// The K3 series as the managed endpoint spells it. `k3-256k` is the 256K
+/// window variant; the rest of the series is a 1M window.
+constexpr std::array<std::string_view, 4> kManagedK3ModelIds{{
+    "k3",
+    "k3-256k",
+    "k3.1-pro",
+    "k3.1-pro-highspeed",
 }};
 
 /// Public-API K3 series. Matched exactly, never by `kimi-k3` prefix: that
@@ -160,8 +174,11 @@ bool is_kimi_code_model(std::string_view model_id) noexcept {
 bool is_kimi_k3_model(std::string_view model_id) noexcept {
     const std::string_view value = trimmed(model_id);
     // Managed Kimi Code ids are exact; so are the public K3 series ids.
-    return core::utils::ascii::iequals(value, "k3")
-        || core::utils::ascii::iequals(value, "k3-256k")
+    return std::ranges::any_of(
+        kManagedK3ModelIds,
+        [&](std::string_view candidate) {
+            return core::utils::ascii::iequals(value, candidate);
+        })
         || is_public_k3_id(value);
 }
 
@@ -196,9 +213,10 @@ int32_t kimi_model_context_window(std::string_view model_id) noexcept {
         })) {
         return 262'144;
     }
-    // The whole K3 series (kimi-k3, kimi-k3.1-pro and its highspeed variant)
-    // is a 1M-token window.
-    if (core::utils::ascii::iequals(value, "k3") || is_public_k3_id(value)) {
+    // The whole K3 series (managed `k3`/`k3.1-pro` ids and the public
+    // `kimi-k3` series) is a 1M-token window; `k3-256k` excepted, because
+    // that one is the 256K variant matched above.
+    if (is_kimi_k3_model(value) && !is_kimi_k3_256k_model(value)) {
         return 1'048'576;
     }
     return 0;

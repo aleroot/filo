@@ -588,7 +588,12 @@ private:
     void ensure_system_prompt();
     void refresh_stable_prompt_state_unlocked();
 
-    [[nodiscard]] std::string build_dynamic_prompt_suffix() const;
+    /// Rarely changing conversation state (the compaction summary): part of
+    /// the prompt prefix every wire can cache.
+    [[nodiscard]] std::string build_session_state_prompt() const;
+    /// Live task state (goal, DAG, todos): the prompt's dynamic tail, which
+    /// protocols can move behind the conversation when their wire permits it.
+    [[nodiscard]] std::string build_task_state_prompt() const;
     void append_project_facts_update_unlocked(
         std::optional<core::context::ProjectFactsSnapshot> current);
     void refresh_stable_prompt_prefix_unlocked();

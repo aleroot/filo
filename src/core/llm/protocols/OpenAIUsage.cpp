@@ -39,7 +39,11 @@ bool parse_openai_usage(simdjson::dom::object usage,
         int64_t cached = 0;
         int64_t created = 0;
         core::utils::json::ignore_error(prompt_details["cached_tokens"].get(cached));
-        core::utils::json::ignore_error(prompt_details["cache_creation_input_tokens"].get(created));
+        // Moonshot bills the cache write separately and reports it as
+        // `cache_write_tokens`; the Anthropic-style spelling is
+        // `cache_creation_input_tokens`.
+        [[maybe_unused]] const bool has_created = read_first(
+            prompt_details, "cache_creation_input_tokens", "cache_write_tokens", created);
         result.cached_prompt_tokens = token_count(cached);
         result.cache_creation_prompt_tokens = token_count(created);
     }
