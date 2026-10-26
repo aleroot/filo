@@ -262,6 +262,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/catalog/ModelCatalogTraits.cpp
     src/core/llm/catalog/OllamaModelCatalogProvider.cpp
     src/core/llm/catalog/OpenAICompatibleModelCatalogProvider.cpp
+    src/core/llm/catalog/QwenModelCatalogProvider.cpp
     src/core/llm/catalog/XaiModelCatalogProvider.cpp
     src/core/llm/MimoModelTraits.cpp
     src/core/llm/ModelRegistry.cpp

@@ -1,4 +1,5 @@
 #include "ModelCatalogProvider.hpp"
+#include "catalog/QwenModelCatalogProvider.hpp"
 
 namespace core::llm {
 
@@ -43,7 +44,7 @@ make_model_catalog_provider(
             return std::make_unique<OpenAICompatibleModelCatalogProvider>(
                 name);
         case config::ApiType::DashScope:
-            return std::make_unique<OpenAICompatibleModelCatalogProvider>(
+            return std::make_unique<QwenModelCatalogProvider>(
                 name);
         case config::ApiType::Ollama:
             return std::make_unique<OllamaModelCatalogProvider>(name);

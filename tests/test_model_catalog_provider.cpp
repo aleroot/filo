@@ -298,6 +298,41 @@ TEST_CASE("Qwen Token Plan keeps live model membership while enriching sparse ca
     CHECK_FALSE(resolve_model_metadata("qwen3.8-max-preview", result.models, nullptr));
 }
 
+TEST_CASE("Qwen catalog enriches only live hosted models and preserves explicit server metadata",
+          "[llm][model-catalog][qwen][regression]") {
+    auto catalog = make_model_catalog_provider(core::config::ApiType::DashScope, "qwen-hosted-fixture");
+    auto responses_catalog = protocols::DashScopeResponsesProtocol{}.model_catalog("qwen-hosted-fixture");
+    REQUIRE(catalog != nullptr);
+    REQUIRE(responses_catalog != nullptr);
+    constexpr std::string_view body = R"JSON({"data":[
+      {"id":"deepseek-v4.1-flash"},
+      {"id":"deepseek-v4-pro-0813","context_window":777777,"max_output_tokens":12345},
+      {"id":"glm-5.3"},
+      {"id":"MiniMax-M2.5"},
+      {"id":"qwen-future-unknown"}
+    ]})JSON";
+    for (const auto* source : {catalog.get(), responses_catalog.get()}) {
+        const auto parsed = source->parse_models_response(body);
+        REQUIRE(parsed.ok());
+        REQUIRE(parsed.models.size() == 5);
+        CHECK(parsed.models[0].context_window == 1000000);
+        CHECK(parsed.models[0].supports(ModelCapability::Vision));
+        CHECK_FALSE(parsed.models[0].supports(ModelCapability::VideoInput));
+        CHECK(parsed.models[1].context_window == 777777);
+        CHECK(parsed.models[1].max_output_tokens == 12345);
+        CHECK(parsed.models[2].context_window == 1000000);
+        CHECK(parsed.models[3].max_output_tokens == 32768);
+        CHECK(parsed.models[4].canonical_id == "qwen-future-unknown");
+        CHECK(parsed.models[4].context_window == 0);
+        for (const auto& model : parsed.models) CHECK(model.provider == "qwen-hosted-fixture");
+    }
+    const auto generic = OpenAICompatibleModelCatalogProvider{"generic-fixture"}.parse_models_response(body);
+    REQUIRE(generic.models.size() == 5);
+    CHECK(generic.models[0].context_window == 0);
+    CHECK(generic.models[3].max_output_tokens == 0);
+    CHECK_FALSE(ModelRegistry::instance().lookup("deepseek-v4.1-flash"));
+}
+
 TEST_CASE("OpenAI OAuth model catalog sends the client version",
           "[llm][model-catalog][openai]") {
     CodexModelCatalogProvider codex_provider;

@@ -4,6 +4,7 @@
 #include "../Models.hpp"
 #include "../ToolCallAssembly.hpp"
 #include "../QwenModelTraits.hpp"
+#include "../catalog/QwenModelCatalogProvider.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
@@ -66,8 +67,11 @@ struct ThinkingPolicy {
         return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true};
     }
     if (id.starts_with("qwen3-coder")) return {};
-    if (id.starts_with("glm-5.3")) return {ThinkingMode::VendorEffort, true, true};
-    if (id.starts_with("glm-5")) return {ThinkingMode::VendorEffort};
+    // Hosted GLM exposes a toggle, not native vendor effort tiers. GLM-5.3
+    // currently rejects disabled thinking on both Token Plan origins (live
+    // validation 2026-10-26), including the newer QwenCloud host.
+    if (id.starts_with("glm-5.3")) return {ThinkingMode::Toggle, true};
+    if (id.starts_with("glm-5")) return {ThinkingMode::Toggle};
     if (id.starts_with("deepseek-v4")) {
         const bool native_low = id.starts_with("deepseek-v4.1")
             || id.starts_with("deepseek-v4-flash-0731")
@@ -496,9 +500,13 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     // history intact: only an outbound copy is compacted, and only when needed.
     constexpr std::size_t kMaxRequestImages = 250;
     std::string payload;
-    if (const auto images = count_image_inputs(req); images > kMaxRequestImages) {
+    const auto images = count_image_inputs(req);
+    const int output_cap = qwen_endpoint_output_limit(req.model);
+    const bool cap_output = output_cap > 0 && req.max_tokens && *req.max_tokens > output_cap;
+    if (images > kMaxRequestImages || cap_output) {
         ChatRequest bounded = req;
-        evict_oldest_image_inputs(bounded, images - kMaxRequestImages);
+        if (images > kMaxRequestImages) evict_oldest_image_inputs(bounded, images - kMaxRequestImages);
+        if (cap_output) bounded.max_tokens = output_cap;
         payload = Serializer::serialize(bounded, options);
     } else {
         payload = Serializer::serialize(req, options);
@@ -538,6 +546,7 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
         payload += R"(,"vl_high_resolution_images":true)";
     }
 
+    const std::string id = wire_model(req.model);
     const auto policy = thinking_policy(req.model);
     const bool mandatory = policy.required;
     const std::string effort = normalize_dashscope_effort(
@@ -557,12 +566,11 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
             }
             if (policy.mode == ThinkingMode::VendorEffort && !effort.empty()) {
                 payload += R"(,"reasoning_effort":")" + effort + '"';
-            } else if (thinking_budget_ > 0) {
+            } else if (thinking_budget_ > 0 && !id.starts_with("glm-")) {
                 payload += R"(,"thinking_budget":)" + std::to_string(thinking_budget_);
             }
         }
     }
-    const std::string id = wire_model(req.model);
     if (id.starts_with("glm-")) payload += R"(,"clear_thinking":false)";
     if (id.starts_with("kimi-k2.") || id.starts_with("kimi-k3")) {
         payload += R"(,"preserve_thinking":true)";
@@ -582,6 +590,11 @@ DashScopeResponsesProtocol::DashScopeResponsesProtocol(Options options)
     : OpenAIResponsesProtocol(/*include_reasoning_encrypted=*/false)
     , options_(std::move(options)) {}
 
+std::unique_ptr<ModelCatalogProvider> DashScopeResponsesProtocol::model_catalog(
+    std::string_view provider_name) const {
+    return std::make_unique<QwenModelCatalogProvider>(std::string(provider_name));
+}
+
 void DashScopeResponsesProtocol::prepare_request(ChatRequest& request) {
     if (options_.lifecycle.prepare) options_.lifecycle.prepare(request);
     session_id_ = request.session_id;
@@ -595,6 +608,10 @@ ReasoningCapabilities DashScopeResponsesProtocol::reasoning_capabilities(
 
 std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const {
     ChatRequest effective = req;
+    if (const int cap = qwen_endpoint_output_limit(req.model);
+        cap > 0 && effective.max_tokens && *effective.max_tokens > cap) {
+        effective.max_tokens = cap;
+    }
     if (!effective.previous_response_id.empty()) {
         // Qwen appends `input` to the context identified by previous_response_id.
         // Send only the messages produced since the previous model response to
@@ -625,7 +642,9 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
     const std::optional<std::string_view> reasoning_effort =
         model_reasoning.supports_effort()
         ? std::optional<std::string_view>{effective_effort}
-        : std::nullopt;
+        : policy.mode == ThinkingMode::Toggle
+            ? std::optional<std::string_view>{std::string_view{}}
+            : std::nullopt;
     static constexpr std::array<std::string_view, 5> kHostedTools{
         "web_search",
         "code_interpreter",

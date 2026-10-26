@@ -106,7 +106,8 @@ TEST_CASE("DashScope protocols own endpoint-specific model reasoning policy", "[
             CHECK(supports(*protocol, model, ReasoningCapability::ToggleOnly));
         }
         CHECK_FALSE(supports(*protocol, "qwen3-coder-plus", ReasoningCapability::Effort));
-        CHECK(supports(*protocol, "glm-5.2", ReasoningCapability::Effort));
+        CHECK_FALSE(supports(*protocol, "glm-5.2", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "glm-5.2", ReasoningCapability::ToggleOnly));
         CHECK(supports(*protocol, "ZHIPU/GLM-5.3", ReasoningCapability::Required));
     }
     CHECK_FALSE(supports(chat, "qwen2.5-72b-instruct", ReasoningCapability::Effort));

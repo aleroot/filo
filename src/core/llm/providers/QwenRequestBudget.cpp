@@ -53,6 +53,11 @@ void QwenRequestBudget::prepare(ChatRequest& request, const ModelInfo* model,
     const int output_limit = model ? model->max_output_tokens : 0;
     int ceiling = request.max_tokens.value_or(output_limit > 0 ? std::min(output_limit, 64000) : 32000);
     if (output_limit > 0) ceiling = std::min(ceiling, output_limit);
+    // The gateway's hard cap applies even if a live catalog or an explicit
+    // request carries the native vendor's larger output limit.
+    if (const int cap = qwen_endpoint_output_limit(request.model); cap > 0) {
+        ceiling = std::min(ceiling, cap);
+    }
     if (window > 0) {
         const auto prompt = std::max(estimate_request(request), calibrated_prompt_tokens);
         const auto margin = std::max(10000, window / 20);

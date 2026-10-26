@@ -22,9 +22,9 @@ class QwenServer {
 public:
     httplib::Server server;
     int port = 0;
-    QwenServer() {
-        server.Get("/compatible-mode/v1/models", [](const auto&, auto& response) {
-            response.set_content(R"({"data":[]})", "application/json");
+    explicit QwenServer(std::string catalog_body = R"({"data":[]})") {
+        server.Get("/compatible-mode/v1/models", [body = std::move(catalog_body)](const auto&, auto& response) {
+            response.set_content(body, "application/json");
         });
         port = server.bind_to_any_port("127.0.0.1");
         if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
@@ -54,6 +54,69 @@ core::tools::ToolInvocationContext invocation(const std::shared_ptr<core::llm::L
             .model_name = "qwen3-coder-plus", .provider = provider};
 }
 } // namespace
+
+TEST_CASE("Qwen hosted catalog metadata reaches complete HTTP requests on both wires",
+          "[integration][qwen][regression][hosted-metadata]") {
+    const bool responses = GENERATE(false, true);
+    const std::string model = GENERATE("deepseek-v4.1-flash", "MiniMax-M2.5", "glm-5.3");
+    CAPTURE(model, responses);
+    QwenServer fixture(R"({"data":[{"id":"deepseek-v4.1-flash"},{"id":"MiniMax-M2.5"},{"id":"glm-5.3"}]})");
+    std::atomic<int> calls{0};
+    std::string sent_body;
+    fixture.server.Post(responses ? "/compatible-mode/v1/responses" : "/compatible-mode/v1/chat/completions",
+        [&](const auto& request, auto& response) {
+            sent_body = request.body;
+            ++calls;
+            if (responses) {
+                response.set_content(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Verified\"}\n\n"
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"hosted-fixture\",\"status\":\"completed\",\"output\":[]}}\n\n",
+                    "text/event-stream");
+            } else {
+                response.set_content(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Verified\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    "data: [DONE]\n\n", "text/event-stream");
+            }
+        });
+    const auto provider = std::make_shared<core::llm::providers::QwenProvider>(
+        core::llm::providers::QwenProvider::Options{
+            .base_url = fixture.url(),
+            .credentials = core::auth::ApiKeyCredentialSource::as_bearer("fixture-key"),
+            .model = model,
+            .provider_name = "hosted-http-" + model + (responses ? "-responses" : "-chat"),
+            .token_plan = true,
+            .responses = responses,
+        });
+    core::llm::ChatRequest request;
+    // Exercise a configured default as well as explicit model overrides.
+    if (model != "MiniMax-M2.5") request.model = model;
+    request.effort = "high";
+    // GLM's established default allowance must survive sparse-card
+    // enrichment; MiniMax exercises a caller's explicit over-cap allowance.
+    if (model != "glm-5.3") request.max_tokens = 64000;
+    request.messages = {{.role = "user", .content = "Verify"}};
+    std::string text;
+    provider->stream_response(request, [&](const auto& chunk) {
+        CHECK_FALSE(chunk.is_error);
+        text += chunk.content;
+    });
+    REQUIRE(calls == 1);
+    CHECK(text == "Verified");
+    const auto info = provider->get_model_info();
+    REQUIRE(info.has_value());
+    CHECK(info->context_window == (model == "MiniMax-M2.5" ? 196608 : 1000000));
+    if (model == "glm-5.3") CHECK_FALSE(request.max_tokens.has_value());
+    else CHECK(request.max_tokens == 64000);
+    simdjson::dom::parser parser;
+    const auto document = parser.parse(sent_body);
+    const int64_t sent_limit = document[responses ? "max_output_tokens" : "max_tokens"].get_int64();
+    CHECK(sent_limit == (model == "MiniMax-M2.5" ? 32768 : 64000));
+    if (model == "glm-5.3") {
+        CHECK_THAT(sent_body, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+        CHECK_THAT(sent_body, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+        CHECK_THAT(sent_body, !Catch::Matchers::ContainsSubstring(R"("reasoning":)"));
+    }
+}
 
 TEST_CASE("Qwen HTTP preserves truncation and usage but rejects a premature EOF",
           "[integration][qwen][regression][http]") {

@@ -2,6 +2,7 @@
 #include "core/config/ConfigSource.hpp"
 #include "HttpLLMProvider.hpp"
 #include "KimiModelTraits.hpp"
+#include "QwenModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
 #include "providers/QwenModelCatalogSelector.hpp"
@@ -86,21 +87,6 @@ std::string resolve_key(
     if (lowered == "chat_completions") return OpenAIWireApi::ChatCompletions;
 
     return OpenAIWireApi::ChatCompletions;
-}
-
-[[nodiscard]] bool is_qwen_token_plan_endpoint(std::string_view base_url) noexcept {
-    const auto host = core::utils::uri::extract_http_host(base_url);
-    return host.has_value()
-        && core::utils::ascii::iequals(
-            *host, "token-plan.ap-southeast-1.maas.aliyuncs.com");
-}
-
-[[nodiscard]] bool is_qwen_coding_plan_endpoint(std::string_view base_url) noexcept {
-    const auto host = core::utils::uri::extract_http_host(base_url);
-    if (!host) return false;
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(*host);
-    if (lowered.find("dashscope") == std::string::npos) return false;
-    return lowered.starts_with("coding.") || lowered.starts_with("coding-");
 }
 
 /// Shared by every wire that can ask the server for a cache TTL. A typo is
@@ -254,13 +240,20 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         || is_qwen_token_plan_endpoint(base_url);
     const bool qwen_coding_plan = canonical_type == "qwen-coding"
         || is_qwen_coding_plan_endpoint(base_url);
-    if (qwen_token_plan && env_vars.front().empty()) {
-        env_vars[0] = "QWEN_TOKEN_PLAN_API_KEY";
+    if (qwen_token_plan) {
+        env_vars = {"QWEN_TOKEN_PLAN_API_KEY", is_qwencloud_endpoint(base_url)
+            ? "QWENCLOUD_TOKEN_PLAN_API_KEY" : "BAILIAN_TOKEN_PLAN_API_KEY"};
     }
     if (qwen_coding_plan && env_vars.front().empty()) {
         env_vars = { "QWEN_CODING_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY" };
     }
-    if ((qwen_coding_plan || qwen_token_plan)
+    const bool qwen_standard = is_qwen_standard_endpoint(base_url);
+    if (qwen_standard) {
+        env_vars = is_qwencloud_endpoint(base_url)
+            ? std::array<std::string_view, 2>{"QWENCLOUD_API_KEY", "QWEN_API_KEY"}
+            : std::array<std::string_view, 2>{"QWEN_API_KEY", "DASHSCOPE_API_KEY"};
+    }
+    if ((qwen_coding_plan || qwen_token_plan || qwen_standard)
         && (api_type == ApiType::Unknown || api_type == ApiType::OpenAI)) {
         // Qwen plans are DashScope-compatible. Treating them as vanilla OpenAI
         // drops X-DashScope-* cache headers and Qwen thinking fields.

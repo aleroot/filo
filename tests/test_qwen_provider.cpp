@@ -21,9 +21,172 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <cstdlib>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+namespace {
+class QwenEnvironmentGuard {
+public:
+    QwenEnvironmentGuard() {
+        for (const auto* key : {"QWEN_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY",
+                               "QWENCLOUD_TOKEN_PLAN_API_KEY", "QWENCLOUD_API_KEY",
+                               "QWEN_API_KEY", "DASHSCOPE_API_KEY"}) {
+            const char* old = std::getenv(key);
+            saved_.emplace_back(key, old ? std::optional<std::string>(old) : std::nullopt);
+            ::unsetenv(key);
+        }
+    }
+    ~QwenEnvironmentGuard() {
+        for (const auto& [key, value] : saved_) {
+            if (value) ::setenv(key.c_str(), value->c_str(), 1);
+            else ::unsetenv(key.c_str());
+        }
+    }
+private:
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
+};
+} // namespace
+
+TEST_CASE("Qwen endpoint credential aliases work without replacing explicit keys",
+          "[qwen][factory][regression][credentials]") {
+    for (const auto& [url, alias] : {
+            std::pair{"https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", "BAILIAN_TOKEN_PLAN_API_KEY"},
+            std::pair{"https://token-plan.maas.qwencloudapi.com/compatible-mode/v1", "QWENCLOUD_TOKEN_PLAN_API_KEY"},
+            std::pair{"https://maas.qwencloudapi.com/compatible-mode/v1", "QWENCLOUD_API_KEY"},
+            std::pair{"https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"}}) {
+        CAPTURE(url, alias);
+        QwenEnvironmentGuard guard;
+        ::setenv(alias, "fixture-alias-key", 1);
+        core::config::ProviderConfig config;
+        config.api_type = core::config::ApiType::OpenAI;
+        config.base_url = url;
+        config.model = "qwen3.8-max";
+        auto provider = ProviderFactory::create_provider("custom-qwen-credential-fixture", config);
+        REQUIRE(provider != nullptr);
+        CHECK(provider->metadata()->credential_source->get_auth().headers.at("Authorization")
+              == "Bearer fixture-alias-key");
+        config.api_key = "fixture-explicit-key";
+        provider = ProviderFactory::create_provider("custom-qwen-credential-fixture", config);
+        REQUIRE(provider != nullptr);
+        CHECK(provider->metadata()->credential_source->get_auth().headers.at("Authorization")
+              == "Bearer fixture-explicit-key");
+    }
+}
+
+TEST_CASE("Qwen hosted metadata fills context and media limits without changing native cards",
+          "[qwen][regression][hosted-metadata]") {
+    const auto native_glm = *ModelRegistry::instance().lookup("glm-5.3");
+    for (const auto id : {"deepseek-v4-pro", "deepseek-v4-pro-0813",
+                          "deepseek-v4-flash-0731", "deepseek-v4.1-flash",
+                          "deepseek-v4.1-flash-1017"}) {
+        CAPTURE(id);
+        const bool existed = bool(ModelRegistry::instance().lookup(id));
+        core::llm::providers::QwenProvider provider({.model = id, .provider_name = "hosted-card-fixture"});
+        CHECK(provider.max_context_size() == 1000000);
+        const auto info = qwen_hosted_model_info(id);
+        REQUIRE(info.has_value());
+        CHECK(info->context_window == 1000000);
+        CHECK(info->supports(ModelCapability::FunctionCalling));
+        CHECK(info->supports(ModelCapability::Vision) == std::string_view(id).starts_with("deepseek-v4.1"));
+        CHECK(bool(ModelRegistry::instance().lookup(id)) == existed);
+    }
+    CHECK(ModelRegistry::instance().lookup("glm-5.3")->capabilities == native_glm.capabilities);
+    CHECK_FALSE(qwen_hosted_model_info("deepseek-v5-future"));
+    CHECK_FALSE(qwen_hosted_model_info("deepseek-v4-pro-unknown"));
+}
+
+TEST_CASE("Qwen clamps the hosted MiniMax output limit across request budgets and both wires",
+          "[qwen][regression][output-cap]") {
+    ModelInfo live;
+    live.context_window = 196608;
+    live.max_output_tokens = 128000;
+    for (const auto id : {"MiniMax-M2.5", "minimax-m2.5", "gateway/MiniMax-M2.5"}) {
+        for (const int requested : {1000, 32768, 64000, 128000}) {
+            CAPTURE(id, requested);
+            ChatRequest request;
+            request.model = id;
+            request.max_tokens = requested;
+            request.messages = {{.role = "user", .content = "Hello"}};
+            const int expected = std::min(requested, 32768);
+            CHECK_THAT(DashScopeProtocol{}.serialize(request), Catch::Matchers::ContainsSubstring(
+                "\"max_tokens\":" + std::to_string(expected)));
+            CHECK_THAT(DashScopeResponsesProtocol{}.serialize(request), Catch::Matchers::ContainsSubstring(
+                "\"max_output_tokens\":" + std::to_string(expected)));
+            providers::QwenRequestBudget::prepare(request, &live);
+            CHECK(request.max_tokens == expected);
+        }
+    }
+    ChatRequest native;
+    native.model = "MiniMax-M2.5";
+    native.max_tokens = 64000;
+    CHECK_THAT(OpenAIProtocol{}.serialize(native), Catch::Matchers::ContainsSubstring(R"("max_tokens":64000)"));
+    CHECK_FALSE(qwen_endpoint_output_limit("MiniMax-M3") > 0);
+}
+
+TEST_CASE("Official Qwen endpoint recognition preserves subscription billing and excludes impostors",
+          "[qwen][factory][regression][endpoints]") {
+    for (const auto host : {"token-plan.ap-southeast-1.maas.aliyuncs.com",
+                            "token-plan.cn-beijing.maas.aliyuncs.com",
+                            "token-plan.maas.qwencloudapi.com", "token-plan.maas.qianwenaiapi.com",
+                            "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com",
+                            "maas.qwencloudapi.com", "maas.qianwenaiapi.com"}) {
+        CAPTURE(host);
+        core::config::ProviderConfig cfg;
+        cfg.api_type = core::config::ApiType::OpenAI;
+        cfg.base_url = "https://" + std::string(host) + "/compatible-mode/v1";
+        cfg.model = "qwen3.8-max";
+        cfg.api_key = "fixture-key";
+        const auto provider = ProviderFactory::create_provider("custom-qwen-host-fixture", cfg);
+        REQUIRE(std::dynamic_pointer_cast<providers::QwenProvider>(provider) != nullptr);
+        CHECK(provider->metadata()->api_type == core::config::ApiType::DashScope);
+        CHECK(provider->should_estimate_cost() == is_qwen_standard_endpoint(cfg.base_url));
+        CHECK(provider->metadata()->base_url == cfg.base_url);
+    }
+    for (const auto url : {"https://token-plan.maas.qwencloudapi.com.evil.test/v1",
+                           "https://evil.test/token-plan.cn-beijing.maas.aliyuncs.com/v1",
+                           "https://coding.dashscope.evil.test/v1",
+                           "https://token-plan.maas.qwencloudapi.com@evil.test/v1",
+                           "https://api.openai.com/v1"}) {
+        CAPTURE(url);
+        core::config::ProviderConfig cfg;
+        cfg.api_type = core::config::ApiType::OpenAI;
+        cfg.base_url = url;
+        cfg.model = "fixture-model";
+        cfg.api_key = "fixture-key";
+        const auto provider = ProviderFactory::create_provider("generic-host-fixture", cfg);
+        REQUIRE(provider != nullptr);
+        CHECK(std::dynamic_pointer_cast<providers::QwenProvider>(provider) == nullptr);
+        CHECK(provider->metadata()->api_type == core::config::ApiType::OpenAI);
+        CHECK(provider->should_estimate_cost());
+    }
+}
+
+TEST_CASE("Hosted GLM controls use toggles and retain GLM-5.3 mandatory thinking on both wires",
+          "[qwen][regression][thinking][glm]") {
+    DashScopeProtocol chat(8192, "high");
+    DashScopeResponsesProtocol responses;
+    for (const auto model : {"glm-5.2", "glm-5.3", "ZHIPU/GLM-5.3"}) {
+        for (const auto effort : {"none", "low", "high", "max"}) {
+            CAPTURE(model, effort);
+            ChatRequest request;
+            request.model = model;
+            request.effort = effort;
+            const bool enabled = std::string_view(effort) != "none" || std::string_view(model) != "glm-5.2";
+            for (const auto& body : {chat.serialize(request), responses.serialize(request)}) {
+                CHECK_THAT(body, Catch::Matchers::ContainsSubstring(enabled
+                    ? R"("enable_thinking":true)" : R"("enable_thinking":false)"));
+                CHECK_THAT(body, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+                CHECK_THAT(body, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+                CHECK_THAT(body, !Catch::Matchers::ContainsSubstring(R"("reasoning":)"));
+            }
+            CHECK_FALSE(chat.reasoning_capabilities(model).supports_effort());
+            CHECK(chat.reasoning_capabilities(model).supports(ReasoningCapability::ToggleOnly));
+            CHECK_FALSE(chat.clone()->reasoning_capabilities(model).supports_effort());
+        }
+    }
+}
 
 TEST_CASE("Qwen finish reasons survive the usage tail without changing OpenAI",
           "[qwen][regression][sse]") {
@@ -915,13 +1078,13 @@ TEST_CASE("DashScopeProtocol - non-streaming cache control is system-only",
         R"("content":"Latest prompt")"));
 }
 
-TEST_CASE("DashScopeProtocol - sends GLM reasoning controls without a competing budget",
+TEST_CASE("DashScopeProtocol - sends hosted GLM thinking toggle without effort or budget",
           "[qwen][serializer][thinking][token-plan]") {
     auto req = make_simple_request("glm-5.2");
     req.effort = "high";
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
@@ -988,7 +1151,8 @@ TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("name":"read")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("reasoning":)"));
+        R"("enable_thinking":true)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
         R"({"type":"web_search"})"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(

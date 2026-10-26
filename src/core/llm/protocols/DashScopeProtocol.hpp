@@ -194,6 +194,8 @@ private:
 class DashScopeResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
     [[nodiscard]] bool uses_provider_reasoning_catalog() const noexcept override { return false; }
+    [[nodiscard]] std::unique_ptr<ModelCatalogProvider> model_catalog(
+        std::string_view provider_name) const override;
     struct Options {
         std::string default_effort = "high";
         bool enable_hosted_tools = true;

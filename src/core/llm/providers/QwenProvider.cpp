@@ -14,6 +14,16 @@ namespace {
 std::optional<ModelInfo> cached_model_info(std::string_view catalog, std::string_view model) {
     const auto snapshot = ModelCatalogAvailability::instance().snapshot(catalog);
     auto fallback = ModelRegistry::instance().lookup(model);
+    if (auto hosted = qwen_hosted_model_info(model)) {
+        // Do not import native-vendor context, pricing or wire policy into
+        // a model served by this gateway.
+        // Retain an existing output allowance where no gateway cap is known;
+        // enriching a sparse catalog must not shorten existing GLM responses.
+        if (hosted->max_output_tokens == 0 && fallback) {
+            hosted->max_output_tokens = fallback->max_output_tokens;
+        }
+        fallback = std::make_shared<ModelInfo>(std::move(*hosted));
+    }
     const int endpoint_window = qwen_endpoint_context_window(model);
     if (endpoint_window > 0) {
         auto scoped = fallback ? std::make_shared<ModelInfo>(*fallback) : std::make_shared<ModelInfo>();
@@ -103,6 +113,13 @@ void QwenProvider::stream_response(const ChatRequest& request,
                                   std::function<void(const StreamChunk&)> callback) {
     cancelled_.store(false, std::memory_order_release);
     ChatRequest effective = request;
+    // Clamp before the shared validator sees the endpoint's smaller model
+    // card. The caller's request and native MiniMax provider remain intact.
+    const auto model = effective.model.empty() ? options_.model : effective.model;
+    if (const int cap = qwen_endpoint_output_limit(model);
+        cap > 0 && effective.max_tokens && *effective.max_tokens > cap) {
+        effective.max_tokens = cap;
+    }
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (cancelled_.load(std::memory_order_acquire)) {
@@ -114,7 +131,7 @@ void QwenProvider::stream_response(const ChatRequest& request,
             state_->status = 0;
             state_->error_message.clear();
             state_->prompt_tokens = 0;
-            state_->requested_max_tokens = request.max_tokens;
+            state_->requested_max_tokens = effective.max_tokens;
         }
         std::optional<StreamChunk> error;
         bool emitted_output = false;

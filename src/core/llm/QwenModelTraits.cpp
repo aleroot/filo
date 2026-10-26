@@ -2,6 +2,8 @@
 #include "ModelRegistry.hpp"
 
 #include "core/utils/StringUtils.hpp"
+#include "core/utils/UriUtils.hpp"
+#include "core/utils/AsciiUtils.hpp"
 
 #include <array>
 #include <limits>
@@ -23,6 +25,44 @@ constexpr std::array kCodingPlanModels{
     Entry{"kimi-k2.5", 262144, true},
     Entry{"MiniMax-M2.5", 196608, false},
 };
+
+// Qwen Code v0.26.1's ModelStudio/QwenCloud presets. These describe the
+// deployment, not the vendor's native API. Zero output means unadvertised.
+struct HostedEntry { std::string_view id; int context; int output; bool vision; };
+constexpr std::array kHostedModels{
+    HostedEntry{"deepseek-v4-pro", 1000000, 0, false},
+    HostedEntry{"deepseek-v4-pro-0813", 1000000, 0, false},
+    HostedEntry{"deepseek-v4-flash-0731", 1000000, 0, false},
+    HostedEntry{"deepseek-v4.1-flash", 1000000, 0, true},
+    HostedEntry{"deepseek-v4.1-flash-1017", 1000000, 0, true},
+    HostedEntry{"glm-5.3", 1000000, 0, false},
+    HostedEntry{"glm-5.2", 1000000, 0, false},
+    HostedEntry{"MiniMax-M2.5", 196608, 32768, false},
+};
+
+[[nodiscard]] std::string wire_id(std::string_view model) {
+    auto id = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(model));
+    if (const auto slash = id.rfind('/'); slash != std::string::npos) id.erase(0, slash + 1);
+    return id;
+}
+
+[[nodiscard]] const HostedEntry* hosted_entry(std::string_view model) {
+    const auto id = wire_id(model);
+    for (const auto& entry : kHostedModels) {
+        if (core::utils::ascii::iequals(id, entry.id)) return &entry;
+    }
+    return nullptr;
+}
+
+template <std::size_t N>
+bool matches_host(std::string_view url, const std::array<std::string_view, N>& hosts) {
+    const auto host = core::utils::uri::extract_http_host(url);
+    if (!host) return false;
+    for (const auto allowed : hosts) {
+        if (core::utils::ascii::iequals(*host, allowed)) return true;
+    }
+    return false;
+}
 
 [[nodiscard]] bool is_qwen_chat_model(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
@@ -76,7 +116,9 @@ std::vector<ModelInfo> qwen_coding_plan_fallback_models() {
         model.display_name = entry.id;
         model.provider = "qwen";
         model.context_window = entry.context;
-        if (model.max_output_tokens <= 0) model.max_output_tokens = 32000;
+        const int cap = qwen_endpoint_output_limit(entry.id);
+        if (cap > 0) model.max_output_tokens = cap;
+        else if (model.max_output_tokens <= 0) model.max_output_tokens = 32000;
         model.reasoning = {};
         model.wire = {};
         model.capabilities = static_cast<uint32_t>(ModelCapability::TextInput)
@@ -96,15 +138,67 @@ std::vector<ModelInfo> qwen_coding_plan_fallback_models() {
     return models;
 }
 
+std::optional<ModelInfo> qwen_hosted_model_info(std::string_view model) {
+    if (const auto* entry = hosted_entry(model)) {
+        ModelInfo info;
+        info.canonical_id = std::string(model);
+        info.display_name = std::string(entry->id);
+        info.provider = "qwen";
+        info.context_window = entry->context;
+        info.max_output_tokens = entry->output;
+        info.capabilities = static_cast<uint32_t>(ModelCapability::TextInput)
+            | static_cast<uint32_t>(ModelCapability::TextOutput)
+            | static_cast<uint32_t>(ModelCapability::Streaming)
+            | static_cast<uint32_t>(ModelCapability::SystemPrompts)
+            | static_cast<uint32_t>(ModelCapability::FunctionCalling)
+            | static_cast<uint32_t>(ModelCapability::Reasoning);
+        if (entry->vision) info.capabilities |= static_cast<uint32_t>(ModelCapability::Vision);
+        // Reasoning wire policy belongs to the Qwen protocol. Do not inherit
+        // native-vendor reasoning fields or assume absent capabilities false.
+        return info;
+    }
+    return std::nullopt;
+}
+
+int qwen_endpoint_output_limit(std::string_view model) {
+    if (const auto* entry = hosted_entry(model)) return entry->output;
+    return 0;
+}
+
 int qwen_endpoint_context_window(std::string_view model) {
-    std::string id = core::utils::str::to_lower_ascii_copy(model);
-    if (const auto slash = id.rfind('/'); slash != std::string::npos) id.erase(0, slash + 1);
+    if (const auto* entry = hosted_entry(model)) return entry->context;
+    const auto id = wire_id(model);
     for (const auto& entry : kCodingPlanModels) {
         const auto canonical = core::utils::str::to_lower_ascii_copy(entry.id);
         if (id == canonical || (id.starts_with(canonical) && id.size() > canonical.size()
                                 && id[canonical.size()] == '-')) return entry.context;
     }
     return id.starts_with("qwen") || id == "coder-model" ? get_max_context_size(id) : 0;
+}
+
+bool is_qwen_token_plan_endpoint(std::string_view url) {
+    return matches_host(url, std::array<std::string_view, 4>{
+        "token-plan.ap-southeast-1.maas.aliyuncs.com",
+        "token-plan.cn-beijing.maas.aliyuncs.com",
+        "token-plan.maas.qwencloudapi.com",
+        "token-plan.maas.qianwenaiapi.com"});
+}
+
+bool is_qwen_coding_plan_endpoint(std::string_view url) {
+    return matches_host(url, std::array<std::string_view, 2>{
+        "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com"});
+}
+
+bool is_qwencloud_endpoint(std::string_view url) {
+    return matches_host(url, std::array<std::string_view, 4>{
+        "maas.qwencloudapi.com", "maas.qianwenaiapi.com",
+        "token-plan.maas.qwencloudapi.com", "token-plan.maas.qianwenaiapi.com"});
+}
+
+bool is_qwen_standard_endpoint(std::string_view url) {
+    return matches_host(url, std::array<std::string_view, 5>{
+        "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com",
+        "maas.qwencloudapi.com", "maas.qianwenaiapi.com"});
 }
 
 bool qwen_model_supports_preserve_thinking(std::string_view model_id) {
