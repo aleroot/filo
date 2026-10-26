@@ -30,6 +30,8 @@ class CodeBlockRunServices final : public ICodeBlockRunServices {
 public:
     explicit CodeBlockRunServices(CodeBlockRunDependencies dependencies);
 
+    [[nodiscard]] std::filesystem::path working_directory() const override;
+
     [[nodiscard]] std::expected<core::code::CodeRunResult, std::string>
     run(const core::code::ExecutionPlan& plan) override;
 

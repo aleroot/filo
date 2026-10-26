@@ -2236,7 +2236,7 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
             rows.push_back(text(std::format(
                 "Runs with '{}' in {}. Filo's current workspace sandbox policy is preserved.",
                 selected_item->plan->interpreter,
-                std::filesystem::current_path().string())) | dim);
+                state.working_directory.string())) | dim);
             static constexpr std::array<std::string_view, 3> actions{
                 "Run interactively", "Copy source", "Back to blocks"};
             for (int index = 0; index < static_cast<int>(actions.size()); ++index) {

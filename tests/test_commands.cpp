@@ -1708,7 +1708,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         ctx.agent = std::make_shared<core::agent::Agent>(
             provider,
             core::tools::ToolManager::get_instance(),
-            test_support::make_workspace_session_context());
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = temp_dir,
+            }));
         ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
@@ -1776,7 +1778,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         ctx.agent = std::make_shared<core::agent::Agent>(
             provider,
             core::tools::ToolManager::get_instance(),
-            test_support::make_workspace_session_context());
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = temp_dir,
+            }));
         ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
@@ -1828,7 +1832,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         ctx.agent = std::make_shared<core::agent::Agent>(
             provider,
             core::tools::ToolManager::get_instance(),
-            test_support::make_workspace_session_context());
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = temp_dir,
+            }));
         ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
@@ -1842,6 +1848,64 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
 
         fs::current_path(guard.old, ec);
         fs::remove_all(temp_dir, ec);
+    }
+
+    SECTION("/review reads the session's repository, not the process cwd") {
+        // Thread tabs share one process cwd, and /workspace change in any tab
+        // moves it. A review must follow the session that asked for it.
+        namespace fs = std::filesystem;
+        struct CwdGuard {
+            fs::path old;
+            ~CwdGuard() {
+                std::error_code ec;
+                fs::current_path(old, ec);
+            }
+        } guard{fs::current_path()};
+
+        const fs::path base =
+            fs::temp_directory_path() / std::format("filo-test-review-tabs-{}", std::rand());
+        const fs::path session_repo = base / "session";
+        const fs::path cwd_repo = base / "other-tab";
+        std::error_code ec;
+        fs::remove_all(base, ec);
+        fs::create_directories(session_repo, ec);
+        fs::create_directories(cwd_repo, ec);
+        REQUIRE_FALSE(ec);
+
+        const auto make_dirty_repo = [](const fs::path& repo, std::string_view file,
+                                        std::string_view body) {
+            const std::string quoted = std::format("'{}'", repo.string());
+            REQUIRE(std::system(std::format("git init -q {}", quoted).c_str()) == 0);
+            std::ofstream(repo / file) << body;
+            REQUIRE(std::system(std::format("git -C {} add .", quoted).c_str()) == 0);
+        };
+        make_dirty_repo(session_repo, "session_change.cpp", "int session_tab() { return 1; }\n");
+        make_dirty_repo(cwd_repo, "other_tab_change.cpp", "int other_tab() { return 2; }\n");
+        fs::current_path(cwd_repo);
+
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = session_repo,
+            }));
+        ctx.text = "/review uncommitted";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(provider->requests.size() == 1);
+
+        const std::string& prompt = provider->requests.front().messages.back().content;
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("session_change.cpp"));
+        REQUIRE_THAT(prompt, !Catch::Matchers::ContainsSubstring("other_tab_change.cpp"));
+        REQUIRE_THAT(prompt, !Catch::Matchers::ContainsSubstring("other_tab()"));
+
+        // Leave the directory before deleting it; the guard covers early exits.
+        fs::current_path(guard.old, ec);
+        fs::remove_all(base, ec);
     }
 
     SECTION("/review help shows usage without needing an agent") {

@@ -119,6 +119,11 @@ write_private_transcript(const std::filesystem::path& directory,
 CodeBlockRunServices::CodeBlockRunServices(CodeBlockRunDependencies dependencies)
     : dependencies_(std::move(dependencies)) {}
 
+std::filesystem::path CodeBlockRunServices::working_directory() const {
+    return dependencies_.working_directory ? dependencies_.working_directory()
+                                           : std::filesystem::path{};
+}
+
 std::filesystem::path select_code_run_script_directory(
     core::landrun::LandrunMode mode,
     const std::filesystem::path& runtime_root,

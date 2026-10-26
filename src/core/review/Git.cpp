@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <sstream>
 #include <utility>
@@ -111,12 +112,17 @@ std::string shell_quote(std::string_view value) {
 #endif
 }
 
-std::optional<std::string> run_git_stdout(std::string_view args,
+std::string git_command(const std::filesystem::path& repository, std::string_view args) {
+    return std::format("git -C {} {} 2>&1", shell_quote(repository.string()), args);
+}
+
+std::optional<std::string> run_git_stdout(const std::filesystem::path& repository,
+                                          std::string_view args,
                                           std::string* error_detail = nullptr) {
     std::string output;
     std::string error;
     int exit_code = 0;
-    const std::string command = std::format("git {} 2>&1", args);
+    const std::string command = git_command(repository, args);
     if (!run_command_capture(command, output, error, &exit_code)) {
         if (error_detail) {
             const std::string detail = trim_ascii_copy(output);
@@ -127,13 +133,14 @@ std::optional<std::string> run_git_stdout(std::string_view args,
     return trim_ascii_copy(output);
 }
 
-std::optional<std::string> run_git_stdout_allow_exit(std::string_view args,
+std::optional<std::string> run_git_stdout_allow_exit(const std::filesystem::path& repository,
+                                                     std::string_view args,
                                                      int allowed_exit_code,
                                                      std::string* error_detail = nullptr) {
     std::string output;
     std::string error;
     int exit_code = 0;
-    const std::string command = std::format("git {} 2>&1", args);
+    const std::string command = git_command(repository, args);
     if (run_command_capture(command, output, error, &exit_code)
         || exit_code == allowed_exit_code) {
         return trim_ascii_copy(output);
@@ -166,39 +173,6 @@ std::vector<std::string> split_lines(std::string_view text) {
     return lines;
 }
 
-std::optional<std::string> resolve_upstream_ref(std::string_view branch) {
-    return run_git_stdout(std::format(
-        "rev-parse --abbrev-ref --symbolic-full-name {}",
-        shell_quote(std::format("{}@{{upstream}}", std::string(branch)))));
-}
-
-std::optional<std::string> build_untracked_patch(std::string_view paths,
-                                                 std::string& error_detail) {
-#if defined(_WIN32)
-    constexpr std::string_view kNullFile = "NUL";
-#else
-    constexpr std::string_view kNullFile = "/dev/null";
-#endif
-
-    std::string patch;
-    for (const auto& path : split_lines(paths)) {
-        auto diff = run_git_stdout_allow_exit(
-            std::format("diff --no-index -- {} {}",
-                        shell_quote(kNullFile),
-                        shell_quote(path)),
-            1,
-            &error_detail);
-        if (!diff.has_value()) {
-            return std::nullopt;
-        }
-        if (!patch.empty()) {
-            patch += "\n\n";
-        }
-        patch += *diff;
-    }
-    return patch;
-}
-
 void split_commit_header(GitSnapshot& snapshot) {
     const auto pos = snapshot.patch.find("\ndiff --git ");
     const auto start = snapshot.patch.starts_with("diff --git ")
@@ -215,33 +189,72 @@ void split_commit_header(GitSnapshot& snapshot) {
     snapshot.patch = snapshot.patch.substr(start);
 }
 
-std::expected<GitSnapshot, std::string> collect_snapshot(
+} // namespace
+
+GitClient::GitClient(std::filesystem::path repository)
+    : repository_(std::move(repository)) {}
+
+std::optional<std::string> GitClient::resolve_upstream_ref(std::string_view branch) const {
+    return run_git_stdout(repository_, std::format(
+        "rev-parse --abbrev-ref --symbolic-full-name {}",
+        shell_quote(std::format("{}@{{upstream}}", std::string(branch)))));
+}
+
+std::optional<std::string> GitClient::build_untracked_patch(std::string_view paths,
+                                                            std::string& error_detail) const {
+#if defined(_WIN32)
+    constexpr std::string_view kNullFile = "NUL";
+#else
+    constexpr std::string_view kNullFile = "/dev/null";
+#endif
+
+    std::string patch;
+    for (const auto& path : split_lines(paths)) {
+        auto diff = run_git_stdout_allow_exit(
+            repository_,
+            std::format("diff --no-index -- {} {}",
+                        shell_quote(kNullFile),
+                        shell_quote(path)),
+            1,
+            &error_detail);
+        if (!diff.has_value()) {
+            return std::nullopt;
+        }
+        if (!patch.empty()) {
+            patch += "\n\n";
+        }
+        patch += *diff;
+    }
+    return patch;
+}
+
+std::expected<GitSnapshot, std::string> GitClient::collect_snapshot(
     std::string_view stat_args,
     std::string_view diff_args,
-    bool include_untracked) {
+    bool include_untracked) const {
     std::string error_detail;
-    auto root = run_git_stdout("rev-parse --show-toplevel", &error_detail);
+    auto root = run_git_stdout(repository_, "rev-parse --show-toplevel", &error_detail);
     if (!root.has_value()) {
         return std::unexpected(error_detail.empty()
             ? std::string("could not resolve git worktree root")
             : error_detail);
     }
 
-    auto status = run_git_stdout("status --short", &error_detail);
+    auto status = run_git_stdout(repository_, "status --short", &error_detail);
     if (!status.has_value()) {
         return std::unexpected(error_detail.empty()
             ? std::string("could not read git status")
             : error_detail);
     }
 
-    auto stat = run_git_stdout(stat_args, &error_detail);
+    auto stat = run_git_stdout(repository_, stat_args, &error_detail);
     if (!stat.has_value()) {
         return std::unexpected(error_detail.empty()
             ? std::string("could not read git diff stat")
             : error_detail);
     }
 
-    auto diff = run_git_stdout(diff_args, &error_detail);
+    auto diff = run_git_stdout(repository_, diff_args, &error_detail);
     if (!diff.has_value()) {
         return std::unexpected(error_detail.empty()
             ? std::string("could not read git patch")
@@ -255,7 +268,8 @@ std::expected<GitSnapshot, std::string> collect_snapshot(
     snapshot.patch = std::move(*diff);
 
     if (include_untracked) {
-        auto paths = run_git_stdout("ls-files --others --exclude-standard", &error_detail);
+        auto paths = run_git_stdout(
+            repository_, "ls-files --others --exclude-standard", &error_detail);
         if (!paths.has_value()) {
             return std::unexpected(error_detail.empty()
                 ? std::string("could not list untracked files")
@@ -284,11 +298,10 @@ std::expected<GitSnapshot, std::string> collect_snapshot(
     return snapshot;
 }
 
-} // namespace
-
-bool GitClient::is_repository(std::string* error_detail) {
+bool GitClient::is_repository(std::string* error_detail) const {
     std::string local_error;
-    const auto inside = run_git_stdout("rev-parse --is-inside-work-tree",
+    const auto inside = run_git_stdout(repository_,
+                                       "rev-parse --is-inside-work-tree",
                                        error_detail ? error_detail : &local_error);
     if (!inside.has_value()) {
         return false;
@@ -296,11 +309,11 @@ bool GitClient::is_repository(std::string* error_detail) {
     return to_lower_ascii_copy(*inside) == "true";
 }
 
-std::optional<std::string> GitClient::rev_parse(std::string_view ref) {
-    return run_git_stdout(std::format("rev-parse --verify {}", shell_quote(ref)));
+std::optional<std::string> GitClient::rev_parse(std::string_view ref) const {
+    return run_git_stdout(repository_, std::format("rev-parse --verify {}", shell_quote(ref)));
 }
 
-std::optional<std::string> GitClient::merge_base_with_head(std::string_view branch) {
+std::optional<std::string> GitClient::merge_base_with_head(std::string_view branch) const {
     const auto head_sha = rev_parse("HEAD");
     if (!head_sha.has_value()) {
         return std::nullopt;
@@ -312,7 +325,7 @@ std::optional<std::string> GitClient::merge_base_with_head(std::string_view bran
     }
 
     if (const auto upstream = resolve_upstream_ref(branch); upstream.has_value()) {
-        if (const auto counts = run_git_stdout(std::format(
+        if (const auto counts = run_git_stdout(repository_, std::format(
                 "rev-list --left-right --count {}",
                 shell_quote(std::format("{}...{}", std::string(branch), *upstream))));
             counts.has_value()) {
@@ -328,16 +341,17 @@ std::optional<std::string> GitClient::merge_base_with_head(std::string_view bran
         }
     }
 
-    return run_git_stdout(std::format("merge-base {} {}",
+    return run_git_stdout(repository_,
+                          std::format("merge-base {} {}",
                                       shell_quote(*head_sha),
                                       shell_quote(*preferred_ref)));
 }
 
-std::string GitClient::uncommitted_base_ref() {
+std::string GitClient::uncommitted_base_ref() const {
     return rev_parse("HEAD").value_or(std::string(kGitEmptyTreeSha));
 }
 
-std::expected<GitSnapshot, std::string> GitClient::collect_uncommitted() {
+std::expected<GitSnapshot, std::string> GitClient::collect_uncommitted() const {
     const std::string base_ref = uncommitted_base_ref();
     return collect_snapshot(
         std::format("diff --stat {} --", shell_quote(base_ref)),
@@ -345,21 +359,21 @@ std::expected<GitSnapshot, std::string> GitClient::collect_uncommitted() {
         true);
 }
 
-std::expected<GitSnapshot, std::string> GitClient::collect_staged() {
+std::expected<GitSnapshot, std::string> GitClient::collect_staged() const {
     return collect_snapshot(
         "diff --staged --stat --",
         "diff --staged --patch --find-renames --",
         false);
 }
 
-std::expected<GitSnapshot, std::string> GitClient::collect_against_ref(std::string_view ref) {
+std::expected<GitSnapshot, std::string> GitClient::collect_against_ref(std::string_view ref) const {
     return collect_snapshot(
         std::format("diff --stat {} --", shell_quote(ref)),
         std::format("diff --patch --find-renames {} --", shell_quote(ref)),
         false);
 }
 
-std::expected<GitSnapshot, std::string> GitClient::collect_commit(std::string_view sha) {
+std::expected<GitSnapshot, std::string> GitClient::collect_commit(std::string_view sha) const {
     auto snapshot = collect_snapshot(
         std::format("show --stat --format=fuller {}", shell_quote(sha)),
         std::format("show --format=fuller --patch --find-renames {}", shell_quote(sha)),

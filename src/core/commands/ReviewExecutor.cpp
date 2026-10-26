@@ -669,9 +669,14 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
         }
     };
 
+    // Review this session's repository, not the process cwd: the cwd is
+    // shared by every thread tab.
+    const auto workspace = ctx.agent->workspace_snapshot();
+    const core::review::GitClient git(workspace.primary());
+
     if (parsed.target.kind != ReviewTargetKind::Custom) {
         std::string git_error;
-        if (!core::review::GitClient::is_repository(&git_error)) {
+        if (!git.is_repository(&git_error)) {
             const std::string detail = trim_ascii_copy(git_error);
             stop_review_activity();
             ctx.append_history_fn(std::format(
@@ -697,7 +702,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
 
     switch (parsed.target.kind) {
         case ReviewTargetKind::UncommittedChanges: {
-            auto snapshot = core::review::GitClient::collect_uncommitted();
+            auto snapshot = git.collect_uncommitted();
             if (!snapshot.has_value()) {
                 stop_review_activity();
                 ctx.append_history_fn(std::format(
@@ -710,7 +715,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
             break;
         }
         case ReviewTargetKind::StagedChanges: {
-            auto snapshot = core::review::GitClient::collect_staged();
+            auto snapshot = git.collect_staged();
             if (!snapshot.has_value()) {
                 stop_review_activity();
                 ctx.append_history_fn(std::format(
@@ -728,15 +733,14 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
                 ctx.append_history_fn("\n✗  Could not start review: Base branch name cannot be empty.\n");
                 return;
             }
-            const auto merge_base =
-                core::review::GitClient::merge_base_with_head(parsed.target.branch);
+            const auto merge_base = git.merge_base_with_head(parsed.target.branch);
             if (!merge_base.has_value()) {
                 const std::string prompt = build_custom_submission_prompt(
                     core::review::base_branch_backup_task(parsed.target.branch));
                 run_agent_review_turn(ctx, prompt, true);
                 return;
             }
-            auto snapshot = core::review::GitClient::collect_against_ref(*merge_base);
+            auto snapshot = git.collect_against_ref(*merge_base);
             if (!snapshot.has_value()) {
                 stop_review_activity();
                 ctx.append_history_fn(std::format(
@@ -754,14 +758,14 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
                 ctx.append_history_fn("\n✗  Could not start review: Commit SHA cannot be empty.\n");
                 return;
             }
-            if (!core::review::GitClient::rev_parse(parsed.target.sha).has_value()) {
+            if (!git.rev_parse(parsed.target.sha).has_value()) {
                 stop_review_activity();
                 ctx.append_history_fn(std::format(
                     "\n✗  Could not start review: Commit '{}' could not be resolved.\n",
                     parsed.target.sha));
                 return;
             }
-            auto snapshot = core::review::GitClient::collect_commit(parsed.target.sha);
+            auto snapshot = git.collect_commit(parsed.target.sha);
             if (!snapshot.has_value()) {
                 stop_review_activity();
                 ctx.append_history_fn(std::format(
@@ -778,7 +782,6 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
     }
 
     const auto session = ctx.agent->session_context_snapshot();
-    const auto workspace = ctx.agent->workspace_snapshot();
     const auto steering_roots = core::context::collect_steering_roots(
         workspace.primary(), workspace.additional());
     input.steering = core::review::load_review_steering_guidance(

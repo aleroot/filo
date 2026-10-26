@@ -21,6 +21,10 @@ namespace {
 
 class FakeCodeBlockRunServices final : public tui::ICodeBlockRunServices {
 public:
+    std::filesystem::path working_directory() const override {
+        return "/tmp/filo-test-workspace";
+    }
+
     std::expected<CodeRunResult, std::string> run(
         const ExecutionPlan& plan) override {
         ++run_count;

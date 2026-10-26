@@ -33,6 +33,7 @@ std::expected<void, std::string> CodeBlockRunnerController::open(
 
     state_ = {};
     state_.active = true;
+    state_.working_directory = services_.working_directory();
     state_.items.reserve(blocks.size());
     for (auto& block : blocks) {
         auto plan = core::code::plan_execution(std::move(block));

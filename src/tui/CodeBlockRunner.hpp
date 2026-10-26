@@ -33,6 +33,8 @@ struct CodeBlockRunnerState {
     int selected_block = 0;
     int selected_action = 0;
     std::vector<CodeBlockRunnerItem> items;
+    /// Where a run executes: the owning session's workspace, captured on open.
+    std::filesystem::path working_directory;
     std::shared_ptr<const core::code::CodeRunResult> result;
     std::string error;
 };
@@ -40,6 +42,8 @@ struct CodeBlockRunnerState {
 class ICodeBlockRunServices {
 public:
     virtual ~ICodeBlockRunServices() = default;
+
+    [[nodiscard]] virtual std::filesystem::path working_directory() const = 0;
 
     [[nodiscard]] virtual std::expected<core::code::CodeRunResult, std::string>
     run(const core::code::ExecutionPlan& plan) = 0;
