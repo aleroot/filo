@@ -4,6 +4,7 @@
 #include "core/llm/QwenModelTraits.hpp"
 #include "core/llm/ModelMetadata.hpp"
 #include "core/llm/ModelRegistry.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/utils/StringUtils.hpp"
 
@@ -33,10 +34,6 @@ std::optional<ModelInfo> cached_model_info(std::string_view catalog, std::string
     }
     return resolve_model_metadata(model, snapshot.models, fallback).model;
 }
-bool thinking_disabled(std::string_view effort) {
-    const auto normalized = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(effort));
-    return normalized == "off" || normalized == "none" || normalized == "disabled";
-}
 } // namespace
 
 QwenProvider::QwenProvider(Options options)
@@ -64,7 +61,7 @@ std::unique_ptr<protocols::ApiProtocolBase> QwenProvider::make_protocol(
                 std::lock_guard lock(state->mutex);
                 request.max_tokens = state->requested_max_tokens;
                 if (state->required_thinking_models.contains(request.model)
-                    && thinking_disabled(request.effort.empty() ? default_effort : request.effort)) {
+                    && is_reasoning_off_effort(request.effort.empty() ? default_effort : request.effort)) {
                     request.effort = "low";
                 }
                 if (state->model != request.model) {
@@ -172,7 +169,7 @@ bool QwenProvider::repair_request(ChatRequest& request) {
         message = core::utils::str::to_lower_ascii_copy(state_->error_message);
         request.model = state_->model;
     }
-    if (thinking_disabled(request.effort.empty() ? options_.default_effort : request.effort)
+    if (is_reasoning_off_effort(request.effort.empty() ? options_.default_effort : request.effort)
         && !HttpLLMProvider::reasoning_capabilities(request.model).supports(ReasoningCapability::Required)
         && message.find("enable_thinking") != std::string::npos
         && (message.find("must be true") != std::string::npos

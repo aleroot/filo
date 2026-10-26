@@ -1,5 +1,6 @@
 #include "StrictToolPolicy.hpp"
 
+#include "MimoModelTraits.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -118,7 +119,9 @@ constexpr int kMinimumGpt4oSnapshot = 2024'08'06;
 bool model_supports_strict_tools(ToolSchemaWire wire, std::string_view model) noexcept {
     const std::string normalized = core::utils::str::to_lower_ascii_copy(model);
     switch (wire) {
-        case ToolSchemaWire::OpenAI: return openai_model_supports_strict(normalized);
+        case ToolSchemaWire::OpenAI:
+            // MiMo documents OpenAI's `strict` function flag and subset.
+            return openai_model_supports_strict(normalized) || is_mimo_model(normalized);
         case ToolSchemaWire::Anthropic: return anthropic_model_supports_strict(normalized);
     }
     return false;

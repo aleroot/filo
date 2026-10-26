@@ -188,6 +188,20 @@ public:
         }
     }
 
+    /// Subscription credits the session's plan-billed calls consumed, for
+    /// plans that meter in credits (MiMo Token Plan). Zero otherwise.
+    [[nodiscard]] double session_plan_credits(std::string_view session_id) const noexcept {
+        try {
+            return ledger_.sum(actual_filter(session_id), [](const TokenLedgerEvent& event) {
+                return event.billable
+                    ? 0.0
+                    : estimate_plan_credits(event.usage, event.model, event.recorded_at);
+            });
+        } catch (...) {
+            return 0.0;
+        }
+    }
+
     [[nodiscard]] std::string status_string() const {
         return status_string(session_id());
     }

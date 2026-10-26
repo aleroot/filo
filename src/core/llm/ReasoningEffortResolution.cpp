@@ -1,6 +1,14 @@
 #include "ReasoningEffortResolution.hpp"
 
+#include "../utils/StringUtils.hpp"
+
 namespace core::llm {
+
+bool is_reasoning_off_effort(std::string_view effort) {
+    const auto normalized = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(effort));
+    return normalized == "off" || normalized == "none" || normalized == "disabled";
+}
 
 ReasoningEffortResolution resolve_reasoning_effort(
     std::string_view configured,
@@ -11,7 +19,7 @@ ReasoningEffortResolution resolve_reasoning_effort(
         return {"provider default", Kind::ProviderDefault};
     }
 
-    if (configured == "none" || configured == "off" || configured == "disabled") {
+    if (is_reasoning_off_effort(configured)) {
         if (capabilities.supports(ReasoningCapability::Disable)) {
             return {"off", Kind::Exact};
         }

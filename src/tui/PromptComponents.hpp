@@ -130,9 +130,12 @@ enum class ReviewPickerMode {
 /// Compact token counters for subscription providers. Cache and reasoning
 /// details are useful when no quota window is available, but become noise once
 /// the footer can show the provider's authoritative utilization windows.
+/// A positive @p plan_credits (plans metered in credits) is appended as the
+/// session's estimated consumption.
 [[nodiscard]] std::string format_subscription_token_usage(
     const core::llm::TokenUsage& usage,
-    bool has_usage_windows);
+    bool has_usage_windows,
+    double plan_credits = 0.0);
 
 /// Compact footer signal for the assistant turn. While a turn runs it shows
 /// the same quadrant-filling circle animation as the tool call rows; once the

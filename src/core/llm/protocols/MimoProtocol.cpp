@@ -1,7 +1,9 @@
 #include "MimoProtocol.hpp"
 
 #include "../MimoModelTraits.hpp"
+#include "../ReasoningEffortResolution.hpp"
 #include "../StrictToolPolicy.hpp"
+#include "core/logging/Logger.hpp"
 #include "core/version/Version.hpp"
 #include "../../utils/JsonUtils.hpp"
 
@@ -10,14 +12,20 @@
 namespace core::llm::protocols {
 namespace {
 
-/// Gateway error payload: `{"error":{"code":…,"message":…,"param":…}}`.
+/// Gateway error payload: `{"error":{"code":…,"type":…,"message":…,"param":…}}`.
 struct MimoGatewayError {
     std::string code;
+    std::string type;
     std::string message;
     std::string param;
 
     [[nodiscard]] bool empty() const noexcept {
         return code.empty() && message.empty() && param.empty();
+    }
+
+    /// The OpenAI-compatible billing code MiMo Code treats as terminal.
+    [[nodiscard]] bool quota_exhausted() const noexcept {
+        return code == "insufficient_quota" || type == "insufficient_quota";
     }
 };
 
@@ -54,6 +62,9 @@ struct MimoGatewayError {
 
     if (simdjson::dom::element code; error["code"].get(code) == simdjson::SUCCESS) {
         parsed.code = field_to_string(code);
+    }
+    if (simdjson::dom::element type; error["type"].get(type) == simdjson::SUCCESS) {
+        parsed.type = field_to_string(type);
     }
     if (simdjson::dom::element message;
         error["message"].get(message) == simdjson::SUCCESS) {
@@ -92,6 +103,23 @@ struct MimoGatewayError {
     return req;
 }
 
+/**
+ * Whether a MiMo request should think.
+ *
+ * Precedence: the request's own effort, then a JSON-object helper call (reader,
+ * review) that names none, then the provider's configured default. Off
+ * spellings disable thinking; any other level leaves it on. Structured helper
+ * calls default to off for the reason MiMo Code's web-search call does:
+ * reasoning counts against `max_completion_tokens`, so their small budget
+ * would be spent thinking and truncate the JSON the caller waits for.
+ */
+[[nodiscard]] bool thinking_enabled(const ChatRequest& req,
+                                    std::string_view default_effort) {
+    if (!req.effort.empty()) return !is_reasoning_off_effort(req.effort);
+    if (req.response_format.is_structured()) return false;
+    return !is_reasoning_off_effort(default_effort);
+}
+
 } // namespace
 
 std::string MimoProtocol::serialize(const ChatRequest& req) const {
@@ -100,6 +128,13 @@ std::string MimoProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
     options.strict_tools = configured_strict_tool_dialect(
         ToolSchemaWire::OpenAI, adjusted.model);
+    // Prefix caching is automatic and a hit costs 1/120 of a miss, so the
+    // per-turn state (goal, todos, facts) trails the conversation instead of
+    // invalidating it from the top. MiMo's chat template renders a system
+    // message at any position.
+    options.system_prompt_layout = Serializer::SystemPromptLayout::DynamicTail;
+    // The documented budget field; it includes reasoning tokens.
+    options.max_tokens_field = "max_completion_tokens";
     // MiMo models are interleaved-reasoning models: the reference client
     // replays `reasoning_content` on every assistant message, present even
     // when empty. Omitting it on a follow-up turn is what a tool loop does,
@@ -111,6 +146,11 @@ std::string MimoProtocol::serialize(const ChatRequest& req) const {
     std::string payload = Serializer::serialize(adjusted, options);
     if (payload.ends_with('}')) {
         payload.pop_back();
+        // Thinking is on by default; only the opt-out goes on the wire.
+        if (is_mimo_model(adjusted.model)
+            && !thinking_enabled(adjusted, default_effort_)) {
+            payload += R"(,"thinking":{"type":"disabled"})";
+        }
         append_extra_fields(payload, adjusted);
         if ((stream_usage_ || adjusted.stream_include_usage) && adjusted.stream) {
             payload += R"(,"stream_options":{"include_usage":true})";
@@ -121,9 +161,23 @@ std::string MimoProtocol::serialize(const ChatRequest& req) const {
 }
 
 ReasoningCapabilities MimoProtocol::reasoning_capabilities(
-    std::string_view /*model*/) const noexcept {
-    // Thinking is always on and has no request-side control.
-    return {};
+    std::string_view model) const noexcept {
+    if (!is_mimo_model(model)) return {};
+    return ReasoningCapabilities(ReasoningCapability::ToggleOnly)
+        | ReasoningCapability::Disable;
+}
+
+bool MimoProtocol::is_retryable(const HttpResponse& response) const noexcept {
+    if (response.status_code == 429) {
+        try {
+            // A rate limit and an exhausted plan share HTTP 429; only the
+            // billing code tells them apart.
+            if (parse_gateway_error(response.body).quota_exhausted()) return false;
+        } catch (...) {
+            // An unreadable body cannot prove exhaustion; fall back to status.
+        }
+    }
+    return OpenAIProtocol::is_retryable(response);
 }
 
 cpr::Header MimoProtocol::build_headers(
@@ -170,6 +224,12 @@ std::string MimoProtocol::format_error_message(
                           : detail)
                    + "]";
         case 429:
+            if (error.quota_exhausted()) {
+                return "[MiMo API Error 429: Token Plan quota exhausted. "
+                       "Top up or upgrade the plan at "
+                       + mimo_platform_url() + "/console/plan-manage, or switch "
+                       "to a pay-as-you-go provider.]";
+            }
             return "[MiMo API Error 429: Rate limited or Token Plan quota "
                    "exhausted. "
                    + (detail.empty()

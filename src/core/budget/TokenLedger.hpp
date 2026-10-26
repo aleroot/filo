@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -132,6 +133,12 @@ public:
     [[nodiscard]] std::vector<TokenLedgerEvent> recent_events(
         std::size_t limit,
         const TokenLedgerFilter& filter = {}) const;
+
+    /// Sum of @p measure over matching events, without copying them. The
+    /// measure runs under the ledger lock and must not call back into it.
+    [[nodiscard]] double sum(
+        const TokenLedgerFilter& filter,
+        const std::function<double(const TokenLedgerEvent&)>& measure) const;
 
     [[nodiscard]] std::size_t event_count() const noexcept;
 

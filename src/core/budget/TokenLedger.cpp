@@ -200,6 +200,17 @@ std::vector<TokenLedgerEvent> TokenLedger::recent_events(
     return out;
 }
 
+double TokenLedger::sum(
+    const TokenLedgerFilter& filter,
+    const std::function<double(const TokenLedgerEvent&)>& measure) const {
+    double total = 0.0;
+    std::lock_guard lock(mutex_);
+    for (const auto& event : events_) {
+        if (matches_filter(event, filter)) total += measure(event);
+    }
+    return total;
+}
+
 std::size_t TokenLedger::event_count() const noexcept {
     std::lock_guard lock(mutex_);
     return events_.size();

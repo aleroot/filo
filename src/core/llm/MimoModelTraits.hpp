@@ -14,11 +14,15 @@
  * `api.xiaomimimo.com` knowledge out of the generic OpenAI protocol.
  */
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::llm {
+
+struct TokenUsage;
 
 /// Regional Token Plan gateway. One subscription is served by all three.
 enum class MimoRegion {
@@ -60,6 +64,34 @@ enum class MimoRegion {
 
 /// True when @p model is a MiMo model id (`mimo-v2.6-pro`, `MiMo-V2-Flash`, ...).
 [[nodiscard]] bool is_mimo_model(std::string_view model) noexcept;
+
+/// Token Plan credits charged per token of one model.
+struct MimoTokenPlanRates {
+    double cache_hit = 0.0;
+    double cache_miss = 0.0;
+    double output = 0.0;
+};
+
+/// Credit rates of a model the Token Plan serves; nullopt for anything else.
+[[nodiscard]] std::optional<MimoTokenPlanRates> mimo_token_plan_rates(
+    std::string_view model) noexcept;
+
+/// Every model id the Token Plan serves, in catalog order.
+[[nodiscard]] std::vector<std::string_view> mimo_token_plan_model_ids();
+
+/// True inside the Token Plan off-peak window, 00:00-08:00 Beijing time.
+[[nodiscard]] bool is_mimo_off_peak(
+    std::chrono::system_clock::time_point at) noexcept;
+
+/**
+ * Token Plan credits one call consumed: cache hits, cache misses and output
+ * (reasoning included) at the model's rates, times 0.8 off-peak. Zero for a
+ * model the plan does not serve.
+ */
+[[nodiscard]] double mimo_token_plan_credits(
+    const TokenUsage& usage,
+    std::string_view model,
+    std::chrono::system_clock::time_point at) noexcept;
 
 /**
  * Console/authorization origin, overridable with `MIMO_PLATFORM_URL` exactly

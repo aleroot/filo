@@ -10345,6 +10345,10 @@ RunResult run(RunOptions opts) {
         // a fallback for aggregate/router providers that expose subscription quota.
         const bool is_subscription = !llm_provider->should_estimate_cost()
             || !rate_limit_info.usage_windows.empty();
+        const double plan_credits = is_subscription
+            ? core::budget::BudgetTracker::get_instance().session_plan_credits(
+                  visible_session_id)
+            : 0.0;
 
         const auto visible_workspace = agent->workspace_snapshot();
 
@@ -10374,7 +10378,8 @@ RunResult run(RunOptions opts) {
                 is_subscription,
                 total,
                 cost,
-                ctx_pct);
+                ctx_pct,
+                plan_credits);
         } else if (review_details_panel_visible) {
             auto review_view = review_view_snapshot;
             if (review_view.elapsed.empty()
@@ -10672,7 +10677,8 @@ RunResult run(RunOptions opts) {
                     visible_session_id);
                 const std::string token_usage = format_subscription_token_usage(
                     total,
-                    !rate_limit_info.usage_windows.empty());
+                    !rate_limit_info.usage_windows.empty(),
+                    plan_credits);
                 if (!token_usage.empty()) {
                     budget_el = text("  " + token_usage) | color(ColorTextSecondary);
                 }

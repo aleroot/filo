@@ -1,10 +1,13 @@
 #pragma once
 
+#include "../llm/MimoModelTraits.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/Models.hpp"
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 #include <string_view>
 
 namespace core::budget {
@@ -68,8 +71,6 @@ namespace core::budget {
     if (model.find("gpt-4-turbo")      != std::string_view::npos) return   128'000;
     if (model.find("gpt-4")            != std::string_view::npos) return     8'192;
     if (model.find("gpt-3.5")          != std::string_view::npos) return    16'385;
-    if (model.find("mimo-v2-omni")     != std::string_view::npos) return   262'144;
-    if (model.find("mimo-v2-flash")    != std::string_view::npos) return   262'144;
     if (model.find("mimo-")            != std::string_view::npos) return 1'048'576;
     if (model == "mistral-vibe-cli-latest"
         || model.find("mistral-medium-3.5") != std::string_view::npos
@@ -104,13 +105,23 @@ struct ModelRates {
     double output_per_m = 8.00;
 };
 
-[[nodiscard]] inline ModelRates rates_for_model(std::string_view model) noexcept {
+/// Registry entry whose pricing is maintained as the authoritative rate card,
+/// cache-read rates included. Other vendors fall back to the table below.
+[[nodiscard]] inline std::shared_ptr<const core::llm::ModelInfo> registry_priced_model(
+    std::string_view model) noexcept {
     try {
-        if (const auto info = core::llm::ModelRegistry::instance().lookup(model);
-            info && info->provider == "anthropic") {
-            return {info->pricing.input_per_mtok, info->pricing.output_per_mtok};
+        auto info = core::llm::ModelRegistry::instance().lookup(model);
+        if (info && (info->provider == "anthropic" || info->provider == "mimo")) {
+            return info;
         }
     } catch (...) {}
+    return nullptr;
+}
+
+[[nodiscard]] inline ModelRates rates_for_model(std::string_view model) noexcept {
+    if (const auto info = registry_priced_model(model)) {
+        return {info->pricing.input_per_mtok, info->pricing.output_per_mtok};
+    }
     if (model.find("grok-code-fast-1") != std::string_view::npos) return { 0.20,  1.50 };
     if (model.find("grok-4-fast")      != std::string_view::npos) return { 0.20,  0.50 };
     if (model.find("grok-4.1-fast")    != std::string_view::npos) return { 0.20,  0.50 };
@@ -143,15 +154,6 @@ struct ModelRates {
     if (model.find("gpt-4o")      != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-4")       != std::string_view::npos) return {30.00, 60.00 };
     if (model.find("gpt-3.5")     != std::string_view::npos) return { 0.50,  1.50 };
-    if (model.find("mimo-v2.6-pro-ultraspeed") != std::string_view::npos
-        || model.find("mimo-v2-6-pro-ultraspeed") != std::string_view::npos) return { 4.35, 8.70 };
-    if (model.find("mimo-v2.5-pro-ultraspeed") != std::string_view::npos
-        || model.find("mimo-v2-5-pro-ultraspeed") != std::string_view::npos) return { 1.305, 2.61 };
-    if (model.find("mimo-v2.6-pro") != std::string_view::npos
-        || model.find("mimo-v2-6-pro") != std::string_view::npos
-        || model.find("mimo-v2.5-pro") != std::string_view::npos
-        || model.find("mimo-v2-5-pro") != std::string_view::npos
-        || model.find("mimo-v2-pro") != std::string_view::npos) return { 0.435, 0.87 };
     if (model.find("mimo-")         != std::string_view::npos) return { 0.14, 0.28 };
     if (model == "mistral-vibe-cli-latest"
         || model.find("mistral-medium-3.5") != std::string_view::npos
@@ -181,13 +183,19 @@ struct ModelRates {
 /// Both budget guardrails and session stats use the same cache-aware estimate.
 [[nodiscard]] inline double estimate_usage_cost(const core::llm::TokenUsage& usage,
                                                 std::string_view model) noexcept {
-    try {
-        if (const auto info = core::llm::ModelRegistry::instance().lookup(model);
-            info && info->provider == "anthropic") return info->estimate_cost(usage);
-    } catch (...) {}
+    if (const auto info = registry_priced_model(model)) return info->estimate_cost(usage);
     const auto rates = rates_for_model(model);
     return (static_cast<double>(usage.prompt_tokens) * rates.input_per_m
         + static_cast<double>(usage.completion_tokens) * rates.output_per_m) / 1'000'000.0;
+}
+
+/// Credits a plan that meters in credits rather than currency charges for one
+/// call; zero for a model no such plan serves. Only the MiMo Token Plan does.
+[[nodiscard]] inline double estimate_plan_credits(
+    const core::llm::TokenUsage& usage,
+    std::string_view model,
+    std::chrono::system_clock::time_point at) noexcept {
+    return core::llm::mimo_token_plan_credits(usage, model, at);
 }
 
 } // namespace core::budget

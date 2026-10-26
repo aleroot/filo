@@ -25,6 +25,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -757,7 +758,8 @@ std::string format_provider_setup_hint(std::string_view provider_name,
 
 std::string format_subscription_token_usage(
     const core::llm::TokenUsage& usage,
-    bool has_usage_windows) {
+    bool has_usage_windows,
+    double plan_credits) {
     if (!usage.has_data()) return {};
 
     const core::budget::formatters::CompactTokenCountFormatter formatter;
@@ -770,6 +772,9 @@ std::string format_subscription_token_usage(
     }
     if (!has_usage_windows && usage.reasoning_tokens > 0) {
         label += " R:" + formatter.format(usage.reasoning_tokens);
+    }
+    if (plan_credits > 0.0) {
+        label += " · " + formatter.format(std::llround(plan_credits)) + " cr";
     }
     return label;
 }

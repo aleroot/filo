@@ -48,18 +48,6 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.6-flash",
 }};
 
-// The MiMo Token Plan gateways and the pay-as-you-go host share one model
-// family but not one catalog: the plan does not serve the UltraSpeed tiers,
-// the omni line, or mimo-v2-flash. Claiming the plan models on both origins
-// keeps a plan key from being routed to api.xiaomimimo.com, which rejects it.
-constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
-    "mimo-v2.6-pro",
-    "mimo-v2.6-flash",
-    "mimo-v2.5-pro",
-    "mimo-v2.5",
-    "mimo-v2-pro",
-}};
-
 [[nodiscard]] std::string normalized(std::string_view value) {
     return core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(value));
@@ -132,14 +120,18 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
     return filter;
 }
 
+// The MiMo Token Plan gateways and the pay-as-you-go host share one model
+// family but not one catalog: the plan does not serve the UltraSpeed tier.
+// Claiming the plan models on both origins keeps a plan key from being routed
+// to api.xiaomimimo.com, which rejects it.
 [[nodiscard]] ProviderCatalogModelFilter mimo_token_plan_filter() {
     return model_filter(
-        ProviderCatalogModelRule::Include, kMimoTokenPlanModels);
+        ProviderCatalogModelRule::Include, mimo_token_plan_model_ids());
 }
 
 [[nodiscard]] ProviderCatalogModelFilter mimo_pay_as_you_go_filter() {
     return model_filter(
-        ProviderCatalogModelRule::Exclude, kMimoTokenPlanModels);
+        ProviderCatalogModelRule::Exclude, mimo_token_plan_model_ids());
 }
 
 [[nodiscard]] ProviderCatalogModelFilter qwen_public_dashscope_filter() {

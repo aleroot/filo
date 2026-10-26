@@ -7,8 +7,12 @@
  * MiMo is OpenAI-compatible, but the MiMo model gateway adds vendor behavior
  * that must stay on this subclass:
  *   - every MiMo model runs at temperature 1 (the reference client pins it)
- *   - reasoning is always on and streams back as `delta.reasoning_content`;
- *     there is no `reasoning_effort` knob to send
+ *   - thinking is on by default and toggled with `thinking:{type}`; there is
+ *     no effort scale, and reasoning tokens count against
+ *     `max_completion_tokens`
+ *   - prefix caching is automatic, so the stable prompt leads and the
+ *     per-turn system state trails the conversation (a cache hit costs
+ *     1/120 of a miss)
  *   - `X-Mimo-Source` identifies the client to the Token Plan gateway
  *   - moderation (421) and risk-control (441) blocks arrive under HTTP 400,
  *     with the real reason in `error.param` rather than `error.message`
@@ -37,18 +41,17 @@ mimo_stream_timeouts() noexcept {
 
 class MimoProtocol final : public OpenAIProtocol {
 public:
-    /// Always request stream usage so Token Plan consumption is visible.
-    explicit MimoProtocol(bool stream_usage = true)
-        : OpenAIProtocol(stream_usage) {}
+    /// Stream usage is always requested so Token Plan consumption is visible.
+    /// @param default_effort  Provider-configured effort for requests that name none.
+    explicit MimoProtocol(std::string default_effort = {})
+        : OpenAIProtocol(/*stream_usage=*/true),
+          default_effort_(std::move(default_effort)) {}
 
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
     [[nodiscard]] std::string_view name() const noexcept override { return "mimo"; }
 
-    /**
-     * MiMo models think by default and expose no effort control, so the
-     * request carries no reasoning field. `delta.reasoning_content` is already
-     * captured by OpenAIProtocol::parse_event.
-     */
+    /// Thinking is an on/off switch for MiMo models: `/effort off` disables
+    /// it and every other level maps to on.
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
 
@@ -61,10 +64,16 @@ public:
         const core::auth::AuthInfo& auth) const override;
     [[nodiscard]] std::string format_error_message(
         const HttpResponse& response) const override;
+    /// An `insufficient_quota` error is final; retrying it only burns time.
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<MimoProtocol>(*this);
     }
+
+private:
+    std::string default_effort_;
 };
 
 } // namespace core::llm::protocols

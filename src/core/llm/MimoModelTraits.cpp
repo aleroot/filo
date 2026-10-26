@@ -1,9 +1,11 @@
 #include "MimoModelTraits.hpp"
 
+#include "Models.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 
@@ -11,6 +13,25 @@ namespace core::llm {
 namespace {
 
 using core::utils::ascii::iequals;
+
+struct TokenPlanModel {
+    std::string_view id;
+    MimoTokenPlanRates rates;
+};
+
+// Credits per token from the Token Plan subscription page. They keep the
+// pay-as-you-go 1 : 120 : 240 (pro) and 1 : 50 : 100 (flash) ratios, which
+// is why a cache hit is the single largest saving available on the plan.
+constexpr std::array kTokenPlanModels{
+    TokenPlanModel{"mimo-v2.6-pro", {.cache_hit = 2.5, .cache_miss = 300.0, .output = 600.0}},
+    TokenPlanModel{"mimo-v2.6-flash", {.cache_hit = 2.0, .cache_miss = 100.0, .output = 200.0}},
+};
+
+constexpr double kOffPeakMultiplier = 0.8;
+/// Beijing time is UTC+8 all year; the off-peak window is 00:00-08:00 there,
+/// i.e. 16:00-24:00 UTC.
+constexpr std::chrono::hours kBeijingOffset{8};
+constexpr std::chrono::hours kOffPeakEnd{8};
 
 [[nodiscard]] std::string env_value(const char* name) {
     if (const char* raw = std::getenv(name); raw != nullptr && *raw != '\0') {
@@ -116,17 +137,55 @@ bool is_mimo_token_plan_endpoint(std::string_view base_url) {
 }
 
 bool is_mimo_endpoint(std::string_view base_url) {
+    // Whole-label match, so a look-alike such as `evilxiaomimimo.com` is not
+    // treated as a MiMo gateway.
     const std::string host = lowered_host(base_url);
-    return !host.empty() && host.ends_with("xiaomimimo.com");
+    return host == "xiaomimimo.com" || host.ends_with(".xiaomimimo.com");
 }
 
 bool is_mimo_model(std::string_view model) noexcept {
-    // Model ids are `mimo-v2.6-pro`, `mimo-v2-flash`, and friends. A bare
+    // Model ids are `mimo-v2.6-pro`, `mimo-v2.6-flash`, and friends. A bare
     // "mimo" prefix check would also claim unrelated ids such as
     // "mimosa-7b", so require the separator the family always uses.
     if (model.size() < 5) return false;
     if (!iequals(model.substr(0, 4), "mimo")) return false;
     return model[4] == '-' || model[4] == '_' || model[4] == '.';
+}
+
+std::vector<std::string_view> mimo_token_plan_model_ids() {
+    std::vector<std::string_view> ids;
+    ids.reserve(kTokenPlanModels.size());
+    for (const auto& model : kTokenPlanModels) ids.push_back(model.id);
+    return ids;
+}
+
+std::optional<MimoTokenPlanRates> mimo_token_plan_rates(
+    std::string_view model) noexcept {
+    const auto entry = std::ranges::find_if(kTokenPlanModels, [model](const TokenPlanModel& plan) {
+        return iequals(plan.id, model);
+    });
+    if (entry == kTokenPlanModels.end()) return std::nullopt;
+    return entry->rates;
+}
+
+bool is_mimo_off_peak(std::chrono::system_clock::time_point at) noexcept {
+    const auto beijing = at + kBeijingOffset;
+    const auto since_midnight = beijing - std::chrono::floor<std::chrono::days>(beijing);
+    return since_midnight < kOffPeakEnd;
+}
+
+double mimo_token_plan_credits(
+    const TokenUsage& usage,
+    std::string_view model,
+    std::chrono::system_clock::time_point at) noexcept {
+    const auto rates = mimo_token_plan_rates(model);
+    if (!rates) return 0.0;
+    const double prompt = std::max(0, usage.prompt_tokens);
+    const double hits = std::clamp<double>(usage.cached_prompt_tokens, 0.0, prompt);
+    const double credits = hits * rates->cache_hit
+        + (prompt - hits) * rates->cache_miss
+        + std::max(0, usage.completion_tokens) * rates->output;
+    return is_mimo_off_peak(at) ? credits * kOffPeakMultiplier : credits;
 }
 
 std::string mimo_platform_url() {

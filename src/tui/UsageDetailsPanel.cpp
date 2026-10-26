@@ -20,7 +20,10 @@ using namespace ftxui;
     if (count < 1'000'000) {
         return std::format("{:.1f}k", static_cast<double>(count) / 1'000.0);
     }
-    return std::format("{:.2f}M", static_cast<double>(count) / 1'000'000.0);
+    if (count < 1'000'000'000) {
+        return std::format("{:.2f}M", static_cast<double>(count) / 1'000'000.0);
+    }
+    return std::format("{:.2f}B", static_cast<double>(count) / 1'000'000'000.0);
 }
 
 [[nodiscard]] ftxui::Color utilization_color(float utilization) {
@@ -117,7 +120,8 @@ Element render_usage_details_panel(
     bool is_subscription,
     const core::llm::TokenUsage& session_tokens,
     double session_cost_usd,
-    int context_pct) {
+    int context_pct,
+    double plan_credits) {
     Elements rows;
 
     // ── Header & Active Model Badge ──────────────────────────────────────────
@@ -302,6 +306,13 @@ Element render_usage_details_panel(
         rows.push_back(hbox({
             text("    • Estimated Cost: ") | ftxui::color(ColorTextSecondary),
             text(std::format("${:.4f} USD", session_cost_usd)) | ftxui::bold | ftxui::color(ftxui::Color::Green),
+        }));
+    }
+
+    if (plan_credits > 0.0) {
+        rows.push_back(hbox({
+            text("    • Plan Credits Used (est.): ") | ftxui::color(ColorTextSecondary),
+            text(format_compact_number(std::llround(plan_credits))) | ftxui::bold | ftxui::color(ftxui::Color::Green),
         }));
     }
 

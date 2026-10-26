@@ -28,4 +28,8 @@ struct ReasoningEffortResolution {
     std::string_view configured,
     const ReasoningCapabilities& capabilities);
 
+/// True for the effort spellings that ask for no reasoning ("off", "none",
+/// "disabled"), ignoring case and surrounding whitespace.
+[[nodiscard]] bool is_reasoning_off_effort(std::string_view effort);
+
 } // namespace core::llm

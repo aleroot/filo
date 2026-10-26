@@ -29,6 +29,8 @@ namespace tui {
 
 /**
  * @brief Renders the complete usage details popover panel for active provider quotas and rate limits.
+ * @param plan_credits Subscription credits the session consumed, for plans
+ *                     that meter in credits rather than requests; 0 hides it.
  */
 [[nodiscard]] ftxui::Element render_usage_details_panel(
     const core::llm::protocols::RateLimitInfo& rate_limit_info,
@@ -38,6 +40,7 @@ namespace tui {
     bool is_subscription,
     const core::llm::TokenUsage& session_tokens,
     double session_cost_usd,
-    int context_pct);
+    int context_pct,
+    double plan_credits = 0.0);
 
 } // namespace tui

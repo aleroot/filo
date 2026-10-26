@@ -315,6 +315,8 @@ TEST_CASE("subscription token badge hides details beside quota windows",
     CHECK(format_subscription_token_usage(usage, true)
           == "↑92.1k ↓1.8k");
     CHECK(format_subscription_token_usage({}, true).empty());
+    CHECK(format_subscription_token_usage(usage, false, 28'140'250.0)
+          == "↑92.1k ↓1.8k C:56.6k R:1.7k · 28.1M cr");
 }
 
 TEST_CASE("authentication recovery panel explains safe retry",

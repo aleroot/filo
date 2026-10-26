@@ -2,6 +2,7 @@
 #include "core/config/ConfigSource.hpp"
 #include "HttpLLMProvider.hpp"
 #include "KimiModelTraits.hpp"
+#include "MimoModelTraits.hpp"
 #include "QwenModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
@@ -370,10 +371,14 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     effort, config.stream_usage);
             } else if (canonical_type == "mistral") {
                 protocol = std::make_unique<protocols::MistralProtocol>();
-            } else if (canonical_type.starts_with("mimo")) {
-                // Covers every preset prefix: mimo and the three regional
-                // mimo-token-plan gateways, which all share this contract.
-                protocol = std::make_unique<protocols::MimoProtocol>();
+            } else if (canonical_type.starts_with("mimo") || is_mimo_endpoint(base_url)) {
+                // Covers every preset prefix (mimo and the three regional
+                // mimo-token-plan gateways) and any user-defined provider
+                // pointed at a MiMo host: all share this contract, and the
+                // generic protocol would drop the reasoning replay MiMo
+                // requires in thinking mode.
+                protocol = std::make_unique<protocols::MimoProtocol>(
+                    config.reasoning_effort);
             } else {
                 const auto system_layout =
                     openai_endpoint::extract_host_lower(base_url) == "api.openai.com"

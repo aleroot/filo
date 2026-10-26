@@ -1,10 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/auth/ICredentialSource.hpp"
 #include "core/auth/MimoAuthenticationStrategy.hpp"
 #include "core/auth/MimoOAuthFlow.hpp"
+#include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenAccounting.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/MimoModelTraits.hpp"
@@ -13,6 +15,8 @@
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
+#include "core/llm/StrictToolPolicy.hpp"
 #include "core/llm/ToolCallAssembly.hpp"
 #include "core/llm/protocols/MimoProtocol.hpp"
 #include "core/utils/Base64.hpp"
@@ -24,6 +28,7 @@
 #include <cpr/cpr.h>
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -139,6 +144,19 @@ TEST_CASE("ProviderFactory creates MiMo providers", "[mimo][factory]") {
     CHECK(ProviderFactory::create_provider("mimo-token-plan-cn", config) != nullptr);
 }
 
+TEST_CASE("A user-defined provider on a MiMo host speaks the MiMo contract",
+          "[mimo][factory]") {
+    core::config::ProviderConfig config;
+    config.api_type = core::config::ApiType::OpenAI;
+    config.base_url = "https://token-plan-sgp.xiaomimimo.com/v1";
+    config.api_key = "tp-test";
+    config.model = "mimo-v2.6-pro";
+    const auto provider = ProviderFactory::create_provider("my-mimo", config);
+    REQUIRE(provider);
+    CHECK(provider->reasoning_capabilities("mimo-v2.6-pro")
+              .supports(ReasoningCapability::ToggleOnly));
+}
+
 TEST_CASE("Xiaomi is the login id; mimo remains an alias", "[mimo][auth]") {
     auto manager = core::auth::AuthenticationManager::create_with_defaults("/tmp");
     const auto providers = manager.available_login_providers();
@@ -176,6 +194,7 @@ TEST_CASE("MiMo regions map to gateways and presets", "[mimo][traits]") {
     CHECK_FALSE(is_mimo_token_plan_endpoint("https://api.xiaomimimo.com/v1"));
     CHECK(is_mimo_endpoint("https://api.xiaomimimo.com/v1"));
     CHECK_FALSE(is_mimo_endpoint("https://api.openai.com/v1"));
+    CHECK_FALSE(is_mimo_endpoint("https://evilxiaomimimo.com/v1"));
 }
 
 TEST_CASE("MiMo model detection requires the family separator", "[mimo][traits]") {
@@ -216,16 +235,94 @@ TEST_CASE("MiMo requests stream usage", "[mimo][serializer]") {
                      R"("stream_options":{"include_usage":true})"));
 }
 
-TEST_CASE("MiMo sends no reasoning_effort field", "[mimo][serializer]") {
-    // Thinking is always on and has no request-side control, so advertising
-    // effort support would make the UI offer a knob the API ignores.
+TEST_CASE("MiMo exposes thinking as an on/off switch", "[mimo][serializer][reasoning]") {
+    const auto capabilities = MimoProtocol().reasoning_capabilities("mimo-v2.6-pro");
+    CHECK(capabilities.supports(ReasoningCapability::ToggleOnly));
+    CHECK(capabilities.supports(ReasoningCapability::Disable));
+    // There is no effort scale, so no level may be offered as one.
+    CHECK_FALSE(capabilities.supports_effort());
+    CHECK(MimoProtocol().reasoning_capabilities("gpt-5.6-sol").empty());
+    CHECK(resolve_reasoning_effort("high", capabilities).effective == "on");
+    CHECK(resolve_reasoning_effort("off", capabilities).effective == "off");
+}
+
+TEST_CASE("MiMo sends the thinking opt-out only when thinking is off",
+          "[mimo][serializer][reasoning]") {
+    constexpr std::string_view kDisabled = R"("thinking":{"type":"disabled"})";
     ChatRequest req = make_mimo_request();
-    req.effort = "high";
+
+    SECTION("the server default stays implicit") {
+        CHECK_THAT(MimoProtocol().serialize(req), !Catch::Matchers::ContainsSubstring("thinking"));
+    }
+    SECTION("an enabled level never becomes reasoning_effort") {
+        req.effort = "high";
+        const std::string payload = MimoProtocol().serialize(req);
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking"));
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    }
+    SECTION("effort off disables thinking") {
+        req.effort = "off";
+        CHECK_THAT(MimoProtocol().serialize(req), Catch::Matchers::ContainsSubstring(std::string(kDisabled)));
+    }
+    SECTION("a provider default of off applies to requests that name no effort") {
+        CHECK_THAT(MimoProtocol("none").serialize(req),
+                   Catch::Matchers::ContainsSubstring(std::string(kDisabled)));
+        req.effort = "high";
+        CHECK_THAT(MimoProtocol("none").serialize(req), !Catch::Matchers::ContainsSubstring("thinking"));
+    }
+    SECTION("JSON helper calls do not spend their budget thinking") {
+        req.response_format = {.type = ResponseFormat::Type::JsonObject};
+        req.max_tokens = 1400;
+        CHECK_THAT(MimoProtocol("high").serialize(req),
+                   Catch::Matchers::ContainsSubstring(std::string(kDisabled)));
+        // An explicit request level still wins.
+        req.effort = "high";
+        CHECK_THAT(MimoProtocol().serialize(req), !Catch::Matchers::ContainsSubstring("thinking"));
+    }
+}
+
+TEST_CASE("MiMo caps output with the documented max_completion_tokens field",
+          "[mimo][serializer]") {
+    ChatRequest req = make_mimo_request();
+    req.max_tokens = 1400;
     const std::string payload = MimoProtocol().serialize(req);
-    CHECK_THAT(payload,
-               !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    CHECK_FALSE(MimoProtocol().reasoning_capabilities("mimo-v2.6-pro")
-                    .supports_effort());
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_completion_tokens":1400)"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("max_tokens")"));
+}
+
+TEST_CASE("MiMo keeps per-turn state behind the cached prefix",
+          "[mimo][serializer][prompt-cache]") {
+    const auto request_with_state = [](std::string_view state) {
+        ChatRequest req = make_mimo_request();
+        req.prompt_plan.append({
+            .kind = core::context::ContextLayerKind::RuntimeInstructions,
+            .stability = core::context::PromptStability::Stable,
+            .name = "runtime", .content = "STABLE_RUNTIME",
+        });
+        req.prompt_plan.append({
+            .kind = core::context::ContextLayerKind::ConversationState,
+            .stability = core::context::PromptStability::Dynamic,
+            .name = "conversation_state", .content = std::string(state),
+        });
+        return req;
+    };
+    const std::string first = MimoProtocol().serialize(request_with_state("TASK_ONE"));
+    const std::string second = MimoProtocol().serialize(request_with_state("TASK_TWO"));
+
+    const auto tail_at = [](const std::string& payload) {
+        return payload.find(R"({"role":"system","content":"TASK_)");
+    };
+    REQUIRE(tail_at(first) != std::string::npos);
+    // Byte-identical up to the dynamic tail, so the automatic prefix cache hits.
+    CHECK(first.substr(0, tail_at(first)) == second.substr(0, tail_at(second)));
+    CHECK(first.find(R"({"role":"system","content":"STABLE_RUNTIME"})") < first.find(R"("role":"user")"));
+    CHECK(first.find(R"("role":"user")") < tail_at(first));
+}
+
+TEST_CASE("MiMo tool schemas can opt into strict mode", "[mimo][strict]") {
+    CHECK(model_supports_strict_tools(ToolSchemaWire::OpenAI, "mimo-v2.6-pro"));
+    CHECK(model_supports_strict_tools(ToolSchemaWire::OpenAI, "MiMo-V2.6-Flash"));
+    CHECK_FALSE(model_supports_strict_tools(ToolSchemaWire::OpenAI, "mimosa-7b"));
 }
 
 TEST_CASE("MiMo widens the stream idle budget", "[mimo][timeouts]") {
@@ -376,6 +473,27 @@ TEST_CASE("MiMo quota exhaustion points at the console", "[mimo][errors]") {
                Catch::Matchers::ContainsSubstring("platform.xiaomimimo.com"));
 }
 
+TEST_CASE("MiMo stops retrying only when the plan quota is provably exhausted",
+          "[mimo][errors][retry]") {
+    const cpr::Header headers;
+    const auto retryable = [&](int status, std::string_view body) {
+        return MimoProtocol().is_retryable(
+            HttpResponse{.status_code = status, .body = body, .headers = headers});
+    };
+    constexpr std::string_view kExhausted =
+        R"({"error":{"code":"insufficient_quota","message":"quota exceeded"}})";
+    // A rate limit and an exhausted plan share 429; only the code separates them.
+    CHECK(retryable(429, R"({"error":{"code":"429","message":"Too many requests","type":"limitation"}})"));
+    CHECK(retryable(429, "not json"));
+    CHECK_FALSE(retryable(429, kExhausted));
+    CHECK_FALSE(retryable(429, R"({"error":{"type":"insufficient_quota"}})"));
+    CHECK(retryable(503, "{}"));
+
+    const std::string message = format_error(429, kExhausted);
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("quota exhausted"));
+    CHECK_THAT(message, !Catch::Matchers::ContainsSubstring("Rate limited"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Model registry and accounting
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,16 +509,68 @@ TEST_CASE("MiMo flagship models are registered", "[mimo][registry]") {
     CHECK(has_capability(pro->capabilities, ModelCapability::Vision));
     CHECK(has_capability(pro->capabilities, ModelCapability::PdfInput));
 
-    const auto flash = registry.lookup("mimo-v2-flash");
+    const auto flash = registry.lookup("mimo-v2.6-flash");
     REQUIRE(flash != nullptr);
-    CHECK(flash->context_window == 262'144);
+    CHECK(flash->context_window == 1'048'576);
+
+    // The retired V2 and V2.5 lines are not offered.
+    for (const auto retired : {"mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni",
+                               "mimo-v2-flash", "mimo-v2.5-pro-ultraspeed"}) {
+        CAPTURE(retired);
+        const auto info = registry.lookup(retired);
+        CHECK((info == nullptr || info->provider != "mimo"));
+    }
 }
 
 TEST_CASE("MiMo context windows are known to the budget tracker",
           "[mimo][accounting]") {
     CHECK(core::budget::context_window_for_model("mimo-v2.6-pro") == 1'048'576);
-    CHECK(core::budget::context_window_for_model("mimo-v2-omni") == 262'144);
-    CHECK(core::budget::context_window_for_model("mimo-v2-flash") == 262'144);
+    CHECK(core::budget::context_window_for_model("mimo-v2.6-flash") == 1'048'576);
+}
+
+TEST_CASE("MiMo pay-as-you-go cost estimates price cache hits", "[mimo][accounting]") {
+    const TokenUsage cold{.prompt_tokens = 1'000'000, .completion_tokens = 0};
+    const TokenUsage warm{.prompt_tokens = 1'000'000, .completion_tokens = 0,
+                          .cached_prompt_tokens = 1'000'000};
+    CHECK(core::budget::estimate_usage_cost(cold, "mimo-v2.6-pro") == Catch::Approx(0.435));
+    CHECK(core::budget::estimate_usage_cost(warm, "mimo-v2.6-pro") == Catch::Approx(0.0036));
+    CHECK(core::budget::rates_for_model("mimo-v2.6-pro-ultraspeed").output_per_m
+          == Catch::Approx(8.70));
+}
+
+TEST_CASE("MiMo Token Plan credits follow the plan's rate card", "[mimo][accounting]") {
+    using namespace std::chrono;
+    // 2026-10-26 04:00 UTC is 12:00 in Beijing (peak); 18:00 UTC is 02:00 (off-peak).
+    const auto peak = sys_days{2026y / October / 26} + 4h;
+    const auto off_peak = sys_days{2026y / October / 26} + 18h;
+    CHECK_FALSE(is_mimo_off_peak(peak));
+    CHECK(is_mimo_off_peak(off_peak));
+    CHECK_FALSE(is_mimo_off_peak(sys_days{2026y / October / 26} + 0h));  // 08:00 Beijing
+    CHECK(is_mimo_off_peak(sys_days{2026y / October / 26} + 16h));       // 00:00 Beijing
+
+    const TokenUsage usage{.prompt_tokens = 1'000, .completion_tokens = 100,
+                           .cached_prompt_tokens = 800};
+    // 800 hits x 2.5 + 200 misses x 300 + 100 output x 600.
+    CHECK(mimo_token_plan_credits(usage, "mimo-v2.6-pro", peak) == Catch::Approx(122'000.0));
+    CHECK(mimo_token_plan_credits(usage, "mimo-v2.6-pro", off_peak) == Catch::Approx(97'600.0));
+    // 800 x 2 + 200 x 100 + 100 x 200.
+    CHECK(mimo_token_plan_credits(usage, "mimo-v2.6-flash", peak) == Catch::Approx(41'600.0));
+    // UltraSpeed is not served on the plan.
+    CHECK(mimo_token_plan_credits(usage, "mimo-v2.6-pro-ultraspeed", peak) == 0.0);
+}
+
+TEST_CASE("Plan credits accumulate only for plan-billed calls", "[mimo][accounting]") {
+    auto& tracker = core::budget::BudgetTracker::get_instance();
+    const std::string session = "mimo-plan-credits-test";
+    tracker.reset_session(session);
+    const TokenUsage usage{.prompt_tokens = 1'000, .completion_tokens = 0, .total_tokens = 1'000};
+    tracker.record_event({.session_id = session, .model = "mimo-v2.6-flash", .usage = usage,
+                          .should_estimate_cost = false, .billable = false});
+    tracker.record_event({.session_id = session, .model = "mimo-v2.6-flash", .usage = usage});
+    const double credits = tracker.session_plan_credits(session);
+    // One plan call of 1000 cache misses at 100 credits, possibly off-peak.
+    CHECK((credits == Catch::Approx(100'000.0) || credits == Catch::Approx(80'000.0)));
+    tracker.reset_session(session);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
