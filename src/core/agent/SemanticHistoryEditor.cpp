@@ -5,15 +5,15 @@
 #include <format>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace core::agent {
 namespace {
 
-[[nodiscard]] bool is_successful_result(const core::llm::Message& message) {
-    simdjson::dom::parser parser;
-    simdjson::padded_string padded(message.content);
+[[nodiscard]] bool is_successful_result(
+    const core::llm::Message& message, simdjson::dom::parser& parser) {
     simdjson::dom::object object;
-    if (parser.parse(padded).get(object) != simdjson::SUCCESS) return false;
+    if (parser.parse(message.content).get(object) != simdjson::SUCCESS) return false;
 
     simdjson::dom::element error;
     if (object["error"].get(error) == simdjson::SUCCESS) return false;
@@ -27,51 +27,55 @@ namespace {
 } // namespace
 
 SemanticHistoryEditResult SemanticHistoryEditor::edit(
-    const std::vector<core::llm::Message>& history,
+    std::vector<core::llm::Message> history,
     SemanticHistoryEditPolicy policy) {
-    SemanticHistoryEditResult result{.messages = history};
-    if (history.empty()) return result;
+    SemanticHistoryEditResult result{.messages = std::move(history)};
+    auto& messages = result.messages;
+    const std::size_t editable_end = messages.size() > policy.protected_tail_messages
+        ? messages.size() - policy.protected_tail_messages
+        : 0;
+    if (editable_end == 0) return result;
 
     std::unordered_map<std::string, std::string> key_by_call_id;
-    for (const auto& message : history) {
+    for (const auto& message : messages) {
         if (message.role != "assistant") continue;
         for (const auto& call : message.tool_calls) {
             const std::string key = ToolCallDeduplicator::key_for_call(call);
             if (!call.id.empty() && !key.empty()) key_by_call_id[call.id] = key;
         }
     }
+    if (key_by_call_id.empty()) return result;
 
+    // Walk newest first: once a successful observation is known, only older
+    // editable results need parsing. Non-observation output is never parsed.
+    // The retained index always names the newest successful result, including
+    // protected or signed results that must themselves remain untouched.
     std::unordered_map<std::string, std::size_t> latest_result_by_key;
-    for (std::size_t i = 0; i < history.size(); ++i) {
-        const auto& message = history[i];
-        if (message.role != "tool" || !is_successful_result(message)) continue;
-        if (const auto found = key_by_call_id.find(message.tool_call_id);
-            found != key_by_call_id.end()) {
-            latest_result_by_key[found->second] = i;
-        }
-    }
-
-    const std::size_t editable_end = history.size() > policy.protected_tail_messages
-        ? history.size() - policy.protected_tail_messages
-        : 0;
-    for (std::size_t i = 0; i < editable_end; ++i) {
-        auto& message = result.messages[i];
-        if (message.role != "tool"
-            || message.content.size() < policy.minimum_result_chars
-            || !message.continuation_items.empty()
-            || !is_successful_result(message)) {
-            continue;
-        }
+    simdjson::dom::parser parser;
+    for (std::size_t next = messages.size(); next > 0; --next) {
+        const std::size_t i = next - 1;
+        auto& message = messages[i];
+        if (message.role != "tool") continue;
         const auto key = key_by_call_id.find(message.tool_call_id);
         if (key == key_by_call_id.end()) continue;
         const auto latest = latest_result_by_key.find(key->second);
-        if (latest == latest_result_by_key.end() || latest->second <= i) continue;
+        if (latest != latest_result_by_key.end()
+            && (i >= editable_end
+                || message.content.size() < policy.minimum_result_chars
+                || !message.continuation_items.empty())) continue;
+        if (!is_successful_result(message, parser)) continue;
+        if (latest == latest_result_by_key.end()) {
+            latest_result_by_key.emplace(key->second, i);
+            continue;
+        }
 
         const std::size_t original_chars = message.content.size();
-        message.content = std::format(
+        auto replacement = std::format(
             R"({{"context_edit":"superseded_tool_result","original_chars":{},"newer_message_index":{}}})",
             original_chars,
             latest->second);
+        if (replacement.size() >= original_chars) continue;
+        message.content = std::move(replacement);
         ++result.superseded_results;
         result.characters_removed += original_chars - message.content.size();
     }

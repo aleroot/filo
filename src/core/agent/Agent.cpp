@@ -2091,14 +2091,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     if (context_before_edit.max_context_tokens > 0
         && context_before_edit.estimated_context_tokens * 100
             >= static_cast<std::size_t>(context_before_edit.max_context_tokens) * 65) {
-        auto edited = SemanticHistoryEditor::edit(request.messages);
+        auto edited = SemanticHistoryEditor::edit(std::move(request.messages));
         if (edited.superseded_results > 0) {
             core::logging::debug(
                 "[Agent] Semantic context edit removed {} chars from {} superseded tool results",
                 edited.characters_removed,
                 edited.superseded_results);
-            request.messages = std::move(edited.messages);
         }
+        request.messages = std::move(edited.messages);
     }
     if (provider->capabilities().supports_tool_calls) {
         request.tools = skill_manager_.get_all_tools(session_context_snapshot().transport);

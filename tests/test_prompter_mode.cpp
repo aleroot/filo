@@ -54,6 +54,10 @@ public:
         set_last_usage(prompt_tokens, completion_tokens);
     }
 
+    void publish_usage(const core::llm::TokenUsage& usage) noexcept {
+        set_last_usage(usage);
+    }
+
     [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
         return caps;
     }
@@ -581,7 +585,9 @@ TEST_CASE("prompter json stats include attributed per-tool cost table", "[prompt
     provider->on_stream = [provider, calls](const auto&, auto callback) {
         const int call = calls->fetch_add(1, std::memory_order_acq_rel) + 1;
         if (call == 1) {
-            provider->publish_usage(1000, 200);
+            provider->publish_usage({.prompt_tokens = 1000, .completion_tokens = 200,
+                .total_tokens = 1200, .cached_prompt_tokens = 600,
+                .cache_creation_prompt_tokens = 100, .reasoning_tokens = 80});
 
             core::llm::ToolCall tool_call;
             tool_call.index = 0;
@@ -597,7 +603,9 @@ TEST_CASE("prompter json stats include attributed per-tool cost table", "[prompt
             return;
         }
 
-        provider->publish_usage(500, 50);
+        provider->publish_usage({.prompt_tokens = 500, .completion_tokens = 50,
+            .total_tokens = 550, .cached_prompt_tokens = 200,
+            .cache_creation_prompt_tokens = 50, .reasoning_tokens = 20});
         callback(core::llm::StreamChunk::make_content("done"));
         callback(core::llm::StreamChunk::make_final());
     };
@@ -626,6 +634,10 @@ TEST_CASE("prompter json stats include attributed per-tool cost table", "[prompt
     REQUIRE_THAT(out.str(), ContainsSubstring(R"("cost_usd":0.001600)"));
     REQUIRE_THAT(out.str(), ContainsSubstring(R"("argument_tokens":1)"));
     REQUIRE_THAT(out.str(), ContainsSubstring(R"("result_tokens":)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("prompt_tokens":1500)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("cached_prompt_tokens":800)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("cache_creation_prompt_tokens":150)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("reasoning_tokens":100)"));
 }
 
 TEST_CASE("prompter stream-json emits partial events", "[prompter][stream-json]") {

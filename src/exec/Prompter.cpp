@@ -307,6 +307,9 @@ void register_default_tools(core::tools::ToolManager& tool_manager,
             writer.kv_num("prompt_tokens", totals.prompt_tokens).comma()
                   .kv_num("completion_tokens", totals.completion_tokens).comma()
                   .kv_num("total_tokens", totals.total_tokens).comma()
+                  .kv_num("cached_prompt_tokens", totals.cached_prompt_tokens).comma()
+                  .kv_num("cache_creation_prompt_tokens", totals.cache_creation_prompt_tokens).comma()
+                  .kv_num("reasoning_tokens", totals.reasoning_tokens).comma()
                   .key("cost_usd").raw(format_double(cost_usd));
         }
 

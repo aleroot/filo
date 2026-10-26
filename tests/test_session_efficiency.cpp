@@ -5,6 +5,55 @@
 #include "core/session/SessionEfficiencyController.hpp"
 #include "core/session/SessionHandoff.hpp"
 
+TEST_CASE("SessionEfficiencyController retains its initial baseline across window wraps",
+          "[session][efficiency]") {
+    core::session::SessionEfficiencyController controller;
+    for (const int tokens : {1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000})
+        controller.record_turn({.prompt_tokens = tokens});
+
+    auto decision = controller.current_decision();
+    CHECK(decision.turn_count == 9);
+    CHECK(decision.waste_factor == 3.0); // latest four / original four
+
+    for (int i = 0; i < 10'000; ++i)
+        controller.record_turn({.prompt_tokens = 10'000,
+            .estimated_history_tokens = 40'000, .max_context_tokens = 200'000,
+            .provider_supports_prompt_caching = true});
+
+    decision = controller.current_decision();
+    CHECK(decision.turn_count == 10'009);
+    CHECK(decision.waste_factor == 4.0);
+    CHECK(decision.estimated_history_tokens == 40'000);
+    CHECK(decision.context_utilization == 0.2);
+    CHECK(decision.action == core::session::SessionEfficiencyDecision::Action::None);
+}
+
+TEST_CASE("SessionEfficiencyController reset discards both windows and latest provider state",
+          "[session][efficiency]") {
+    core::session::SessionEfficiencyController controller;
+    for (int i = 0; i < 12; ++i)
+        controller.record_turn({.prompt_tokens = 80'000,
+            .estimated_history_tokens = 90'000, .max_context_tokens = 96'000,
+            .provider_is_local = true});
+    REQUIRE(controller.current_decision().action == core::session::SessionEfficiencyDecision::Action::Rotate);
+
+    controller.reset();
+    const auto empty = controller.current_decision();
+    CHECK(empty.turn_count == 0);
+    CHECK(empty.estimated_history_tokens == 0);
+    CHECK(empty.waste_factor == 1.0);
+    CHECK(empty.context_utilization == 0.0);
+    CHECK(empty.action == core::session::SessionEfficiencyDecision::Action::None);
+
+    controller.record_turn({.prompt_tokens = -10});
+    controller.record_turn({.prompt_tokens = 200});
+    const auto fresh = controller.current_decision();
+    CHECK(fresh.turn_count == 2);
+    CHECK(fresh.waste_factor == 1.0);
+    CHECK(fresh.estimated_history_tokens == 0);
+    CHECK(fresh.action == core::session::SessionEfficiencyDecision::Action::None);
+}
+
 TEST_CASE("SessionEfficiencyController rotates remote sessions after large waste growth",
           "[session][efficiency]") {
     core::session::SessionEfficiencyController controller;

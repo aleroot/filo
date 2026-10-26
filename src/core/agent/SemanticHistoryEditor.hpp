@@ -28,8 +28,10 @@ struct SemanticHistoryEditResult {
  */
 class SemanticHistoryEditor {
 public:
+    // Pass an owned request history with std::move to edit it without copying
+    // its payloads again. Passing an lvalue still preserves the caller's data.
     [[nodiscard]] static SemanticHistoryEditResult edit(
-        const std::vector<core::llm::Message>& history,
+        std::vector<core::llm::Message> history,
         SemanticHistoryEditPolicy policy = {});
 };
 

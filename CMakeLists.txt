@@ -683,6 +683,12 @@ set_target_properties(filo PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
+# Explicitly built, offline benchmark for lossless request-preparation changes.
+add_executable(filo_context_benchmark EXCLUDE_FROM_ALL
+    benchmarks/context_preparation.cpp)
+target_link_libraries(filo_context_benchmark PRIVATE filo_core)
+set_target_properties(filo_context_benchmark PROPERTIES FOLDER "Filo/Benchmarks")
+
 install(TARGETS filo
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     COMPONENT Runtime

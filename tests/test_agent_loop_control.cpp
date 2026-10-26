@@ -268,6 +268,10 @@ private:
 
 class CapturingProvider final : public core::llm::LLMProvider {
 public:
+    int context_size = 0;
+
+    [[nodiscard]] int max_context_size() const noexcept override { return context_size; }
+
     void stream_response(
         const core::llm::ChatRequest& request,
         std::function<void(const core::llm::StreamChunk&)> callback) override {
@@ -899,6 +903,65 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
 }
 
 } // namespace
+
+TEST_CASE("Agent prepares owned high-context requests without losing history",
+          "[agent][context-edit][regression]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    provider->context_size = 200'000;
+    core::tools::ToolManager tools;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context());
+    std::vector<core::llm::Message> history;
+    bool expects_edit = false;
+
+    SECTION("no eligible observation results") {
+        for (int i = 0; i < 12; ++i)
+            history.push_back({.role = "user", .content = std::string(44'000, 'a' + i)});
+    }
+    SECTION("only superseded request observations are edited") {
+        expects_edit = true;
+        for (const std::string id : {"old", "latest"}) {
+            core::llm::ToolCall call;
+            call.id = id;
+            call.function.name = "read";
+            call.function.arguments = R"({"path":"src/a.cpp"})";
+            history.push_back({.role = "assistant", .tool_calls = {std::move(call)}});
+            history.push_back({.role = "tool",
+                .content = R"({"content":")" + std::string(200'000, 'x') + R"("})",
+                .name = "read", .tool_call_id = id});
+        }
+        for (int i = 0; i < 8; ++i)
+            history.push_back({.role = "assistant", .content = std::string(16'000, 'a' + i)});
+    }
+
+    agent->load_history(history, "", "BUILD");
+    send_and_wait(agent, "Continue using the existing evidence.");
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests.front().messages.size() >= history.size());
+    CHECK(std::ranges::any_of(requests.front().messages, [](const auto& message) {
+        return message.content.contains("Continue using the existing evidence.");
+    }));
+    const auto durable = agent->get_history();
+    for (const auto& original : history)
+        CHECK(std::ranges::any_of(durable, [&](const auto& message) {
+            return message.role == original.role && message.content == original.content
+                && message.tool_call_id == original.tool_call_id;
+        }));
+
+    if (expects_edit) {
+        const auto old = std::ranges::find_if(requests.front().messages, [](const auto& message) {
+            return message.role == "tool" && message.tool_call_id == "old";
+        });
+        REQUIRE(old != requests.front().messages.end());
+        CHECK(old->content.contains("superseded_tool_result"));
+    } else {
+        for (const auto& original : history)
+            CHECK(std::ranges::any_of(requests.front().messages, [&](const auto& message) {
+                return message.role == original.role && message.content == original.content;
+            }));
+    }
+}
 
 TEST_CASE("Agent appends history-only user messages without model turn", "[agent][history]") {
     auto provider = std::make_shared<CapturingProvider>();
@@ -2141,7 +2204,7 @@ TEST_CASE("Agent loads AGENTS.md hierarchically from repo root to workspace root
 TEST_CASE("Agent enforces per-turn model and tool constraints",
           "[agent][turn][constraints]") {
     auto provider = std::make_shared<CapturingProvider>();
-    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::tools::ToolManager tool_manager;
     tool_manager.register_tool(std::make_shared<NamedNoopTool>("allowed_tool"));
     tool_manager.register_tool(std::make_shared<NamedNoopTool>("blocked_tool"));
 

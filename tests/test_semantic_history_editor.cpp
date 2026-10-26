@@ -3,6 +3,7 @@
 #include "core/agent/SemanticHistoryEditor.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -84,4 +85,101 @@ TEST_CASE("semantic history editor preserves errors recent results and opaque st
     CHECK(edited.messages[1].content == large_error);
     CHECK(edited.messages[5].content == opaque_result.content);
     CHECK(edited.messages[5].continuation_items.size() == 1);
+}
+
+TEST_CASE("semantic history editor consumes owned request storage without another payload copy",
+          "[agent][context-edit]") {
+    std::vector<core::llm::Message> history{
+        read_call("old", R"({"path":"src/a.cpp"})"),
+        result("old", large_payload('a')),
+        read_call("new", R"({"path":"src/a.cpp"})"),
+        result("new", large_payload('b')),
+    };
+    auto* const storage = history.data();
+    const char* const latest_payload = history.back().content.data();
+    const auto edited = core::agent::SemanticHistoryEditor::edit(
+        std::move(history), {.protected_tail_messages = 0});
+
+    CHECK(edited.messages.data() == storage);
+    CHECK(edited.messages.back().content.data() == latest_payload);
+    CHECK(edited.superseded_results == 1);
+    CHECK(edited.messages.back().content == large_payload('b'));
+}
+
+TEST_CASE("semantic history editor restores an entirely protected owned history",
+          "[agent][context-edit]") {
+    std::vector<core::llm::Message> history{
+        read_call("old", R"({"path":"src/a.cpp"})"),
+        result("old", large_payload('a')),
+        read_call("new", R"({"path":"src/a.cpp"})"),
+        result("new", large_payload('b')),
+    };
+    auto* const storage = history.data();
+    const auto edited = core::agent::SemanticHistoryEditor::edit(std::move(history));
+
+    REQUIRE(edited.messages.size() == 4);
+    CHECK(edited.messages.data() == storage);
+    CHECK(edited.superseded_results == 0);
+    CHECK(edited.characters_removed == 0);
+    CHECK(edited.messages[1].content == large_payload('a'));
+    CHECK(edited.messages[3].content == large_payload('b'));
+}
+
+TEST_CASE("semantic history editor retains the newest success when the last observation failed",
+          "[agent][context-edit]") {
+    const std::string small_success = R"({"content":"updated"})";
+    const std::string failure = R"({"isError":true,"content":"read failed"})";
+    const std::vector<core::llm::Message> history{
+        read_call("old", R"({"path":"src/a.cpp"})"),
+        result("old", large_payload('a')),
+        read_call("new", R"({"path":"src/a.cpp"})"),
+        result("new", small_success),
+        read_call("failed", R"({"path":"src/a.cpp"})"),
+        result("failed", failure),
+    };
+    const auto edited = core::agent::SemanticHistoryEditor::edit(
+        history, {.protected_tail_messages = 2});
+
+    REQUIRE(edited.superseded_results == 1);
+    CHECK(edited.messages[1].content.find(R"("newer_message_index":3)") != std::string::npos);
+    CHECK(edited.messages[3].content == small_success);
+    CHECK(edited.messages[5].content == failure);
+}
+
+TEST_CASE("semantic history editor keeps malformed and untracked tool output verbatim",
+          "[agent][context-edit]") {
+    auto shell_call = read_call("shell", R"({"command":"make test"})");
+    shell_call.tool_calls.front().function.name = "run_terminal_command";
+    const std::vector<core::llm::Message> history{
+        shell_call,
+        result("shell", large_payload('s')),
+        read_call("bad", R"({"path":"src/a.cpp"})"),
+        result("bad", std::string(4096, 'x')),
+        read_call("good", R"({"path":"src/a.cpp"})"),
+        result("good", large_payload('g')),
+    };
+    const auto edited = core::agent::SemanticHistoryEditor::edit(
+        history, {.protected_tail_messages = 0});
+
+    CHECK(edited.superseded_results == 0);
+    CHECK(edited.messages[1].content == history[1].content);
+    CHECK(edited.messages[3].content == history[3].content);
+    CHECK(edited.messages[5].content == history[5].content);
+}
+
+TEST_CASE("semantic history editor never enlarges tiny results under a custom threshold",
+          "[agent][context-edit]") {
+    const std::vector<core::llm::Message> history{
+        read_call("old", R"({"path":"src/a.cpp"})"),
+        result("old", "{}"),
+        read_call("new", R"({"path":"src/a.cpp"})"),
+        result("new", R"({"content":"updated"})"),
+    };
+    const auto edited = core::agent::SemanticHistoryEditor::edit(
+        history, {.protected_tail_messages = 0, .minimum_result_chars = 0});
+
+    CHECK(edited.superseded_results == 0);
+    CHECK(edited.characters_removed == 0);
+    CHECK(edited.messages[1].content == history[1].content);
+    CHECK(edited.messages[3].content == history[3].content);
 }
