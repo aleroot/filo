@@ -1223,8 +1223,11 @@ Element render_model_provider_picker_panel(
     int selected_index,
     bool local_model_available) {
     std::vector<Element> rows;
-    rows.reserve(providers.size());
-    for (std::size_t i = 0; i < providers.size(); ++i) {
+    const auto [first, last] = picker_visible_range(
+        static_cast<int>(providers.size()), selected_index, kCommandPickerMaxDisplayRows);
+    if (first > 0) rows.push_back(text(std::format("↑ {} more above", first)) | dim);
+    for (int index = first; index < last; ++index) {
+        const auto i = static_cast<std::size_t>(index);
         const auto& provider = providers[i];
         std::string label = std::format("[{}] {}", i + 1, provider.name);
         if (provider.active) {
@@ -1237,6 +1240,9 @@ Element render_model_provider_picker_panel(
             provider.credentials_missing
                 ? Color{FillSelection}
                 : Color{FillYellowDark}));
+    }
+    if (last < static_cast<int>(providers.size())) {
+        rows.push_back(text(std::format("↓ {} more below", providers.size() - last)) | dim);
     }
 
     return vbox({
@@ -1255,7 +1261,7 @@ Element render_model_provider_picker_panel(
             ? (text("L: browse local GGUF files   Esc: close") | dim)
             : (text("Esc closes this panel.") | dim),
     }) | UiBorder(ColorYellowBright)
-      | size(HEIGHT, GREATER_THAN, std::max(12, static_cast<int>(providers.size()) * 2 + 6));
+      | size(HEIGHT, GREATER_THAN, std::max(12, (last - first) * 2 + 6));
 }
 
 Element render_provider_model_picker_panel(
@@ -1263,8 +1269,14 @@ Element render_provider_model_picker_panel(
     const std::vector<ModelPickerRow>& models,
     int selected_index) {
     std::vector<Element> rows;
-    rows.reserve(models.size());
-    for (std::size_t i = 0; i < models.size(); ++i) {
+    // Rendering the entire catalog lets vbox shrink descriptions to zero
+    // height when the models outgrow the terminal. Bound the viewport and
+    // move it with selection, as in the command and option pickers.
+    const auto [first, last] = picker_visible_range(
+        static_cast<int>(models.size()), selected_index, kCommandPickerMaxDisplayRows);
+    if (first > 0) rows.push_back(text(std::format("↑ {} more above", first)) | dim);
+    for (int index = first; index < last; ++index) {
+        const auto i = static_cast<std::size_t>(index);
         const auto& model = models[i];
         std::string label = std::format("[{}] {}", i + 1, model.id);
         if (model.active) {
@@ -1279,6 +1291,9 @@ Element render_provider_model_picker_panel(
             model.credentials_missing
                 ? Color{FillSelection}
                 : Color{FillYellowDark}));
+    }
+    if (last < static_cast<int>(models.size())) {
+        rows.push_back(text(std::format("↓ {} more below", models.size() - last)) | dim);
     }
 
     return vbox({
@@ -1296,7 +1311,7 @@ Element render_provider_model_picker_panel(
         filler(),
         text("Esc returns to providers.") | dim,
     }) | UiBorder(ColorYellowBright)
-      | size(HEIGHT, GREATER_THAN, std::max(12, static_cast<int>(models.size()) * 2 + 6));
+      | size(HEIGHT, GREATER_THAN, std::max(12, (last - first) * 2 + 6));
 }
 
 Element render_option_selection_panel(std::string_view title,

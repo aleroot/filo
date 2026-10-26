@@ -8,6 +8,7 @@
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelCatalogProvider.hpp"
 #include "core/llm/ModelMetadata.hpp"
+#include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
@@ -246,6 +247,55 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses data array and preserves 
     CHECK(embedding.provider == "openai");
     CHECK(embedding.context_window == 0);
     CHECK(embedding.supports(ModelCapability::Embeddings));
+}
+
+TEST_CASE("Qwen Token Plan keeps live model membership while enriching sparse cards",
+          "[llm][model-catalog][qwen][regression]") {
+    // Qwen's live /models payload supplies IDs, creation times and ownership,
+    // without display names, context limits or capability metadata.
+    OpenAICompatibleModelCatalogProvider provider("qwen-token-plan");
+    auto result = provider.parse_models_response(R"JSON({
+      "object": "list", "has_more": false,
+      "first_id": "model-id-0", "last_id": "model-id-4",
+      "data": [
+        {"id":"qwen3.8-max","created":1783306792,"owned_by":"system","object":"model"},
+        {"id":"glm-5.3","created":1783306792,"owned_by":"system","object":"model"},
+        {"id":"qwen-future-catalog-model","created":1783306792,"owned_by":"system","object":"model"},
+        {"id":"wan3.0-video","created":1783306792,"owned_by":"system","object":"model"},
+        {"id":"qwen-audio-3.0-tts-plus","created":1783306792,"owned_by":"system","object":"model"}
+      ]
+    })JSON");
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 5);
+    CHECK(result.models.front().context_window == 0);
+
+    const std::vector<std::string> providers{"qwen-token-plan"};
+    const auto group = provider_catalog_group_for("qwen", providers);
+    const auto* source = group.find_source("qwen-token-plan");
+    REQUIRE(source != nullptr);
+    std::erase_if(result.models, [&](const auto& model) {
+        return !source->includes_api_model(model.canonical_id);
+    });
+    const auto fallback = source->registry_models("qwen");
+    const auto catalog = resolve_model_catalog(result.models, fallback);
+    REQUIRE(catalog.models.size() == 3);
+    CHECK(catalog.origin == ModelMetadataOrigin::ProviderApi);
+    CHECK(catalog.models.back().canonical_id == "qwen-future-catalog-model");
+
+    const auto card = ModelRegistry::instance().lookup("qwen3.8-max");
+    REQUIRE(card != nullptr);
+    const auto enriched = resolve_model_metadata("qwen3.8-max", result.models, card);
+    REQUIRE(enriched.model.has_value());
+    CHECK(enriched.origin == ModelMetadataOrigin::ProviderApi);
+    CHECK(enriched.model->canonical_id == "qwen3.8-max");
+    CHECK(enriched.model->display_name == card->display_name);
+    CHECK(enriched.model->context_window == card->context_window);
+    CHECK(enriched.model->context_window > 0);
+    // Display enrichment does not publish sparse endpoint data globally or
+    // append models absent from the authenticated catalog.
+    CHECK(card->provider == "qwen");
+    CHECK(catalog.models.front().context_window == 0);
+    CHECK_FALSE(resolve_model_metadata("qwen3.8-max-preview", result.models, nullptr));
 }
 
 TEST_CASE("OpenAI OAuth model catalog sends the client version",

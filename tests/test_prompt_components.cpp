@@ -782,6 +782,42 @@ TEST_CASE("render_provider_model_picker_panel — renders model choices",
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Claude Opus 4.8"));
 }
 
+TEST_CASE("Model pickers keep descriptions and the selected row visible in long catalogs",
+          "[tui][picker][model][regression]") {
+    std::vector<ModelPickerRow> models;
+    std::vector<ModelProviderPickerRow> providers;
+    for (int i = 0; i < 40; ++i) {
+        const auto id = "catalog-model-" + std::to_string(i);
+        const auto description = "Model details " + std::to_string(i) + " Token Plan endpoint.";
+        models.push_back({.id = id, .description = description});
+        providers.push_back({.name = id, .description = description});
+    }
+
+    for (const int selected : {0, 20, 39}) {
+        CAPTURE(selected);
+        for (const bool provider_picker : {false, true}) {
+            CAPTURE(provider_picker);
+            auto panel = provider_picker
+                ? render_model_provider_picker_panel(providers, selected, false)
+                : render_provider_model_picker_panel("qwen", models, selected);
+            auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(180),
+                                                ftxui::Dimension::Fixed(24));
+            ftxui::Render(screen, panel);
+            const auto output = strip_ansi(screen.ToString());
+            CHECK_THAT(output, Catch::Matchers::ContainsSubstring(
+                "[" + std::to_string(selected + 1) + "] catalog-model-" + std::to_string(selected)));
+            CHECK_THAT(output, Catch::Matchers::ContainsSubstring(models[selected].description));
+            CHECK_THAT(output, Catch::Matchers::ContainsSubstring("Esc"));
+            if (selected > 0) {
+                CHECK_THAT(output, Catch::Matchers::ContainsSubstring("more above"));
+            }
+            if (selected < 39) {
+                CHECK_THAT(output, Catch::Matchers::ContainsSubstring("more below"));
+            }
+        }
+    }
+}
+
 TEST_CASE("render_option_selection_panel — renders generic command choices",
           "[tui][picker][option]") {
     std::vector<OptionPickerRow> rows = {

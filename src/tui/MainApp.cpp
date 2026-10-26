@@ -4165,12 +4165,21 @@ RunResult run(RunOptions opts) {
                         resolved_source.credential_state));
             }
             for (const auto& model : resolved.models) {
+                // /models often supplies only IDs. Preserve API membership
+                // while filling missing display metadata from known cards,
+                // just as for the configured default above.
+                const auto metadata = resolved.origin == core::llm::ModelMetadataOrigin::ProviderApi
+                    ? core::llm::resolve_model_metadata(
+                        model.canonical_id,
+                        provider_models,
+                        core::llm::ModelRegistry::instance().lookup(model.canonical_id))
+                    : core::llm::ResolvedModelMetadata{};
                 add_row(
                     effective_source->service_id,
                     model.canonical_id,
                     model.canonical_id,
                     source_provider,
-                    compact_model_description(model),
+                    compact_model_description(metadata.model ? *metadata.model : model),
                     models_equivalent(
                         configured_default, model.canonical_id),
                     category_label,
