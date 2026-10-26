@@ -141,6 +141,31 @@ if(EXISTS "${state}/oauth_claude.json" OR EXISTS "${root}/work.json.d")
 endif()
 check_personal()
 
+# A gzip-compressed export is used in place: --config reads the archive
+# directly, installs its login in isolated state, and never unpacks it.
+run_cli(0 "${root}/source" --export work.json.gz --only claude --include-secrets)
+file(READ "${root}/work.json.gz" magic HEX LIMIT 2)
+if(NOT magic STREQUAL "1f8b")
+    message(FATAL_ERROR "A .gz export was not gzip-compressed")
+endif()
+file(SHA256 "${root}/work.json.gz" archive_before)
+file(GLOB states_before_archive "${root}/state/filo/configs/*")
+run_cli(0 "${root}/personal" --config work.json.gz --auth logout openai)
+file(GLOB archive_states "${root}/state/filo/configs/*")
+list(REMOVE_ITEM archive_states ${states_before_archive})
+list(LENGTH archive_states archive_state_count)
+if(NOT archive_state_count EQUAL 1)
+    message(FATAL_ERROR "The compressed bundle did not get its own state directory")
+endif()
+list(GET archive_states 0 archive_state)
+file(READ "${archive_state}/oauth_claude.json" archive_token)
+file(SHA256 "${root}/work.json.gz" archive_after)
+if(NOT archive_token MATCHES "fake-work" OR NOT archive_before STREQUAL archive_after
+   OR EXISTS "${root}/work.json.gz.d" OR EXISTS "${archive_state}/auth_defaults.json")
+    message(FATAL_ERROR "The compressed bundle was not read in place with its login")
+endif()
+check_personal()
+
 # Omitting --config retains the normal configuration location and never
 # creates a per-config state namespace or an overlay logout marker.
 file(GLOB states_before_native "${root}/state/filo/configs/*")

@@ -70,21 +70,31 @@ int run_export(const ConfigTransferRequest& request, const PortabilityPaths& pat
                                         .include_secrets = request.include_secrets});
     auto& report = to_stdout ? err : out;
     const auto& items = result.bundle.items;
+    const bool compress =
+        request.compress || (!to_stdout && bundle_encoding_for(target) == BundleEncoding::Gzip);
+    const auto encoding = compress ? BundleEncoding::Gzip : BundleEncoding::Json;
 
     if (!request.dry_run) {
-        const std::string text = serialize_bundle(result.bundle);
-        if (to_stdout) {
-            if (result.bundle.contains_secrets() && request.stdout_is_terminal) {
+        if (to_stdout && request.stdout_is_terminal) {
+            if (result.bundle.contains_secrets()) {
                 err << "Refusing to print credentials to the terminal. "
                        "Redirect the output or pass a file path to --export.\n";
                 return 2;
             }
-            out << text << std::flush;
+            if (encoding == BundleEncoding::Gzip) {
+                err << "Refusing to print a compressed bundle to the terminal. "
+                       "Redirect the output or pass a file path to --export.\n";
+                return 2;
+            }
+        }
+        const std::string bytes = encode_bundle(result.bundle, encoding);
+        if (to_stdout) {
+            out << bytes << std::flush;
         } else {
             // A configuration snapshot is private whether or not it carries
             // credentials: it maps out accounts, endpoints and projects.
             std::string error;
-            if (!core::utils::atomic_write_file(target, text, &error,
+            if (!core::utils::atomic_write_file(target, bytes, &error,
                                                 core::utils::kPrivateFilePermissions)) {
                 err << "Cannot write " << target << ": " << error << '\n';
                 return 1;
@@ -96,9 +106,10 @@ int run_export(const ConfigTransferRequest& request, const PortabilityPaths& pat
         report << "No configuration matched; "
                << (request.dry_run ? "nothing would be exported" : "the bundle is empty") << ".\n";
     } else {
-        report << std::format("{} {} item(s){}:\n",
+        report << std::format("{} {} item(s){}{}:\n",
                               request.dry_run ? "Would export" : "Exported", items.size(),
-                              request.dry_run || to_stdout ? "" : " to " + target);
+                              request.dry_run || to_stdout ? "" : " to " + target,
+                              encoding == BundleEncoding::Gzip ? " (gzip-compressed)" : "");
         for (const auto& item : items) {
             print_line(report, kind_info(item.kind).name, item.name, item_summary(item));
         }
@@ -143,7 +154,7 @@ int run_import(const ConfigTransferRequest& request, const PortabilityPaths& pat
         err << "Cannot read " << source << ".\n";
         return 1;
     }
-    auto bundle = parse_bundle(text);
+    auto bundle = decode_bundle(text);
     if (!bundle) {
         err << "Cannot import " << source << ": " << bundle.error() << '\n';
         return 1;

@@ -6,6 +6,7 @@
 #include "core/llm/ClaudeBilling.hpp"
 #include "core/llm/ClaudeCodeClient.hpp"
 #include "core/utils/Uuid.hpp"
+#include "core/utils/Gzip.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
@@ -13,7 +14,6 @@
 #include "core/tools/Tool.hpp"
 
 #include <simdjson.h>
-#include <zlib.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -77,18 +77,9 @@ namespace {
 }
 
 [[nodiscard]] std::string gunzip(std::string_view bytes) {
-    z_stream stream{};
-    REQUIRE(inflateInit2(&stream, 15 + 16) == Z_OK);
-    std::string out(bytes.size() * 20 + 1024, '\0');
-    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(bytes.data()));
-    stream.avail_in = static_cast<uInt>(bytes.size());
-    stream.next_out = reinterpret_cast<Bytef*>(out.data());
-    stream.avail_out = static_cast<uInt>(out.size());
-    const int status = inflate(&stream, Z_FINISH);
-    out.resize(stream.total_out);
-    inflateEnd(&stream);
-    REQUIRE(status == Z_STREAM_END);
-    return out;
+    auto text = core::utils::gzip::decompress(bytes);
+    REQUIRE(text.has_value());
+    return *text;
 }
 
 /// Sets or clears environment variables for one scope and restores them.

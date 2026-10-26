@@ -4,7 +4,6 @@
 
 #include <httplib.h>
 #include <simdjson.h>
-#include <zlib.h>
 
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
@@ -27,6 +26,7 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/utils/Gzip.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -1766,20 +1766,10 @@ private:
 };
 
 [[nodiscard]] std::string maybe_gunzip(const std::string& body) {
-    if (body.size() < 2 || static_cast<unsigned char>(body[0]) != 0x1f
-        || static_cast<unsigned char>(body[1]) != 0x8b) return body;
-    z_stream stream{};
-    REQUIRE(inflateInit2(&stream, 15 + 16) == Z_OK);
-    std::string out(body.size() * 20 + 4096, '\0');
-    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(body.data()));
-    stream.avail_in = static_cast<uInt>(body.size());
-    stream.next_out = reinterpret_cast<Bytef*>(out.data());
-    stream.avail_out = static_cast<uInt>(out.size());
-    const int status = inflate(&stream, Z_FINISH);
-    out.resize(stream.total_out);
-    inflateEnd(&stream);
-    REQUIRE(status == Z_STREAM_END);
-    return out;
+    if (!core::utils::gzip::is_compressed(body)) return body;
+    auto text = core::utils::gzip::decompress(body);
+    REQUIRE(text.has_value());
+    return *text;
 }
 } // namespace
 

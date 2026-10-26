@@ -9,7 +9,7 @@ jobs:
   build-and-test-opensuse:
     name: Build & Test (openSUSE)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     container:
       image: opensuse/tumbleweed:latest
 
@@ -37,11 +37,14 @@ jobs:
             zypper --non-interactive install --no-recommends $packages
           fi
 
+      # Integration tests are for local runs only: neither built nor run here.
       - name: Configure
-        run: cmake --preset linux-debug
+        run: cmake --preset linux-debug -DFILO_BUILD_INTEGRATION_TESTS=OFF
 
+      # Use every core the runner has: at -j2 the build alone took ~43 of the
+      # job's minutes and the tests were cancelled before finishing.
       - name: Build
-        run: cmake --build --preset linux-debug -j2
+        run: cmake --build --preset linux-debug -j"$(nproc)"
 
       - name: Test
         run: ctest --preset linux-debug --output-on-failure --parallel 4

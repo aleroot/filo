@@ -44,6 +44,7 @@ option(FILO_ENABLE_IPO "Enable interprocedural optimization for Release-like bui
 option(FILO_ENABLE_NATIVE_TUNING "Enable host-specific CPU tuning (-march=native)" OFF)
 option(FILO_ENABLE_TSAN "Enable ThreadSanitizer instrumentation" OFF)
 option(FILO_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(FILO_BUILD_INTEGRATION_TESTS "Build the test_integration binary and its ctest entries" ON)
 
 if(CMAKE_GENERATOR STREQUAL "Xcode")
     set(CMAKE_XCODE_GENERATE_SCHEME ON CACHE BOOL "Generate Xcode schemes" FORCE)
@@ -361,6 +362,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
+    src/core/utils/Gzip.cpp
     src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp
     src/core/utils/FileStamp.cpp
@@ -627,7 +629,8 @@ target_link_libraries(filo_core
         ${CMAKE_DL_LIBS}
 )
 
-# zlib gzips Claude request bodies as Claude Code does. On Apple, link the SDK
+# zlib backs core::utils::gzip: Claude request bodies (as Claude Code sends
+# them) and compressed configuration bundles. On Apple, link the SDK
 # library directly: ZLIB::ZLIB would add the SDK's usr/include as a system
 # include and break libc++'s include_next (see the cpp-httplib note above).
 if(APPLE)
@@ -715,6 +718,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_read_resources.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
+    tests/test_gzip.cpp
     tests/test_mime_utils.cpp
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
@@ -870,32 +874,35 @@ set_target_properties(filo_tests PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
-add_executable(test_integration ${FILO_INTEGRATION_TEST_SOURCES})
-target_link_libraries(test_integration PRIVATE filo_core Catch2::Catch2WithMain)
-set_target_properties(test_integration PROPERTIES
-    FOLDER "Tests"
-    INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}
-    INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
-    INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
-)
+if(FILO_BUILD_INTEGRATION_TESTS)
+    add_executable(test_integration ${FILO_INTEGRATION_TEST_SOURCES})
+    target_link_libraries(test_integration PRIVATE filo_core Catch2::Catch2WithMain)
+    set_target_properties(test_integration PROPERTIES
+        FOLDER "Tests"
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}
+        INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
+        INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
+    )
 
-# Keep the reader's local HTTP/policy regression in the standard CTest run,
-# including the existing Linux CI presets. No model service is contacted.
-add_test(NAME read_http_integration
-    COMMAND test_integration "[integration][tools][web][read]" --reporter compact)
-set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60)
+    # Local-server subsets of test_integration, available to a local `ctest`.
+    # Labelled "integration" so CI can exclude them (ctest -LE integration);
+    # no model service is contacted.
+    add_test(NAME read_http_integration
+        COMMAND test_integration "[integration][tools][web][read]" --reporter compact)
+    set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60 LABELS integration)
 
-add_test(NAME provider_http_integration
-    COMMAND test_integration "[integration][http]" --reporter compact)
-set_tests_properties(provider_http_integration PROPERTIES TIMEOUT 60)
+    add_test(NAME provider_http_integration
+        COMMAND test_integration "[integration][http]" --reporter compact)
+    set_tests_properties(provider_http_integration PROPERTIES TIMEOUT 60 LABELS integration)
 
-add_test(NAME websocket_transport_integration
-    COMMAND test_integration "[transport][websocket]" --reporter compact)
-set_tests_properties(websocket_transport_integration PROPERTIES TIMEOUT 60)
+    add_test(NAME websocket_transport_integration
+        COMMAND test_integration "[transport][websocket]" --reporter compact)
+    set_tests_properties(websocket_transport_integration PROPERTIES TIMEOUT 60 LABELS integration)
 
-add_test(NAME qwen_web_integration
-    COMMAND test_integration "[integration][qwen][web]" --reporter compact)
-set_tests_properties(qwen_web_integration PROPERTIES TIMEOUT 60)
+    add_test(NAME qwen_web_integration
+        COMMAND test_integration "[integration][qwen][web]" --reporter compact)
+    set_tests_properties(qwen_web_integration PROPERTIES TIMEOUT 60 LABELS integration)
+endif()
 
 add_executable(test_agent_freeze tests/test_agent_freeze.cpp)
 target_link_libraries(test_agent_freeze PRIVATE filo_core)
@@ -935,7 +942,11 @@ set_tests_properties(filo_version PROPERTIES
     TIMEOUT 10
 )
 
-foreach(filo_ftxui_consumer filo filo_tests test_integration test_agent_freeze test_tui_freeze test_landrun_native)
+set(filo_ftxui_consumers filo filo_tests test_agent_freeze test_tui_freeze test_landrun_native)
+if(FILO_BUILD_INTEGRATION_TESTS)
+    list(APPEND filo_ftxui_consumers test_integration)
+endif()
+foreach(filo_ftxui_consumer ${filo_ftxui_consumers})
     target_compile_definitions(${filo_ftxui_consumer}
         PRIVATE FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH}
     )
@@ -948,11 +959,13 @@ catch_discover_tests(filo_tests
     PROPERTIES TIMEOUT 60
 )
 
-add_custom_target(run_integration_tests
-    COMMAND $<TARGET_FILE:test_integration>
-    DEPENDS test_integration
-    USES_TERMINAL
-)
+if(FILO_BUILD_INTEGRATION_TESTS)
+    add_custom_target(run_integration_tests
+        COMMAND $<TARGET_FILE:test_integration>
+        DEPENDS test_integration
+        USES_TERMINAL
+    )
+endif()
 
 source_group(
     TREE "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -972,6 +985,7 @@ source_group(
         tests/test_read_resources.cpp
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp
+        tests/test_gzip.cpp
         tests/test_crypto.cpp
         tests/test_mime_utils.cpp
         tests/test_uri_utils.cpp

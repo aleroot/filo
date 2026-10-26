@@ -279,7 +279,7 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional chat API proxy mode
 - `filo --auth <provider> [login|logout]` authenticate or sign out and exit
-- `--export <file|->` / `--import <file|->` move settings, providers, logins and memories between machines (see [Moving your setup to another machine](#moving-your-setup-to-another-machine))
+- `--export <file|->` / `--import <file|->` move settings, providers, logins and memories between machines; `--config <bundle>` uses a bundle in place. Bundles named `*.gz` are gzip-compressed (see [Moving your setup to another machine](#moving-your-setup-to-another-machine))
 
 **Sessions and models**
 
@@ -561,24 +561,30 @@ session controls, and Markdown import/export. `/memory status` prints the text s
 
 `filo --export` writes your user configuration to one portable JSON bundle and
 `filo --import` applies it on another machine, so you do not have to sign in or
-reconfigure providers again. Both commands do their work and exit.
+reconfigure providers again. Both commands do their work and exit. A bundle
+whose file name ends in `.gz` (or any bundle exported with `--compress`) is
+gzip-compressed; `--import` and `--config` read plain and compressed bundles
+alike, so there is nothing to unpack.
 
 ```bash
 # Everything except secrets: settings, providers, MCP servers, memories
 filo --export filo-setup.json
 
-# Include OAuth logins, API keys and MCP headers/env
-filo --export filo-setup.json --include-secrets
+# Include OAuth logins, API keys and MCP headers/env, compressed
+filo --export filo-setup.json.gz --include-secrets
 
 # Only Claude (its provider entry and its OAuth login)
-filo --export claude.json --only claude --include-secrets
+filo --export claude.json.gz --only claude --include-secrets
 
 # See what would be exported, without writing anything
 filo --export --dry-run --only providers
 
 # On the other machine: preview, then apply
-filo --import filo-setup.json --dry-run
-filo --import filo-setup.json
+filo --import filo-setup.json.gz --dry-run
+filo --import filo-setup.json.gz
+
+# Or use a bundle in place, without importing it
+filo --config claude.json.gz
 
 # Encrypt in transit with any tool that reads stdin, e.g. age
 filo --export - --include-secrets | age -p > filo-setup.age

@@ -51,6 +51,10 @@ namespace core::utils::ascii {
             [](char a, char b) { return to_lower(a) == to_lower(b); });
 }
 
+[[nodiscard]] inline bool iends_with(std::string_view value, std::string_view suffix) noexcept {
+    return value.size() >= suffix.size() && iequals(value.substr(value.size() - suffix.size()), suffix);
+}
+
 /// Case-insensitive substring test. ASCII only, like the rest of this header:
 /// it exists for filename and flag matching, not for prose.
 [[nodiscard]] inline bool icontains(std::string_view value, std::string_view needle) noexcept {

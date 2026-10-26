@@ -63,8 +63,7 @@ fs::path state_home() {
 
 ConfigOverlayFiles read_input(const fs::path& path) {
     if (fs::is_regular_file(path)) {
-        const auto text = read_regular_file(path);
-        const auto bundle = core::portability::parse_bundle(text);
+        const auto bundle = core::portability::decode_bundle(read_regular_file(path));
         if (!bundle) throw std::runtime_error(bundle.error());
         return core::portability::config_overlay_files(*bundle);
     }

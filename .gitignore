@@ -52,10 +52,9 @@ compile_commands.json
 .ninja_log
 .ninja_deps
 
-# Generic build directories
-build/
-Build/
-build-*/
+# Build directories (build/, build-*/, cmake-build-*/, ...). Directories only:
+# a bare *build* would also hide sources such as ContextBuilder.cpp.
+*[Bb]uild*/
 out/
 dist/
 

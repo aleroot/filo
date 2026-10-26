@@ -215,19 +215,22 @@ int main(int argc, char** argv) {
     std::string config_source;
     auto* config_opt = app.add_option(
         "--config", config_source,
-        "Overlay an exported config bundle or config directory on the default configuration. "
+        "Overlay an exported config bundle (plain or gzip-compressed) or config directory "
+        "on the default configuration. "
         "Missing values fall back to the normal setup; the source stays read-only and "
         "changes are saved in Filo's state directory, isolated per config.");
     auto* export_opt = app.add_option(
         "--export", transfer.export_target,
         "Export settings, providers, MCP servers, memories (and, with --include-secrets, "
-        "OAuth logins and API keys) to a bundle file, or - for stdout, and exit. "
+        "OAuth logins and API keys) to a bundle file, or - for stdout, and exit. A file name "
+        "ending in .gz is gzip-compressed. "
         "Without a value, use with --dry-run to list what would be exported.")
         ->expected(0, 1)
         ->excludes(config_opt);
     auto* import_opt = app.add_option(
         "--import", transfer.import_source,
-        "Import a bundle written by --export (- reads stdin) and exit. Replaced items "
+        "Import a bundle written by --export, plain or gzip-compressed (- reads stdin), "
+        "and exit. Replaced items "
         "are backed up first; memories are merged.")
         ->excludes(export_opt)
         ->excludes(config_opt);
@@ -244,6 +247,11 @@ int main(int argc, char** argv) {
     app.add_flag(
         "--include-secrets", transfer.include_secrets,
         "With --export: include OAuth logins, API keys and MCP headers/env.")
+        ->needs(export_opt);
+    app.add_flag(
+        "--compress", transfer.compress,
+        "With --export: gzip-compress the bundle whatever the file name "
+        "(implied by a .gz file name).")
         ->needs(export_opt);
     auto* dry_run_opt = app.add_flag(
         "--dry-run", transfer.dry_run,

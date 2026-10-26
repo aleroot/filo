@@ -83,6 +83,27 @@ struct Bundle {
 /// Validates format and version; rejects bundles written by a newer Filo.
 [[nodiscard]] std::expected<Bundle, std::string> parse_bundle(std::string_view text);
 
+/// How a bundle is stored on disk or in a stream. Compression only wraps the
+/// JSON document; the bundle format and version are the same in both.
+enum class BundleEncoding {
+    Json,  ///< Plain JSON text.
+    Gzip,  ///< The same JSON text in one gzip member.
+};
+
+/// File-name suffix that selects BundleEncoding::Gzip on export.
+inline constexpr std::string_view kCompressedBundleSuffix = ".gz";
+
+/// The encoding a file name asks for: Gzip for a `.gz` name, else Json.
+[[nodiscard]] BundleEncoding bundle_encoding_for(std::string_view file_name) noexcept;
+/// The encoding of stored bundle bytes, recognised by content alone.
+[[nodiscard]] BundleEncoding detect_bundle_encoding(std::string_view bytes) noexcept;
+
+/// serialize_bundle() in the requested encoding.
+[[nodiscard]] std::string encode_bundle(const Bundle& bundle, BundleEncoding encoding);
+/// Reads a bundle in any BundleEncoding; everything that loads a bundle
+/// (import, --config overlays) goes through here.
+[[nodiscard]] std::expected<Bundle, std::string> decode_bundle(std::string_view bytes);
+
 struct Selector {
     std::optional<ItemKind> kind;   ///< nullopt: any kind.
     std::string pattern = "*";

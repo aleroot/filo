@@ -56,7 +56,7 @@ struct Env {
 
 void write(const fs::path& path, std::string_view text) {
     fs::create_directories(path.parent_path());
-    std::ofstream(path) << text;
+    std::ofstream(path, std::ios::binary) << text;
 }
 std::string read(const fs::path& path) { return core::utils::read_file(path).value_or(""); }
 
@@ -98,12 +98,13 @@ struct Fixture {
         manager.set_config_override(source);
         manager.load(project);
     }
-    fs::path bundle(bool secrets = true) {
+    fs::path bundle(bool secrets = true,
+                    core::portability::BundleEncoding encoding = core::portability::BundleEncoding::Json) {
         const auto result = core::portability::export_bundle(
             {.config_dir = custom, .memory_file = custom / "memory.json", .home = root.string()},
             {.include_secrets = secrets});
-        const auto path = root / "work.json";
-        write(path, core::portability::serialize_bundle(result.bundle));
+        const auto path = root / (encoding == core::portability::BundleEncoding::Gzip ? "work.json.gz" : "work.json");
+        write(path, core::portability::encode_bundle(result.bundle, encoding));
         return path;
     }
 };
@@ -201,6 +202,63 @@ TEST_CASE("Exported bundles stay sparse and their refreshed logins survive reope
     CHECK((fs::status(state).permissions() & fs::perms::group_all) == fs::perms::none);
     CHECK_FALSE(fs::exists(state / "auth_defaults.json"));
     CHECK((fs::status(state / "oauth_claude.json.selected").permissions() & fs::perms::others_all) == fs::perms::none);
+}
+
+TEST_CASE("A compressed bundle is read in place and signs in with its Claude login", "[config-overlay][portability][gzip]") {
+    Fixture f;
+    write(f.base / "config.json", R"({"default_provider":"openai","ui_theme":"light"})");
+    write(f.custom / "config.json", R"({"default_provider":"claude",
+        "providers":{"claude":{"model":"claude-sonnet-4-6"}}})");
+    write(f.custom / "auth_defaults.json", R"({"providers":{"claude":{"auth_type":"oauth_claude"}}})");
+    FileTokenStore(f.base.string()).save("claude", token("personal"));
+    FileTokenStore(f.custom.string()).save("claude", token("work"));
+    const auto path = f.bundle(true, core::portability::BundleEncoding::Gzip);
+    const auto original = read(path);
+    REQUIRE(core::portability::detect_bundle_encoding(original) == core::portability::BundleEncoding::Gzip);
+
+    f.select(path);
+    const auto& config = f.manager.get_config();
+    CHECK(config.default_provider == "claude");
+    CHECK(config.ui_theme == "light");  // the personal setup still fills the gaps
+    CHECK(config.providers.at("claude").model == "claude-sonnet-4-6");
+    CHECK(config.providers.at("claude").auth_type == "oauth_claude");
+
+    const fs::path state = f.manager.get_config_dir();
+    CHECK(state.parent_path() == f.root / "state/filo/configs");
+    auto auth = core::auth::AuthenticationManager::create_with_defaults(state.string());
+    core::config::ProviderConfig provider = config.providers.at("claude");
+    provider.config_source = f.manager.get_config_source();
+    const auto source = auth.create_credential_source("claude", provider);
+    REQUIRE(source);
+    CHECK(source->get_auth().headers.at("Authorization") == "Bearer work-access");
+
+    // The archive is the read-only source: nothing is unpacked beside it and
+    // it is never rewritten; the personal login is untouched.
+    CHECK(read(path) == original);
+    CHECK_FALSE(fs::exists(path.string() + ".d"));
+    CHECK_FALSE(fs::exists(state / "config.json"));
+    CHECK(FileTokenStore(f.base.string()).load("claude")->account_id == "personal");
+
+    // Reopening keeps the same state, which is keyed by the archive's path.
+    f.manager.set_config_override(std::nullopt);
+    f.select(path);
+    CHECK(f.manager.get_config_dir() == state.string());
+}
+
+TEST_CASE("A damaged compressed bundle is rejected before creating state", "[config-overlay][portability][gzip]") {
+    Fixture f;
+    FileTokenStore(f.custom.string()).save("claude", token("work"));
+    const auto path = f.bundle(true, core::portability::BundleEncoding::Gzip);
+    auto bytes = read(path);
+    bytes.resize(bytes.size() / 2);
+    write(path, bytes);
+    try {
+        f.select(path);
+        FAIL("a truncated archive was accepted");
+    } catch (const std::exception& error) {
+        CHECK_THAT(error.what(), Catch::Matchers::ContainsSubstring("compressed bundle is damaged"));
+    }
+    CHECK_FALSE(fs::exists(f.root / "state/filo/configs"));
 }
 
 TEST_CASE("Inherited credentials refresh only in isolated state and explicit logout stays local", "[config-overlay][oauth]") {

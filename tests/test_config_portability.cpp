@@ -6,6 +6,8 @@
 #include "core/memory/MemoryStore.hpp"
 #include "core/portability/ConfigBundle.hpp"
 #include "core/portability/ConfigPortability.hpp"
+#include "core/utils/Gzip.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonValue.hpp"
 #include "core/utils/PathUtils.hpp"
 
@@ -500,6 +502,93 @@ TEST_CASE("Bundles from a newer Filo or another tool are rejected", "[portabilit
         R"({"format": "filo-config-bundle", "version": 1, "items": [{"kind": "credential", "name": "y", "secret": false, "data": {}}]})");
     REQUIRE(credential.has_value());
     CHECK(credential->contains_secrets());
+}
+
+TEST_CASE("Bundles are stored as plain JSON or gzip and read back from either", "[portability][bundle][gzip]") {
+    using core::portability::BundleEncoding;
+    Machine source("filo_portability_encoding");
+    seed_source(source);
+    const auto bundle = core::portability::export_bundle(source.paths, {.include_secrets = true}).bundle;
+
+    CHECK(core::portability::bundle_encoding_for("setup.json.gz") == BundleEncoding::Gzip);
+    CHECK(core::portability::bundle_encoding_for("SETUP.JSON.GZ") == BundleEncoding::Gzip);
+    CHECK(core::portability::bundle_encoding_for("setup.json") == BundleEncoding::Json);
+    CHECK(core::portability::bundle_encoding_for("gz") == BundleEncoding::Json);
+
+    const auto plain = core::portability::encode_bundle(bundle, BundleEncoding::Json);
+    const auto packed = core::portability::encode_bundle(bundle, BundleEncoding::Gzip);
+    CHECK(plain == core::portability::serialize_bundle(bundle));
+    CHECK(core::portability::detect_bundle_encoding(plain) == BundleEncoding::Json);
+    CHECK(core::portability::detect_bundle_encoding(packed) == BundleEncoding::Gzip);
+    CHECK(packed.size() < plain.size());
+
+    const auto from_plain = core::portability::decode_bundle(plain);
+    const auto from_packed = core::portability::decode_bundle(packed);
+    REQUIRE(from_plain.has_value());
+    REQUIRE(from_packed.has_value());
+    // Same document either way: re-serializing gives identical text.
+    CHECK(core::portability::serialize_bundle(*from_packed) == plain);
+    CHECK(core::portability::serialize_bundle(*from_plain) == plain);
+
+    const auto damaged = core::portability::decode_bundle(packed.substr(0, packed.size() - 8));
+    REQUIRE_FALSE(damaged.has_value());
+    CHECK_THAT(damaged.error(), Catch::Matchers::ContainsSubstring("compressed bundle is damaged"));
+    // A compressed document that is not a bundle fails like its plain form.
+    const auto foreign = core::portability::decode_bundle(core::utils::gzip::compress(R"({"format":"x"})"));
+    REQUIRE_FALSE(foreign.has_value());
+    CHECK_THAT(foreign.error(), Catch::Matchers::ContainsSubstring("not a Filo configuration bundle"));
+}
+
+TEST_CASE("The export command compresses .gz targets and import reads them", "[portability][cli][gzip]") {
+    Machine source("filo_portability_cli_gzip_source");
+    Machine target("filo_portability_cli_gzip_target");
+    seed_source(source);
+    std::istringstream in;
+    std::ostringstream out;
+    std::ostringstream err;
+    const auto archive = (source.root.path / "claude.json.gz").string();
+
+    core::cli::ConfigTransferRequest request{
+        .export_target = archive, .only = {"claude"}, .include_secrets = true};
+    REQUIRE(core::cli::run_config_transfer(request, source.paths, in, out, err) == 0);
+    CHECK_THAT(out.str(), Catch::Matchers::ContainsSubstring("gzip-compressed"));
+    const auto bytes = core::utils::read_file(archive);
+    REQUIRE(bytes.has_value());
+    CHECK(core::utils::gzip::is_compressed(*bytes));
+    CHECK((fs::status(archive).permissions() & (fs::perms::group_all | fs::perms::others_all))
+          == fs::perms::none);
+
+    // Import from the file and from standard input, as written.
+    std::ostringstream imported;
+    core::cli::ConfigTransferRequest from_file{.import_source = archive};
+    REQUIRE(core::cli::run_config_transfer(from_file, target.paths, in, imported, err) == 0);
+    CHECK(target.json("oauth_claude.json").find("refresh_token")->as_string() == "claude-refresh");
+    CHECK(target.json("auth_defaults.json").find("providers")->find("claude")
+              ->find("auth_type")->as_string() == "oauth_claude");
+    std::istringstream piped(*bytes);
+    std::ostringstream again;
+    core::cli::ConfigTransferRequest from_stdin{.import_source = "-"};
+    REQUIRE(core::cli::run_config_transfer(from_stdin, target.paths, piped, again, err) == 0);
+    CHECK_THAT(again.str(), Catch::Matchers::ContainsSubstring("unchanged"));
+
+    // --compress applies to any name and to stdout, but never to a terminal.
+    std::ostringstream stdout_bytes;
+    std::ostringstream report;
+    core::cli::ConfigTransferRequest piped_export{.export_target = "-", .compress = true};
+    REQUIRE(core::cli::run_config_transfer(piped_export, source.paths, in, stdout_bytes, report) == 0);
+    CHECK(core::utils::gzip::is_compressed(stdout_bytes.str()));
+    CHECK(core::portability::decode_bundle(stdout_bytes.str()).has_value());
+    std::ostringstream terminal;
+    piped_export.stdout_is_terminal = true;
+    CHECK(core::cli::run_config_transfer(piped_export, source.paths, in, terminal, report) == 2);
+    CHECK(terminal.str().empty());
+    CHECK_THAT(report.str(), Catch::Matchers::ContainsSubstring("compressed bundle to the terminal"));
+
+    // Without --compress or a .gz name the file stays plain JSON.
+    const auto plain = (source.root.path / "setup.json").string();
+    core::cli::ConfigTransferRequest plain_export{.export_target = plain};
+    REQUIRE(core::cli::run_config_transfer(plain_export, source.paths, in, out, err) == 0);
+    CHECK(core::utils::read_file(plain)->starts_with("{"));
 }
 
 TEST_CASE("The export command never prints credentials to a terminal", "[portability][cli]") {

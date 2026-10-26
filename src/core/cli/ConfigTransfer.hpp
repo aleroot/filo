@@ -17,6 +17,8 @@ struct ConfigTransferRequest {
     std::vector<std::string> except;
     std::vector<std::string> map_paths;
     bool include_secrets = false;
+    /// Gzip the exported bundle even when the target does not end in `.gz`.
+    bool compress = false;
     bool dry_run = false;
     /// Secrets are never written to an interactive terminal.
     bool stdout_is_terminal = false;

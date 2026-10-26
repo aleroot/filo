@@ -1,6 +1,7 @@
 #include "ConfigBundle.hpp"
 
 #include "core/utils/AsciiUtils.hpp"
+#include "core/utils/Gzip.hpp"
 #include "core/utils/StringUtils.hpp"
 
 #include <algorithm>
@@ -142,6 +143,29 @@ std::expected<Bundle, std::string> parse_bundle(std::string_view text) {
         bundle.items.push_back(std::move(item));
     }
     return bundle;
+}
+
+BundleEncoding bundle_encoding_for(std::string_view file_name) noexcept {
+    return core::utils::ascii::iends_with(file_name, kCompressedBundleSuffix)
+        ? BundleEncoding::Gzip : BundleEncoding::Json;
+}
+
+BundleEncoding detect_bundle_encoding(std::string_view bytes) noexcept {
+    // A JSON document cannot begin with the gzip magic byte 0x1F.
+    return core::utils::gzip::is_compressed(bytes) ? BundleEncoding::Gzip : BundleEncoding::Json;
+}
+
+std::string encode_bundle(const Bundle& bundle, BundleEncoding encoding) {
+    std::string text = serialize_bundle(bundle);
+    if (encoding == BundleEncoding::Json) return text;
+    return core::utils::gzip::compress(text, {.level = 9});
+}
+
+std::expected<Bundle, std::string> decode_bundle(std::string_view bytes) {
+    if (detect_bundle_encoding(bytes) == BundleEncoding::Json) return parse_bundle(bytes);
+    const auto text = core::utils::gzip::decompress(bytes);
+    if (!text) return std::unexpected("compressed bundle is damaged: " + text.error());
+    return parse_bundle(*text);
 }
 
 bool Selector::matches(ItemKind item_kind, std::string_view name) const {

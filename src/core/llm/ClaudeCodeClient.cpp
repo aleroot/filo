@@ -3,11 +3,11 @@
 #include "ClaudeModelTraits.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/Crypto.hpp"
+#include "../utils/Gzip.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/Uuid.hpp"
 
 #include <simdjson.h>
-#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -354,24 +354,10 @@ std::string gzip_body(std::string_view signed_body) {
     text += '\n';
     for (std::size_t i = length(rng); i > 0; --i) text += space(rng) ? ' ' : '\t';
 
-    z_stream stream{};
-    // windowBits 15 + 16 writes a gzip wrapper, as Node's zlib.gzip does.
-    if (deflateInit2(&stream, 6, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        throw std::runtime_error("gzip initialisation failed");
-    }
-    std::string out(deflateBound(&stream, static_cast<uLong>(text.size())), '\0');
-    stream.next_in = reinterpret_cast<Bytef*>(text.data());
-    stream.avail_in = static_cast<uInt>(text.size());
-    stream.next_out = reinterpret_cast<Bytef*>(out.data());
-    stream.avail_out = static_cast<uInt>(out.size());
-    const int status = deflate(&stream, Z_FINISH);
-    const auto written = stream.total_out;
-    deflateEnd(&stream);
-    if (status != Z_STREAM_END) throw std::runtime_error("gzip compression failed");
-    out.resize(written);
-    // zlib writes OS 3 (Unix); Claude Code's runtime writes 255. Outside the CRC.
-    out[9] = static_cast<char>(0xff);
-    return out;
+    // Node's zlib.gzip defaults, as Claude Code's runtime writes them: level 6,
+    // mtime 0, OS 255.
+    return core::utils::gzip::compress(
+        text, {.level = 6, .operating_system = core::utils::gzip::kUnknownOperatingSystem});
 }
 
 bool is_gzip_rejection(int status, const cpr::Header& headers, std::string_view body) {
