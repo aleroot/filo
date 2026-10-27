@@ -138,10 +138,27 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
     task_context.session_id = entry->state.task_id;
     TaskRunner runner = build_runner(tool_name, arguments_json, task_context);
     record->request_cancel = std::move(runner.request_cancel);
+    {
+        // Counted before the thread starts, so wait_for_idle can never observe a
+        // zero count for a worker that is merely not scheduled yet.
+        std::lock_guard lock(workers_mutex_);
+        ++active_workers_;
+    }
     std::thread worker(
-        [entry,
+        [this,
+         entry,
          stop_token = record->stop_source.get_token(),
          execute = std::move(runner.execute)]() mutable {
+            // Declared first so it is destroyed last: "idle" has to mean the
+            // worker is completely finished, session-state release included.
+            struct WorkerExit {
+                McpTaskManager* self;
+                ~WorkerExit() {
+                    std::lock_guard exit_lock(self->workers_mutex_);
+                    --self->active_workers_;
+                    self->workers_cv_.notify_all();
+                }
+            } worker_exit{this};
             // A task is one stateless request: whatever session state its
             // tools (and the workers it delegates to) keyed by the task id is
             // released when it ends, like the per-request scope of tools/call.
@@ -371,6 +388,16 @@ std::optional<McpTaskManager::ResultPayload> McpTaskManager::await_result(
     }
 
     return payload;
+}
+
+bool McpTaskManager::wait_for_idle(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(workers_mutex_);
+    return workers_cv_.wait_for(lock, timeout, [&] { return active_workers_ == 0; });
+}
+
+std::size_t McpTaskManager::active_worker_count() const noexcept {
+    std::lock_guard lock(workers_mutex_);
+    return active_workers_;
 }
 
 } // namespace core::mcp

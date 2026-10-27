@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -69,6 +70,25 @@ public:
     [[nodiscard]] std::optional<ResultPayload> await_result(std::string_view task_id,
                                                             std::string_view session_scope);
 
+    /**
+     * @brief Wait until every task worker has exited, or @p timeout elapses.
+     *
+     * Workers are detached on purpose: a non-cooperative tool must never be able
+     * to block a cancellation or a shutdown. This is therefore a bounded
+     * observation point, not a join — it reports whether the workers finished
+     * rather than making anyone wait for one that never will.
+     *
+     * Callers that are about to destroy state a worker may still touch (a test
+     * sandbox, or the singletons a process destroys on exit) use it to avoid
+     * racing that teardown.
+     *
+     * @return false when workers were still running when the timeout expired.
+     */
+    bool wait_for_idle(std::chrono::milliseconds timeout);
+
+    /// Number of task workers currently running.
+    [[nodiscard]] std::size_t active_worker_count() const noexcept;
+
 private:
     struct Entry {
         TaskState state;
@@ -97,6 +117,12 @@ private:
     std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<TaskRecord>> records_;
     std::atomic<uint64_t> next_task_id_{1};
+
+    /// Guards `active_workers_` only. Kept apart from `mutex_` so a worker can
+    /// announce its exit without taking the lock that guards the record map.
+    mutable std::mutex workers_mutex_;
+    std::condition_variable workers_cv_;
+    std::size_t active_workers_ = 0;
 };
 
 } // namespace core::mcp
