@@ -10,6 +10,54 @@ namespace core::tools {
 
 namespace {
 
+/// JSON Schema for one entry of `questions`, mirroring exactly what execute()
+/// reads. Declaring it is not cosmetic: Gemini and Cloud Code Assist reject an
+/// `array` parameter whose `items` is absent (`INVALID_ARGUMENT: …
+/// properties[questions].items: missing field`), which failed every request
+/// that offered this tool.
+constexpr std::string_view kQuestionItemsSchema = R"({
+  "type": "object",
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "The specific, actionable question."
+    },
+    "header": {
+      "type": "string",
+      "description": "Short category tag (max 12 chars, e.g. 'Auth', 'Style')."
+    },
+    "body": {
+      "type": "string",
+      "description": "Optional longer context shown beneath the question."
+    },
+    "multi_select": {
+      "type": "boolean",
+      "description": "True when multiple answers are valid."
+    },
+    "options": {
+      "type": "array",
+      "description": "2-4 meaningful, distinct choices.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Option text shown as a choice."
+          },
+          "description": {
+            "type": "string",
+            "description": "Brief explanation of the trade-off."
+          }
+        },
+        "required": ["label"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["question", "options"],
+  "additionalProperties": false
+})";
+
 std::string generateUuid() {
     static std::random_device rd;
     static std::mt19937 gen(rd());
@@ -52,12 +100,14 @@ Guidelines:
 - Keep header tags short (max 12 chars, e.g. 'Auth', 'Style'))";
 
     def.parameters = {
-        {"questions", "array",
-         "The questions to ask the user (1-4 questions).", true},
+        {
+            .name = "questions",
+            .type = "array",
+            .description = "The questions to ask the user (1-4 questions).",
+            .required = true,
+            .items_schema = std::string{kQuestionItemsSchema},
+        },
     };
-    
-    // Note: The items_schema for the questions parameter would be set here
-    // but for simplicity we're using a simpler definition
 
     def.annotations = {
         .read_only_hint = true,  // renders a dialog and returns the answer

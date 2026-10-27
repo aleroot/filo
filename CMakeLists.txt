@@ -312,6 +312,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/GoogleCodeAssist.cpp
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/GoogleAntigravityOAuthFlow.cpp
+    src/core/auth/AntigravityClientCredentials.cpp
     src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
     src/core/auth/OAuthPkce.cpp

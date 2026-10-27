@@ -15,14 +15,12 @@ using core::auth::antigravity::kAntigravitySandboxEndpoint;
 /// core::auth::antigravity so the control plane reports the same identity.
 using core::auth::antigravity::kAntigravityClientVersion;
 
-/// Per-wire-id Antigravity request constants, captured from the real
-/// `antigravity/hub` client against `daily-cloudcode-pa`. `model_enum` is the
-/// opaque `labels.model_enum` telemetry token the client tags each request
-/// with (empty when the id carries none — Anthropic-backed wire ids such as
-/// `claude-sonnet-4-6` are accepted without one). `max_output_tokens` is the
-/// fixed `generationConfig.maxOutputTokens` the client sends independent of
-/// the thinking budget; the backend rejects Claude above 64000 and enforces
-/// the Gemini caps.
+/// Per-wire-id Antigravity request constants, snapshotted from
+/// `v1internal:fetchAvailableModels` as served to the real `antigravity/hub`
+/// client. `model_enum` is the opaque `labels.model_enum` telemetry token the
+/// client tags each request with (empty when the id carries none).
+/// `max_output_tokens` is the fixed `generationConfig.maxOutputTokens` the
+/// client sends for that SKU, independent of the thinking budget.
 struct AntigravityModelWireProfile {
     std::string_view model_enum;
     int max_output_tokens;
@@ -40,18 +38,20 @@ antigravity_wire_profile(std::string_view model);
  *
  * Same endpoint and response format as gemini_code_assist, but the request
  * mirrors the real `antigravity/hub` client:
- *  - envelope: `userAgent:"antigravity"`, `requestType:"agent"`, a structured
- *    `requestId` (`agent/<agentId>/<ms>/<trajectoryId>/<step>`), plus
- *    request-level `sessionId` and `labels`. The ids are derived from the
- *    conversation (session id, else first user message) so they stay stable
- *    across turns without per-conversation protocol state; `labels` carries
- *    `last_step_index`, `trajectory_id`, `used_claude`, and — when known —
- *    `model_enum` plus the previous response's `last_execution_id`
- *    (AntigravityConversationState);
- *  - `systemInstruction.role = "user"`, `toolConfig` mode `VALIDATED`;
- *  - the thought-signature bypass on the first function call of Gemini 3+
- *    turns, and the per-model fixed output cap (Claude falls back to the
- *    64000 ceiling);
+ *  - envelope in the hub's own key order: `project`, `requestId`
+ *    (`agent/<cascadeId>/<ms>/<trajectoryId>/<contents>`), `request`, `model`,
+ *    `userAgent:"antigravity"`, `requestType:"agent"`. The ids are derived from
+ *    the conversation (session id, else first user message) so they stay stable
+ *    across turns without per-conversation protocol state; request-level
+ *    `sessionId` is one signed 64-bit value per installation, and `labels` is
+ *    alphabetical: `cascade_id`, `last_step_index`, `model_enum`, `request_id`,
+ *    `root_cascade_id`, `trajectory_id`, `used_claude`,
+ *    `used_claude_conservative`, `used_non_gemini_model`, plus the previous
+ *    response's `last_execution_id` (AntigravityConversationState) once known;
+ *  - `systemInstruction.role = "user"` and no `toolConfig`: the hub sends none;
+ *  - one `functionDeclarations` element per tool, the thought-signature bypass
+ *    on every replayed call part of Gemini 3+ turns, and the per-SKU fixed
+ *    output cap (Claude falls back to the 128000 ceiling);
  *  - `User-Agent` identifying the Antigravity hub and nothing else: the real
  *    client sends no `X-Goog-Api-Client` / `Client-Metadata` on these calls,
  *    so neither does Filo;

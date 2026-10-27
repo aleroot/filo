@@ -1,7 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/tools/AskUserQuestionTool.hpp"
 #include "core/tools/ToolSchema.hpp"
+
+#include <simdjson.h>
 
 using Catch::Matchers::ContainsSubstring;
 
@@ -158,4 +161,45 @@ TEST_CASE("union errors surface the nested failure only for a type-selected bran
 
     CHECK(core::tools::schema::validate_arguments(definition, R"({"value":2.5})")
               .has_value());
+}
+
+TEST_CASE("AskUserQuestion declares an items schema for its questions array",
+          "[tools][schema][ask-user-question]") {
+    // Gemini and Cloud Code Assist reject an `array` parameter that carries no
+    // `items` — `INVALID_ARGUMENT: …properties[questions].items: missing
+    // field` — which failed every request offering this tool.
+    core::tools::AskUserQuestionTool tool;
+    const std::string schema =
+        core::tools::schema::canonical_input_schema(tool.get_definition());
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(schema);
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(padded).get(doc) == simdjson::SUCCESS);
+
+    std::string_view type;
+    REQUIRE(doc["properties"]["questions"]["type"].get(type) == simdjson::SUCCESS);
+    CHECK(type == "array");
+
+    const auto items = doc["properties"]["questions"]["items"];
+    REQUIRE(items["type"].get(type) == simdjson::SUCCESS);
+    CHECK(type == "object");
+
+    // The item schema names every field execute() reads.
+    for (const char* field : {"question", "header", "body", "multi_select", "options"}) {
+        CHECK(items["properties"][field].error() == simdjson::SUCCESS);
+    }
+    REQUIRE(items["properties"]["options"]["items"]["type"].get(type) == simdjson::SUCCESS);
+    CHECK(type == "object");
+    CHECK(items["properties"]["options"]["items"]["properties"]["label"].error()
+          == simdjson::SUCCESS);
+
+    // A call the schema accepts, and one it rejects.
+    CHECK(core::tools::schema::validate_arguments(
+              tool.get_definition(),
+              R"({"questions":[{"question":"How?","options":[{"label":"A"},{"label":"B"}]}]})")
+              .has_value());
+    CHECK_FALSE(core::tools::schema::validate_arguments(
+                    tool.get_definition(), R"({"questions":[{"header":"x"}]})")
+                    .has_value());
 }

@@ -302,8 +302,13 @@ std::string serialize_gemini_request(const ChatRequest& req,
 
     // Tools (Gemini uses functionDeclarations with uppercase type names).
     if (!req.tools.empty()) {
-        payload += R"("tools":[{"functionDeclarations":[)";
+        // The Antigravity hub sends one `functionDeclarations` array per tool;
+        // the public Gemini API accepts either shape, so plain Gemini keeps the
+        // single grouped element.
+        const bool per_element = extras && extras->tool_declaration_per_element;
+        payload += per_element ? R"("tools":[)" : R"("tools":[{"functionDeclarations":[)";
         for (size_t i = 0; i < req.tools.size(); ++i) {
+            if (per_element) payload += R"({"functionDeclarations":[)";
             const auto& def = req.tools[i].function;
             payload += R"({"name":")";
             payload += core::utils::escape_json_string(def.name);
@@ -314,9 +319,10 @@ std::string serialize_gemini_request(const ChatRequest& req,
                 core::tools::schema::canonical_input_schema(def),
                 gemini_model_requires_property_ordering(effective_model));
             payload += '}';
+            if (per_element) payload += "]}";
             if (i < req.tools.size() - 1) payload += ',';
         }
-        payload += "]}],";
+        payload += per_element ? "]," : "]}],";
     }
 
     // generationConfig (temperature, maxOutputTokens).
@@ -337,6 +343,30 @@ std::string serialize_gemini_request(const ChatRequest& req,
         payload += R"("maxOutputTokens":)" + std::to_string(*max_output_tokens);
         has_config = true;
     }
+    if (extras && (extras->include_thoughts || !extras->thinking_level.empty()
+                   || extras->thinking_budget.has_value())) {
+        if (has_config) payload += ',';
+        payload += R"("thinkingConfig":{)";
+        bool first_thinking = true;
+        if (extras->include_thoughts) {
+            payload += R"("includeThoughts":true)";
+            first_thinking = false;
+        }
+        if (!extras->thinking_level.empty()) {
+            if (!first_thinking) payload += ',';
+            payload += R"("thinkingLevel":")";
+            payload += core::utils::escape_json_string(extras->thinking_level);
+            payload += '"';
+            first_thinking = false;
+        }
+        if (extras->thinking_budget.has_value()) {
+            if (!first_thinking) payload += ',';
+            payload += R"("thinkingBudget":)";
+            payload += std::to_string(*extras->thinking_budget);
+        }
+        payload += '}';
+        has_config = true;
+    }
     if (req.response_format.is_structured()) {
         if (has_config) payload += ',';
         payload += R"("responseMimeType":"application/json")";
@@ -354,16 +384,29 @@ std::string serialize_gemini_request(const ChatRequest& req,
     payload += R"("contents":[)";
     for (size_t i = 0; i < filtered_messages.size(); ++i) {
         const auto& msg = filtered_messages[i];
+        const bool tool_result = msg.role == "tool";
         std::string role = msg.role;
         if (role == "assistant") role = "model";
-        if (role == "tool")      role = "function";
+        // Tool results ride on a `model` turn: Gemini has no "function" role
+        // and rejects it with `INVALID_ARGUMENT: Role 'function' is not
+        // supported` (valid roles are SYSTEM/USER/MODEL/...), and the native
+        // Cloud Code Assist clients send `functionResponse` parts as `model`.
+        if (tool_result) role = "model";
 
         payload += R"({"role":")";
         payload += core::utils::escape_json_string(role);
         payload += R"(","parts":[)";
 
-        if (role == "function") {
-            payload += R"({"functionResponse":{"name":")";
+        if (tool_result) {
+            payload += R"({"functionResponse":{)";
+            // The id pairs the result with its call when a turn issued several
+            // calls of the same tool.
+            if (!msg.tool_call_id.empty()) {
+                payload += R"("id":")";
+                payload += core::utils::escape_json_string(msg.tool_call_id);
+                payload += R"(",)";
+            }
+            payload += R"("name":")";
             payload += core::utils::escape_json_string(msg.name);
             payload += R"(","response":{"result":)";
             // Tool output is often JSON, but denials and failures are plain
@@ -381,12 +424,20 @@ std::string serialize_gemini_request(const ChatRequest& req,
             for (size_t j = 0; j < msg.tool_calls.size(); ++j) {
                 const auto& tc = msg.tool_calls[j];
                 payload += '{';
-                if (j == 0 && extras && extras->skip_thought_signature_on_first_call) {
+                const bool sign_call = extras && (extras->skip_thought_signature_on_all_calls
+                    || (j == 0 && extras->skip_thought_signature_on_first_call));
+                if (sign_call) {
                     payload += R"("thoughtSignature":")";
                     payload += kSkipThoughtSignatureValidator;
                     payload += R"(",)";
                 }
-                payload += R"("functionCall":{"name":")";
+                payload += R"("functionCall":{)";
+                if (!tc.id.empty()) {
+                    payload += R"("id":")";
+                    payload += core::utils::escape_json_string(tc.id);
+                    payload += R"(",)";
+                }
+                payload += R"("name":")";
                 payload += core::utils::escape_json_string(tc.function.name);
                 payload += R"(","args":)";
                 payload += core::utils::json::object_or_empty(
@@ -434,9 +485,6 @@ std::string serialize_gemini_request(const ChatRequest& req,
     }
     payload += ']';
     if (extras) {
-        if (extras->validated_tool_mode && !req.tools.empty()) {
-            payload += R"(,"toolConfig":{"functionCallingConfig":{"mode":"VALIDATED"}})";
-        }
         if (!extras->session_id.empty()) {
             payload += R"(,"sessionId":")";
             payload += core::utils::escape_json_string(extras->session_id);
@@ -455,56 +503,54 @@ std::string serialize_gemini_request(const ChatRequest& req,
 // parse_gemini_sse_chunk
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::pair<std::string, std::vector<ToolCall>>
-parse_gemini_sse_chunk(std::string_view json_sv) {
-    if (json_sv.empty()) return {};
+GeminiChunkParts parse_gemini_sse_chunk(std::string_view json_sv) {
+    GeminiChunkParts parsed;
+    if (json_sv.empty()) return parsed;
 
-    simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_sv);
-    simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return {};
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(json_sv.data(), json_sv.size());
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return parsed;
 
-    std::string           content_str;
-    std::vector<ToolCall> tools;
-
-    simdjson::ondemand::array candidates;
-    if (doc["candidates"].get_array().get(candidates) != simdjson::SUCCESS) return {};
+    simdjson::dom::array candidates;
+    if (doc["candidates"].get(candidates) != simdjson::SUCCESS) return parsed;
 
     for (auto candidate : candidates) {
-        simdjson::ondemand::object content_obj;
-        if (candidate["content"].get_object().get(content_obj) != simdjson::SUCCESS) continue;
-        simdjson::ondemand::array parts;
-        if (content_obj["parts"].get_array().get(parts) != simdjson::SUCCESS) continue;
+        simdjson::dom::array parts;
+        if (candidate["content"]["parts"].get(parts) != simdjson::SUCCESS) continue;
 
         for (auto part : parts) {
             std::string_view text_v;
-            if (part["text"].get_string().get(text_v) == simdjson::SUCCESS) {
-                content_str += std::string(text_v);
+            if (part["text"].get(text_v) == simdjson::SUCCESS) {
+                // `"thought": true` marks a thinking summary; it is reasoning,
+                // not answer text, and must never reach the transcript.
+                bool is_thought = false;
+                [[maybe_unused]] const auto thought_err = part["thought"].get(is_thought);
+                if (is_thought) parsed.reasoning.append(text_v);
+                else            parsed.content.append(text_v);
                 continue;
             }
 
-            simdjson::ondemand::object function_call;
-            if (part["functionCall"].get_object().get(function_call) == simdjson::SUCCESS) {
+            simdjson::dom::object function_call;
+            if (part["functionCall"].get(function_call) == simdjson::SUCCESS) {
                 ToolCall call;
                 call.id   = "call_gemini_" + std::to_string(++g_gemini_call_counter);
                 call.type = "function";
 
                 std::string_view name_v;
-                if (function_call["name"].get_string().get(name_v) == simdjson::SUCCESS)
+                if (function_call["name"].get(name_v) == simdjson::SUCCESS)
                     call.function.name = std::string(name_v);
 
-                simdjson::ondemand::object args_obj;
-                if (function_call["args"].get_object().get(args_obj) == simdjson::SUCCESS) {
-                    std::string_view raw_v;
-                    if (args_obj.raw_json().get(raw_v) == simdjson::SUCCESS)
-                        call.function.arguments = std::string(raw_v);
-                }
-                tools.push_back(std::move(call));
+                simdjson::dom::element args_el;
+                if (function_call["args"].get(args_el) == simdjson::SUCCESS)
+                    call.function.arguments = simdjson::minify(args_el);
+
+                parsed.tools.push_back(std::move(call));
             }
         }
     }
 
-    return {std::move(content_str), std::move(tools)};
+    return parsed;
 }
 
 GeminiUsageMetadata extract_gemini_usage_metadata(std::string_view json_sv) {
@@ -584,17 +630,21 @@ ParseResult GeminiProtocol::parse_event(std::string_view raw_event) {
         return r;
     }
 
-    auto [content, tools] = parse_gemini_sse_chunk(json_sv);
+    auto parts = parse_gemini_sse_chunk(json_sv);
 
     ParseResult result;
     const GeminiUsageMetadata usage = extract_gemini_usage_metadata(json_sv);
     result.prompt_tokens = usage.prompt_tokens;
     result.completion_tokens = usage.completion_tokens;
     result.cached_prompt_tokens = usage.cached_prompt_tokens;
-    if (!content.empty() || !tools.empty()) {
+    if (!parts.content.empty() || !parts.reasoning.empty() || !parts.tools.empty()) {
         StreamChunk chunk;
-        chunk.content = std::move(content);
-        chunk.tools   = std::move(tools);
+        chunk.content = std::move(parts.content);
+        if (!parts.reasoning.empty()) {
+            chunk.reasoning_content = std::move(parts.reasoning);
+            chunk.reasoning_protocol = "gemini";
+        }
+        chunk.tools   = std::move(parts.tools);
         result.chunks.push_back(std::move(chunk));
     }
     return result;

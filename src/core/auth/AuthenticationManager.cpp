@@ -61,22 +61,23 @@ std::string join(const std::vector<std::string>& values) {
 }
 
 /**
- * @brief Google (Gemini) OAuth strategy — subscription (Google AI Pro/Ultra)
- *        login for the `gemini` provider.
+ * @brief Google (Gemini) strategy — subscription (Google AI Pro/Ultra) access
+ *        for the `gemini` provider through the Antigravity backend.
  *
  * Google deprecated the gemini-cli OAuth flow for individual / Google AI Pro
  * and Ultra accounts (June 2026) and replaced it with a closed-source
- * "Antigravity CLI" that does not publish an integrable client_id. This
- * strategy signs in using OAuth client credentials supplied via environment
- * variables (see GoogleAntigravityOAuthFlow.hpp) — it is the only way left
- * to authenticate
- * a personal Google AI Pro/Ultra subscription without an API key.
+ * "Antigravity CLI". This strategy signs in with the Antigravity OAuth client
+ * natively: no Antigravity installation on the machine, and no access to any app
+ * session or keychain. `GOOGLE_ANTIGRAVITY_CLIENT_ID` / `_CLIENT_SECRET` or
+ * `<config_dir>/antigravity.json` supply that client pair per field — Filo
+ * embeds neither half, because a public repository cannot carry them; see
+ * AntigravityClientCredentials.hpp.
  *
  * This is NOT an officially supported integration: it violates Google's
- * Antigravity Terms of Service, and Google has suspended/banned real
- * accounts for this exact pattern. `GoogleAntigravityOAuthFlow::login()`
- * always shows a risk disclosure before proceeding — using it is entirely
- * at the user's own risk and responsibility.
+ * Antigravity Terms of Service, and Google has suspended/banned real accounts
+ * for this exact pattern. `GoogleAntigravityOAuthFlow::login()` always shows a
+ * risk disclosure before proceeding — using it is entirely at the user's own
+ * risk and responsibility.
  */
 class GoogleOAuthStrategy final : public IAuthStrategy {
 public:
@@ -85,7 +86,7 @@ public:
         return "Google / Gemini (unofficial — ToS risk)";
     }
     std::vector<std::string_view> login_aliases() const override {
-        return {"gemini"};
+        return {"gemini", "antigravity"};
     }
     std::string_view token_store_key() const noexcept override { return "google"; }
 
@@ -101,7 +102,8 @@ public:
     std::shared_ptr<ICredentialSource> create_credential_source(
         const core::config::ProviderConfig& /*provider_config*/,
         std::string_view config_dir) const override {
-        auto flow = std::make_shared<GoogleAntigravityOAuthFlow>();
+        auto flow = std::make_shared<GoogleAntigravityOAuthFlow>(
+            /*ui=*/nullptr, std::string(config_dir));
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store),
@@ -112,7 +114,7 @@ public:
 
     std::vector<std::string> login(std::string_view config_dir) const override {
         auto flow = std::make_shared<GoogleAntigravityOAuthFlow>(
-            std::make_shared<ui::ConsoleAuthUI>());
+            std::make_shared<ui::ConsoleAuthUI>(), std::string(config_dir));
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store));

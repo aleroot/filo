@@ -59,8 +59,13 @@ struct GeminiRequestExtras {
     /// signature (Gemini 3+ rejects unsigned first calls; Filo does not
     /// round-trip thought signatures).
     bool skip_thought_signature_on_first_call = false;
-    /// Emit `toolConfig.functionCallingConfig.mode = VALIDATED` when tools exist.
-    bool validated_tool_mode = false;
+    /// Tag *every* replayed `functionCall` part with the bypass signature.
+    /// The Antigravity hub carries one `thoughtSignature` per part, so a turn
+    /// that issued several calls has all of them signed.
+    bool skip_thought_signature_on_all_calls = false;
+    /// Emit one `{"functionDeclarations":[…]}` element per tool instead of a
+    /// single element holding every declaration (the Antigravity hub shape).
+    bool tool_declaration_per_element = false;
     /// Request-level `sessionId` (empty = omit).
     std::string session_id;
     /// Raw JSON object emitted as request-level `labels` (empty = omit).
@@ -68,6 +73,16 @@ struct GeminiRequestExtras {
     /// Fixed `maxOutputTokens` ceiling: clamps a caller value, and is used
     /// verbatim when the caller sent none.
     std::optional<int> max_output_tokens_cap;
+    /// Ask the backend to stream thought summaries (`thinkingConfig.
+    /// includeThoughts`). Without it Gemini 3+ still thinks, but the thoughts
+    /// are never returned, so the UI shows no reasoning.
+    bool include_thoughts = false;
+    /// `thinkingConfig.thinkingLevel`: "LOW" / "MEDIUM" / "HIGH" (empty = omit,
+    /// i.e. let the backend apply the model default).
+    std::string thinking_level;
+    /// `thinkingConfig.thinkingBudget`; -1 asks for dynamic budgeting (the
+    /// `*-tiered` SKUs). Mutually exclusive with `thinking_level` in practice.
+    std::optional<int> thinking_budget;
 };
 
 /// Value of `thoughtSignature` that makes Cloud Code Assist skip validation.
@@ -78,6 +93,16 @@ inline constexpr std::string_view kSkipThoughtSignatureValidator =
 serialize_gemini_request(const ChatRequest& req, const std::string& default_model,
                          const GeminiRequestExtras* extras = nullptr);
 
+/// Content, thought-summary and tool-call parts of one Gemini response object.
+struct GeminiChunkParts {
+    /// `parts[].text` of ordinary (non-thought) parts.
+    std::string content;
+    /// `parts[].text` of parts flagged `"thought": true` — the model's
+    /// thinking summary, which must never be mixed into the answer.
+    std::string reasoning;
+    std::vector<ToolCall> tools;
+};
+
 /**
  * @brief Parse a single Gemini SSE data-line JSON chunk.
  *
@@ -86,12 +111,13 @@ serialize_gemini_request(const ChatRequest& req, const std::string& default_mode
  *
  * Tool calls arrive complete (not streamed), with a synthetic auto-generated id
  * of the form `"call_gemini_N"`.  Pure function — exposed for unit testing.
+ * Also accepts an already-extracted response object (Cloud Code Assist wraps
+ * the same shape under `response`); callers pass `simdjson::minify(...)` then.
  *
  * @param json_sv  The JSON after stripping the leading `"data: "` prefix.
- * @return `{content_text, tool_calls}`.  Both empty on malformed or no-op input.
+ * @return Parsed parts.  All empty on malformed or no-op input.
  */
-[[nodiscard]] std::pair<std::string, std::vector<ToolCall>>
-parse_gemini_sse_chunk(std::string_view json_sv);
+[[nodiscard]] GeminiChunkParts parse_gemini_sse_chunk(std::string_view json_sv);
 
 /**
  * @brief Extract token usage metadata from a Gemini response object.

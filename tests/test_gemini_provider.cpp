@@ -10,6 +10,8 @@
 #include "core/llm/Models.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include <charconv>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <simdjson.h>
@@ -149,6 +151,35 @@ TEST_CASE("GeminiProvider Serializes Tool Calls and Responses", "[GeminiProvider
     int64_t temp;
     REQUIRE(resp_result["temperature"].get_int64().get(temp) == simdjson::SUCCESS);
     REQUIRE(temp == 22);
+}
+
+TEST_CASE("Gemini tool results ride on a model turn", "[GeminiProvider][tool-call]") {
+    GeminiProtocol protocol;
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.messages.push_back(Message{.role = "user", .content = "Run it"});
+    Message call{.role = "assistant"};
+    ToolCall tc;
+    tc.id = "call_gemini_7";
+    tc.function.name = "run_command";
+    tc.function.arguments = R"({"CommandLine":"echo hi"})";
+    call.tool_calls.push_back(tc);
+    req.messages.push_back(call);
+    req.messages.push_back(Message{.role = "tool",
+                                   .content = "hi\n",
+                                   .name = "run_command",
+                                   .tool_call_id = "call_gemini_7"});
+
+    const std::string payload = protocol.serialize(req);
+
+    // Cloud Code Assist rejects role "function" outright (400
+    // INVALID_ARGUMENT: "Role 'function' is not supported"), and the ids pair a
+    // result with its call when a turn issued several calls of the same tool.
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"function")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"model","parts":[{"functionResponse":{"id":"call_gemini_7")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("functionCall":{"id":"call_gemini_7","name":"run_command")"));
 }
 
 TEST_CASE("Gemini serializer keeps malformed tool data inside valid JSON",
@@ -338,67 +369,76 @@ TEST_CASE("HttpLLMProvider uses inherited protocol model canonicalization",
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("parse_gemini_sse_chunk - text content extracted", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}]})");
-    REQUIRE(content == "Hello");
-    REQUIRE(tools.empty());
+    REQUIRE(parts.content == "Hello");
+    REQUIRE(parts.reasoning.empty());
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - multi-sentence text preserved", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello World!"}]}}]})");
-    REQUIRE(content == "Hello World!");
+    REQUIRE(parts.content == "Hello World!");
 }
 
 TEST_CASE("parse_gemini_sse_chunk - multiple text parts are concatenated", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello "},{"text":"World"}]}}]})");
-    REQUIRE(content == "Hello World");
-    REQUIRE(tools.empty());
+    REQUIRE(parts.content == "Hello World");
+    REQUIRE(parts.tools.empty());
+}
+
+TEST_CASE("parse_gemini_sse_chunk - thought parts are reasoning, not content", "[gemini][sse]") {
+    const auto parts = parse_gemini_sse_chunk(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"Thinking hard."},{"text":"The answer."}]}}]})");
+    REQUIRE(parts.content == "The answer.");
+    REQUIRE(parts.reasoning == "Thinking hard.");
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - function call extracted with auto id", "[gemini][sse][tools]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"location":"Paris"}}}]}}]})");
-    REQUIRE(content.empty());
-    REQUIRE(tools.size() == 1);
-    REQUIRE(tools[0].function.name == "get_weather");
+    REQUIRE(parts.content.empty());
+    REQUIRE(parts.tools.size() == 1);
+    REQUIRE(parts.tools[0].function.name == "get_weather");
     // ID is auto-generated as "call_gemini_N"
-    REQUIRE_THAT(tools[0].id, Catch::Matchers::StartsWith("call_gemini_"));
-    REQUIRE(tools[0].type == "function");
+    REQUIRE_THAT(parts.tools[0].id, Catch::Matchers::StartsWith("call_gemini_"));
+    REQUIRE(parts.tools[0].type == "function");
 }
 
 TEST_CASE("parse_gemini_sse_chunk - function call args are stringified", "[gemini][sse][tools]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{"x":42}}}]}}]})");
-    REQUIRE(tools.size() == 1);
-    REQUIRE_THAT(tools[0].function.arguments, Catch::Matchers::ContainsSubstring("42"));
+    REQUIRE(parts.tools.size() == 1);
+    REQUIRE_THAT(parts.tools[0].function.arguments, Catch::Matchers::ContainsSubstring("42"));
 }
 
 TEST_CASE("parse_gemini_sse_chunk - empty candidates returns empty result", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"candidates":[]})");
-    REQUIRE(content.empty());
-    REQUIRE(tools.empty());
+    REQUIRE(parts.content.empty());
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - empty string returns empty result", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk("");
-    REQUIRE(content.empty());
-    REQUIRE(tools.empty());
+    const auto parts = parse_gemini_sse_chunk("");
+    REQUIRE(parts.content.empty());
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - malformed JSON returns empty result", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk("{bad json");
-    REQUIRE(content.empty());
-    REQUIRE(tools.empty());
+    const auto parts = parse_gemini_sse_chunk("{bad json");
+    REQUIRE(parts.content.empty());
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - missing candidates key returns empty result", "[gemini][sse]") {
-    auto [content, tools] = parse_gemini_sse_chunk(
+    const auto parts = parse_gemini_sse_chunk(
         R"({"usageMetadata":{"promptTokenCount":10}})");
-    REQUIRE(content.empty());
-    REQUIRE(tools.empty());
+    REQUIRE(parts.content.empty());
+    REQUIRE(parts.tools.empty());
 }
 
 TEST_CASE("extract_gemini_usage_metadata - prompt and completion tokens", "[gemini][usage]") {
@@ -562,6 +602,13 @@ simdjson::dom::element parse_json(simdjson::dom::parser& parser, const std::stri
     REQUIRE(parser.parse(json).get(doc) == simdjson::SUCCESS);
     return doc;
 }
+
+/// The envelope's `requestId`, as a view owned by the parsed document.
+std::string_view request_id_of(simdjson::dom::element doc) {
+    std::string_view value;
+    REQUIRE(doc["requestId"].get(value) == simdjson::SUCCESS);
+    return value;
+}
 } // namespace
 
 TEST_CASE("GeminiAntigravityProtocol rotates daily and sandbox on failed attempts",
@@ -616,30 +663,75 @@ TEST_CASE("GeminiAntigravityProtocol envelope mirrors the hub client",
 
     std::string_view request_id;
     REQUIRE(doc["requestId"].get(request_id) == simdjson::SUCCESS);
+    // agent/<cascadeId>/<epoch ms>/<trajectoryId>/<contents>; a first turn
+    // sends exactly one content, so the request number is 1.
     REQUIRE_THAT(std::string(request_id),
                  Catch::Matchers::Matches(
                      "agent/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-                     "/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/2"));
-    std::string_view user_agent, request_type, session_id, role, tool_mode;
+                     "/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/1"));
+    std::string_view user_agent, request_type, session_id, role;
     REQUIRE(doc["userAgent"].get(user_agent) == simdjson::SUCCESS);
     REQUIRE(doc["requestType"].get(request_type) == simdjson::SUCCESS);
     REQUIRE(user_agent == "antigravity");
     REQUIRE(request_type == "agent");
+    // A signed 64-bit integer, one value per installation.
     REQUIRE(doc["request"]["sessionId"].get(session_id) == simdjson::SUCCESS);
-    REQUIRE(session_id.starts_with('-'));
+    REQUIRE(!session_id.empty());
+    std::int64_t session_value = 0;
+    const auto* session_end = session_id.data() + session_id.size();
+    REQUIRE(std::from_chars(session_id.data(), session_end, session_value).ptr
+            == session_end);
     REQUIRE(doc["request"]["systemInstruction"]["role"].get(role) == simdjson::SUCCESS);
     REQUIRE(role == "user");
-    std::string_view last_step, used_claude;
-    REQUIRE(doc["request"]["labels"]["last_step_index"].get(last_step) == simdjson::SUCCESS);
-    REQUIRE(last_step == "1");
-    REQUIRE(doc["request"]["labels"]["used_claude"].get(used_claude) == simdjson::SUCCESS);
-    REQUIRE(used_claude == "false");
-    // No tools declared -> no toolConfig.
+
+    // The hub sends no toolConfig at all.
     REQUIRE(doc["request"]["toolConfig"].error() == simdjson::NO_SUCH_FIELD);
-    REQUIRE(tool_mode.empty());
+    // No credential resolved a project, so the envelope carries none.
+    REQUIRE(doc["project"].error() == simdjson::NO_SUCH_FIELD);
+
+    // labels is alphabetical and carries the full hub key set.
+    const auto labels = doc["request"]["labels"];
+    std::string_view cascade_id, root_cascade_id, trajectory_id, label_request_id;
+    std::string_view last_step, used_claude, used_claude_conservative, used_non_gemini;
+    REQUIRE(labels["cascade_id"].get(cascade_id) == simdjson::SUCCESS);
+    REQUIRE(labels["root_cascade_id"].get(root_cascade_id) == simdjson::SUCCESS);
+    REQUIRE(cascade_id == root_cascade_id);
+    REQUIRE(labels["trajectory_id"].get(trajectory_id) == simdjson::SUCCESS);
+    REQUIRE(labels["request_id"].get(label_request_id) == simdjson::SUCCESS);
+    REQUIRE(label_request_id == std::string(trajectory_id) + "-0");
+    REQUIRE(labels["last_step_index"].get(last_step) == simdjson::SUCCESS);
+    REQUIRE(last_step == "0");
+    REQUIRE(labels["used_claude"].get(used_claude) == simdjson::SUCCESS);
+    REQUIRE(used_claude == "false");
+    REQUIRE(labels["used_claude_conservative"].get(used_claude_conservative)
+            == simdjson::SUCCESS);
+    REQUIRE(used_claude_conservative == "false");
+    REQUIRE(labels["used_non_gemini_model"].get(used_non_gemini) == simdjson::SUCCESS);
+    REQUIRE(used_non_gemini == "false");
+    // The cascade and trajectory ids in the envelope are the labelled ones.
+    REQUIRE_THAT(std::string(request_id),
+                 Catch::Matchers::ContainsSubstring(std::string(cascade_id)));
+    REQUIRE_THAT(std::string(request_id),
+                 Catch::Matchers::ContainsSubstring(std::string(trajectory_id)));
 }
 
-TEST_CASE("GeminiAntigravityProtocol keeps session ids stable and advances the step",
+TEST_CASE("GeminiAntigravityProtocol sends the resolved project in the envelope",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    auto req = antigravity_request("gemini-4-argon-high");
+    req.auth_properties["project_id"] = "aicode-consumers";
+
+    simdjson::dom::parser parser;
+    const auto doc = parse_json(parser, protocol.serialize(req));
+    std::string_view project;
+    REQUIRE(doc["project"].get(project) == simdjson::SUCCESS);
+    REQUIRE(project == "aicode-consumers");
+    std::string_view model;
+    REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
+    REQUIRE(model == "gemini-4-argon-high");
+}
+
+TEST_CASE("GeminiAntigravityProtocol keeps one session id and numbers turns like the hub",
           "[gemini][antigravity]") {
     GeminiAntigravityProtocol protocol;
     auto first = antigravity_request("gemini-3.1-pro-preview", "Same conversation");
@@ -653,20 +745,35 @@ TEST_CASE("GeminiAntigravityProtocol keeps session ids stable and advances the s
     const auto d2 = parse_json(p2, protocol.serialize(second));
     const auto d3 = parse_json(p3, protocol.serialize(other));
 
-    std::string_view s1, s2, s3, l2, t1, t2;
+    // sessionId is per installation, not per conversation.
+    std::string_view s1, s2, s3, l2, t1, t2, t3;
     REQUIRE(d1["request"]["sessionId"].get(s1) == simdjson::SUCCESS);
     REQUIRE(d2["request"]["sessionId"].get(s2) == simdjson::SUCCESS);
     REQUIRE(d3["request"]["sessionId"].get(s3) == simdjson::SUCCESS);
     REQUIRE(s1 == s2);
-    REQUIRE(s1 != s3);
+    REQUIRE(s1 == s3);
+
+    // The three turns are: one content, then three after a tool round.
     REQUIRE(d2["request"]["labels"]["last_step_index"].get(l2) == simdjson::SUCCESS);
     REQUIRE(l2 == "2");
+    REQUIRE_THAT(std::string(request_id_of(d1)), Catch::Matchers::EndsWith("/1"));
+    REQUIRE_THAT(std::string(request_id_of(d2)), Catch::Matchers::EndsWith("/3"));
+
+    // Distinct conversations get distinct trajectories, and the request ordinal
+    // inside a trajectory counts prior assistant turns.
     REQUIRE(d1["request"]["labels"]["trajectory_id"].get(t1) == simdjson::SUCCESS);
     REQUIRE(d2["request"]["labels"]["trajectory_id"].get(t2) == simdjson::SUCCESS);
+    REQUIRE(d3["request"]["labels"]["trajectory_id"].get(t3) == simdjson::SUCCESS);
     REQUIRE(t1 == t2);
+    REQUIRE(t1 != t3);
+    std::string_view r1, r2;
+    REQUIRE(d1["request"]["labels"]["request_id"].get(r1) == simdjson::SUCCESS);
+    REQUIRE(d2["request"]["labels"]["request_id"].get(r2) == simdjson::SUCCESS);
+    REQUIRE(r1 == std::string(t1) + "-0");
+    REQUIRE(r2 == std::string(t2) + "-1");
 }
 
-TEST_CASE("GeminiAntigravityProtocol prefers the explicit session id as anchor",
+TEST_CASE("GeminiAntigravityProtocol anchors its ids on the explicit session id",
           "[gemini][antigravity]") {
     GeminiAntigravityProtocol protocol;
     auto a = antigravity_request("gemini-3.1-pro-preview", "First prompt");
@@ -674,13 +781,18 @@ TEST_CASE("GeminiAntigravityProtocol prefers the explicit session id as anchor",
     a.session_id = b.session_id = "session-42";
 
     simdjson::dom::parser pa, pb;
-    std::string_view sa, sb;
-    REQUIRE(parse_json(pa, protocol.serialize(a))["request"]["sessionId"].get(sa) == simdjson::SUCCESS);
-    REQUIRE(parse_json(pb, protocol.serialize(b))["request"]["sessionId"].get(sb) == simdjson::SUCCESS);
-    REQUIRE(sa == sb);
+    const auto da = parse_json(pa, protocol.serialize(a));
+    const auto db = parse_json(pb, protocol.serialize(b));
+
+    // The prompts differ, so only the explicit session id can tie the two
+    // requests to one trajectory.
+    std::string_view ta, tb;
+    REQUIRE(da["request"]["labels"]["trajectory_id"].get(ta) == simdjson::SUCCESS);
+    REQUIRE(db["request"]["labels"]["trajectory_id"].get(tb) == simdjson::SUCCESS);
+    REQUIRE(ta == tb);
 }
 
-TEST_CASE("GeminiAntigravityProtocol validates tool calling and signs Gemini 3 calls",
+TEST_CASE("GeminiAntigravityProtocol mirrors the hub tool shape and signs every call",
           "[gemini][antigravity]") {
     GeminiAntigravityProtocol protocol;
     auto req = antigravity_request("gemini-3.1-pro-preview");
@@ -688,7 +800,10 @@ TEST_CASE("GeminiAntigravityProtocol validates tool calling and signs Gemini 3 c
     def.name = "read_file";
     def.description = "Read";
     def.input_schema = R"({"type":"object","properties":{}})";
+    core::tools::ToolDefinition second = def;
+    second.name = "run_command";
     req.tools.push_back(Tool{.function = def});
+    req.tools.push_back(Tool{.function = second});
     Message call{.role = "assistant"};
     ToolCall tc;
     tc.id = "c1";
@@ -701,16 +816,31 @@ TEST_CASE("GeminiAntigravityProtocol validates tool calling and signs Gemini 3 c
     const std::string payload = protocol.serialize(req);
     simdjson::dom::parser parser;
     const auto doc = parse_json(parser, payload);
-    std::string_view mode;
-    REQUIRE(doc["request"]["toolConfig"]["functionCallingConfig"]["mode"].get(mode)
-            == simdjson::SUCCESS);
-    REQUIRE(mode == "VALIDATED");
 
-    // Only the first call of the turn carries the bypass signature.
+    // The hub sends no toolConfig, not even with tools declared.
+    REQUIRE(doc["request"]["toolConfig"].error() == simdjson::NO_SUCH_FIELD);
+
+    // One `functionDeclarations` element per tool.
+    simdjson::dom::array tools;
+    REQUIRE(doc["request"]["tools"].get(tools) == simdjson::SUCCESS);
+    REQUIRE(tools.size() == 2);
+    for (auto tool_result : tools) {
+        simdjson::dom::element tool;
+        REQUIRE(tool_result.get(tool) == simdjson::SUCCESS);
+        simdjson::dom::array declarations;
+        REQUIRE(tool["functionDeclarations"].get(declarations) == simdjson::SUCCESS);
+        REQUIRE(declarations.size() == 1);
+    }
+
+    // Every replayed call part is signed: the hub carries one thoughtSignature
+    // per part, so a turn that issued two calls has two of them.
     const std::string needle = R"("thoughtSignature":"skip_thought_signature_validator")";
-    const auto first = payload.find(needle);
-    REQUIRE(first != std::string::npos);
-    REQUIRE(payload.find(needle, first + 1) == std::string::npos);
+    std::size_t signatures = 0;
+    for (auto at = payload.find(needle); at != std::string::npos;
+         at = payload.find(needle, at + needle.size())) {
+        ++signatures;
+    }
+    REQUIRE(signatures == 2);
 }
 
 TEST_CASE("GeminiAntigravityProtocol caps Claude output and skips the signature bypass",
@@ -718,26 +848,43 @@ TEST_CASE("GeminiAntigravityProtocol caps Claude output and skips the signature 
     GeminiAntigravityProtocol protocol;
     simdjson::dom::parser parser;
 
-    auto claude = antigravity_request("claude-sonnet-4-6");
+    auto claude = antigravity_request("claude-sonnet-5-5-high");
     auto doc = parse_json(parser, protocol.serialize(claude));
     int64_t max_tokens = 0;
     REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
-    REQUIRE(max_tokens == 64000);
-    std::string_view used_claude;
+    REQUIRE(max_tokens == 128000);
+    std::string_view used_claude, used_non_gemini, model_enum;
     REQUIRE(doc["request"]["labels"]["used_claude"].get(used_claude) == simdjson::SUCCESS);
     REQUIRE(used_claude == "true");
+    REQUIRE(doc["request"]["labels"]["used_non_gemini_model"].get(used_non_gemini)
+            == simdjson::SUCCESS);
+    REQUIRE(used_non_gemini == "true");
+    REQUIRE(doc["request"]["labels"]["model_enum"].get(model_enum) == simdjson::SUCCESS);
+    REQUIRE(model_enum == "MODEL_PLACEHOLDER_M405");
 
-    claude.max_tokens = 100000;
+    claude.max_tokens = 200000;
     simdjson::dom::parser parser2;
     doc = parse_json(parser2, protocol.serialize(claude));
     REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
-    REQUIRE(max_tokens == 64000);
+    REQUIRE(max_tokens == 128000);
 
     claude.max_tokens = 2048;
     simdjson::dom::parser parser3;
     doc = parse_json(parser3, protocol.serialize(claude));
     REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
     REQUIRE(max_tokens == 2048);
+
+    // The signature bypass is a Gemini 3+ requirement only.
+    auto claude_calls = claude;
+    Message call{.role = "assistant"};
+    ToolCall tc;
+    tc.id = "c1";
+    tc.function.name = "read_file";
+    tc.function.arguments = "{}";
+    call.tool_calls.push_back(tc);
+    claude_calls.messages.push_back(call);
+    const std::string claude_payload = protocol.serialize(claude_calls);
+    REQUIRE_THAT(claude_payload, !Catch::Matchers::ContainsSubstring("thoughtSignature"));
 
     // Gemini keeps whatever the caller asked for.
     auto gemini = antigravity_request("gemini-3.1-pro-preview");
@@ -752,22 +899,22 @@ TEST_CASE("GeminiAntigravityProtocol tags wire-profile models with model_enum an
     simdjson::dom::parser p1, p2, p3;
 
     const auto profiled =
-        parse_json(p1, protocol.serialize(antigravity_request("gemini-3.1-pro-low", "Profiled wire model")));
+        parse_json(p1, protocol.serialize(antigravity_request("gemini-4-argon-high", "Profiled wire model")));
     std::string_view model_enum;
     REQUIRE(profiled["request"]["labels"]["model_enum"].get(model_enum) == simdjson::SUCCESS);
-    REQUIRE(model_enum == "MODEL_PLACEHOLDER_M36");
+    REQUIRE(model_enum == "MODEL_PLACEHOLDER_M417");
     int64_t max_tokens = 0;
     REQUIRE(profiled["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens)
             == simdjson::SUCCESS);
-    REQUIRE(max_tokens == 65535);
+    REQUIRE(max_tokens == 65536);
 
     // The profile cap is a ceiling: a smaller caller request passes through.
-    auto clamped = antigravity_request("gemini-3.1-pro-low", "Clamped wire model");
+    auto clamped = antigravity_request("gemini-4-argon-high", "Clamped wire model");
     clamped.max_tokens = 100'000;
     const auto clamped_doc = parse_json(p2, protocol.serialize(clamped));
     REQUIRE(clamped_doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens)
             == simdjson::SUCCESS);
-    REQUIRE(max_tokens == 65535);
+    REQUIRE(max_tokens == 65536);
 
     // Unknown ids carry no telemetry label and no forced output cap.
     const auto unknown = parse_json(
@@ -781,7 +928,7 @@ TEST_CASE("Antigravity responseId becomes the next request's last_execution_id",
           "[gemini][antigravity]") {
     AntigravityConversationState::instance().clear();
     GeminiAntigravityProtocol protocol;
-    auto first = antigravity_request("gemini-3.1-pro-low", "Execution handle conversation");
+    auto first = antigravity_request("gemini-3.8-flash-high", "Execution handle conversation");
 
     protocol.prepare_request(first);
     simdjson::dom::parser p1;
@@ -816,6 +963,49 @@ TEST_CASE("AntigravityConversationState drops the oldest conversations at capaci
     CHECK(state.execution_id("anchor-0").empty());
     CHECK(state.execution_id("anchor-" + std::to_string(total - 1))
           == "exec-" + std::to_string(total - 1));
+}
+
+TEST_CASE("GeminiAntigravityProtocol asks for thought summaries at the SKU's level",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    simdjson::dom::parser p1, p2, p3, p4;
+
+    const auto argon =
+        parse_json(p1, protocol.serialize(antigravity_request("gemini-4-argon-high")));
+    bool include_thoughts = false;
+    REQUIRE(argon["request"]["generationConfig"]["thinkingConfig"]["includeThoughts"]
+                .get(include_thoughts)
+            == simdjson::SUCCESS);
+    CHECK(include_thoughts);
+    std::string_view level;
+    REQUIRE(argon["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"].get(level)
+            == simdjson::SUCCESS);
+    CHECK(level == "HIGH");
+
+    // The caller's effort hint wins over the SKU suffix.
+    auto hinted = antigravity_request("gemini-4-argon-high");
+    hinted.effort = "low";
+    const auto hinted_doc = parse_json(p2, protocol.serialize(hinted));
+    REQUIRE(hinted_doc["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"]
+                .get(level)
+            == simdjson::SUCCESS);
+    CHECK(level == "LOW");
+
+    // `*-tiered` SKUs budget dynamically instead of pinning a level.
+    const auto tiered =
+        parse_json(p3, protocol.serialize(antigravity_request("gemini-3.8-flash-tiered")));
+    int64_t budget = 0;
+    REQUIRE(tiered["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"].get(budget)
+            == simdjson::SUCCESS);
+    CHECK(budget == -1);
+    CHECK(tiered["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"].error()
+          == simdjson::NO_SUCH_FIELD);
+
+    // A SKU that cannot think gets no thinkingConfig.
+    const auto image =
+        parse_json(p4, protocol.serialize(antigravity_request("gemini-3.1-flash-image")));
+    CHECK(image["request"]["generationConfig"]["thinkingConfig"].error()
+          == simdjson::NO_SUCH_FIELD);
 }
 
 TEST_CASE("Plain Code Assist serialization is unchanged by Antigravity extras",

@@ -1,5 +1,6 @@
 #include "GeminiAntigravityProtocol.hpp"
 #include "AntigravityConversationState.hpp"
+#include "GeminiProtocol.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 
@@ -14,26 +16,48 @@ namespace core::llm::protocols {
 
 namespace {
 
-constexpr int kClaudeMaxOutputTokens = 64000;
+constexpr int kClaudeMaxOutputTokens = 128000;
+constexpr int kGeminiMaxOutputTokens = 65536;
 
-// Per-wire-id constants captured from the real `antigravity/hub` client.
-// `model_enum` is telemetry-only (the backend does not require it) but the
-// real client never omits it for these ids, so neither does Filo.
+// Per-wire-id constants snapshotted from `v1internal:fetchAvailableModels` as
+// served to the 2.26.0 hub client (2026-10-26). `model_enum` is telemetry-only
+// (the backend does not require it) but the real client never omits it for the
+// ids it lists, so neither does Filo; an id absent from this snapshot simply
+// sends no label. `max_output_tokens` is the fixed `generationConfig.
+// maxOutputTokens` the client sends for that SKU.
 struct WireProfileEntry {
     std::string_view model;
     AntigravityModelWireProfile profile;
 };
 
-constexpr std::array<WireProfileEntry, 7> kWireProfiles{{
-    {"gemini-3.5-flash-extra-low", {"MODEL_PLACEHOLDER_M187", 65536}},
-    {"gemini-3.5-flash-low", {"MODEL_PLACEHOLDER_M20", 65536}},
-    {"gemini-3-flash-agent", {"MODEL_PLACEHOLDER_M132", 65536}},
-    {"gemini-3.1-pro-low", {"MODEL_PLACEHOLDER_M36", 65535}},
-    {"gemini-pro-agent", {"MODEL_PLACEHOLDER_M16", 65535}},
-    // Claude on `daily-cloudcode-pa` rejects maxOutputTokens > 64000 with a
-    // 400; these ids carry no model_enum label.
-    {"claude-sonnet-4-6", {{}, 64000}},
-    {"claude-opus-4-6-thinking", {{}, 64000}},
+constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
+    // Gemini 4 Argon — the frontier tier of the 2.26.0 client.
+    {"gemini-4-argon-low", {"MODEL_PLACEHOLDER_M419", kGeminiMaxOutputTokens}},
+    {"gemini-4-argon-medium", {"MODEL_PLACEHOLDER_M418", kGeminiMaxOutputTokens}},
+    {"gemini-4-argon-high", {"MODEL_PLACEHOLDER_M417", kGeminiMaxOutputTokens}},
+    // Gemini 3.8 Flash. `-tiered` is the SKU the hub's own agent runs: it
+    // carries no display name and asks for a dynamic thinking budget.
+    {"gemini-3.8-flash-low", {"MODEL_PLACEHOLDER_M320", kGeminiMaxOutputTokens}},
+    {"gemini-3.8-flash-medium", {"MODEL_PLACEHOLDER_M319", kGeminiMaxOutputTokens}},
+    {"gemini-3.8-flash-high", {"MODEL_PLACEHOLDER_M318", kGeminiMaxOutputTokens}},
+    {"gemini-3.8-flash-tiered", {"MODEL_PLACEHOLDER_M322", kGeminiMaxOutputTokens}},
+    {"gemini-3.5-flash-lite", {"MODEL_PLACEHOLDER_M198", 65535}},
+    {"gemini-3.1-flash-lite", {"MODEL_PLACEHOLDER_M50", 65535}},
+    {"gemini-3.1-flash-image", {"MODEL_PLACEHOLDER_M21", kGeminiMaxOutputTokens}},
+    {"gemini-3-flash", {"MODEL_PLACEHOLDER_M18", kGeminiMaxOutputTokens}},
+    {"gemini-2.5-pro", {"MODEL_GOOGLE_GEMINI_2_5_PRO", 65535}},
+    {"gemini-2.5-flash", {"MODEL_GOOGLE_GEMINI_2_5_FLASH", 65535}},
+    {"gemini-2.5-flash-lite", {"MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE", 65535}},
+    {"gemini-2.5-flash-thinking", {"MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING", 65535}},
+    // Anthropic-backed SKUs: measured 128000 maxOutputTokens on
+    // `daily-cloudcode-pa` (the 64000 ceiling of the 4.x ids is gone).
+    {"claude-opus-5-5-low", {"MODEL_PLACEHOLDER_M400", kClaudeMaxOutputTokens}},
+    {"claude-opus-5-5-medium", {"MODEL_PLACEHOLDER_M401", kClaudeMaxOutputTokens}},
+    {"claude-opus-5-5-high", {"MODEL_PLACEHOLDER_M402", kClaudeMaxOutputTokens}},
+    {"claude-sonnet-5-5-low", {"MODEL_PLACEHOLDER_M403", kClaudeMaxOutputTokens}},
+    {"claude-sonnet-5-5-medium", {"MODEL_PLACEHOLDER_M404", kClaudeMaxOutputTokens}},
+    {"claude-sonnet-5-5-high", {"MODEL_PLACEHOLDER_M405", kClaudeMaxOutputTokens}},
+    {"gpt-oss-120b-medium", {"MODEL_OPENAI_GPT_OSS_120B_MEDIUM", 32768}},
 }};
 
 [[nodiscard]] std::uint64_t fnv1a64(std::string_view text) noexcept {
@@ -72,6 +96,24 @@ constexpr std::array<WireProfileEntry, 7> kWireProfiles{{
     return "filo-antigravity";
 }
 
+/// The hub derives one signed 64-bit `sessionId` per installation and reuses it
+/// for every conversation *and* every restart (a single value appears across
+/// all captured cascades and language-server runs), so Filo derives one per
+/// user/machine rather than per conversation.
+[[nodiscard]] std::string installation_session_id() {
+    static const std::string value = [] {
+        std::string seed = "filo-antigravity";
+        for (const char* key : {"USER", "HOME"}) {
+            if (const char* raw = std::getenv(key); raw && raw[0] != '\0') {
+                seed += '|';
+                seed += raw;
+            }
+        }
+        return std::to_string(static_cast<std::int64_t>(fnv1a64(seed)));
+    }();
+    return value;
+}
+
 [[nodiscard]] std::string next_request_timestamp_ms() {
     static std::atomic<std::int64_t> last{0};
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -93,6 +135,31 @@ constexpr std::array<WireProfileEntry, 7> kWireProfiles{{
     if (!lowered.starts_with("gemini-")) return false;
     const auto digit = lowered.find_first_of("0123456789", 7);
     return digit != std::string::npos && lowered[digit] >= '3';
+}
+
+/// `thinkingConfig.thinkingLevel` for a routed id: the caller's effort hint
+/// wins, else the SKU's own `-low` / `-medium` / `-high` suffix. Empty when
+/// neither names a level, in which case the backend applies its default.
+[[nodiscard]] std::string thinking_level_for(std::string_view model,
+                                             std::string_view effort) {
+    const std::string hint = core::utils::str::to_lower_ascii_copy(effort);
+    if (hint == "low") return "LOW";
+    if (hint == "medium") return "MEDIUM";
+    if (hint == "high" || hint == "max") return "HIGH";
+
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
+    if (lowered.ends_with("-low")) return "LOW";
+    if (lowered.ends_with("-medium")) return "MEDIUM";
+    if (lowered.ends_with("-high")) return "HIGH";
+    return {};
+}
+
+/// Whether the SKU takes a `thinkingConfig` at all: the image-generation SKU is
+/// not thinking-capable, and non-Gemini/non-Claude ids are left alone.
+[[nodiscard]] bool model_supports_thinking(std::string_view model) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
+    if (lowered.ends_with("-image")) return false;
+    return lowered.starts_with("gemini-") || lowered.starts_with("claude-");
 }
 
 std::string trim_trailing_slashes(std::string_view url) {
@@ -129,21 +196,31 @@ void GeminiAntigravityProtocol::prepare_request(ChatRequest& request) {
 
 std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
     const std::string anchor = conversation_anchor(req);
-    const std::string model = req.model;
+    const std::string model = normalize_requested_gemini_model(req.model);
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
     const bool claude = is_claude_model(model);
+    const bool gemini = lowered.starts_with("gemini-");
 
-    // One prior assistant message == one earlier request of this trajectory.
-    const auto prior_steps = static_cast<int>(std::count_if(
+    // The hub numbers a trajectory by the `contents` it sends: one content per
+    // turn, so the first request of a cascade carries 1, the request after one
+    // tool round carries 3, and so on. `requestId` ends with that count and
+    // `labels.last_step_index` with count-1, while `labels.request_id` ends
+    // with the 0-based index of this request inside the trajectory — one prior
+    // assistant message == one prior request.
+    const auto contents = static_cast<int>(std::count_if(
+        req.messages.begin(), req.messages.end(),
+        [](const Message& m) { return m.role != "system"; }));
+    const auto prior_requests = static_cast<int>(std::count_if(
         req.messages.begin(), req.messages.end(),
         [](const Message& m) { return m.role == "assistant"; }));
-    const int step = 2 + prior_steps;
+    const int step = std::max(contents, 1);
 
     const std::string trajectory_id = uuid_from_seed(anchor + "#trajectory");
-    const std::string agent_id = uuid_from_seed(anchor + "#agent");
+    const std::string cascade_id = uuid_from_seed(anchor + "#agent");
     const std::string used_claude = claude ? "true" : "false";
     const auto profile = antigravity_wire_profile(model);
 
-    // Label order matches the real hub client. The previous response's
+    // Alphabetical, exactly as the hub serialises it. The previous response's
     // execution handle appears only once a response has been observed for
     // this conversation.
     std::string labels = "{";
@@ -153,42 +230,64 @@ std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
         labels += labels_entry(key, value);
         first_label = false;
     };
-    const std::string last_execution_id =
-        AntigravityConversationState::instance().execution_id(anchor);
-    if (!last_execution_id.empty()) {
+    append_label("cascade_id", cascade_id);
+    if (const std::string last_execution_id =
+            AntigravityConversationState::instance().execution_id(anchor);
+        !last_execution_id.empty()) {
         append_label("last_execution_id", last_execution_id);
     }
     append_label("last_step_index", std::to_string(step - 1));
     if (profile.has_value() && !profile->model_enum.empty()) {
         append_label("model_enum", profile->model_enum);
     }
+    append_label("request_id", trajectory_id + "-" + std::to_string(prior_requests));
+    append_label("root_cascade_id", cascade_id);
     append_label("trajectory_id", trajectory_id);
     append_label("used_claude", used_claude);
     append_label("used_claude_conservative", used_claude);
+    append_label("used_non_gemini_model", gemini ? "false" : "true");
     labels += '}';
 
     GeminiRequestExtras extras;
     extras.system_instruction_role = "user";
-    extras.validated_tool_mode = true;
-    extras.skip_thought_signature_on_first_call = is_gemini3_or_newer(model);
-    extras.session_id = "-" + std::to_string(fnv1a64(anchor) & 0x7FFFFFFFFFFFFFFFULL);
+    // The hub sends no `toolConfig` at all, one `functionDeclarations` element
+    // per tool, and one thought signature per replayed call part.
+    extras.tool_declaration_per_element = true;
+    extras.skip_thought_signature_on_all_calls = is_gemini3_or_newer(model);
+    extras.session_id = installation_session_id();
     extras.labels_json = std::move(labels);
     if (profile.has_value()) {
         extras.max_output_tokens_cap = profile->max_output_tokens;
     } else if (claude) {
         extras.max_output_tokens_cap = kClaudeMaxOutputTokens;
     }
-
-    std::string payload = serialize_gemini_code_assist_request(req, req.model, &extras);
-    // serialize_gemini_code_assist_request always emits a single top-level
-    // JSON object terminated by '}'; splice in the Antigravity envelope
-    // rather than re-implementing Gemini request serialization here.
-    if (!payload.empty() && payload.back() == '}') {
-        payload.pop_back();
-        payload += R"(,"requestId":"agent/)" + agent_id + '/' + next_request_timestamp_ms()
-            + '/' + trajectory_id + '/' + std::to_string(step);
-        payload += R"(","userAgent":"antigravity","requestType":"agent"})";
+    if (model_supports_thinking(model)) {
+        // includeThoughts is the only way the backend surfaces reasoning: the
+        // model thinks either way, but without it no thought parts come back.
+        extras.include_thoughts = true;
+        if (lowered.ends_with("-tiered")) {
+            extras.thinking_budget = -1;
+        } else {
+            extras.thinking_level = thinking_level_for(model, req.effort);
+        }
     }
+
+    // Envelope in the hub's own key order: project, requestId, request, model,
+    // userAgent, requestType.
+    std::string payload = "{";
+    if (const auto project = req.auth_properties.find("project_id");
+        project != req.auth_properties.end() && !project->second.empty()) {
+        payload += R"("project":")";
+        payload += core::utils::escape_json_string(project->second);
+        payload += "\",";
+    }
+    payload += R"("requestId":"agent/)" + cascade_id + '/' + next_request_timestamp_ms()
+        + '/' + trajectory_id + '/' + std::to_string(step);
+    payload += R"(","request":)";
+    payload += serialize_gemini_request(req, req.model, &extras);
+    payload += R"(,"model":")";
+    payload += core::utils::escape_json_string(model);
+    payload += R"(","userAgent":"antigravity","requestType":"agent"})";
     return payload;
 }
 

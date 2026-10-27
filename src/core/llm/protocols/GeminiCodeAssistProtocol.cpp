@@ -2,61 +2,10 @@
 #include "GeminiProtocol.hpp"
 #include "SseUtils.hpp"
 #include "../../utils/JsonUtils.hpp"
-#include <atomic>
 #include <simdjson.h>
 #include <stdexcept>
 
 namespace core::llm::protocols {
-
-namespace {
-
-[[nodiscard]] std::pair<std::string, std::vector<ToolCall>>
-parse_code_assist_response(simdjson::dom::element response_el) {
-    std::string           content_str;
-    std::vector<ToolCall> tools;
-
-    simdjson::dom::array candidates;
-    if (response_el["candidates"].get(candidates) != simdjson::SUCCESS) return {};
-
-    for (auto candidate : candidates) {
-        simdjson::dom::object content_obj;
-        if (candidate["content"].get(content_obj) != simdjson::SUCCESS) continue;
-
-        simdjson::dom::array parts;
-        if (content_obj["parts"].get(parts) != simdjson::SUCCESS) continue;
-
-        for (auto part : parts) {
-            std::string_view text_v;
-            if (part["text"].get(text_v) == simdjson::SUCCESS) {
-                content_str += std::string(text_v);
-                continue;
-            }
-
-            simdjson::dom::object function_call;
-            if (part["functionCall"].get(function_call) == simdjson::SUCCESS) {
-                ToolCall call;
-                static std::atomic_uint64_t call_counter{0};
-                call.id   = "call_gemini_" + std::to_string(++call_counter);
-                call.type = "function";
-
-                std::string_view name_v;
-                if (function_call["name"].get(name_v) == simdjson::SUCCESS) {
-                    call.function.name = std::string(name_v);
-                }
-
-                simdjson::dom::element args_el;
-                if (function_call["args"].get(args_el) == simdjson::SUCCESS) {
-                    call.function.arguments = simdjson::minify(args_el);
-                }
-                tools.push_back(std::move(call));
-            }
-        }
-    }
-
-    return {std::move(content_str), std::move(tools)};
-}
-
-} // namespace
 
 std::string serialize_gemini_code_assist_request(const ChatRequest& req,
                                                  const std::string& default_model,
@@ -125,28 +74,32 @@ ParseResult GeminiCodeAssistProtocol::parse_event(std::string_view raw_event) {
     if (doc["response"].get(response_el) != simdjson::SUCCESS) return {};
 
     ParseResult result;
-    auto [content, tools] = parse_code_assist_response(response_el);
-    if (!content.empty() || !tools.empty()) {
-        StreamChunk chunk;
-        chunk.content = std::move(content);
-        chunk.tools   = std::move(tools);
-        result.chunks.push_back(std::move(chunk));
-    }
-
     result.rate_limit = {};
-    result.prompt_tokens = 0;
-    result.completion_tokens = 0;
 
     std::string_view response_id;
     if (response_el["responseId"].get(response_id) == simdjson::SUCCESS) {
         result.response_id = std::string(response_id);
     }
 
-    const GeminiUsageMetadata usage =
-        extract_gemini_usage_metadata(simdjson::minify(response_el));
+    // The wrapped object is the same Gemini response shape, so it shares the
+    // plain-Gemini parser (thought summaries, complete tool calls, usage).
+    const std::string response_json = simdjson::minify(response_el);
+    auto parts = parse_gemini_sse_chunk(response_json);
+    const GeminiUsageMetadata usage = extract_gemini_usage_metadata(response_json);
     result.prompt_tokens = usage.prompt_tokens;
     result.completion_tokens = usage.completion_tokens;
     result.cached_prompt_tokens = usage.cached_prompt_tokens;
+
+    if (!parts.content.empty() || !parts.reasoning.empty() || !parts.tools.empty()) {
+        StreamChunk chunk;
+        chunk.content = std::move(parts.content);
+        if (!parts.reasoning.empty()) {
+            chunk.reasoning_content = std::move(parts.reasoning);
+            chunk.reasoning_protocol = "gemini";
+        }
+        chunk.tools = std::move(parts.tools);
+        result.chunks.push_back(std::move(chunk));
+    }
     return result;
 }
 

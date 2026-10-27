@@ -1,4 +1,5 @@
 #include "GoogleAntigravityOAuthFlow.hpp"
+#include "AntigravityClientCredentials.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "GoogleCodeAssist.hpp"
 #include "GoogleOAuthFlow.hpp"
@@ -16,39 +17,30 @@ namespace core::auth {
 
 namespace {
 
-// OAuth client credentials for the Google Antigravity flow are supplied via
-// environment variables. This avoids hardcoding secrets in source control.
-// Set GOOGLE_ANTIGRAVITY_CLIENT_ID and GOOGLE_ANTIGRAVITY_CLIENT_SECRET
-// before running Filo / Lampo. See GoogleAntigravityOAuthFlow.hpp for the
-// risk disclosure this class surfaces before every login.
+// The Antigravity OAuth client identity is NOT embedded in Filo: GitHub secret
+// scanning matches both halves of a Google OAuth client and push protection
+// rejects any commit carrying them. `GOOGLE_ANTIGRAVITY_CLIENT_ID` /
+// `_CLIENT_SECRET` or `<config_dir>/antigravity.json` supply the pair per field
+// — see AntigravityClientCredentials.hpp. Both halves are required for a login
+// or a refresh: the client is confidential, and the token endpoint answers
+// `client_secret is missing.` without one. See GoogleAntigravityOAuthFlow.hpp
+// for the risk disclosure this class surfaces before every browser login.
 
-[[nodiscard]] std::string resolve_client_id() {
-    if (const char* env = std::getenv("GOOGLE_ANTIGRAVITY_CLIENT_ID");
-        env && env[0] != '\0') {
-        return std::string(env);
-    }
-    throw std::runtime_error(
-        "Google (Antigravity) OAuth client ID is not configured. "
-        "Set the GOOGLE_ANTIGRAVITY_CLIENT_ID environment variable.");
-}
-
-[[nodiscard]] std::string resolve_client_secret() {
-    if (const char* env = std::getenv("GOOGLE_ANTIGRAVITY_CLIENT_SECRET");
-        env && env[0] != '\0') {
-        return std::string(env);
-    }
-    throw std::runtime_error(
-        "Google (Antigravity) OAuth client secret is not configured. "
-        "Set the GOOGLE_ANTIGRAVITY_CLIENT_SECRET environment variable.");
-}
-
+/// Scopes the genuine Antigravity client is granted, in the order its own
+/// `GetAuthStatus` reports them. Requesting a narrower set still works, but a
+/// scope the client is not authorized for fails the whole login, so this list
+/// mirrors the observed grant exactly.
 const std::vector<std::string>& antigravity_scopes() {
     static const std::vector<std::string> scopes = {
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/aicode",
+        "https://www.googleapis.com/auth/cclog",
         "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/experimentsandconfigs",
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/cclog",
-        "https://www.googleapis.com/auth/experimentsandconfigs",
+        "openid",
     };
     return scopes;
 }
@@ -78,8 +70,9 @@ constexpr const char* kRiskWarning =
 
 } // namespace
 
-GoogleAntigravityOAuthFlow::GoogleAntigravityOAuthFlow(std::shared_ptr<ui::AuthUI> ui)
-    : ui_(std::move(ui)) {}
+GoogleAntigravityOAuthFlow::GoogleAntigravityOAuthFlow(std::shared_ptr<ui::AuthUI> ui,
+                                                      std::string config_dir)
+    : ui_(std::move(ui)), config_dir_(std::move(config_dir)) {}
 
 void GoogleAntigravityOAuthFlow::warn_about_risk() const {
     if (ui_) {
@@ -92,10 +85,26 @@ void GoogleAntigravityOAuthFlow::warn_about_risk() const {
 }
 
 OAuthToken GoogleAntigravityOAuthFlow::login() {
+    const antigravity::ClientCredentials credentials =
+        antigravity::load_client_credentials(config_dir_);
+
+    // A token the user supplied explicitly (environment or antigravity.json)
+    // is adopted as-is, the way ClaudeOAuthFlow imports CLAUDE_CODE_OAUTH_TOKEN.
+    if (auto imported = antigravity::imported_token(credentials, now_unix_seconds());
+        imported.has_value()) {
+        imported->scopes = antigravity_scopes();
+        return *imported;
+    }
+
     warn_about_risk();
 
-    const std::string client_id = resolve_client_id();
-    const std::string client_secret = resolve_client_secret();
+    // A browser login has to exchange the code, and every later refresh has to
+    // authenticate, so both halves of the confidential client are needed from
+    // here on. Fail here rather than at Google with an opaque invalid_client.
+    antigravity::require_client_credentials(credentials, config_dir_);
+
+    const std::string& client_id = credentials.client_id;
+    const std::string& client_secret = credentials.client_secret;
 
     const std::string state = oauth_pkce::generate_correlation_token();
     // The real Antigravity client does not use PKCE (its login exchange is a
@@ -196,8 +205,11 @@ OAuthToken GoogleAntigravityOAuthFlow::login() {
 }
 
 OAuthToken GoogleAntigravityOAuthFlow::refresh(std::string_view refresh_token) {
-    const std::string client_id = resolve_client_id();
-    const std::string client_secret = resolve_client_secret();
+    const antigravity::ClientCredentials credentials =
+        antigravity::load_client_credentials(config_dir_);
+    antigravity::require_client_credentials(credentials, config_dir_);
+    const std::string& client_id = credentials.client_id;
+    const std::string& client_secret = credentials.client_secret;
 
     const auto request_time = now_unix_seconds();
 

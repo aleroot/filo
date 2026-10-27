@@ -4,6 +4,7 @@
 #include "core/auth/ITokenStore.hpp"
 #include "core/auth/IOAuthFlow.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/auth/AntigravityClientCredentials.hpp"
 #include "core/auth/FileTokenStore.hpp"
 #include "core/auth/GoogleAntigravityOAuthFlow.hpp"
 #include "core/auth/GoogleCodeAssist.hpp"
@@ -25,6 +26,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1105,6 +1107,9 @@ TEST_CASE("AuthenticationManager treats gemini as an alias for the google login 
     // provider".
     REQUIRE(manager.logout("gemini", /*revoke_remote=*/false)
             == manager.logout("google", /*revoke_remote=*/false));
+    // "antigravity" is the second alias, naming the backend it signs in to.
+    REQUIRE(manager.logout("antigravity", /*revoke_remote=*/false)
+            == manager.logout("google", /*revoke_remote=*/false));
 }
 
 TEST_CASE("GoogleAntigravityOAuthFlow uses distinct client credentials from gemini-cli",
@@ -2021,4 +2026,108 @@ TEST_CASE("Code Assist endpoint: Antigravity uses the daily host unless overridd
     ::setenv("CODE_ASSIST_ENDPOINT", "http://localhost:1234", 1);
     CHECK(code_assist_endpoint("ANTIGRAVITY") == "http://localhost:1234");
     ::unsetenv("CODE_ASSIST_ENDPOINT");
+}
+
+// ── Antigravity client credentials (native OAuth client) ────────────────────
+
+TEST_CASE("Antigravity embeds no client identity; both halves come from configuration",
+          "[oauth][antigravity][credentials]") {
+    using namespace core::auth::antigravity;
+
+    const auto defaults = default_client_credentials();
+    CHECK(defaults.client_id.empty());
+    CHECK(defaults.client_secret.empty());
+    CHECK(defaults.source == "unset");
+    CHECK_FALSE(defaults.complete());
+    CHECK_FALSE(defaults.has_imported_token());
+
+    // The client is confidential, and Google answers an incomplete pair with an
+    // opaque `client_secret is missing.` or `invalid_client`, so the missing
+    // configuration is reported locally and names both ways to supply it.
+    CHECK_THROWS_AS(require_client_credentials(defaults, "/cfg"), std::runtime_error);
+    std::string message;
+    try {
+        require_client_credentials(defaults, "/cfg");
+    } catch (const std::runtime_error& e) {
+        message = e.what();
+    }
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("client_id and client_secret"));
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("GOOGLE_ANTIGRAVITY_CLIENT_ID"));
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("/cfg/antigravity.json"));
+
+    auto configured = defaults;
+    configured.client_id = "configured-id";
+    CHECK_FALSE(configured.complete());
+    CHECK_THROWS_AS(require_client_credentials(configured, "/cfg"), std::runtime_error);
+
+    configured.client_secret = "configured-secret";
+    CHECK(configured.complete());
+    CHECK_NOTHROW(require_client_credentials(configured, "/cfg"));
+}
+
+TEST_CASE("Antigravity credentials layer env over the config file",
+          "[oauth][antigravity][credentials]") {
+    using namespace core::auth::antigravity;
+
+    TempDir dir;
+    const std::string path = credentials_path(dir.path);
+    REQUIRE(path == dir.path + "/antigravity.json");
+    {
+        std::ofstream out(path);
+        out << R"({"client_id":"id-from-file","client_secret":"secret-from-file",)"
+               R"("refresh_token":"rt-from-file"})";
+    }
+
+    const auto from_file = load_client_credentials(dir.path);
+    CHECK(from_file.client_id == "id-from-file");
+    CHECK(from_file.refresh_token == "rt-from-file");
+    CHECK(from_file.source == path);
+    CHECK(from_file.complete());
+    CHECK(from_file.client_secret == "secret-from-file");
+
+    {
+        ScopedEnvVar client_id("GOOGLE_ANTIGRAVITY_CLIENT_ID", "id-from-env");
+        const auto merged = load_client_credentials(dir.path);
+        CHECK(merged.client_id == "id-from-env");
+        // A field the environment leaves unset keeps the file's value.
+        CHECK(merged.client_secret == "secret-from-file");
+        CHECK(merged.refresh_token == "rt-from-file");
+        CHECK(merged.source == "env");
+    }
+    {
+        // An empty value counts as unset, so a blank variable cannot mask the
+        // file with nothing.
+        ScopedEnvVar blank("GOOGLE_ANTIGRAVITY_CLIENT_ID", "");
+        CHECK(load_client_credentials(dir.path).client_id == "id-from-file");
+    }
+
+    // With nothing configured there is no client to authenticate with, and the
+    // caller reports that instead of letting Google reject the login.
+    CHECK_FALSE(load_client_credentials("").complete());
+    CHECK(load_client_credentials("").source == "unset");
+    CHECK(credentials_path("").empty());
+}
+
+TEST_CASE("Antigravity login adopts an explicitly supplied access token",
+          "[oauth][antigravity][credentials]") {
+    using namespace core::auth::antigravity;
+
+    ClientCredentials credentials = default_client_credentials();
+    credentials.client_id = "configured-client-id";
+    const auto now = now_unix();
+    CHECK_FALSE(imported_token(credentials, now).has_value());
+
+    credentials.access_token = "ya29.supplied";
+    credentials.refresh_token = "rt-supplied";
+    const auto token = imported_token(credentials, now);
+    REQUIRE(token.has_value());
+    CHECK(token->access_token == "ya29.supplied");
+    CHECK(token->refresh_token == "rt-supplied");
+    CHECK(token->token_type == "Bearer");
+    CHECK(token->client_id == "configured-client-id");
+    // Google publishes no lifetime for a pasted token, so the standard hour is
+    // assumed: an expired paste falls through to a refresh or a browser login
+    // instead of being replayed until the endpoint rejects it.
+    CHECK(token->expires_at == now + 3600);
+    CHECK(token->is_valid());
 }
