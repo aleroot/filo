@@ -96,6 +96,9 @@ namespace {
     info.max_reasoning_tokens = model.first_integer(
         {"max_reasoning_tokens", "reasoning_max_tokens"});
     info.reasoning = catalog::compatible_reasoning_profile(model);
+    if (model.boolean("support_verbosity")) {
+        (void)model.string("default_verbosity", info.default_verbosity);
+    }
     info.tier = catalog::infer_tier(
         info.canonical_id,
         info.supports(ModelCapability::Reasoning));

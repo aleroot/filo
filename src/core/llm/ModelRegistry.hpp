@@ -283,6 +283,10 @@ struct ModelInfo {
     /// merge_model_metadata does not copy it onto a curated card, and the JSON
     /// registry does not read or write it.
     std::string wire_protocol = {};
+    /// `text.verbosity` the serving endpoint's live catalog asks clients to
+    /// send (Codex: `default_verbosity` when `support_verbosity`). Empty means
+    /// omit the field. Provider-scoped like wire_protocol.
+    std::string default_verbosity = {};
     
     // ------------------------------------------------------------------------
     // Metadata

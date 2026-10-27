@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <simdjson.h>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -137,7 +138,15 @@ TEST_CASE("OpenAIResponsesProtocol - clamps private Codex effort tiers",
     req.model = "gpt-5.6-sol";
     CHECK_THAT(codex.serialize(req),
                Catch::Matchers::ContainsSubstring(
-                   R"("reasoning":{"effort":"ultra","summary":"auto"})"));
+                   R"("reasoning":{"effort":"max","summary":"auto"})"));
+
+    req.model = "gpt-6.1-terra";
+    CHECK_THAT(codex.serialize(req),
+               Catch::Matchers::ContainsSubstring(
+                   R"("reasoning":{"effort":"max","summary":"auto"})"));
+    req.effort = "off";
+    CHECK_THAT(codex.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"summary":"auto"})"));
 }
 
 TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
@@ -313,8 +322,8 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("session_id") == "thread-123");
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
-    REQUIRE(headers.at("version") == "0.160.0");
-    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.160.0");
+    REQUIRE(headers.at("version") == "0.164.0");
+    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.164.0");
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
@@ -1113,7 +1122,12 @@ TEST_CASE("Codex request controls honor the endpoint catalog and omit unsupporte
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("temperature"));
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("max_output_tokens"));
     request.effort = "ultra";
-    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"ultra")"));
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
+    request.catalog_reasoning->effort = request.catalog_reasoning->effort
+        | ReasoningCapability::MaxEffort;
+    request.catalog_reasoning->supported_efforts = {"high", "max", "ultra"};
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"max")"));
+    CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring("ultra"));
     request.effort = "low";
     CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
     request.catalog_reasoning->effort = {};
@@ -1121,6 +1135,29 @@ TEST_CASE("Codex request controls honor the endpoint catalog and omit unsupporte
     request.catalog_reasoning->catalog_default_effort.reset();
     CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring(R"("effort")"));
     CHECK_FALSE(protocol.parse_event("data: [DONE]").done);
+}
+
+TEST_CASE("Codex sends the catalog verbosity alongside any structured-output format",
+          "[openai][responses][codex][catalog][verbosity]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-terra";
+    request.messages = {{.role = "user", .content = "hi"}};
+    request.catalog_verbosity = "low";
+
+    CodexResponsesProtocol codex;
+    CHECK_THAT(codex.serialize(request),
+               Catch::Matchers::ContainsSubstring(R"(,"text":{"verbosity":"low"})"));
+
+    request.response_format.type = ResponseFormat::Type::JsonObject;
+    const auto with_format = codex.serialize(request);
+    CHECK_THAT(with_format,
+               Catch::Matchers::ContainsSubstring(R"("text":{"verbosity":"low","format":{"type":"json_schema")"));
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded(with_format);
+    CHECK(parser.parse(padded).error() == simdjson::SUCCESS);
+
+    OpenAIResponsesProtocol public_openai;
+    CHECK_THAT(public_openai.serialize(request), !Catch::Matchers::ContainsSubstring("verbosity"));
 }
 
 TEST_CASE("Responses retry reset preserves other session continuity and permanent quota failures",

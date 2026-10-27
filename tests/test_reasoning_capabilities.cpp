@@ -45,12 +45,15 @@ TEST_CASE("OpenAI protocols own their reasoning capability policy", "[llm][effor
         CHECK(supports(*protocol, "gpt-6.1", ReasoningCapability::XHighEffort));
         CHECK(supports(*protocol, "gpt-6.1-sol", ReasoningCapability::MaxEffort));
         CHECK_FALSE(supports(*protocol, "gpt-6.1", ReasoningCapability::UltraEffort));
+        // Verified against the live backend: GPT-6.1 rejects `none` and `minimal`.
+        CHECK_FALSE(supports(*protocol, "gpt-6.1-terra", ReasoningCapability::Disable));
+        CHECK_FALSE(supports(*protocol, "gpt-6.1-terra", ReasoningCapability::MinimalEffort));
     }
 
+    // `ultra` is a Codex client mode, not a wire value: the API rejects it.
     CodexResponsesProtocol codex;
-    CHECK(supports(codex, "gpt-5.6-sol", ReasoningCapability::UltraEffort));
-    CHECK(supports(codex, "gpt-5.6-terra", ReasoningCapability::UltraEffort));
-    CHECK_FALSE(supports(codex, "gpt-5.6-luna", ReasoningCapability::UltraEffort));
+    CHECK_FALSE(supports(codex, "gpt-5.6-sol", ReasoningCapability::UltraEffort));
+    CHECK_FALSE(supports(codex, "gpt-6.1-terra", ReasoningCapability::UltraEffort));
 }
 
 TEST_CASE("Mistral protocol owns its reasoning model allow-list",

@@ -424,6 +424,8 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
             {"effort": "xhigh"},
             {"effort": "max"}
           ],
+          "support_verbosity": true,
+          "default_verbosity": "low",
           "context_window": 1000000
         },
         {
@@ -460,6 +462,8 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(result.models[1].context_window == 1000000);
     CHECK(result.models[1].reasoning.effort.supports(ReasoningCapability::XHighEffort));
     CHECK(result.models[1].reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(result.models[1].default_verbosity == "low");
+    CHECK(codex.default_verbosity.empty());
     CHECK(result.models[2].canonical_id == "internal-chatgpt-only");
 }
 
@@ -1371,7 +1375,7 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     REQUIRE(chatgpt != nullptr);
     CHECK(dynamic_cast<CodexModelCatalogProvider*>(chatgpt.get()) != nullptr);
     CHECK(chatgpt->provider_name() == "openai");
-    CHECK(chatgpt->model_list_path() == "/models?client_version=0.160.0");
+    CHECK(chatgpt->model_list_path() == "/models?client_version=0.164.0");
 
     core::llm::protocols::OpenAIResponsesProtocol public_openai;
     CHECK(public_openai.model_catalog("openai") == nullptr);

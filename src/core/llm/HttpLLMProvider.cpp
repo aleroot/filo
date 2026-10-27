@@ -174,6 +174,9 @@ void apply_live_catalog_metadata(ChatRequest& request,
     if (!live->wire_protocol.empty()) {
         request.catalog_wire_protocol = live->wire_protocol;
     }
+    if (!live->default_verbosity.empty()) {
+        request.catalog_verbosity = live->default_verbosity;
+    }
 }
 
 }

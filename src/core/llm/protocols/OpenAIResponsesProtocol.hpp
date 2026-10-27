@@ -94,6 +94,8 @@ protected:
         bool include_response_include = true;
         // Codex requires `reasoning.summary`; public OpenAI, Grok, and DashScope omit it.
         bool include_reasoning_summary = false;
+        // Codex sends its catalog's `default_verbosity` as `text.verbosity`.
+        bool include_catalog_verbosity = false;
         bool include_sampling_controls = true;
         std::optional<std::string_view> reasoning_effort_override;
         std::span<const std::string_view> hosted_tool_types;
@@ -177,8 +179,6 @@ public:
         return codex_stream_retry_policy();
     }
 
-    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
-        std::string_view model) const noexcept override;
     [[nodiscard]] cpr::Header build_headers(
         const core::auth::AuthInfo& auth) const override;
     void on_response(const HttpResponse& response) override;

@@ -915,7 +915,10 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
                 : std::string{};
         if (!options.reasoning_effort_override && catalog && !catalog->supported_efforts.empty()) {
             const auto& levels = catalog->supported_efforts;
-            if (std::ranges::find(levels, requested_effort) != levels.end()) {
+            // The Codex catalog lists `ultra`, but it is a client-side
+            // selection the API rejects; normalization resolved it above.
+            if (requested_effort != "ultra"
+                && std::ranges::find(levels, requested_effort) != levels.end()) {
                 effort = requested_effort;
             } else if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
                 // An authoritative catalog may expose only a subset of the
@@ -979,12 +982,29 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         }
     }
 
-    if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
-        payload += R"(,"text":{"format":{"type":"json_schema","name":"structured_output","strict":true,"schema":)";
-        payload += req.response_format.schema.empty() ? R"({"type":"object"})" : req.response_format.schema;
-        payload += "}}";
-    } else if (req.response_format.type == ResponseFormat::Type::JsonObject) {
-        payload += R"(,"text":{"format":{"type":"json_schema","name":"json_object","strict":false,"schema":{"type":"object","additionalProperties":true}}})";
+    // Codex sends the catalog's default_verbosity for every model that
+    // advertises support_verbosity, alongside any structured-output format.
+    const bool has_verbosity = options.include_catalog_verbosity
+        && req.catalog_verbosity.has_value()
+        && !req.catalog_verbosity->empty();
+    const bool has_format = req.response_format.type == ResponseFormat::Type::JsonSchema
+        || req.response_format.type == ResponseFormat::Type::JsonObject;
+    if (has_verbosity || has_format) {
+        payload += R"(,"text":{)";
+        if (has_verbosity) {
+            payload += R"("verbosity":")";
+            payload += core::utils::escape_json_string(*req.catalog_verbosity);
+            payload += '"';
+            if (has_format) payload += ',';
+        }
+        if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
+            payload += R"("format":{"type":"json_schema","name":"structured_output","strict":true,"schema":)";
+            payload += req.response_format.schema.empty() ? R"({"type":"object"})" : req.response_format.schema;
+            payload += '}';
+        } else if (req.response_format.type == ResponseFormat::Type::JsonObject) {
+            payload += R"("format":{"type":"json_schema","name":"json_object","strict":false,"schema":{"type":"object","additionalProperties":true}})";
+        }
+        payload += '}';
     }
 
     payload += "}";
@@ -1039,16 +1059,6 @@ CodexResponsesProtocol::CodexResponsesProtocol(bool include_reasoning_encrypted,
     , client_identity_source_(std::move(client_identity_source))
     , rate_limit_state_(std::make_shared<RateLimitState>()) {}
 
-ReasoningCapabilities CodexResponsesProtocol::reasoning_capabilities(
-    std::string_view model) const noexcept {
-    auto capabilities = OpenAIResponsesProtocol::reasoning_capabilities(model);
-    if (core::utils::ascii::istarts_with(model, "gpt-5.6")
-        && !core::utils::ascii::istarts_with(model, "gpt-5.6-luna")) {
-        capabilities = capabilities | ReasoningCapability::UltraEffort;
-    }
-    return capabilities;
-}
-
 cpr::Header CodexResponsesProtocol::build_headers(
     const core::auth::AuthInfo& auth) const {
     cpr::Header headers = OpenAIResponsesProtocol::build_headers(auth);
@@ -1075,6 +1085,7 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     std::optional<std::string_view> previous_response_id_override) const {
     SerializationOptions options;
     options.include_reasoning_summary = true;
+    options.include_catalog_verbosity = true;
     options.include_sampling_controls = false;
     std::string payload = serialize_with_input_items(
         request, input_items, previous_response_id_override, options);

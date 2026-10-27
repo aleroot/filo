@@ -642,6 +642,9 @@ struct ChatRequest {
     /// request for the same reason as `catalog_context_window`: discovery is
     /// provider-scoped and never reaches the global registry.
     std::optional<std::string> catalog_wire_protocol = {};
+    /// Output verbosity the serving endpoint's live catalog prescribes for
+    /// `model`, sent as `text.verbosity`. Copied for the same reason.
+    std::optional<std::string> catalog_verbosity = {};
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

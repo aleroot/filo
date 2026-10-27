@@ -10,41 +10,48 @@
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <optional>
 
 namespace core::llm::protocols {
 
-ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noexcept {
-    using core::utils::ascii::istarts_with;
-    if (!istarts_with(model, "gpt-5")
-        && !istarts_with(model, "gpt-6")
-        && !istarts_with(model, "o1")
-        && !istarts_with(model, "o3")
-        && !istarts_with(model, "o4")) {
-        return {};
-    }
+namespace {
 
-    ReasoningCapabilities features{ReasoningCapability::Effort};
-    if (istarts_with(model, "gpt-5")
-        && !istarts_with(model, "gpt-5.")) {
-        features = features | ReasoningCapability::MinimalEffort;
+struct ReasoningFamily {
+    std::string_view prefix;
+    ReasoningCapabilities capabilities;
+};
+
+constexpr auto kEffort = ReasoningCapabilities{ReasoningCapability::Effort};
+
+// Effort levels each OpenAI family accepts on the wire. The first matching
+// prefix wins, so more specific prefixes come first. GPT-6 dropped `none` and
+// `minimal`: the API answers 400 "Supported values are: 'low', 'medium',
+// 'high', 'xhigh', and 'max'".
+constexpr std::array kReasoningFamilies{
+    ReasoningFamily{"gpt-5.6", kEffort | ReasoningCapability::XHighEffort
+                                   | ReasoningCapability::MaxEffort
+                                   | ReasoningCapability::Disable},
+    ReasoningFamily{"gpt-5.", kEffort | ReasoningCapability::XHighEffort},
+    ReasoningFamily{"gpt-5", kEffort | ReasoningCapability::MinimalEffort},
+    ReasoningFamily{"gpt-6", kEffort | ReasoningCapability::XHighEffort
+                                 | ReasoningCapability::MaxEffort},
+    ReasoningFamily{"o1", kEffort},
+    ReasoningFamily{"o3", kEffort},
+    ReasoningFamily{"o4", kEffort},
+};
+
+} // namespace
+
+ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noexcept {
+    for (const auto& family : kReasoningFamilies) {
+        if (core::utils::ascii::istarts_with(model, family.prefix)) {
+            return family.capabilities;
+        }
     }
-    // The original GPT-5 family tops out at high. Newer versioned families
-    // advertise their additional effort levels explicitly below.
-    if ((istarts_with(model, "gpt-5.")
-            && !istarts_with(model, "gpt-5-mini")
-            && !istarts_with(model, "gpt-5-nano"))
-        || istarts_with(model, "gpt-6")) {
-        features = features | ReasoningCapability::XHighEffort;
-    }
-    if (istarts_with(model, "gpt-5.6") || istarts_with(model, "gpt-6")) {
-        features = features
-            | ReasoningCapability::MaxEffort
-            | ReasoningCapability::Disable;
-    }
-    return features;
+    return {};
 }
 
 namespace {
@@ -160,8 +167,9 @@ std::string normalize_openai_reasoning_effort(
         if (capabilities.supports(ReasoningCapability::XHighEffort)) return "xhigh";
         return "high";
     }
+    // `ultra` is a client-side selection (Codex adds proactive delegation to
+    // it), never a wire value: the API rejects it with "Invalid value: 'ultra'".
     if (effort == "ultra") {
-        if (capabilities.supports(ReasoningCapability::UltraEffort)) return "ultra";
         if (capabilities.supports(ReasoningCapability::MaxEffort)) return "max";
         if (capabilities.supports(ReasoningCapability::XHighEffort)) return "xhigh";
         return "high";
