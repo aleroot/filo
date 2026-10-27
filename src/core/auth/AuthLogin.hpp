@@ -2,6 +2,7 @@
 
 #include "AuthenticationManager.hpp"
 
+#include <cstdint>
 #include <iosfwd>
 #include <optional>
 #include <string>
@@ -26,8 +27,21 @@ struct AuthLoginOutcome {
     std::istream& input,
     std::ostream& output);
 
+/**
+ * @brief Authenticate @p provider and make it the default login profile.
+ *
+ * @param import_source  When set, adopt the credential the provider's installed
+ *                       app holds (`--from`, see AppCredentialImport.hpp)
+ *                       instead of running the interactive login.
+ */
 [[nodiscard]] AuthLoginOutcome login_and_persist(
     std::string_view provider,
-    std::string_view config_dir);
+    std::string_view config_dir,
+    std::optional<std::string_view> import_source = std::nullopt);
+
+/// Describe an app import for the console: origin, remaining lifetime, warnings.
+void print_app_import_report(const AppImportReport& report,
+                             std::int64_t now_unix_seconds,
+                             std::ostream& output);
 
 } // namespace core::auth

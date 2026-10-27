@@ -41,6 +41,18 @@ public:
     [[nodiscard]] bool has_stored_token();
 
     void save_token(const OAuthToken& token);
+
+    /**
+     * @brief Store a token obtained outside this manager's flow, such as one
+     *        imported from another client.
+     *
+     * A token that is no longer valid is renewed through the flow first, so an
+     * unusable credential never replaces the stored one; nothing is written when
+     * that renewal fails or no refresh token came with it.
+     *
+     * @return The token as stored.
+     */
+    OAuthToken adopt(OAuthToken token);
     void force_refresh();
     void login();
     void logout();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AppCredentialImport.hpp"
 #include "ICredentialSource.hpp"
 #include "core/config/ConfigManager.hpp"
 #include <memory>
@@ -24,6 +25,8 @@ struct LoginResult {
     std::string provider;
     std::string login_provider;
     std::vector<std::string> hints;
+    /// Set when the session was imported from an installed app (`--from`).
+    std::optional<AppImportReport> app_import;
 };
 
 /**
@@ -78,6 +81,17 @@ public:
     logout_revocation_flow() const {
         return nullptr;
     }
+
+    /**
+     * Support for adopting the credential the provider's own installed app
+     * holds instead of signing in (`--auth <provider> --from <source>`).
+     * Return std::nullopt when the provider has no such app. Only token-backed
+     * strategies can support it: the import is stored under token_store_key().
+     */
+    [[nodiscard]] virtual std::optional<AppCredentialImport>
+    app_credential_import(std::string_view /*config_dir*/) const {
+        return std::nullopt;
+    }
 };
 
 /**
@@ -99,6 +113,17 @@ public:
     void register_strategy(std::shared_ptr<IAuthStrategy> strategy);
 
     LoginResult login(std::string_view provider) const;
+
+    /**
+     * Sign in by adopting the credential the provider's installed app holds
+     * (see AppCredentialImport.hpp) instead of running its login flow.
+     *
+     * @param source  Where to read it: empty or "auto" to discover, otherwise
+     *                an app-specific keyword or a path.
+     * @throws std::runtime_error when the provider supports no import or the
+     *         credential cannot be adopted; the stored session is then unchanged.
+     */
+    LoginResult import_from_app(std::string_view provider, std::string_view source) const;
 
     /**
      * Resolve a login alias or token-store key through the registered
@@ -131,6 +156,9 @@ public:
     std::vector<std::string> available_login_providers() const;
 
 private:
+    /// The strategy for a login alias; throws listing the known ones otherwise.
+    [[nodiscard]] const IAuthStrategy& login_strategy(std::string_view provider) const;
+
     std::string config_dir_;
     std::vector<std::shared_ptr<IAuthStrategy>> strategies_;
 };

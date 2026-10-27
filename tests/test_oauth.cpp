@@ -5,6 +5,9 @@
 #include "core/auth/IOAuthFlow.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/AntigravityAppImport.hpp"
+#include "core/auth/AppCredentialImport.hpp"
+#include "core/auth/AuthLogin.hpp"
+#include "core/auth/ChatGptAppImport.hpp"
 #include "core/auth/AntigravityClientCredentials.hpp"
 #include "core/auth/FileTokenStore.hpp"
 #include "core/auth/GoogleAntigravityOAuthFlow.hpp"
@@ -21,6 +24,8 @@
 #include "core/auth/ApiKeyPromptStrategy.hpp"
 #include "core/auth/MimoAuthenticationStrategy.hpp"
 #include "core/auth/SecretInput.hpp"
+#include "core/auth/StoredAppCredentialReader.hpp"
+#include "core/auth/SystemKeyring.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/utils/Base64.hpp"
 
@@ -2135,6 +2140,165 @@ TEST_CASE("Antigravity login adopts an explicitly supplied access token",
     CHECK(token->is_valid());
 }
 
+// ── Stored app credentials: OS keyring and source resolution ─────────────────
+
+namespace {
+
+/// An in-memory IKeyring that records every lookup.
+struct FakeKeyring final : IKeyring {
+    std::vector<std::pair<KeyringEntry, std::string>> items;
+    std::string name = "the test keyring";
+    /// When set, every lookup fails with this reason (store unavailable).
+    std::optional<std::string> failure;
+    mutable std::vector<KeyringEntry> reads;
+
+    void put(KeyringEntry entry, std::string secret) {
+        items.emplace_back(std::move(entry), std::move(secret));
+    }
+    std::string_view description() const noexcept override { return name; }
+    std::expected<std::optional<std::string>, std::string> read(
+        const KeyringEntry& entry) const override {
+        reads.push_back(entry);
+        if (failure.has_value()) return std::unexpected(*failure);
+        for (const auto& [key, secret] : items) {
+            if (key == entry) return secret;
+        }
+        return std::nullopt;
+    }
+};
+
+/// A minimal app: `<dir>/cred.txt` holding the access token, or a keyring
+/// item per directory. Exercises the shared algorithm without a real format.
+class TestStoredReader final : public StoredAppCredentialReader {
+public:
+    TestStoredReader(std::shared_ptr<const IKeyring> keyring, std::filesystem::path home)
+        : StoredAppCredentialReader(std::move(keyring)), home_(std::move(home)) {}
+    std::string_view app_name() const noexcept override { return "TestApp"; }
+
+    static KeyringEntry entry_for(const std::filesystem::path& directory) {
+        return KeyringEntry{.service = "test", .account = directory.filename().string()};
+    }
+
+protected:
+    std::filesystem::path default_directory() const override { return home_; }
+    std::string_view file_name() const noexcept override { return "cred.txt"; }
+    std::optional<KeyringEntry> keyring_entry(const std::filesystem::path& directory) const override {
+        return entry_for(directory);
+    }
+    AppCredential parse(std::string_view payload, std::string_view origin) const override {
+        AppCredential credential;
+        credential.token.access_token = std::string(payload);
+        credential.origin = std::string(origin);
+        return credential;
+    }
+
+private:
+    std::filesystem::path home_;
+};
+
+void write_text(const std::filesystem::path& path, std::string_view text) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream(path) << text;
+}
+
+} // namespace
+
+TEST_CASE("Stored app reader prefers the keyring and falls back to the file",
+          "[oauth][import][keyring]") {
+    TempDir dir;
+    const std::filesystem::path home = std::filesystem::path(dir.path) / "home";
+    write_text(home / "cred.txt", "from-file");
+    auto keyring = std::make_shared<FakeKeyring>();
+    const TestStoredReader reader(keyring, home);
+
+    // Nothing in the keyring: the file.
+    CHECK(reader.read("auto").token.access_token == "from-file");
+
+    // A keyring item wins over the file, which apps write less often.
+    keyring->put(TestStoredReader::entry_for(home), "from-keyring");
+    const auto imported = reader.read("");
+    CHECK(imported.token.access_token == "from-keyring");
+    CHECK(imported.origin == "the test keyring (service=test, account=home)");
+
+    // `keyring` and its alias `keychain` consult the keyring alone.
+    CHECK(reader.read("KEYRING").token.access_token == "from-keyring");
+    CHECK(reader.read("keychain").token.access_token == "from-keyring");
+
+    // An explicit file is read as given, without touching the keyring.
+    keyring->reads.clear();
+    CHECK(reader.read((home / "cred.txt").string()).token.access_token == "from-file");
+    CHECK(keyring->reads.empty());
+}
+
+TEST_CASE("Stored app reader treats a directory without the file as a keyring home",
+          "[oauth][import][keyring]") {
+    TempDir dir;
+    const std::filesystem::path home = std::filesystem::path(dir.path) / "home";
+    write_text(home / "cred.txt", "default-file");
+    const std::filesystem::path other = std::filesystem::path(dir.path) / "other";
+    std::filesystem::create_directories(other);
+    auto keyring = std::make_shared<FakeKeyring>();
+    const TestStoredReader reader(keyring, home);
+
+    // No item for that directory (an app bundle, say): auto-detection.
+    CHECK(reader.read(other.string()).token.access_token == "default-file");
+
+    // An item kept for that directory is the one meant.
+    keyring->put(TestStoredReader::entry_for(other), "other-keyring");
+    CHECK(reader.read(other.string()).token.access_token == "other-keyring");
+}
+
+TEST_CASE("Stored app reader names every location it tried",
+          "[oauth][import][keyring]") {
+    TempDir dir;
+    const std::filesystem::path home = std::filesystem::path(dir.path) / "home";
+    auto keyring = std::make_shared<FakeKeyring>();
+    const TestStoredReader reader(keyring, home);
+
+    CHECK_THROWS_WITH(static_cast<void>(reader.read("auto")),
+                      Catch::Matchers::ContainsSubstring("Found no TestApp credential") &&
+                          Catch::Matchers::ContainsSubstring("account=home) holds no such item") &&
+                          Catch::Matchers::ContainsSubstring("cred.txt does not exist"));
+
+    // A keyring that cannot be consulted says why (here: helper not installed),
+    // instead of claiming it holds nothing.
+    keyring->failure = "secret-tool is not installed";
+    CHECK_THROWS_WITH(static_cast<void>(reader.read("auto")),
+                      Catch::Matchers::ContainsSubstring(
+                          "could not be read: secret-tool is not installed"));
+    CHECK_THROWS_WITH(static_cast<void>(reader.read("keyring")),
+                      Catch::Matchers::ContainsSubstring("secret-tool is not installed"));
+
+    // A platform without a keyring skips it in auto and refuses `keyring` plainly.
+    keyring->failure.reset();
+    keyring->name.clear();
+    keyring->reads.clear();
+    write_text(home / "cred.txt", "from-file");
+    CHECK(reader.read("auto").token.access_token == "from-file");
+    CHECK(keyring->reads.empty());
+    CHECK_THROWS_WITH(static_cast<void>(reader.read("keyring")),
+                      Catch::Matchers::ContainsSubstring("cannot read a keyring on this platform"));
+}
+
+TEST_CASE("The system keyring reports a missing item as absent, never as a secret",
+          "[oauth][import][keyring]") {
+    const auto keyring = system_keyring();
+    const auto result = keyring->read(
+        KeyringEntry{.service = "filo-test-no-such-service", .account = "filo-test-no-such-account"});
+#if defined(__APPLE__)
+    CHECK_FALSE(keyring->description().empty());
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->has_value());
+#else
+    // Linux CI may lack secret-tool or a session bus; then the reason is reported.
+    if (result.has_value()) {
+        CHECK_FALSE(result->has_value());
+    } else {
+        CHECK_FALSE(result.error().empty());
+    }
+#endif
+}
+
 // ── Antigravity app import (`--auth google --from …`) ───────────────────────
 
 namespace {
@@ -2166,15 +2330,16 @@ TEST_CASE("Antigravity import reads the app's nested credential document",
         R"("expiry":"2026-10-27T09:55:12.100199+04:00"}})";
 
     const auto imported = parse_app_token(payload, "test-source");
-    CHECK(imported.access_token == "at-1");
-    CHECK(imported.refresh_token == "rt-1");
+    CHECK(imported.token.access_token == "at-1");
+    CHECK(imported.token.refresh_token == "rt-1");
     // The client id comes from the id_token's `aud`: the app signs in with the
-    // same client Filo authenticates as, so an import can supply that half too.
-    CHECK(imported.client_id == "client-from-aud");
-    CHECK(imported.email == "user@example.com");
-    CHECK(imported.source == "test-source");
+    // same client Filo authenticates as.
+    CHECK(imported.token.client_id == "client-from-aud");
+    CHECK(imported.token.email == "user@example.com");
+    CHECK(imported.token.user_id == "1234");
+    CHECK(imported.origin == "test-source");
     // 09:55:12+04:00 is 05:55:12Z, fractional seconds and zone offset included.
-    CHECK(imported.expires_at == 1793080512);
+    CHECK(imported.token.expires_at == 1793080512);
 }
 
 TEST_CASE("Antigravity import accepts the keychain wrapper, a flat document and both zone signs",
@@ -2183,22 +2348,22 @@ TEST_CASE("Antigravity import accepts the keychain wrapper, a flat document and 
 
     const std::string flat =
         R"({"access_token":"at-2","refresh_token":"rt-2","expiry":"2026-10-27T05:55:12Z"})";
-    CHECK(parse_app_token(flat, "flat").access_token == "at-2");
-    CHECK(parse_app_token(flat, "flat").expires_at == 1793080512);
+    CHECK(parse_app_token(flat, "flat").token.access_token == "at-2");
+    CHECK(parse_app_token(flat, "flat").token.expires_at == 1793080512);
 
     // The keychain stores the same JSON behind a go-keyring base64 prefix.
     const std::string wrapped = "go-keyring-base64:" + core::utils::Base64::encode(flat);
-    CHECK(parse_app_token(wrapped, "keychain").access_token == "at-2");
-    CHECK(parse_app_token(wrapped, "keychain").expires_at == 1793080512);
+    CHECK(parse_app_token(wrapped, "keychain").token.access_token == "at-2");
+    CHECK(parse_app_token(wrapped, "keychain").token.expires_at == 1793080512);
 
     // A zone behind UTC moves the wall clock the other way.
     const std::string negative =
         R"({"access_token":"at-3","expiry":"2026-10-27T01:55:12-04:00"})";
-    CHECK(parse_app_token(negative, "negative").expires_at == 1793080512);
+    CHECK(parse_app_token(negative, "negative").token.expires_at == 1793080512);
 
-    // An absent expiry is reported as unknown rather than guessed, so the caller
-    // does not renew a token it knows nothing about.
-    CHECK(parse_app_token(R"({"access_token":"at-4"})", "none").expires_at == 0);
+    // An absent expiry is reported as unknown rather than guessed, so the import
+    // renews the token instead of storing one it knows nothing about.
+    CHECK(parse_app_token(R"({"access_token":"at-4"})", "none").token.expires_at == 0);
 }
 
 TEST_CASE("Antigravity import rejects a payload that is not a usable credential",
@@ -2228,8 +2393,6 @@ TEST_CASE("Antigravity import resolves a file, its directory, and reports a miss
           "[oauth][antigravity][import]") {
     using namespace core::auth::antigravity;
 
-    CHECK(app_token_file("/home/u") == "/home/u/.gemini/jetski-standalone-oauth-token");
-
     TempDir dir;
     const std::filesystem::path gemini_dir = std::filesystem::path(dir.path) / ".gemini";
     std::filesystem::create_directories(gemini_dir);
@@ -2240,20 +2403,274 @@ TEST_CASE("Antigravity import resolves a file, its directory, and reports a miss
     }
 
     // A directory holding the file resolves to it, so `--from ~/.gemini` and
-    // `--from <the file itself>` both work.
-    CHECK(import_from_app(dir.path + "/.gemini").access_token == "at-dir");
-    CHECK(import_from_app(token_file.string()).access_token == "at-dir");
-    CHECK(import_from_app(token_file.string()).refresh_token == "rt-dir");
-    CHECK_THAT(import_from_app(token_file.string()).source,
+    // `--from <the file itself>` both work, without consulting the keyring.
+    auto keyring = std::make_shared<FakeKeyring>();
+    const AppCredentialReader reader(keyring);
+    CHECK(reader.read(dir.path + "/.gemini").token.access_token == "at-dir");
+    CHECK(reader.read(token_file.string()).token.access_token == "at-dir");
+    CHECK(reader.read(token_file.string()).token.refresh_token == "rt-dir");
+    CHECK_THAT(reader.read(token_file.string()).origin,
                Catch::Matchers::ContainsSubstring("jetski-standalone-oauth-token"));
+    CHECK(keyring->reads.empty());
 
     const auto missing = std::filesystem::path(dir.path) / "nope.json";
-    CHECK_THROWS_AS(static_cast<void>(import_from_app(missing.string())), std::runtime_error);
+    CHECK_THROWS_WITH(static_cast<void>(reader.read(missing.string())),
+                      Catch::Matchers::ContainsSubstring("does not exist"));
+}
+
+TEST_CASE("Antigravity import reads go-keyring's item in either encoding",
+          "[oauth][antigravity][import]") {
+    using namespace core::auth::antigravity;
+
+    const std::string document = R"({"token":{"access_token":"at-ring","refresh_token":"rt"}})";
+    const KeyringEntry entry{.service = "gemini", .account = "antigravity"};
+    for (const std::string& stored :
+         {document, "go-keyring-base64:" + core::utils::Base64::encode(document)}) {
+        auto keyring = std::make_shared<FakeKeyring>();
+        keyring->put(entry, stored);
+        const AppCredentialReader reader(keyring);
+        const auto imported = reader.read("keyring");
+        CHECK(imported.token.access_token == "at-ring");
+        CHECK_THAT(imported.origin, Catch::Matchers::ContainsSubstring("account=antigravity"));
+    }
+}
+
+// ── ChatGPT app import (`--auth openai --from …`) ───────────────────────────
+
+namespace {
+
+/// The app's auth.json around an access token whose payload is @p access_claims.
+[[nodiscard]] std::string chatgpt_auth_json(std::string_view access_claims) {
+    const std::string id_token = fake_id_token(
+        R"({"email":"dev@example.com","sub":"user-1",)"
+        R"("https://api.openai.com/auth":{"chatgpt_account_id":"acct-from-id"}})");
+    return R"({"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":")" + id_token +
+        R"(","access_token":")" + fake_id_token(access_claims) +
+        R"(","refresh_token":"rt-chatgpt","account_id":"acct-1"},)"
+        R"("last_refresh":"2026-10-27T05:07:19.011783Z"})";
+}
+
+} // namespace
+
+TEST_CASE("ChatGPT import reads the app's auth.json through the OpenAI token parser",
+          "[oauth][chatgpt][import]") {
+    using namespace core::auth::chatgpt;
+
+    const auto imported = parse_auth_file(
+        chatgpt_auth_json(R"({"exp":1793080512,"client_id":"app_x"})"), "~/.codex/auth.json");
+    CHECK(imported.origin == "~/.codex/auth.json");
+    CHECK(imported.token.refresh_token == "rt-chatgpt");
+    CHECK(imported.token.account_id == "acct-1");
+    CHECK(imported.token.email == "dev@example.com");
+    // The expiry is the access token's own `exp` claim.
+    CHECK(imported.token.expires_at == 1793080512);
+
+    // Without any `exp` the token must not be given a guessed lifetime: it counts
+    // as expired, so the import renews it before storing it.
+    const auto undated = parse_auth_file(chatgpt_auth_json(R"({"sub":"user-1"})"), "undated");
+    CHECK_FALSE(undated.token.is_valid());
+}
+
+TEST_CASE("ChatGPT import refuses a file without a ChatGPT sign-in",
+          "[oauth][chatgpt][import]") {
+    using namespace core::auth::chatgpt;
+
+    const auto message_of = [](std::string_view payload) {
+        try {
+            static_cast<void>(parse_auth_file(payload, "auth-src"));
+        } catch (const std::runtime_error& e) {
+            return std::string(e.what());
+        }
+        return std::string{};
+    };
+
+    // An API-key login is named as such, and the key itself never reaches the message.
+    const std::string api_key_only =
+        message_of(R"({"auth_mode":"apikey","OPENAI_API_KEY":"sk-secret-value","tokens":null})");
+    CHECK_THAT(api_key_only, Catch::Matchers::ContainsSubstring("API key"));
+    CHECK_THAT(api_key_only, !Catch::Matchers::ContainsSubstring("sk-secret-value"));
+
+    CHECK_THAT(message_of(R"({"tokens":{"refresh_token":"rt"}})"),
+               Catch::Matchers::ContainsSubstring("access_token"));
+    CHECK_THAT(message_of("not json"), Catch::Matchers::ContainsSubstring("auth-src"));
+}
+
+TEST_CASE("ChatGPT import resolves a file, a CODEX_HOME directory, a bundle and auto",
+          "[oauth][chatgpt][import]") {
+    using namespace core::auth::chatgpt;
+
+    TempDir dir;
+    const std::filesystem::path home = std::filesystem::path(dir.path) / "codex-home";
+    std::filesystem::create_directories(home);
+    {
+        std::ofstream out(home / "auth.json");
+        out << chatgpt_auth_json(R"({"exp":1793080512})");
+    }
+    const std::filesystem::path bundle = std::filesystem::path(dir.path) / "ChatGPT.app";
+    std::filesystem::create_directories(bundle / "Contents");
+
+    ScopedEnvVar home_override("CODEX_HOME", home.string());
+    CHECK(codex_home() == home);
+
+    const AppCredentialReader reader(std::make_shared<FakeKeyring>());
+    CHECK(reader.read(home.string()).token.refresh_token == "rt-chatgpt");
+    CHECK(reader.read((home / "auth.json").string()).token.refresh_token == "rt-chatgpt");
+    // A bundle holds no user credential, so it falls back to the app's own file.
+    CHECK(reader.read(bundle.string()).token.refresh_token == "rt-chatgpt");
+    CHECK(reader.read("auto").token.refresh_token == "rt-chatgpt");
+    CHECK(reader.read("").token.refresh_token == "rt-chatgpt");
+
+    CHECK_THROWS_WITH(static_cast<void>(reader.read((home / "nope.json").string())),
+                      Catch::Matchers::ContainsSubstring("does not exist"));
+    ScopedEnvVar empty_home("CODEX_HOME", (std::filesystem::path(dir.path) / "empty").string());
+    CHECK_THROWS_WITH(static_cast<void>(reader.read("auto")),
+                      Catch::Matchers::ContainsSubstring("Found no ChatGPT credential"));
+}
+
+TEST_CASE("ChatGPT import finds a Codex sign-in kept in the OS keyring",
+          "[oauth][chatgpt][import]") {
+    using namespace core::auth::chatgpt;
+
+    // Codex's own derivation: "cli|" + the first 16 hex digits of SHA-256 over
+    // the canonical CODEX_HOME (the path as given when it does not exist).
+    CHECK(keyring_entry_for("/nonexistent/filo-codex-home") ==
+          KeyringEntry{.service = "Codex Auth", .account = "cli|becf5b91c28184f7"});
+
+    // In keyring mode Codex deletes auth.json, so the directory holds no file.
+    TempDir dir;
+    const std::filesystem::path home = std::filesystem::path(dir.path) / "codex-home";
+    std::filesystem::create_directories(home);
+    auto keyring = std::make_shared<FakeKeyring>();
+    keyring->put(keyring_entry_for(home), chatgpt_auth_json(R"({"exp":1793080512})"));
+    const AppCredentialReader reader(keyring);
+
+    ScopedEnvVar elsewhere("CODEX_HOME", (std::filesystem::path(dir.path) / "other").string());
+    // An explicit CODEX_HOME directory selects that home's keyring item.
+    const auto imported = reader.read(home.string());
+    CHECK(imported.token.refresh_token == "rt-chatgpt");
+    CHECK_THAT(imported.origin, Catch::Matchers::ContainsSubstring("Codex Auth"));
+
+    ScopedEnvVar this_home("CODEX_HOME", home.string());
+    CHECK(reader.read("auto").token.refresh_token == "rt-chatgpt");
+    CHECK(reader.read("keyring").token.refresh_token == "rt-chatgpt");
+}
+
+// ── Shared app-import pipeline ──────────────────────────────────────────────
+
+namespace {
+
+struct FixedAppReader final : IAppCredentialReader {
+    OAuthToken token;
+    std::string_view app_name() const noexcept override { return "TestApp"; }
+    AppCredential read(std::string_view) const override {
+        return AppCredential{.token = token, .origin = "test-origin"};
+    }
+};
+
+struct ThrowingRefreshFlow final : StubFlow {
+    OAuthToken refresh(std::string_view) override {
+        ++refresh_calls;
+        throw std::runtime_error("no client configured.");
+    }
+};
+
+[[nodiscard]] AppCredentialImport make_import(OAuthToken token,
+                                              std::shared_ptr<IOAuthFlow> flow) {
+    auto reader = std::make_shared<FixedAppReader>();
+    reader->token = std::move(token);
+    return AppCredentialImport{
+        .reader = std::move(reader), .flow = std::move(flow), .warnings = {"heads up"}};
+}
+
+} // namespace
+
+TEST_CASE("App import stores a live token as-is and carries the provider's warnings",
+          "[oauth][import]") {
+    auto flow = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(7200, "rt-app", "at-app");
+    token.email = "who@example.com";
+
+    const auto report = import_app_credential(make_import(token, flow), "auto", "key", store);
+    CHECK(flow->refresh_calls == 0);
+    REQUIRE(store->stored.has_value());
+    CHECK(store->stored->access_token == "at-app");
+    CHECK_FALSE(report.renewed);
+    CHECK(report.app_name == "TestApp");
+    CHECK(report.origin == "test-origin");
+    CHECK(report.email == "who@example.com");
+    CHECK(report.expires_at == token.expires_at);
+    CHECK(report.warnings == std::vector<std::string>{"heads up"});
+}
+
+TEST_CASE("App import renews an expired token before storing it", "[oauth][import]") {
+    auto flow = std::make_shared<StubFlow>();
+    flow->refresh_result = make_token(3600, "", "at-renewed");
+    auto store = std::make_shared<StubStore>();
+    OAuthToken expired = make_token(-600, "rt-app", "at-stale");
+    expired.email = "who@example.com";
+
+    const auto report = import_app_credential(make_import(expired, flow), "auto", "key", store);
+    CHECK(flow->refresh_calls == 1);
+    CHECK(report.renewed);
+    REQUIRE(store->stored.has_value());
+    CHECK(store->stored->access_token == "at-renewed");
+    // The renewal inherits what the refresh response left out.
+    CHECK(store->stored->refresh_token == "rt-app");
+    CHECK(store->stored->email == "who@example.com");
+}
+
+TEST_CASE("A failed app import leaves the stored session untouched", "[oauth][import]") {
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(3600, "rt-mine", "at-mine");
+
+    SECTION("expired without a refresh token") {
+        auto flow = std::make_shared<StubFlow>();
+        CHECK_THROWS_WITH(
+            static_cast<void>(import_app_credential(
+                make_import(make_token(-600, "", "at-stale"), flow), "auto", "key", store)),
+            Catch::Matchers::ContainsSubstring("no refresh token"));
+        CHECK(flow->refresh_calls == 0);
+    }
+    SECTION("renewal fails") {
+        auto flow = std::make_shared<ThrowingRefreshFlow>();
+        std::string message;
+        try {
+            static_cast<void>(import_app_credential(
+                make_import(make_token(-600, "rt-app", "at-stale"), flow), "auto", "key", store));
+        } catch (const std::runtime_error& e) {
+            message = e.what();
+        }
+        CHECK_THAT(message, Catch::Matchers::ContainsSubstring("TestApp credential from test-origin"));
+        CHECK_THAT(message, Catch::Matchers::ContainsSubstring("no client configured. Open"));
+    }
+    CHECK(store->save_calls == 0);
+    CHECK(store->stored->access_token == "at-mine");
+}
+
+TEST_CASE("Only providers with an installed app accept --from", "[oauth][import]") {
+    TempDir dir;
+    const auto manager = AuthenticationManager::create_with_defaults(dir.path);
     std::string message;
     try {
-        static_cast<void>(import_from_app(missing.string()));
+        static_cast<void>(manager.import_from_app("claude", "auto"));
     } catch (const std::runtime_error& e) {
         message = e.what();
     }
-    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("does not exist"));
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("--from supports: google, openai"));
+    CHECK_THROWS_WITH(static_cast<void>(manager.import_from_app("nonexistent", "auto")),
+                      Catch::Matchers::ContainsSubstring("Unknown provider"));
+}
+
+TEST_CASE("The app import report states origin, lifetime and warnings", "[oauth][import]") {
+    std::ostringstream out;
+    print_app_import_report(
+        AppImportReport{.app_name = "ChatGPT", .origin = "~/.codex/auth.json",
+                        .email = "dev@example.com", .renewed = false,
+                        .expires_at = 1000 + 3 * 86400, .warnings = {"shared sign-in"}},
+        1000, out);
+    CHECK(out.str() ==
+          "Imported the ChatGPT sign-in of dev@example.com from ~/.codex/auth.json.\n"
+          "Its access token is valid for another 3 days.\n"
+          "Warning: shared sign-in\n");
 }

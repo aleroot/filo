@@ -81,6 +81,21 @@ void OAuthTokenManager::save_token(const OAuthToken& token) {
     store_->save(provider_id_, token);
 }
 
+OAuthToken OAuthTokenManager::adopt(OAuthToken token) {
+    std::unique_lock lock(mutex_);
+    auto store_lock = store_->acquire_refresh_lock(provider_id_);
+    if (!token.is_valid()) {
+        if (!token.has_refresh_token()) {
+            throw std::runtime_error(
+                "its access token has expired (or carries no expiry) and no refresh "
+                "token came with it");
+        }
+        token = refresh(token);
+    }
+    store_->save(provider_id_, token);
+    return token;
+}
+
 void OAuthTokenManager::force_refresh() {
     std::unique_lock lock(mutex_);
     auto refresh_lock = store_->acquire_refresh_lock(provider_id_);

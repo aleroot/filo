@@ -313,7 +313,11 @@ set(FILO_CORE_SOURCES
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/GoogleAntigravityOAuthFlow.cpp
     src/core/auth/AntigravityClientCredentials.cpp
+    src/core/auth/AppCredentialImport.cpp
     src/core/auth/AntigravityAppImport.cpp
+    src/core/auth/ChatGptAppImport.cpp
+    src/core/auth/StoredAppCredentialReader.cpp
+    src/core/auth/SystemKeyring.cpp
     src/core/auth/IdTokenClaims.cpp
     src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp

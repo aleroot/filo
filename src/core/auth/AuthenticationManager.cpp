@@ -1,5 +1,8 @@
 #include "AuthenticationManager.hpp"
+#include "AntigravityAppImport.hpp"
+#include "AntigravityClientCredentials.hpp"
 #include "ApiKeyPromptStrategy.hpp"
+#include "ChatGptAppImport.hpp"
 #include "ClaudeOAuthFlow.hpp"
 #include "FileTokenStore.hpp"
 #include "ConfigCredentialSource.hpp"
@@ -94,6 +97,27 @@ public:
         return std::make_shared<GoogleAntigravityOAuthFlow>();
     }
 
+    std::optional<AppCredentialImport> app_credential_import(
+        std::string_view config_dir) const override {
+        AppCredentialImport import{
+            .reader = std::make_shared<antigravity::AppCredentialReader>(),
+            .flow = std::make_shared<GoogleAntigravityOAuthFlow>(
+                /*ui=*/nullptr, std::string(config_dir)),
+            .warnings = {},
+        };
+        // The app cannot supply the client secret — the literals in its bundle
+        // do not authenticate against the token endpoint — so without a
+        // configured client the imported session dies with its access token.
+        if (!antigravity::load_client_credentials(config_dir).complete()) {
+            import.warnings.push_back(
+                "No complete Antigravity OAuth client is configured, so this credential "
+                "cannot be renewed once it expires. Set GOOGLE_ANTIGRAVITY_CLIENT_ID and "
+                "GOOGLE_ANTIGRAVITY_CLIENT_SECRET, or add \"client_id\" and \"client_secret\" "
+                "to " + std::string(config_dir) + "/antigravity.json.");
+        }
+        return import;
+    }
+
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
         return provider_type == "gemini" && auth_type == "oauth_google";
@@ -181,6 +205,22 @@ public:
 
     std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
         return std::make_shared<OpenAIOAuthFlow>();
+    }
+
+    std::optional<AppCredentialImport> app_credential_import(
+        std::string_view /*config_dir*/) const override {
+        return AppCredentialImport{
+            .reader = std::make_shared<chatgpt::AppCredentialReader>(),
+            .flow = std::make_shared<OpenAIOAuthFlow>(),
+            // OpenAI rotates refresh tokens on every use, and an import copies
+            // the app's one rather than minting a second session.
+            .warnings = {
+                "Filo and the ChatGPT app now share one sign-in, and OpenAI rotates its "
+                "refresh token on every renewal: whichever renews first signs the other "
+                "out. If that happens, sign in to the app again and re-run this import, "
+                "or give Filo its own session with `filo --auth openai`.",
+            },
+        };
     }
 
     bool supports(std::string_view provider_type,
@@ -486,23 +526,51 @@ void AuthenticationManager::register_strategy(std::shared_ptr<IAuthStrategy> str
     strategies_.push_back(std::move(strategy));
 }
 
-LoginResult AuthenticationManager::login(std::string_view provider) const {
+const IAuthStrategy& AuthenticationManager::login_strategy(std::string_view provider) const {
     const std::string requested = normalize(provider);
-
     for (const auto& strategy : strategies_) {
-        if (matches_login_provider(*strategy, requested)) {
-            return {
-                .provider = std::string(strategy->display_name()),
-                .login_provider = std::string(strategy->login_provider()),
-                .hints = strategy->login(config_dir_),
-            };
-        }
+        if (matches_login_provider(*strategy, requested)) return *strategy;
     }
 
     const auto available = available_login_providers();
     throw std::runtime_error(
         "Unknown provider '" + std::string(provider)
         + "'. Available: " + join(available));
+}
+
+LoginResult AuthenticationManager::login(std::string_view provider) const {
+    const IAuthStrategy& strategy = login_strategy(provider);
+    return {
+        .provider = std::string(strategy.display_name()),
+        .login_provider = std::string(strategy.login_provider()),
+        .hints = strategy.login(config_dir_),
+    };
+}
+
+LoginResult AuthenticationManager::import_from_app(std::string_view provider,
+                                                   std::string_view source) const {
+    const IAuthStrategy& strategy = login_strategy(provider);
+    auto import = strategy.app_credential_import(config_dir_);
+    if (!import.has_value()) {
+        std::vector<std::string> importable;
+        for (const auto& candidate : strategies_) {
+            if (candidate->app_credential_import(config_dir_).has_value()) {
+                importable.emplace_back(candidate->login_provider());
+            }
+        }
+        throw std::runtime_error(
+            std::string(strategy.display_name()) + " has no installed app to import a "
+            "credential from; --from supports: " + join(importable) + ".");
+    }
+
+    return {
+        .provider = std::string(strategy.display_name()),
+        .login_provider = std::string(strategy.login_provider()),
+        .hints = {},
+        .app_import = import_app_credential(
+            *import, source, std::string(strategy.token_store_key()),
+            std::make_shared<FileTokenStore>(config_dir_)),
+    };
 }
 
 std::optional<AuthenticationProviderDescriptor>

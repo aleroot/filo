@@ -4,10 +4,7 @@
 #include "core/context/SteeringLoader.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
-#include "core/auth/AntigravityAppImport.hpp"
-#include "core/auth/AntigravityClientCredentials.hpp"
 #include "core/auth/AuthLogin.hpp"
-#include "core/auth/GoogleAntigravityOAuthFlow.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/session/SessionReport.hpp"
@@ -56,101 +53,6 @@ constexpr auto kNoSteeringToken =
 #else
     return isatty(STDIN_FILENO) == 0;
 #endif
-}
-
-/**
- * @brief Apply `--from <source>` to a `--auth google` login.
- *
- * Imports an installed Antigravity app's credential and injects it into this
- * process's environment, which is the layer `antigravity::load_client_credentials`
- * already ranks highest, so the adoption path in `GoogleAntigravityOAuthFlow::
- * login()` does the rest: one import mechanism, no second code path. A variable
- * the user set explicitly is left alone.
- */
-void import_antigravity_credential(std::string_view source, const std::string& config_dir) {
-    using namespace core::auth::antigravity;
-
-    // An explicitly exported token already outranks anything an import could
-    // supply, so say so rather than read the app for a value that is then dropped.
-    if (const char* existing = std::getenv("GOOGLE_ANTIGRAVITY_ACCESS_TOKEN");
-        existing != nullptr && existing[0] != '\0') {
-        std::cout << "Ignoring --from: GOOGLE_ANTIGRAVITY_ACCESS_TOKEN is already set, and the "
-                     "environment takes precedence.\n";
-        return;
-    }
-
-    AppImport imported = import_from_app(source);
-
-    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
-    // The app writes its file only at launch, so an import often yields a token
-    // that expired hours ago. Filo assumes a supplied token is good for another
-    // hour, which would store a credential that dies at the first request — as an
-    // opaque `loadCodeAssist failed (401)`, because the project-id bootstrap does
-    // not retry after a refresh. Renew here instead, while the reason is known,
-    // through the flow's own refresh rather than a second copy of that exchange.
-    std::int64_t minutes_left = 0;
-    bool renewed = false;
-    if (imported.expires_at > 0) {
-        minutes_left = (imported.expires_at - now) / 60;
-        if (minutes_left <= 0) {
-            if (imported.refresh_token.empty() ||
-                !load_client_credentials(config_dir).complete()) {
-                throw std::runtime_error(
-                    "The imported Antigravity access token expired " +
-                    std::to_string(-minutes_left) + " minute(s) ago and cannot be renewed: " +
-                    (imported.refresh_token.empty()
-                         ? "the source carries no refresh token"
-                         : "no client_secret is configured") +
-                    ". Launch the Antigravity app once to refresh it, or drop --from and "
-                    "complete a browser login.");
-            }
-            core::auth::GoogleAntigravityOAuthFlow flow(nullptr, config_dir);
-            const core::auth::OAuthToken renewed_token = flow.refresh(imported.refresh_token);
-            imported.access_token = renewed_token.access_token;
-            if (!renewed_token.refresh_token.empty()) {
-                imported.refresh_token = renewed_token.refresh_token;
-            }
-            minutes_left = (renewed_token.expires_at - now) / 60;
-            renewed = true;
-        }
-    }
-
-    const auto inject = [](const char* name, const std::string& value) {
-        if (value.empty()) return;
-        if (const char* existing = std::getenv(name);
-            existing != nullptr && existing[0] != '\0') {
-            return;
-        }
-        ::setenv(name, value.c_str(), /*overwrite=*/0);
-    };
-    inject("GOOGLE_ANTIGRAVITY_ACCESS_TOKEN", imported.access_token);
-    inject("GOOGLE_ANTIGRAVITY_REFRESH_TOKEN", imported.refresh_token);
-    // The id_token's `aud` is the client the app signed in with, which is the one
-    // Filo authenticates as, so an app import can supply the client id too.
-    inject("GOOGLE_ANTIGRAVITY_CLIENT_ID", imported.client_id);
-
-    std::cout << "Imported an Antigravity credential from " << imported.source;
-    if (!imported.email.empty()) std::cout << " (" << imported.email << ")";
-    std::cout << ".\n";
-    if (renewed) {
-        std::cout << "Its access token had expired, so it was renewed with the configured "
-                     "client and is valid for another " << minutes_left << " minute(s).\n";
-    } else if (imported.expires_at > 0) {
-        std::cout << "Its access token is valid for another " << minutes_left
-                  << " minute(s).\n";
-    }
-
-    // The app cannot supply the client secret — the literals in its bundle do not
-    // authenticate against the token endpoint — so without one this credential
-    // cannot be renewed again later. Say so now, not an hour from now.
-    if (load_client_credentials(config_dir).client_secret.empty()) {
-        std::cout << "Warning: no client_secret is configured, so this credential cannot be "
-                     "refreshed once it expires. Set GOOGLE_ANTIGRAVITY_CLIENT_SECRET or add "
-                     "\"client_secret\" to " << config_dir << "/antigravity.json.\n";
-    }
-    std::cout.flush();
 }
 
 } // namespace
@@ -265,14 +167,16 @@ int main(int argc, char** argv) {
         "Authenticate or sign out and exit: --auth <provider> [login|logout]. "
         "The action defaults to login and may also precede the provider.");
     auth_opt->expected(1, 2)->excludes(login_opt);
-    app.add_option(
+    auto* from_opt = app.add_option(
         "--from", credential_import_source,
-        "With --auth google: import the credential of an installed Google Antigravity IDE "
-        "instead of signing in through a browser. Accepts 'auto' (the macOS keychain item the "
-        "app keeps live, else ~/.gemini/jetski-standalone-oauth-token), 'keychain', or a path "
-        "to that file, to its directory, or to Antigravity.app. A one-time bootstrap: Filo uses "
-        "only its own token store afterwards, and renewing the imported token still needs a "
-        "configured client_secret.");
+        "With --auth <provider>: adopt the sign-in the provider's own installed app already "
+        "holds instead of signing in through a browser. 'auto' checks the OS keyring (macOS "
+        "keychain, or the Secret Service via secret-tool on Linux), then the app's credential "
+        "file; 'keyring' checks only the keyring; a path to the credential file, its directory, "
+        "or the .app bundle also works. Supported: google (Antigravity IDE: ~/.gemini/"
+        "jetski-standalone-oauth-token; renewing it needs a configured client_secret) and "
+        "openai (ChatGPT app / Codex CLI: $CODEX_HOME/auth.json, else ~/.codex/auth.json). A "
+        "one-time copy: Filo uses only its own token store afterwards.");
     auto* resume_opt = app.add_option(
         "-r,--resume", resume_session,
         "Resume a session by ID, 1-based index, or name (see --list-sessions and /rename). "
@@ -439,9 +343,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!credential_import_source.empty()) {
+    if (from_opt->count() > 0) {
         if (auth_provider.empty() && login_provider.empty()) {
-            std::cerr << "--from requires --auth google.\n";
+            std::cerr << "--from requires --auth <provider>.\n";
             return 2;
         }
         if (auth_action == "logout") {
@@ -685,17 +589,18 @@ int main(int argc, char** argv) {
                 ? login_provider
                 : auth_provider;
 
-            if (!credential_import_source.empty()) {
-                const auto provider = core::utils::str::to_lower_ascii_copy(selected_provider);
-                if (provider != "google" && provider != "gemini" && provider != "antigravity") {
-                    std::cerr << "--from only applies to --auth google.\n";
-                    return 1;
-                }
-                import_antigravity_credential(credential_import_source, config_dir);
-            }
-
             const auto outcome = core::auth::login_and_persist(
-                selected_provider, config_dir);
+                selected_provider, config_dir,
+                from_opt->count() > 0
+                    ? std::optional<std::string_view>(credential_import_source)
+                    : std::nullopt);
+            if (outcome.result.app_import.has_value()) {
+                core::auth::print_app_import_report(
+                    *outcome.result.app_import,
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count(),
+                    std::cout);
+            }
             core::logging::info("Successfully authenticated with {}.", outcome.result.provider);
             if (!outcome.profile_persisted) {
                 core::logging::warn(
