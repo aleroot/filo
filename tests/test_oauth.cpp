@@ -4,6 +4,7 @@
 #include "core/auth/ITokenStore.hpp"
 #include "core/auth/IOAuthFlow.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/auth/AntigravityAppImport.hpp"
 #include "core/auth/AntigravityClientCredentials.hpp"
 #include "core/auth/FileTokenStore.hpp"
 #include "core/auth/GoogleAntigravityOAuthFlow.hpp"
@@ -21,6 +22,7 @@
 #include "core/auth/MimoAuthenticationStrategy.hpp"
 #include "core/auth/SecretInput.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/utils/Base64.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +35,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <span>
 #include <vector>
 
 using namespace core::auth;
@@ -2130,4 +2133,127 @@ TEST_CASE("Antigravity login adopts an explicitly supplied access token",
     // instead of being replayed until the endpoint rejects it.
     CHECK(token->expires_at == now + 3600);
     CHECK(token->is_valid());
+}
+
+// ── Antigravity app import (`--auth google --from …`) ───────────────────────
+
+namespace {
+
+[[nodiscard]] std::string base64url_segment(std::string_view text) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(text.data());
+    return core::utils::Base64::encode_url(
+        std::span<const std::uint8_t>(bytes, text.size()));
+}
+
+/// An unsigned JWT whose payload carries @p claims_json, shaped like an id_token.
+[[nodiscard]] std::string fake_id_token(std::string_view claims_json) {
+    return base64url_segment(R"({"alg":"none","typ":"JWT"})") + "."
+        + base64url_segment(claims_json) + ".signature";
+}
+
+} // namespace
+
+TEST_CASE("Antigravity import reads the app's nested credential document",
+          "[oauth][antigravity][import]") {
+    using namespace core::auth::antigravity;
+
+    const std::string id_token = fake_id_token(
+        R"({"aud":"client-from-aud","email":"user@example.com","sub":"1234"})");
+    const std::string payload =
+        R"({"auth_method":"consumer","id_token":")" + id_token +
+        R"(","token":{"access_token":"at-1","refresh_token":"rt-1",)"
+        R"("token_type":"Bearer","expires_in":3599,)"
+        R"("expiry":"2026-10-27T09:55:12.100199+04:00"}})";
+
+    const auto imported = parse_app_token(payload, "test-source");
+    CHECK(imported.access_token == "at-1");
+    CHECK(imported.refresh_token == "rt-1");
+    // The client id comes from the id_token's `aud`: the app signs in with the
+    // same client Filo authenticates as, so an import can supply that half too.
+    CHECK(imported.client_id == "client-from-aud");
+    CHECK(imported.email == "user@example.com");
+    CHECK(imported.source == "test-source");
+    // 09:55:12+04:00 is 05:55:12Z, fractional seconds and zone offset included.
+    CHECK(imported.expires_at == 1793080512);
+}
+
+TEST_CASE("Antigravity import accepts the keychain wrapper, a flat document and both zone signs",
+          "[oauth][antigravity][import]") {
+    using namespace core::auth::antigravity;
+
+    const std::string flat =
+        R"({"access_token":"at-2","refresh_token":"rt-2","expiry":"2026-10-27T05:55:12Z"})";
+    CHECK(parse_app_token(flat, "flat").access_token == "at-2");
+    CHECK(parse_app_token(flat, "flat").expires_at == 1793080512);
+
+    // The keychain stores the same JSON behind a go-keyring base64 prefix.
+    const std::string wrapped = "go-keyring-base64:" + core::utils::Base64::encode(flat);
+    CHECK(parse_app_token(wrapped, "keychain").access_token == "at-2");
+    CHECK(parse_app_token(wrapped, "keychain").expires_at == 1793080512);
+
+    // A zone behind UTC moves the wall clock the other way.
+    const std::string negative =
+        R"({"access_token":"at-3","expiry":"2026-10-27T01:55:12-04:00"})";
+    CHECK(parse_app_token(negative, "negative").expires_at == 1793080512);
+
+    // An absent expiry is reported as unknown rather than guessed, so the caller
+    // does not renew a token it knows nothing about.
+    CHECK(parse_app_token(R"({"access_token":"at-4"})", "none").expires_at == 0);
+}
+
+TEST_CASE("Antigravity import rejects a payload that is not a usable credential",
+          "[oauth][antigravity][import]") {
+    using namespace core::auth::antigravity;
+
+    CHECK_THROWS_AS(static_cast<void>(parse_app_token("not json", "broken")), std::runtime_error);
+    CHECK_THROWS_AS(static_cast<void>(parse_app_token("[]", "array")), std::runtime_error);
+    CHECK_THROWS_AS(static_cast<void>(parse_app_token(R"({"refresh_token":"rt"})", "no-access")),
+                    std::runtime_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(parse_app_token("go-keyring-base64:!!!not base64!!!", "bad-keyring")),
+        std::runtime_error);
+
+    // The failure has to say what is missing and where it came from.
+    std::string message;
+    try {
+        static_cast<void>(parse_app_token(R"({"refresh_token":"rt"})", "no-access"));
+    } catch (const std::runtime_error& e) {
+        message = e.what();
+    }
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("access_token"));
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("no-access"));
+}
+
+TEST_CASE("Antigravity import resolves a file, its directory, and reports a missing path",
+          "[oauth][antigravity][import]") {
+    using namespace core::auth::antigravity;
+
+    CHECK(app_token_file("/home/u") == "/home/u/.gemini/jetski-standalone-oauth-token");
+
+    TempDir dir;
+    const std::filesystem::path gemini_dir = std::filesystem::path(dir.path) / ".gemini";
+    std::filesystem::create_directories(gemini_dir);
+    const auto token_file = gemini_dir / "jetski-standalone-oauth-token";
+    {
+        std::ofstream out(token_file);
+        out << R"({"token":{"access_token":"at-dir","refresh_token":"rt-dir"}})";
+    }
+
+    // A directory holding the file resolves to it, so `--from ~/.gemini` and
+    // `--from <the file itself>` both work.
+    CHECK(import_from_app(dir.path + "/.gemini").access_token == "at-dir");
+    CHECK(import_from_app(token_file.string()).access_token == "at-dir");
+    CHECK(import_from_app(token_file.string()).refresh_token == "rt-dir");
+    CHECK_THAT(import_from_app(token_file.string()).source,
+               Catch::Matchers::ContainsSubstring("jetski-standalone-oauth-token"));
+
+    const auto missing = std::filesystem::path(dir.path) / "nope.json";
+    CHECK_THROWS_AS(static_cast<void>(import_from_app(missing.string())), std::runtime_error);
+    std::string message;
+    try {
+        static_cast<void>(import_from_app(missing.string()));
+    } catch (const std::runtime_error& e) {
+        message = e.what();
+    }
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("does not exist"));
 }
