@@ -1,11 +1,10 @@
 #pragma once
 
-#include "IOAuthFlow.hpp"
-#include "IOAuthTokenRevoker.hpp"
-#include "ui/AuthUI.hpp"
-#include <memory>
+#include "OAuthToken.hpp"
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace core::auth {
@@ -16,37 +15,26 @@ struct GoogleManualAuthInput {
 };
 
 /**
- * @brief Google OAuth2 flow for Gemini Code Assist authentication.
+ * @brief Side-effect-free Google OAuth primitives shared by the Google flows.
  *
- * The default constructor uses the same application credentials as gemini-cli
- * (public desktop-app credentials — intentionally not secret per Google's
- * own guidelines for installed applications).
+ * The pieces every Google OAuth client needs and none of which depend on a
+ * particular client identity: building the authorization URL, parsing a token
+ * response, parsing a pasted callback, and normalizing a loopback redirect URI.
+ * `GoogleAntigravityOAuthFlow` composes them into an actual login; they are also
+ * pure functions, so they are unit-tested without network or browser side
+ * effects.
  *
- * login() normally opens the user's browser, starts a local HTTP server to
- * capture the redirect, and exchanges the authorization code for tokens.
- * When browser launch is suppressed (for example `NO_BROWSER=1`), it switches
- * to an immediate manual Code Assist code flow instead of waiting for a
- * loopback callback that will never arrive.
- *
- * The static methods build_auth_url() and parse_token_response() are pure
- * functions exposed for unit testing without network or browser side-effects.
+ * The gemini-cli flow that used to live here is gone: Google deprecated it for
+ * individual accounts, nothing constructed it any more, and it was the last
+ * place a Google client secret was embedded in this source tree. GitHub secret
+ * scanning matches both halves of a Google OAuth client and push protection
+ * rejects any commit carrying them, so client credentials are configured per
+ * machine instead — see GoogleAntigravityIdentity.hpp and
+ * AntigravityClientCredentials.hpp.
  */
-class GoogleOAuthFlow : public IOAuthFlow, public IOAuthTokenRevoker {
+class GoogleOAuthFlow final {
 public:
-    explicit GoogleOAuthFlow(std::shared_ptr<ui::AuthUI> ui = nullptr);
-
-    GoogleOAuthFlow(std::string client_id,
-                    std::string client_secret,
-                    std::vector<std::string> scopes,
-                    int port_start = 54321,
-                    int port_end   = 54400,
-                    std::shared_ptr<ui::AuthUI> ui = nullptr);
-
-    OAuthToken login() override;
-    OAuthToken refresh(std::string_view refresh_token) override;
-
-    /// Best-effort revocation via https://oauth2.googleapis.com/revoke.
-    void revoke(const OAuthToken& token) override;
+    GoogleOAuthFlow() = delete;
 
     static std::string build_auth_url(std::string_view client_id,
                                       std::string_view redirect_uri,
@@ -58,22 +46,11 @@ public:
                                            int64_t request_time_unix);
 
     static GoogleManualAuthInput parse_manual_auth_input(std::string_view raw_input);
+
     static std::string build_loopback_redirect_uri(std::string_view listener_host,
                                                    int port,
                                                    std::string_view path = "/oauth2callback",
                                                    std::string_view redirect_host_override = {});
-
-private:
-    OAuthToken exchange_code(const std::string& code,
-                             const std::string& redirect_uri,
-                             std::string_view code_verifier = {});
-
-    std::string              client_id_;
-    std::string              client_secret_;
-    std::vector<std::string> scopes_;
-    int                      port_start_;
-    int                      port_end_;
-    std::shared_ptr<ui::AuthUI> ui_;
 };
 
 } // namespace core::auth
