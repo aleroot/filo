@@ -585,6 +585,10 @@ int main(int argc, char** argv) {
             core::logging::info("Login cancelled.");
             return 1;
         } catch (const std::exception& e) {
+            // --login exits before any log sink exists, so without this the
+            // failure would be silent: a missing Google OAuth client pair, for
+            // instance, would leave the command returning 1 with no explanation.
+            std::cerr << "Authentication failed: " << e.what() << '\n';
             core::logging::error("Authentication failed: {}", e.what());
             return 1;
         }
