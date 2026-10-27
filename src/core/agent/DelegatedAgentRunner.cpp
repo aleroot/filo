@@ -4,6 +4,7 @@
 #include "ToolRecovery.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../memory/MemorySystem.hpp"
+#include "../utils/DetachedWorkTracker.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -192,6 +193,11 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          cancellation_requested = std::move(worker_cancel_requested),
          ledger_actor = std::move(ledger_actor),
          emit_event]() mutable {
+          // Counted because this thread is detached below whenever a cancellation
+          // or a timeout cannot wait for it, so a caller that is about to destroy
+          // shared state has a bounded way to let it finish first.
+          const core::utils::DetachedWorkTracker::Guard detached_guard{
+              core::utils::DetachedWorkTracker::instance()};
           try {
             agent->send_message(
                 delegated_prompt,

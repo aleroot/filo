@@ -365,6 +365,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
+    src/core/utils/DetachedWorkTracker.cpp
     src/core/utils/Gzip.cpp
     src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp

@@ -22,6 +22,7 @@
 #include "../tools/ToolPolicy.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../tools/ToolSchema.hpp"
+#include "../utils/DetachedWorkTracker.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -2646,6 +2647,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      tool_callback, done_callback, turn_callbacks, turn_state,
                      step_session_context,
                      provider_name_snapshot]() {
+            // Counted because this thread is detached: a tool that never returns
+            // must not be able to hang the turn that started it. A caller about to
+            // destroy shared state can then wait for it within a bound.
+            const core::utils::DetachedWorkTracker::Guard detached_guard{
+                core::utils::DetachedWorkTracker::instance()};
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)

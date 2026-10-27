@@ -8,11 +8,11 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/mcp/McpDispatcher.hpp"
-#include "core/mcp/McpTaskManager.hpp"
 #include "core/task/WorkStore.hpp"
 #include "core/task/TaskService.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WriteFileTool.hpp"
+#include "core/utils/DetachedWorkTracker.hpp"
 #include "core/workspace/Workspace.hpp"
 
 #include <simdjson.h>
@@ -359,12 +359,13 @@ struct TaskTestSandbox {
     }
 
     ~TaskTestSandbox() {
-        // Task workers are detached on purpose — a non-cooperative tool must never
-        // be able to block a cancellation — so one can still be unwinding when
-        // this sandbox, and then the singletons the process destroys on exit, go
-        // away. Wait for them within a bound instead of racing that teardown: the
-        // openSUSE CI job segfaulted here, after every assertion had passed.
-        core::mcp::McpTaskManager::get_instance().wait_for_idle(std::chrono::seconds(5));
+        // Task workers, delegated turns and agent tool loops are all detached on
+        // purpose — a tool that never returns must not be able to hang a
+        // cancellation — so one can still be running when this sandbox, and then
+        // the singletons the process destroys on exit, go away. Wait for them
+        // within a bound instead of racing that teardown: the openSUSE CI job
+        // segfaulted here, after every assertion had already passed.
+        core::utils::DetachedWorkTracker::instance().wait_for_idle(std::chrono::seconds(5));
         if (cwd_guard) {
             core::workspace::Workspace::get_instance().initialize(cwd_guard->old_path(), {}, false);
             core::config::ConfigManager::get_instance().load(cwd_guard->old_path());
@@ -659,11 +660,12 @@ TEST_CASE("MCP cancelled task results return promptly for non-cooperative tools"
     const auto result_doc = parse_json(result_response);
     REQUIRE(string_at(result_doc, {"result", "status"}) == "cancelled");
 
-    // Cancellation returning promptly must not leave the worker behind: it is
-    // detached, so it is still unwinding, and the process exits shortly after
-    // this test ends.
-    CHECK(core::mcp::McpTaskManager::get_instance().wait_for_idle(std::chrono::seconds(5)));
-    CHECK(core::mcp::McpTaskManager::get_instance().active_worker_count() == 0);
+    // Cancellation returning promptly must not leave the worker behind: it and
+    // the turn it delegated to are detached, so both are still unwinding here,
+    // and the process exits shortly after this test ends.
+    auto& detached = core::utils::DetachedWorkTracker::instance();
+    CHECK(detached.wait_for_idle(std::chrono::seconds(5)));
+    CHECK(detached.active() == 0);
 }
 
 TEST_CASE("Delegated agent runner observes cancellation while provider start is blocked",
