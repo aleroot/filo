@@ -11,11 +11,11 @@
  * live here so neither layer depends on the other for them.
  *
  * Format captured from the real darwin/arm64 `antigravity/hub` client:
- * `antigravity/hub/<version> (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)`.
+ * `antigravity/hub/<version> (aidev_client; os_type=darwin; arch=arm64; cl=1007512578)`.
  * os/arch stay pinned to that reference build regardless of the host, and `cl`
- * is the changelist of the 2.26.0 build — it must be bumped together with
- * `kAntigravityClientVersion`, because a version/changelist pair the shipped
- * client never produced is a fingerprint.
+ * is the changelist the 2.27.0 `language_server` was built from — it must be
+ * bumped together with `kAntigravityClientVersion`, because a
+ * version/changelist pair the shipped client never produced is a fingerprint.
  *
  * Environment overrides (all optional):
  *   - `ANTIGRAVITY_CLI_VERSION` — reported client version.
@@ -30,7 +30,7 @@ namespace core::auth::antigravity {
 
 inline constexpr std::string_view kAntigravityEndpoint = "https://daily-cloudcode-pa.googleapis.com";
 inline constexpr std::string_view kAntigravitySandboxEndpoint = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-inline constexpr std::string_view kAntigravityClientVersion = "2.26.0";
+inline constexpr std::string_view kAntigravityClientVersion = "2.27.0";
 
 // The OAuth client identity the genuine `antigravity/hub` client presents at
 // accounts.google.com — the `client_id` that appears as the `aud` of the
@@ -59,7 +59,7 @@ inline constexpr std::string_view kAntigravityClientVersion = "2.26.0";
         return raw;
     }
     return "antigravity/hub/" + client_version()
-        + " (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)";
+        + " (aidev_client; os_type=darwin; arch=arm64; cl=1007512578)";
 }
 
 } // namespace core::auth::antigravity

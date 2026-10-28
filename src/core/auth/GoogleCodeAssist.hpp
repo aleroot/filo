@@ -11,6 +11,7 @@ namespace core::auth::google_code_assist {
 
 struct TierInfo {
     std::string id;
+    std::string name; ///< Display name, e.g. "Google AI Pro".
     bool        user_defined_project = false;
     bool        is_default = false;
 };
@@ -18,6 +19,8 @@ struct TierInfo {
 struct LoadCodeAssistResponseData {
     std::optional<TierInfo> current_tier;
     std::vector<TierInfo>   allowed_tiers;
+    /// The Google One plan the account pays for, if any (Antigravity).
+    std::optional<TierInfo> paid_tier;
     std::string             project_id;
 };
 

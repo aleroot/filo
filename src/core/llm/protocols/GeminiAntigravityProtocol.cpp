@@ -23,7 +23,7 @@ constexpr int kClaudeMaxOutputTokens = 128000;
 constexpr int kGeminiMaxOutputTokens = 65536;
 
 // Per-wire-id constants snapshotted from `v1internal:fetchAvailableModels` as
-// served to the 2.26.0 hub client (2026-10-26). `model_enum` is telemetry-only
+// served to the 2.27.0 hub client (2026-10-28). `model_enum` is telemetry-only
 // (the backend does not require it) but the real client never omits it for the
 // ids it lists, so neither does Filo; an id absent from this snapshot simply
 // sends no label. `max_output_tokens` is the fixed `generationConfig.
@@ -34,7 +34,7 @@ struct WireProfileEntry {
 };
 
 constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
-    // Gemini 4 Argon — the frontier tier of the 2.26.0 client.
+    // Gemini 4 Argon — the frontier tier of the 2.27.0 client.
     {"gemini-4-argon-low", {"MODEL_PLACEHOLDER_M419", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-medium", {"MODEL_PLACEHOLDER_M418", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-high", {"MODEL_PLACEHOLDER_M417", kGeminiMaxOutputTokens}},
@@ -230,11 +230,17 @@ antigravity_wire_profile(std::string_view model) {
     return std::nullopt;
 }
 
+GeminiAntigravityProtocol::GeminiAntigravityProtocol(std::shared_ptr<antigravity::IUsageSource> usage)
+    : usage_(usage ? std::move(usage) : antigravity::make_usage_source()) {}
+
 void GeminiAntigravityProtocol::prepare_request(ChatRequest& request) {
     GeminiCodeAssistProtocol::prepare_request(request);
     // Latch the conversation anchor so parse_event() can attribute the
     // response's responseId to this trajectory (see stream_anchor_).
     stream_anchor_ = conversation_anchor(request);
+    wire_model_ = resolve_wire_model(request).id;
+    const auto project = request.auth_properties.find("project_id");
+    project_ = project != request.auth_properties.end() ? project->second : std::string{};
 }
 
 ReasoningCapabilities
@@ -386,6 +392,25 @@ ParseResult GeminiAntigravityProtocol::parse_event(std::string_view raw_event) {
 void GeminiAntigravityProtocol::on_response(const HttpResponse& response) {
     // Status 0 is a transport failure.
     if (response.status_code != 200 && is_retryable(response)) ++failed_attempts_;
+    // No `retry_after`: every 429 is retryable here, so a server delay (an
+    // exhausted quota's reset) would hold the request instead of failing it,
+    // and the retry goes to the next host anyway.
+    rate_limit_ = {};
+    rate_limit_.is_rate_limited = response.status_code == 429;
+}
+
+void GeminiAntigravityProtocol::enrich_rate_limit(std::string_view base_url,
+                                                  const cpr::Header& headers,
+                                                  const HttpResponse& response) {
+    // After a transport failure the read would most likely wait out another
+    // timeout, and its failure would then be cached.
+    if (!usage_ || wire_model_.empty() || response.status_code == 0) return;
+    try {
+        if (auto quota = usage_->read(base_url, headers, project_, wire_model_)) {
+            quota->is_rate_limited |= rate_limit_.is_rate_limited;
+            rate_limit_ = std::move(*quota);
+        }
+    } catch (...) { /* Usage is best-effort and must not fail generation. */ }
 }
 
 bool GeminiAntigravityProtocol::is_retryable(const HttpResponse& response) const noexcept {

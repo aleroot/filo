@@ -2,7 +2,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/auth/GoogleCodeAssist.hpp"
 #include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
+#include "core/llm/AntigravityUsageClient.hpp"
 #include "core/llm/protocols/AntigravityConversationState.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
@@ -10,11 +12,15 @@
 #include "core/llm/Models.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include <atomic>
 #include <charconv>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <simdjson.h>
+#include <stdexcept>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -1159,4 +1165,387 @@ TEST_CASE("Code Assist request stays valid JSON without a project id",
     REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
     REQUIRE(model == "gemini-2.5-flash");
     REQUIRE(doc["project"].error() == simdjson::NO_SUCH_FIELD);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Antigravity plan usage (retrieveUserQuota / retrieveUserQuotaSummary / loadCodeAssist)
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// The summary served live on 2026-10-28 to a Google AI Pro account, with most
+// descriptions dropped.
+constexpr std::string_view kLiveQuotaSummary = R"({"groups":[
+    {"buckets":[
+        {"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining","window":"weekly",
+         "resetTime":"2026-11-03T16:11:46Z",
+         "description":"You have used some of your weekly limit, it will fully refresh in 6 days, 7 hours.",
+         "remainingFraction":0.9789123},
+        {"bucketId":"gemini-5h","displayName":"Five Hour Limit Remaining","window":"5h",
+         "resetTime":"2026-10-28T11:26:23Z","remainingFraction":0.9261931}],
+     "displayName":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro"},
+    {"buckets":[
+        {"bucketId":"3p-weekly","displayName":"Weekly Limit Remaining","window":"weekly",
+         "resetTime":"2026-11-02T09:56:25Z","remainingFraction":0.9711332},
+        {"bucketId":"3p-5h","displayName":"Five Hour Limit Remaining","window":"5h",
+         "resetTime":"2026-10-28T10:13:40Z","remainingFraction":0.9665336}],
+     "displayName":"Claude and GPT models"},
+    {"buckets":[
+        {"bucketId":"gemini-argon-wtu-weekly","displayName":"Gemini 4 Argon Weekly Limit","window":"weekly",
+         "resetTime":"2026-11-03T15:45:57Z","remainingFraction":0.99953616}],
+     "displayName":"Gemini 4 Argon"}],
+  "description":"Within each group, models share a weekly limit and a 5-hour limit."})";
+
+// The `retrieveUserQuota` buckets served with it, abridged: each SKU repeats
+// its group's tightest window.
+constexpr std::string_view kLiveQuota = R"({"buckets":[
+    {"tokenType":"WTUS","modelId":"chat_20706","remainingFraction":1},
+    {"resetTime":"2026-10-28T10:13:40Z","tokenType":"WTUS","modelId":"claude-opus-5-5-high","remainingFraction":0.9665336},
+    {"resetTime":"2026-10-28T11:26:23Z","tokenType":"WTUS","modelId":"gemini-3.8-flash-high","remainingFraction":0.9261931},
+    {"resetTime":"2026-10-28T11:26:23Z","tokenType":"WTUS","modelId":"gemini-3.8-flash-tiered","remainingFraction":0.9261931},
+    {"resetTime":"2026-11-03T15:45:57Z","tokenType":"WTUS","modelId":"gemini-4-argon-high","remainingFraction":0.99953616},
+    {"resetTime":"2026-10-28T10:13:40Z","tokenType":"WTUS","modelId":"gpt-oss-120b-medium","remainingFraction":0.9665336}]})";
+
+// The account's loadCodeAssist tiers.
+constexpr std::string_view kLivePlan = R"({"currentTier":{"id":"free-tier","name":"Antigravity"},
+    "paidTier":{"id":"g1-pro-tier","name":"Google AI Pro","description":"Google AI Pro"}})";
+
+/// A Code Assist host behind the usage transport: serves the live fixtures and
+/// records every call. A reply reset to nothing fails that method.
+struct FakeCodeAssist {
+    struct Call {
+        std::string url;
+        std::string authorization;
+        std::string body;
+    };
+    std::optional<std::string> quota = std::string(kLiveQuota);
+    std::optional<std::string> summary = std::string(kLiveQuotaSummary);
+    std::optional<std::string> plan = std::string(kLivePlan);
+    std::string throwing_method; ///< Its calls throw instead.
+    std::mutex mutex;            // Reads run on their own threads.
+    std::vector<Call> calls;
+
+    antigravity::UsageTransport transport() {
+        return [this](std::string_view url, std::string_view authorization,
+                      std::string_view body) -> std::optional<std::string> {
+            std::lock_guard lock(mutex);
+            calls.push_back({std::string(url), std::string(authorization), std::string(body)});
+            const auto method = url.substr(url.rfind(':') + 1);
+            if (method == throwing_method) throw std::runtime_error("transport failure");
+            if (method == "retrieveUserQuota") return quota;
+            if (method == "retrieveUserQuotaSummary") return summary;
+            if (method == "loadCodeAssist") return plan;
+            return std::nullopt;
+        };
+    }
+
+    std::vector<Call> calls_to(std::string_view method) {
+        std::lock_guard lock(mutex);
+        std::vector<Call> matching;
+        for (const auto& call : calls) {
+            if (call.url.ends_with(":" + std::string(method))) matching.push_back(call);
+        }
+        return matching;
+    }
+};
+
+} // namespace
+
+TEST_CASE("Antigravity quota decodes retrieveUserQuota buckets", "[gemini][antigravity][usage]") {
+    // Shape served live on 2026-10-28: an untouched bucket has no resetTime
+    // and an integer fraction.
+    const auto buckets = antigravity::parse_quota_buckets(R"({"buckets":[
+        {"tokenType":"WTUS","modelId":"chat_20706","remainingFraction":1},
+        {"resetTime":"2026-10-28T10:13:40Z","tokenType":"WTUS","modelId":"claude-opus-5-5-high","remainingFraction":0.75},
+        {"modelId":"broken","remainingFraction":1.5},
+        {"remainingFraction":0.5}
+    ]})");
+    REQUIRE(buckets.size() == 2);
+    CHECK(buckets[0].model == "chat_20706");
+    CHECK(buckets[0].remaining_fraction == 1.0);
+    CHECK(buckets[0].resets_at == 0);
+    CHECK(buckets[1].model == "claude-opus-5-5-high");
+    CHECK(buckets[1].resets_at == 1793182420);
+
+    CHECK(antigravity::parse_quota_buckets("not json").empty());
+    CHECK(antigravity::parse_quota_buckets(R"({"buckets":{}})").empty());
+}
+
+TEST_CASE("Antigravity quota summary decodes each group's limits", "[gemini][antigravity][usage]") {
+    const auto groups = antigravity::parse_quota_summary(kLiveQuotaSummary);
+    REQUIRE(groups.size() == 3);
+    CHECK(groups[0].name == "Gemini Models");
+    REQUIRE(groups[0].windows.size() == 2);
+    CHECK(groups[0].windows[0].window == "weekly");
+    CHECK(groups[0].windows[0].remaining_fraction == Catch::Approx(0.9789123));
+    CHECK(groups[0].windows[0].resets_at == 1793722306);
+    CHECK(groups[0].windows[1].window == "5h");
+    CHECK(groups[0].windows[1].resets_at == 1793186783);
+    CHECK(groups[1].name == "Claude and GPT models");
+    CHECK(groups[2].name == "Gemini 4 Argon");
+    CHECK(groups[2].windows.size() == 1);
+
+    // A disabled limit, one counted in units and one without a window are not
+    // shown, and a group left with nothing is dropped.
+    const auto partial = antigravity::parse_quota_summary(R"({"groups":[
+        {"displayName":"Limited","buckets":[
+            {"window":"5h","remainingFraction":0.5,"disabled":true},
+            {"window":"weekly","remainingAmount":"12"},
+            {"remainingFraction":0.5},
+            {"window":"weekly","remainingFraction":1}]},
+        {"displayName":"Broken","buckets":[{"window":"5h","remainingFraction":2}]}]})");
+    REQUIRE(partial.size() == 1);
+    REQUIRE(partial[0].windows.size() == 1);
+    CHECK(partial[0].windows[0].window == "weekly");
+    CHECK(partial[0].windows[0].resets_at == 0);
+
+    CHECK(antigravity::parse_quota_summary("not json").empty());
+    CHECK(antigravity::parse_quota_summary(R"({"groups":{}})").empty());
+}
+
+TEST_CASE("Antigravity plan comes from loadCodeAssist", "[gemini][antigravity][usage]") {
+    // Tier shape served live on 2026-10-28.
+    CHECK(antigravity::parse_plan_name(R"({
+        "currentTier":{"id":"free-tier","name":"Antigravity"},
+        "paidTier":{"id":"g1-pro-tier","name":"Google AI Pro","description":"Google AI Pro"}})")
+          == "Google AI Pro");
+    CHECK(antigravity::parse_plan_name(R"({"currentTier":{"id":"free-tier","name":"Antigravity"}})")
+          == "Antigravity");
+    CHECK_FALSE(antigravity::parse_plan_name("{}"));
+    CHECK_FALSE(antigravity::parse_plan_name("<html>"));
+}
+
+TEST_CASE("Antigravity quota shows every limit of the SKU's group", "[gemini][antigravity][usage]") {
+    const auto groups = antigravity::parse_quota_summary(kLiveQuotaSummary);
+    const auto buckets = antigravity::parse_quota_buckets(kLiveQuota);
+    REQUIRE(buckets.size() == 6);
+
+    SECTION("Gemini Flash shows the Gemini group's 5-hour and weekly limits") {
+        const auto info = antigravity::quota_for_model(buckets, groups, "gemini-3.8-flash-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 2);
+        CHECK(info->usage_windows[0].label == "5h");
+        CHECK(info->usage_windows[0].utilization == Catch::Approx(1.0 - 0.9261931));
+        CHECK(info->usage_windows[0].resets_at == 1793186783);
+        CHECK(info->usage_windows[1].label == "7d");
+        CHECK(info->usage_windows[1].utilization == Catch::Approx(1.0 - 0.9789123));
+        CHECK(info->usage_windows[1].resets_at == 1793722306);
+        CHECK(info->unified_representative_claim == "5h");
+        CHECK_FALSE(info->is_rate_limited);
+    }
+    SECTION("Claude and GPT share the third-party group") {
+        for (const std::string_view model : {"claude-opus-5-5-high", "gpt-oss-120b-medium"}) {
+            const auto info = antigravity::quota_for_model(buckets, groups, model);
+            REQUIRE(info);
+            REQUIRE(info->usage_windows.size() == 2);
+            CHECK(info->usage_windows[0].resets_at == 1793182420);
+            CHECK(info->usage_windows[1].utilization == Catch::Approx(1.0 - 0.9711332));
+        }
+    }
+    SECTION("Argon's only limit is weekly") {
+        const auto info = antigravity::quota_for_model(buckets, groups, "gemini-4-argon-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 1);
+        CHECK(info->usage_windows[0].label == "7d");
+        CHECK(info->usage_windows[0].resets_at == 1793720757);
+        CHECK(info->unified_representative_claim == "7d");
+    }
+    SECTION("a SKU without a bucket uses its family's") {
+        const auto info = antigravity::quota_for_model(buckets, groups, "gemini-3.8-flash-medium");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 2);
+        CHECK(info->usage_windows[0].resets_at == 1793186783);
+    }
+    SECTION("an exhausted weekly limit governs and rate-limits the model") {
+        auto exhausted = groups;
+        exhausted[0].windows[0].remaining_fraction = 0.0; // gemini-weekly
+        auto bound = buckets;
+        bound[2] = {"gemini-3.8-flash-high", 0.0, 1793722306};
+        const auto info = antigravity::quota_for_model(bound, exhausted, "gemini-3.8-flash-high");
+        REQUIRE(info);
+        CHECK(info->unified_representative_claim == "7d");
+        CHECK(info->usage_windows[1].utilization == Catch::Approx(1.0));
+        CHECK(info->is_rate_limited);
+    }
+    SECTION("without the summary the bucket is shown alone, its window unknown") {
+        const auto info = antigravity::quota_for_model(buckets, {}, "gemini-4-argon-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 1);
+        CHECK(info->usage_windows[0].label == "quota");
+        CHECK(info->usage_windows[0].utilization == Catch::Approx(1.0 - 0.99953616));
+        CHECK(info->usage_windows[0].resets_at == 1793720757);
+        CHECK(info->unified_representative_claim.empty());
+    }
+    SECTION("an untouched SKU matches only an untouched group") {
+        const std::vector<antigravity::QuotaBucket> fresh{{"gemini-3.8-flash-high", 1.0, 0}};
+        auto untouched = groups;
+        untouched[0].windows = {{"weekly", 1.0, 0}, {"5h", 1.0, 0}};
+        const auto info = antigravity::quota_for_model(fresh, untouched, "gemini-3.8-flash-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 2);
+        CHECK(info->usage_windows[0].label == "5h");
+        CHECK(info->usage_windows[0].utilization == Catch::Approx(0.0));
+        CHECK(info->unified_representative_claim.empty());
+
+        // With two untouched groups the bucket cannot say which one is its own.
+        untouched[2].windows = {{"weekly", 1.0, 0}};
+        const auto ambiguous = antigravity::quota_for_model(fresh, untouched, "gemini-3.8-flash-high");
+        REQUIRE(ambiguous);
+        REQUIRE(ambiguous->usage_windows.size() == 1);
+        CHECK(ambiguous->usage_windows[0].label == "quota");
+    }
+    SECTION("a model the account is not metered for has no quota") {
+        CHECK_FALSE(antigravity::quota_for_model(buckets, groups, "unmetered-model"));
+        CHECK_FALSE(antigravity::quota_for_model(buckets, groups, "claude-opus"));
+    }
+}
+
+TEST_CASE("GeminiAntigravityProtocol reports the quota group of the request's SKU",
+          "[gemini][antigravity][usage]") {
+    FakeCodeAssist server;
+    GeminiAntigravityProtocol protocol(antigravity::make_usage_source(server.transport()));
+    ChatRequest req;
+    req.model = "gemini-3.8-flash-high";
+    req.auth_properties["project_id"] = "project-123";
+    req.messages.push_back(Message{.role = "user", .content = "Hello"});
+    protocol.prepare_request(req);
+
+    const std::string host = "https://daily-cloudcode-pa.googleapis.com";
+    const cpr::Header headers{{"Authorization", "Bearer token-a"}};
+    const cpr::Header no_headers;
+    const HttpResponse ok{200, "", no_headers};
+    auto stream = protocol.clone();
+    stream->on_response(ok);
+    stream->enrich_rate_limit(host, headers, ok);
+
+    const auto info = stream->last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.usage_windows[0].utilization == Catch::Approx(1.0 - 0.9261931));
+    CHECK(info.usage_windows[1].label == "7d");
+    CHECK(info.usage_windows[1].utilization == Catch::Approx(1.0 - 0.9789123));
+    CHECK(info.unified_representative_claim == "5h");
+    CHECK(info.subscription.tier_label == "Google AI Pro");
+
+    // One call per method, to the request's host with its credential and project.
+    const auto expect_one_call = [&](std::string_view method, const std::string& body) {
+        const auto calls = server.calls_to(method);
+        REQUIRE(calls.size() == 1);
+        CHECK(calls[0].url == host + "/v1internal:" + std::string(method));
+        CHECK(calls[0].authorization == "Bearer token-a");
+        CHECK(calls[0].body == body);
+    };
+    expect_one_call("retrieveUserQuota", R"({"project":"project-123"})");
+    expect_one_call("retrieveUserQuotaSummary", R"({"project":"project-123"})");
+    expect_one_call("loadCodeAssist",
+                    core::auth::google_code_assist::load_code_assist_payload("project-123", "ANTIGRAVITY"));
+    CHECK(server.calls.size() == 3);
+
+    // A second response within the minute reuses the reading.
+    stream->on_response(ok);
+    stream->enrich_rate_limit(host, headers, ok);
+    CHECK(server.calls.size() == 3);
+    CHECK(stream->last_rate_limit().usage_windows.size() == 2);
+
+    // A 429 stays rate limited with a reading. Its Retry-After does not reach
+    // the retry scheduler, which moves to the next host instead.
+    const cpr::Header retry_after{{"Retry-After", "3600"}};
+    const HttpResponse limited{429, "", retry_after};
+    stream->on_response(limited);
+    stream->enrich_rate_limit(host, headers, limited);
+    CHECK(stream->last_rate_limit().is_rate_limited);
+    CHECK(stream->last_rate_limit().retry_after == 0);
+
+    // Nothing is read when the request never reached the host.
+    FakeCodeAssist unreachable;
+    GeminiAntigravityProtocol offline(antigravity::make_usage_source(unreachable.transport()));
+    offline.prepare_request(req);
+    const HttpResponse no_response{0, "", no_headers};
+    offline.on_response(no_response);
+    offline.enrich_rate_limit(host, headers, no_response);
+    CHECK(unreachable.calls.empty());
+    CHECK(offline.last_rate_limit().usage_windows.empty());
+}
+
+TEST_CASE("Antigravity usage shows what it could read", "[gemini][antigravity][usage]") {
+    FakeCodeAssist server;
+    const auto usage = antigravity::make_usage_source(server.transport());
+    const cpr::Header headers{{"Authorization", "Bearer token-a"}};
+    const auto read = [&](std::string_view model) {
+        return usage->read("https://daily-cloudcode-pa.googleapis.com/", headers, "project-123", model);
+    };
+
+    SECTION("a host given with a trailing slash still gets one call per method") {
+        REQUIRE(read("gemini-3.8-flash-high"));
+        REQUIRE(server.calls.size() == 3);
+        for (const auto& call : server.calls) {
+            CHECK(call.url.starts_with("https://daily-cloudcode-pa.googleapis.com/v1internal:"));
+        }
+    }
+    SECTION("a failed summary leaves the SKU's own window, unnamed") {
+        server.summary.reset();
+        const auto info = read("gemini-4-argon-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 1);
+        CHECK(info->usage_windows[0].label == "quota");
+        CHECK(info->subscription.tier_label == "Google AI Pro");
+    }
+    SECTION("a throwing summary read counts as a failed one") {
+        server.throwing_method = "retrieveUserQuotaSummary";
+        const auto info = read("gemini-4-argon-high");
+        REQUIRE(info);
+        REQUIRE(info->usage_windows.size() == 1);
+        CHECK(info->usage_windows[0].label == "quota");
+    }
+    SECTION("a failed plan read costs only the tier label") {
+        server.plan.reset();
+        const auto info = read("gemini-3.8-flash-high");
+        REQUIRE(info);
+        CHECK(info->usage_windows.size() == 2);
+        CHECK(info->subscription.tier_label.empty());
+    }
+    SECTION("a quota naming no bucket shows nothing") {
+        server.quota = R"({"buckets":[]})";
+        CHECK_FALSE(read("gemini-3.8-flash-high"));
+    }
+    SECTION("a failed quota read shows nothing") {
+        server.quota.reset();
+        CHECK_FALSE(read("gemini-3.8-flash-high"));
+    }
+    SECTION("nothing is read without a credential") {
+        CHECK_FALSE(usage->read("https://daily-cloudcode-pa.googleapis.com", {}, "project-123",
+                                "gemini-3.8-flash-high"));
+        CHECK(server.calls.empty());
+    }
+}
+
+TEST_CASE("Antigravity usage reads the quota, its summary and the plan side by side",
+          "[gemini][antigravity][usage]") {
+    // Each call waits for the other two, so calls made one after another time
+    // out instead: a cold refresh must cost the slowest read, not the sum.
+    std::mutex mutex;
+    std::condition_variable arrivals;
+    int arrived = 0;
+    std::atomic<bool> overlapped = true;
+    FakeCodeAssist server;
+    const auto serve = server.transport();
+    const auto usage = antigravity::make_usage_source(
+        [&](std::string_view url, std::string_view authorization, std::string_view body) {
+            {
+                std::unique_lock lock(mutex);
+                ++arrived;
+                arrivals.notify_all();
+                if (!arrivals.wait_for(lock, std::chrono::seconds(5), [&] { return arrived == 3; })) {
+                    overlapped = false;
+                }
+            }
+            return serve(url, authorization, body);
+        });
+    const cpr::Header headers{{"Authorization", "Bearer token-a"}};
+    const auto info = usage->read("https://daily-cloudcode-pa.googleapis.com", headers, "project-123",
+                                  "gemini-3.8-flash-high");
+    REQUIRE(info);
+    CHECK(info->usage_windows.size() == 2);
+    CHECK(info->subscription.tier_label == "Google AI Pro");
+    CHECK(overlapped);
 }

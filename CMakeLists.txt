@@ -244,6 +244,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/providers/MiniMaxRequestBudget.cpp
     src/core/llm/KimiModelTraits.cpp
     src/core/llm/AntigravityModelTraits.cpp
+    src/core/llm/AntigravityUsageClient.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/ZaiModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
@@ -777,6 +778,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mistral_provider.cpp
     tests/test_mimo_provider.cpp
     tests/test_minimax_provider.cpp
+    tests/test_usage_snapshot_cache.cpp
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
@@ -1033,6 +1035,7 @@ source_group(
         tests/test_mistral_provider.cpp
         tests/test_mimo_provider.cpp
         tests/test_minimax_provider.cpp
+        tests/test_usage_snapshot_cache.cpp
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp
         tests/test_qwen_oauth.cpp

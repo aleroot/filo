@@ -44,6 +44,9 @@ constexpr std::string_view kApiVersion = "v1internal";
     if (element["id"].get_string().get(sv) == simdjson::SUCCESS) {
         info.id = std::string(sv);
     }
+    if (element["name"].get_string().get(sv) == simdjson::SUCCESS) {
+        info.name = std::string(sv);
+    }
     if (element["userDefinedCloudaicompanionProject"].get_bool().get(bool_value)
         == simdjson::SUCCESS) {
         info.user_defined_project = bool_value;
@@ -150,6 +153,10 @@ LoadCodeAssistResponseData parse_load_code_assist_response(std::string_view json
     simdjson::dom::element current_tier;
     if (doc["currentTier"].get(current_tier) == simdjson::SUCCESS) {
         result.current_tier = parse_tier_info(current_tier);
+    }
+    simdjson::dom::element paid_tier;
+    if (doc["paidTier"].get(paid_tier) == simdjson::SUCCESS) {
+        result.paid_tier = parse_tier_info(paid_tier);
     }
 
     simdjson::dom::array allowed_tiers;

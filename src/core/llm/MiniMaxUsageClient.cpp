@@ -1,5 +1,6 @@
 #include "MiniMaxUsageClient.hpp"
 #include "MiniMaxModelTraits.hpp"
+#include "UsageSnapshotCache.hpp"
 #include "transport/HttpHeaderUtils.hpp"
 #include "core/auth/MiniMaxClientIdentity.hpp"
 #include "core/utils/TimeUtils.hpp"
@@ -12,9 +13,7 @@
 #include <format>
 #include <chrono>
 #include <cmath>
-#include <mutex>
 #include <limits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -139,30 +138,8 @@ std::optional<RateLimitInfo> fetch_quota(std::string_view key) {
 }
 
 class MiniMaxUsageClient final : public IMiniMaxUsageSource {
-    struct Entry {
-        std::mutex mutex;
-        std::optional<RateLimitInfo> value;
-        std::chrono::steady_clock::time_point expires{};
-    };
-    std::mutex mutex_;
-    std::unordered_map<std::string, std::shared_ptr<Entry>> cache_;
+    UsageSnapshotCache<RateLimitInfo> cache_{std::chrono::seconds(60)};
     MiniMaxQuotaFetcher fetcher_;
-
-    std::shared_ptr<Entry> entry_for(const std::string& identity) {
-        std::lock_guard lock(mutex_);
-        if (const auto it = cache_.find(identity); it != cache_.end()) return it->second;
-        if (cache_.size() >= 64) {
-            // Never evict an in-flight entry: its waiters must share its read.
-            const auto idle = std::find_if(cache_.begin(), cache_.end(), [](const auto& item) {
-                return item.second.use_count() == 1;
-            });
-            if (idle == cache_.end()) return {};
-            cache_.erase(idle);
-        }
-        auto entry = std::make_shared<Entry>();
-        cache_.emplace(identity, entry);
-        return entry;
-    }
 
 public:
     explicit MiniMaxUsageClient(MiniMaxQuotaFetcher fetcher) : fetcher_(std::move(fetcher)) {}
@@ -172,20 +149,7 @@ public:
         if (!is_official_minimax_base_url(base_url)) return std::nullopt;
         auto key = transport::find_header(headers, "x-api-key");
         if (!key || key->empty()) return std::nullopt;
-        const auto identity = core::utils::crypto::sha256_hex(*key);
-        const auto entry = entry_for(identity);
-        if (!entry) return std::nullopt;
-        // Network I/O holds only this account's lock, never the cache lock.
-        std::lock_guard lock(entry->mutex);
-        if (entry->expires > std::chrono::steady_clock::now()) return entry->value;
-        entry->value.reset();
-        try {
-            entry->value = fetcher_(*key);
-        } catch (...) { /* Usage is best-effort and must not fail generation. */ }
-        // Quota windows span hours, so a minute of staleness is invisible;
-        // the read sits on the response path and should rarely be paid.
-        entry->expires = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-        return entry->value;
+        return cache_.get(core::utils::crypto::sha256_hex(*key), [&] { return fetcher_(*key); });
     }
 };
 } // namespace

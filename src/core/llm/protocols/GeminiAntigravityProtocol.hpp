@@ -3,6 +3,7 @@
 #include "GeminiCodeAssistProtocol.hpp"
 
 #include "../../auth/GoogleAntigravityIdentity.hpp"
+#include "../AntigravityUsageClient.hpp"
 
 namespace core::llm::protocols {
 
@@ -64,14 +65,18 @@ antigravity_wire_profile(std::string_view model);
  *  - host rotation: each failed attempt (transport error, 408, 429, 5xx) moves
  *    the next retry to the following host of daily -> sandbox -> daily ...
  *    `build_url` reflects that, so HttpLLMProvider needs no endpoint logic;
- *    a user-supplied CODE_ASSIST_ENDPOINT never rotates.
+ *    a user-supplied CODE_ASSIST_ENDPOINT never rotates;
+ *  - plan usage: after each response the 5-hour and weekly windows of the
+ *    quota group the SKU belongs to are read (`retrieveUserQuota` and
+ *    `retrieveUserQuotaSummary`, see AntigravityUsageClient) for the status bar.
  *
  * This is an unofficial, ToS-violating integration path. See
  * GoogleAntigravityOAuthFlow.hpp for details.
  */
 class GeminiAntigravityProtocol : public GeminiCodeAssistProtocol {
 public:
-    GeminiAntigravityProtocol() = default;
+    /// `usage` defaults to the shared per-account quota reader.
+    explicit GeminiAntigravityProtocol(std::shared_ptr<antigravity::IUsageSource> usage = {});
 
     void prepare_request(ChatRequest& request) override;
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
@@ -80,6 +85,9 @@ public:
                                         std::string_view model) const override;
     ParseResult parse_event(std::string_view raw_event) override;
     void on_response(const HttpResponse& response) override;
+    void enrich_rate_limit(std::string_view base_url, const cpr::Header& headers,
+                           const HttpResponse& response) override;
+    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return rate_limit_; }
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
     [[nodiscard]] std::string_view name() const noexcept override { return "gemini_antigravity"; }
     /// An effort ladder for a family the wire-profile snapshot sells at several
@@ -104,6 +112,12 @@ private:
     /// prepare_request()/serialize() so parse_event() can attribute the
     /// response's `responseId` to the right trajectory (copied by clone()).
     std::string stream_anchor_;
+    std::shared_ptr<antigravity::IUsageSource> usage_;
+    /// SKU and Code Assist project of the request this clone is streaming,
+    /// latched by prepare_request() so the quota read matches the wire.
+    std::string wire_model_;
+    std::string project_;
+    RateLimitInfo rate_limit_;
 };
 
 } // namespace core::llm::protocols
