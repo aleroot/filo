@@ -13,15 +13,20 @@
 #include "core/llm/ClaudeModelTraits.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/tools/ReadTool.hpp"
+#include "core/policy/PolicySnapshot.hpp"
+#include "core/policy/PolicyRules.hpp"
+#include "core/policy/ApprovalChannel.hpp"
 #include <atomic>
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -48,6 +53,54 @@ public:
         core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     }
 };
+
+class ScopedEnvironment {
+public:
+    ScopedEnvironment(const char* name, const std::string& value) : name_(name) {
+        if (const char* old = std::getenv(name)) previous_ = old;
+        ::setenv(name, value.c_str(), 1);
+    }
+    ~ScopedEnvironment() {
+        if (previous_) ::setenv(name_.c_str(), previous_->c_str(), 1);
+        else ::unsetenv(name_.c_str());
+    }
+private:
+    std::string name_;
+    std::optional<std::string> previous_;
+};
+
+// A policy channel that answers from a test-supplied predicate.
+class ApprovalChannelStub final : public core::policy::IApprovalChannel {
+public:
+    std::function<bool(const core::policy::ApprovalRequest&)> decide;
+    core::policy::ApprovalOutcome request(
+        const core::policy::ApprovalRequest& request) override {
+        ++requests;
+        if (!decide || !decide(request)) return core::policy::ApprovalOutcome::denied;
+        return core::policy::ApprovalOutcome::approved_once;
+    }
+    int requests = 0;
+};
+
+// A rule that allows one destination for the built-in web tools.
+core::policy::PolicyRule allow_host(std::string host, std::uint16_t port) {
+    return core::policy::PolicyRule{
+        .id = "allow-" + host + ":" + std::to_string(port),
+        .effect = core::policy::Effect::allow,
+        .principal = core::policy::PrincipalKind::web_tool,
+        .operation = core::policy::OperationKind::read,
+        .host = core::policy::HostPattern::parse(host).value(),
+        .port = core::policy::PortRange::exact(port),
+    };
+}
+
+std::shared_ptr<core::policy::PolicySnapshot> make_policy(
+    std::vector<core::policy::PolicyRule> rules,
+    core::policy::Effect default_effect) {
+    return std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet(std::move(rules), default_effect),
+        std::make_shared<core::policy::GrantStore>());
+}
 
 [[nodiscard]] core::context::SessionContext make_tool_test_context(std::string session_id = {}) {
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
@@ -244,6 +297,169 @@ TEST_CASE("WebFetchTool validates redirected URLs against trusted URL policy",
 
     std::error_code ec;
     std::filesystem::remove_all(sandbox, ec);
+}
+
+TEST_CASE("direct web fetch enforces network policy before requests and redirects",
+          "[integration][tools][web][policy]") {
+    using namespace core::policy;
+    httplib::Server first;
+    httplib::Server second;
+    std::atomic<int> first_hits{0};
+    std::atomic<int> second_hits{0};
+    const int first_port = first.bind_to_any_port("127.0.0.1");
+    const int second_port = second.bind_to_any_port("127.0.0.1");
+    if (first_port <= 0 || second_port <= 0)
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    first.Get("/redirect", [&](const httplib::Request&, httplib::Response& response) {
+        ++first_hits;
+        response.status = 302;
+        response.set_header("Location", std::format("http://127.0.0.1:{}/target", second_port));
+    });
+    second.Get("/target", [&](const httplib::Request&, httplib::Response& response) {
+        ++second_hits;
+        response.set_content("ok", "text/plain");
+    });
+    std::jthread first_thread([&] { first.listen_after_bind(); });
+    std::jthread second_thread([&] { second.listen_after_bind(); });
+    ScopedServerStop stop_first(first);
+    ScopedServerStop stop_second(second);
+
+    const auto backend = web::make_direct_web_fetch_backend();
+    const auto url = std::format("http://127.0.0.1:{}/redirect", first_port);
+    auto invocation = ToolInvocationContext{.session_context = make_tool_test_context()};
+
+    // No channel means no decision can be made, so an asked request is denied.
+    invocation.policy = std::make_shared<PolicySnapshot>(
+        PolicySet({}, Effect::ask), std::make_shared<GrantStore>());
+    auto response = backend->fetch(web::FetchRequest{.url = url}, invocation);
+    REQUIRE_FALSE(response);
+    CHECK(first_hits == 0);
+
+    std::vector<std::uint16_t> prompted_ports;
+    auto channel = std::make_shared<ApprovalChannelStub>();
+    channel->decide = [&](const ApprovalRequest& actual) {
+        CHECK(actual.action.flow == DataFlow::bidirectional);
+        prompted_ports.push_back(actual.resource.port);
+        return actual.resource.port == first_port;
+    };
+    invocation.policy = std::make_shared<PolicySnapshot>(
+        PolicySet({}, Effect::ask), std::make_shared<GrantStore>(), channel);
+    response = backend->fetch(web::FetchRequest{.url = url}, invocation);
+    REQUIRE_FALSE(response);
+    REQUIRE(prompted_ports.size() == 2);
+    CHECK(prompted_ports[0] == first_port);
+    CHECK(prompted_ports[1] == second_port);
+    CHECK(first_hits == 1);
+    CHECK(second_hits == 0);
+
+    // Even a GET can send data in its URL, so an inbound-only allow must
+    // not authorize it.
+    auto inbound_only = allow_host("127.0.0.1", first_port);
+    inbound_only.flow = DataFlow::inbound;
+    invocation.policy = make_policy({inbound_only}, Effect::deny);
+    response = backend->fetch(web::FetchRequest{.url = url}, invocation);
+    REQUIRE_FALSE(response);
+    CHECK(first_hits == 1);
+
+    // Approval of a hostname does not authorize a private IP it resolves to.
+    invocation.policy = make_policy({}, Effect::ask);
+    response = backend->fetch(web::FetchRequest{
+        .url = std::format("http://localhost:{}/redirect", first_port)}, invocation);
+    REQUIRE_FALSE(response);
+    CHECK(first_hits == 1);
+
+    // A rule that names the address itself authorizes the connection.
+    invocation.policy = make_policy({allow_host("127.0.0.1", first_port)}, Effect::ask);
+    response = backend->fetch(web::FetchRequest{.url = url}, invocation);
+    REQUIRE_FALSE(response);
+    CHECK(first_hits == 2);
+    CHECK(second_hits == 0);
+
+    invocation.policy = make_policy({allow_host("127.0.0.1", first_port),
+                                     allow_host("127.0.0.1", second_port)}, Effect::ask);
+    response = backend->fetch(web::FetchRequest{.url = url}, invocation);
+    REQUIRE(response);
+    CHECK(response->text == "ok");
+    CHECK(second_hits == 1);
+}
+
+TEST_CASE("web fetch policy treats its URL as outbound data", "[policy][network]") {
+    using namespace core::policy;
+    auto channel = std::make_shared<ApprovalChannelStub>();
+    bool asked = false;
+    channel->decide = [&](const ApprovalRequest& request) {
+        asked = true;
+        CHECK(request.action.operation == OperationKind::read);
+        CHECK(request.action.flow == DataFlow::bidirectional);
+        return false;
+    };
+    auto invocation = ToolInvocationContext{.session_context = make_tool_test_context()};
+    invocation.policy = std::make_shared<PolicySnapshot>(
+        PolicySet({}, Effect::ask), std::make_shared<GrantStore>(), channel);
+    const auto backend = web::make_direct_web_fetch_backend();
+    const auto response = backend->fetch(
+        web::FetchRequest{.url = "https://example.com/?data=secret"}, invocation);
+    CHECK_FALSE(response);
+    CHECK(asked);
+}
+
+TEST_CASE("web access refuses fetch backends without policy enforcement", "[integration][web][policy]") {
+    class UnmediatedBackend final : public web::IWebFetchBackend {
+    public:
+        mutable bool called = false;
+        std::string_view name() const noexcept override { return "unmediated"; }
+        bool supports(const ToolInvocationContext&) const override { return true; }
+        std::expected<web::FetchResponse, std::string> fetch(
+            const web::FetchRequest&, const ToolInvocationContext&) const override {
+            called = true;
+            return web::FetchResponse{};
+        }
+    };
+    auto backend = std::make_shared<UnmediatedBackend>();
+    web::WebAccess access({}, {backend});
+    auto invocation = ToolInvocationContext{.session_context = make_tool_test_context()};
+    invocation.policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({}, core::policy::Effect::ask),
+        std::make_shared<core::policy::GrantStore>());
+    const auto result = access.fetch(web::FetchRequest{.url = "https://example.com/"}, invocation);
+    CHECK_FALSE(result);
+    CHECK_FALSE(backend->called);
+}
+
+TEST_CASE("network-protected fetch ignores ambient proxy configuration", "[integration][web][policy]") {
+    using namespace core::policy;
+    httplib::Server origin;
+    httplib::Server proxy;
+    std::atomic<int> origin_hits{0};
+    std::atomic<int> proxy_hits{0};
+    origin.Get("/target", [&](const auto&, auto& response) {
+        ++origin_hits;
+        response.set_content("direct", "text/plain");
+    });
+    proxy.Get(".*", [&](const auto&, auto& response) {
+        ++proxy_hits;
+        response.set_content("proxy", "text/plain");
+    });
+    const int origin_port = origin.bind_to_any_port("127.0.0.1");
+    const int proxy_port = proxy.bind_to_any_port("127.0.0.1");
+    if (origin_port <= 0 || proxy_port <= 0)
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread origin_thread([&] { origin.listen_after_bind(); });
+    std::jthread proxy_thread([&] { proxy.listen_after_bind(); });
+    ScopedServerStop stop_origin(origin);
+    ScopedServerStop stop_proxy(proxy);
+    ScopedEnvironment proxy_setting("http_proxy", std::format("http://127.0.0.1:{}", proxy_port));
+    ScopedEnvironment no_proxy("no_proxy", "");
+    ScopedEnvironment no_proxy_upper("NO_PROXY", "");
+
+    auto invocation = ToolInvocationContext{.session_context = make_tool_test_context()};
+    invocation.policy = make_policy({allow_host("127.0.0.1", origin_port)}, Effect::ask);
+    const auto result = web::make_direct_web_fetch_backend()->fetch(
+        web::FetchRequest{.url = std::format("http://127.0.0.1:{}/target", origin_port)}, invocation);
+    REQUIRE(result);
+    CHECK(result->text == "direct");
+    CHECK(origin_hits == 1);
+    CHECK(proxy_hits == 0);
 }
 
 TEST_CASE("WebFetchTool returns a usable truncated result for oversized responses",

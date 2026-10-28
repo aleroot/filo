@@ -10,10 +10,13 @@
 
 #include <algorithm>
 #include <format>
+#include <memory>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/dom/node.hpp>
 
 namespace tui {
 
@@ -30,6 +33,51 @@ using namespace ftxui;
 /// idle: MCP has no liveness probe beyond the optional ping, and sessions
 /// only close via an explicit HTTP DELETE, so silence is the only signal.
 constexpr std::chrono::minutes kClientStaleAfter{1};
+
+class CenteredFooter final : public Node {
+public:
+    CenteredFooter(Element left, Element middle, Element right)
+        : left_(std::move(left)), middle_(std::move(middle)), right_(std::move(right)),
+          fallback_(hbox({left_, filler(), middle_, filler(), right_})) {
+        children_ = {fallback_};
+    }
+
+    void ComputeRequirement() override {
+        fallback_->ComputeRequirement();
+        requirement_ = fallback_->requirement();
+    }
+
+    void SetBox(Box box) override {
+        Node::SetBox(box);
+        const int width = box.x_max - box.x_min + 1;
+        const int left_width = left_->requirement().min_x;
+        const int middle_width = middle_->requirement().min_x;
+        const int right_width = right_->requirement().min_x;
+        fallback_active_ = width < left_width + middle_width + right_width;
+        fallback_->SetBox(box);
+        if (fallback_active_) return;
+        const int middle_x = std::clamp(
+            box.x_min + (width - middle_width) / 2,
+            box.x_min + left_width, box.x_max - right_width - middle_width + 1);
+        left_->SetBox({box.x_min, box.x_min + left_width - 1, box.y_min, box.y_max});
+        middle_->SetBox({middle_x, middle_x + middle_width - 1, box.y_min, box.y_max});
+        right_->SetBox({box.x_max - right_width + 1, box.x_max, box.y_min, box.y_max});
+    }
+
+    void Render(Screen& screen) override {
+        if (fallback_active_) {
+            fallback_->Render(screen);
+        } else {
+            left_->Render(screen);
+            middle_->Render(screen);
+            right_->Render(screen);
+        }
+    }
+
+private:
+    Element left_, middle_, right_, fallback_;
+    bool fallback_active_{false};
+};
 
 [[nodiscard]] bool client_is_stale(const RemoteClientActivity& client,
                                    std::chrono::steady_clock::time_point now) {
@@ -313,6 +361,10 @@ Element render_remote_footer_status(const RemoteFooterStatus& status) {
     // centered layout that hosts it, and padding here would offset it from
     // the middle of the status bar.
     return text("⚡ " + status.label + " ") | color(foreground);
+}
+
+Element render_centered_footer(Element left, Element middle, Element right) {
+    return std::make_shared<CenteredFooter>(std::move(left), std::move(middle), std::move(right));
 }
 
 Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,

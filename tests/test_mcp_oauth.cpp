@@ -9,6 +9,8 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/mcp/McpClientSession.hpp"
 #include "core/mcp/McpOAuth.hpp"
+#include "core/policy/PolicyRules.hpp"
+#include "core/policy/PolicySnapshot.hpp"
 
 #include <cpr/cpr.h>
 #include <httplib.h>
@@ -814,6 +816,139 @@ TEST_CASE("HttpMcpSession refreshes OAuth token after mid-session 401",
     REQUIRE(stored.has_value());
     CHECK(stored->access_token == "access-refreshed");
     CHECK(stored->refresh_token == "refresh-2");
+}
+
+TEST_CASE("a refused MCP server never refreshes its sign-in",
+          "[mcp][oauth][http][refresh][policy][integration]") {
+    // The server and its token endpoint listen on different ports, so a rule
+    // can refuse one without the other.
+    httplib::Server mcp;
+    httplib::Server issuer;
+    std::atomic<int> mcp_posts{0};
+    std::atomic<int> token_calls{0};
+    mcp.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        ++mcp_posts;
+        if (req.get_header_value("Authorization") != "Bearer access-refreshed") {
+            res.status = 401;
+            res.set_content(R"({"error":"invalid_token"})", "application/json");
+            return;
+        }
+        if (req.body.find("\"method\":\"initialize\"") != std::string::npos) {
+            res.set_content(
+                R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0"}}})",
+                "application/json");
+        } else if (req.body.find("\"method\":\"notifications/initialized\"") != std::string::npos) {
+            res.status = 202;
+        } else {
+            res.set_content(
+                R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping","description":"p","inputSchema":{"type":"object"}}]}})",
+                "application/json");
+        }
+    });
+    issuer.Post("/token", [&](const httplib::Request&, httplib::Response& res) {
+        ++token_calls;
+        res.set_content(
+            R"({"access_token":"access-refreshed","refresh_token":"refresh-2","token_type":"Bearer","expires_in":3600})",
+            "application/json");
+    });
+    const int mcp_port = mcp.bind_to_any_port("127.0.0.1");
+    const int issuer_port = issuer.bind_to_any_port("127.0.0.1");
+    if (mcp_port <= 0 || issuer_port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread mcp_thread([&] { mcp.listen_after_bind(); });
+    std::jthread issuer_thread([&] { issuer.listen_after_bind(); });
+    ScopedServerStop stop_mcp(mcp);
+    ScopedServerStop stop_issuer(issuer);
+    for (int i = 0; i < 100 && (!mcp.is_running() || !issuer.is_running()); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(mcp.is_running());
+    REQUIRE(issuer.is_running());
+
+    TempDir tmp("filo_mcp_refresh_policy");
+    const std::string issuer_base = std::format("http://127.0.0.1:{}", issuer_port);
+    core::mcp::McpOAuthMeta meta;
+    meta.resource = std::format("http://127.0.0.1:{}/mcp", mcp_port);
+    meta.authorization_server = issuer_base;
+    meta.token_endpoint = issuer_base + "/token";
+    meta.client_id = "mock-client";
+    core::mcp::save_mcp_oauth_meta("guarded", tmp.path.string(), meta);
+    // An expired access token, so building the request headers refreshes it.
+    const auto expire_token = [&] {
+        core::auth::OAuthToken token;
+        token.access_token = "access-expired";
+        token.refresh_token = "refresh-1";
+        token.expires_at = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count()
+            - 3600;
+        core::auth::FileTokenStore(tmp.path.string())
+            .save(core::mcp::mcp_oauth_provider_id("guarded"), token);
+    };
+
+    core::config::McpServerConfig cfg;
+    cfg.name = "guarded";
+    cfg.transport = "http";
+    cfg.url = std::format("http://127.0.0.1:{}/mcp", mcp_port);
+    cfg.auth = "oauth";
+    const auto refuse = [](std::uint16_t port, bool server) {
+        core::policy::PolicyRule rule;
+        rule.effect = core::policy::Effect::deny;
+        if (server) rule.principal = core::policy::PrincipalKind::mcp_server;
+        rule.host = core::policy::HostPattern::parse("127.0.0.1").value();
+        rule.port = core::policy::PortRange::exact(port);
+        return rule;
+    };
+
+    // A refused server is refused before its headers are built, so its
+    // refresh token is not sent anywhere.
+    expire_token();
+    {
+        core::policy::ScopedActivePolicyForTesting installed(
+            std::make_shared<core::policy::PolicySnapshot>(
+                core::policy::PolicySet(
+                    {refuse(static_cast<std::uint16_t>(mcp_port), true)},
+                    core::policy::Effect::ask),
+                std::make_shared<core::policy::GrantStore>()));
+        core::mcp::HttpMcpSession denied(cfg, core::mcp::McpSamplingCallback{},
+                                         std::chrono::seconds(5),
+                                         core::mcp::make_mcp_http_auth(cfg, tmp.path.string()));
+        REQUIRE_THROWS_WITH(denied.initialize(), ContainsSubstring("Network policy"));
+    }
+    CHECK(token_calls == 0);
+    CHECK(mcp_posts == 0);
+
+    // The policy governs the destinations the model can reach. The token
+    // endpoint belongs to the user's own sign-in, so the policy does not
+    // filter it: the sign-in the user established is theirs, not the model's.
+    expire_token();
+    {
+        core::policy::ScopedActivePolicyForTesting installed(
+            std::make_shared<core::policy::PolicySnapshot>(
+                core::policy::PolicySet(
+                    {refuse(static_cast<std::uint16_t>(issuer_port), false)},
+                    core::policy::Effect::ask),
+                std::make_shared<core::policy::GrantStore>()));
+        core::mcp::HttpMcpSession unfiltered_token(cfg, core::mcp::McpSamplingCallback{},
+                                                    std::chrono::seconds(5),
+                                                    core::mcp::make_mcp_http_auth(cfg, tmp.path.string()));
+        REQUIRE_NOTHROW(unfiltered_token.initialize());
+    }
+    CHECK(token_calls == 1);
+
+    // The server the user configured is allowed without a question.
+    expire_token();
+    core::policy::ScopedActivePolicyForTesting installed(
+        std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}, core::policy::Effect::ask),
+            std::make_shared<core::policy::GrantStore>()));
+    const auto allowed = std::make_unique<core::mcp::HttpMcpSession>(
+        cfg, core::mcp::McpSamplingCallback{}, std::chrono::seconds(5),
+        core::mcp::make_mcp_http_auth(cfg, tmp.path.string()));
+    const auto tools = allowed->initialize();
+    REQUIRE(tools.size() == 1);
+    CHECK(token_calls == 2);
 }
 
 TEST_CASE("McpHttpAuth static Authorization does not claim OAuth refresh",

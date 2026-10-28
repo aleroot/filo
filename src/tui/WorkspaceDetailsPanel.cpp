@@ -2,6 +2,8 @@
 
 #include "KeyInput.hpp"
 #include "TuiTheme.hpp"
+#include "core/landrun/LandrunStatus.hpp"
+#include "core/policy/PolicySnapshot.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 
 #include <ftxui/dom/flexbox_config.hpp>
@@ -167,6 +169,64 @@ ftxui::Element render_workspace_details_panel(
                 | size(HEIGHT, LESS_THAN, std::max(1, max_visible_lines)),
             text(""),
             paragraph("↑/↓/Wheel: browse · Esc, q, or click workspace label to close")
+                | color(ColorTextMuted) | dim,
+        }) | xflex);
+}
+
+std::vector<std::string> security_detail_entries(
+    core::landrun::LandrunMode mode,
+    const std::vector<std::filesystem::path>& excluded_paths,
+    const core::policy::PolicySnapshot* policy) {
+    using namespace core::policy;
+    std::vector<std::string> entries{
+        std::format("Sandbox: {}", core::landrun::landrun_mode_name(mode)),
+        core::landrun::landrun_status_detail(mode),
+    };
+    for (const auto& path : excluded_paths)
+        entries.push_back("Sandbox excluded path: " + path.string());
+    if (!policy) {
+        entries.emplace_back("Network policy: off");
+        entries.emplace_back("Model-directed network requests are not filtered by a network policy.");
+        return entries;
+    }
+    entries.push_back("Network policy: " + policy->describe());
+    if (policy->policy().default_effect() == Effect::ask) {
+        entries.emplace_back("Configured model providers and remote MCP servers are allowed unless a rule says otherwise.");
+    }
+    entries.emplace_back("Approved destinations can receive data, including in URLs.");
+    for (const auto& rule : policy->policy().rules()) {
+        const std::string principal = rule.principal
+            ? std::format("{}:{}", to_string(*rule.principal), rule.principal_id)
+            : "*";
+        entries.push_back(std::format(
+            "Rule {}: {}  principal={}  operation={}  flow={}  host={}  port={}",
+            rule.id.empty() ? "(unnamed)" : rule.id, to_string(rule.effect), principal,
+            rule.operation ? to_string(*rule.operation) : "*",
+            rule.flow ? to_string(*rule.flow) : "*",
+            rule.host.kind() == HostPattern::Kind::any ? "*" : rule.host.text(),
+            rule.port.text()));
+    }
+    return entries;
+}
+
+ftxui::Element render_security_details_panel(const std::vector<std::string>& entries,
+                                              std::size_t selected,
+                                              int max_visible_lines) {
+    using namespace ftxui;
+    Elements lines;
+    const auto active_index = entries.empty() ? 0 : std::min(selected, entries.size() - 1);
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        auto line = paragraph(" " + entries[i]) | color(ColorText);
+        if (i == active_index) line = std::move(line) | focus;
+        lines.push_back(std::move(line));
+    }
+    return UiWindow(
+        text(" Security details ") | color(ColorYellowBright) | bold,
+        vbox({
+            vbox(std::move(lines)) | vscroll_indicator | yframe
+                | size(HEIGHT, LESS_THAN, std::max(1, max_visible_lines)),
+            text(""),
+            paragraph("↑/↓/Wheel: browse · Esc, q, or click lock to close")
                 | color(ColorTextMuted) | dim,
         }) | xflex);
 }

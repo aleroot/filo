@@ -41,6 +41,7 @@ void PythonTool::load_definition() {
 
         definition_.name = schema["name"].cast<std::string>();
         definition_.description = schema["description"].cast<std::string>();
+        definition_.network_mediation = core::tools::NetworkMediation::unmediated;
         
         if (schema.contains("parameters")) {
             py::list params = schema["parameters"].cast<py::list>();

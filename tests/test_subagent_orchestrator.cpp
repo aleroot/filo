@@ -15,6 +15,8 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/ShellTool.hpp"
+#include "core/policy/PolicySnapshot.hpp"
+#include "core/policy/PolicyRules.hpp"
 #include "TestSessionContext.hpp"
 
 #include <simdjson.h>
@@ -390,6 +392,31 @@ TEST_CASE("Worker cancellation before admission survives the turn's stop reset",
     });
     CHECK(result.cancelled());
     CHECK(provider->requests_snapshot().empty());
+}
+
+TEST_CASE("Delegated agents obey the policy of the process", "[agent][orchestration][policy]") {
+    using namespace core::policy;
+    auto provider = std::make_shared<RecordingProvider>();
+    auto policy = std::make_shared<PolicySnapshot>(
+        PolicySet({}, Effect::ask), std::make_shared<GrantStore>());
+    // The policy of the process is the one every tool call is judged against,
+    // so a delegated worker inherits the boundary without being told.
+    ScopedActivePolicyForTesting installed(policy);
+    const auto result = core::agent::DelegatedAgentRunner::run({
+        .provider = provider,
+        .tool_manager = core::tools::ToolManager::get_instance(),
+        .session_context = test_support::make_workspace_session_context(),
+        .max_steps = 3,
+        .prompt = "inspect files",
+    });
+    CHECK(result.status() == "completed");
+    // A worker that cannot ask a person is refused, not answered.
+    const auto decision = policy->authorize(NetworkIntent{
+        .subject = Subject{.kind = PrincipalKind::web_tool, .id = "fetch_url"},
+        .action = Action{.operation = OperationKind::read,
+                         .flow = DataFlow::inbound},
+        .resource = Resource{.host = "example.com", .port = 443}});
+    CHECK(decision.effect == Effect::deny);
 }
 
 TEST_CASE("Final handoffs reject unsolicited tool calls", "[agent][orchestration][budget]") {

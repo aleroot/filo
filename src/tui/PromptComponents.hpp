@@ -102,8 +102,9 @@ enum class ReviewPickerMode {
 };
 
 [[nodiscard]] std::string format_workspace_status_label(
-    std::string_view workspace_path,
-    bool sandbox_enabled);
+    std::string_view workspace_path);
+[[nodiscard]] std::string format_security_status_label(bool sandbox_active,
+                                                       bool network_policy_active);
 
 [[nodiscard]] std::string format_runtime_status_summary(
     std::string_view provider_name,

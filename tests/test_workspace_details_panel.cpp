@@ -1,8 +1,10 @@
 #include "tui/WorkspaceDetailsPanel.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
+#include "core/policy/PolicySnapshot.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <format>
@@ -50,6 +52,45 @@ void write_file(const std::filesystem::path& path) {
 }
 
 } // namespace
+
+TEST_CASE("Security details show actual sandbox and network policy settings", "[tui][security]") {
+    using namespace core::policy;
+    using core::landrun::LandrunMode;
+    const auto off = tui::security_detail_entries(LandrunMode::off, {}, nullptr);
+    REQUIRE(off.size() >= 3);
+    CHECK(off[0] == "Sandbox: off");
+    CHECK(off[2] == "Network policy: off");
+
+    PolicyRule rule;
+    rule.id = "web";
+    rule.effect = Effect::allow;
+    rule.principal = PrincipalKind::web_tool;
+    rule.host = HostPattern::exact("example.com");
+    rule.port = PortRange::exact(443);
+    PolicySnapshot policy(PolicySet({rule}, Effect::deny));
+    const auto entries = tui::security_detail_entries(
+        LandrunMode::workspace_write, {"/private/excluded"}, &policy);
+    CHECK(entries[0] == "Sandbox: workspace-write");
+    CHECK(entries[2].find("/private/excluded") != std::string::npos);
+    CHECK(entries[3].find("default deny") != std::string::npos);
+    CHECK(entries.back().find("allow") != std::string::npos);
+    CHECK(entries.back().find("example.com") != std::string::npos);
+    CHECK(entries.back().find("port=443") != std::string::npos);
+
+    auto panel = tui::render_security_details_panel(entries, entries.size() - 1, 4);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+    CHECK(screen.ToString().find("example.com") != std::string::npos);
+    CHECK(screen.ToString().find("Security details") != std::string::npos);
+
+    PolicySnapshot ask(PolicySet({}, Effect::ask));
+    const auto asking = tui::security_detail_entries(LandrunMode::read_only, {}, &ask);
+    CHECK(std::ranges::any_of(asking, [](const auto& line) {
+        return line.find("configured model providers") != std::string::npos
+            || line.find("Configured model providers") != std::string::npos;
+    }));
+}
 
 TEST_CASE("Workspace details show loaded roots in precedence order", "[workspace_details][tui]") {
     core::workspace::WorkspaceSnapshot workspace{

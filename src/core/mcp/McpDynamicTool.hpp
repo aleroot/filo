@@ -26,6 +26,13 @@ public:
         def_.input_schema = tool_def.input_schema;
         def_.output_schema = tool_def.output_schema;
         def_.annotations = tool_def.annotations;
+        // A remote MCP server authorizes its own destination; a local stdio
+        // server runs a process tree Filo does not confine, so it cannot be
+        // constrained and must not pretend otherwise.
+        def_.network_mediation =
+            (session_ && session_->network_endpoint())
+                ? core::tools::NetworkMediation::mediated
+                : core::tools::NetworkMediation::unmediated;
         for (const auto& p : tool_def.parameters) {
             def_.parameters.push_back({
                 .name        = p.name,

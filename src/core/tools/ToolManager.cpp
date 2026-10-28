@@ -3,6 +3,7 @@
 #include "ToolArgumentUtils.hpp"
 #include "../changes/TurnChangeTracker.hpp"
 #include "../changes/WorkspaceMutationGate.hpp"
+#include "../policy/PolicySnapshot.hpp"
 
 namespace core::tools {
 ToolManager::ToolManager(std::shared_ptr<core::changes::WorkspaceMutationGate> mutations,
@@ -25,9 +26,10 @@ std::string ToolManager::execute_tool(
 std::string ToolManager::execute_tool(
     const std::string& name,
     std::string_view json_args,
-    const ToolInvocationContext& invocation)
+    const ToolInvocationContext& incoming)
 {
     std::shared_ptr<Tool> tool;
+    std::shared_ptr<const core::policy::PolicySnapshot> mandatory_policy;
     ToolDefinition definition;
     {
         std::lock_guard lock(mutex_);
@@ -37,8 +39,26 @@ std::string ToolManager::execute_tool(
         tool = registered->tool;
         definition = tool->get_definition();
     }
+    // The policy the process runs under is the one every tool must obey.
+    mandatory_policy = policy_snapshot();
+    if (mandatory_policy && incoming.policy
+        && mandatory_policy->identity() != incoming.policy->identity()) {
+        return R"({"error":"Network policy: conflicting policy snapshots cannot be combined safely."})";
+    }
+    std::optional<ToolInvocationContext> enforced;
+    if (mandatory_policy && !incoming.policy) {
+        enforced = incoming;
+        enforced->policy = mandatory_policy;
+    }
+    const auto& invocation = enforced ? *enforced : incoming;
     if (!tool_allows_transport(definition, invocation.session_context.transport)) {
         return R"({"error":"Tool is available only to Filo's internal agents."})";
+    }
+    if (invocation.policy && definition.network_mediation == NetworkMediation::unmediated) {
+        // The tool can reach the network in a way the policy cannot
+        // intercept. Refusing it is the only honest answer: allowing it
+        // would claim a protection that does not exist.
+        return R"({"error":"Network policy: this tool reaches the network without mediation and is unavailable while a policy is active."})";
     }
     const auto sandbox_mode =
         core::landrun::LandrunSettings::instance().mode();
@@ -76,6 +96,13 @@ std::string ToolManager::execute_tool(
             if (!acquired) return std::string("{\"error\":\"")
                 + core::changes::WorkspaceMutationGate::failure_message(acquired.error()) + "\"}";
             lease = std::move(*acquired);
+        }
+        // A question the policy asks during this call belongs to the chat
+        // that made it, and is withdrawn when that chat stops.
+        std::optional<core::policy::ApprovalOriginScope> origin;
+        if (invocation.policy) {
+            origin.emplace(std::string(invocation.session_context.root_session()),
+                           invocation.cancellation_requested);
         }
         const auto execute = [&] { return tool->execute(*normalized, invocation); };
         // MCP and other callers without a turn tracker still participate in

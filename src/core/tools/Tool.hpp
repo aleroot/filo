@@ -14,6 +14,9 @@ class LLMProvider;
 namespace core::session {
 class SessionStatsRegistry;
 }
+namespace core::policy {
+class PolicySnapshot;
+}
 namespace core::changes {
 class TurnChangeTracker;
 }
@@ -37,6 +40,29 @@ struct ToolInvocationContext {
     std::function<bool()> cancellation_requested{};
     std::shared_ptr<core::session::SessionStatsRegistry> session_stats{};
     std::shared_ptr<core::changes::TurnChangeTracker> change_tracker{};
+    // Optional policy snapshot supplied by trusted host code, never tool input.
+    // A null pointer preserves existing behavior: the tool is unconstrained.
+    // When present, a tool that reaches the network must authorize every
+    // request through it.
+    std::shared_ptr<const core::policy::PolicySnapshot> policy{};
+};
+
+/**
+ * @brief How a tool's network access can be constrained.
+ *
+ * This is a capability, not a hint. A tool that declares @c unmediated can
+ * reach the network in ways no policy can intercept, so a policy refuses it
+ * outright instead of pretending to protect it. Only Filo's own adapters set
+ * this value; a remote server's annotations never do.
+ */
+enum class NetworkMediation {
+    /// The tool does not reach the network.
+    none,
+    /// The tool authorizes every request through the policy before it
+    /// performs it, so a decision reaches the actual operation.
+    mediated,
+    /// The tool may reach the network and cannot be constrained.
+    unmediated,
 };
 
 /**
@@ -124,6 +150,13 @@ struct ToolDefinition {
     /// Internal trust marker. It is never populated from remote MCP metadata;
     /// only built-in tools may mint receipts accepted by AUTO's quality gate.
     bool trusted_verification_receipts = false;
+    /// How the tool's network access can be constrained. It is set by Filo's
+    /// own adapters, never by a server's annotations.
+    ///
+    /// A tool that declares @c unmediated may egress and cannot be
+    /// constrained, so a policy refuses it outright rather than pretending to
+    /// protect it.
+    NetworkMediation network_mediation = NetworkMediation::none;
     /// Local exposure policy, never serialized as MCP metadata. Internal
     /// agent tools must remain private even in a shared TUI/MCP registry.
     bool agent_only = false;

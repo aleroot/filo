@@ -96,6 +96,9 @@
 #include "core/logging/Logger.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
+#include "core/policy/PolicyFamily.hpp"
+#include "core/policy/ApprovalChannel.hpp"
+#include "core/policy/PolicySnapshot.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/memory/MemorySystem.hpp"
 #include "core/agent/PermissionGate.hpp"
@@ -545,6 +548,86 @@ void insert_token_with_spacing(std::string& text, int& cursor, std::string_view 
     return TurnActivityState::Idle;
 }
 
+/// Asks the user through the thread modal host when a network policy needs a
+/// decision.
+///
+/// The channel is deliberately narrow. It can approve one request or one
+/// exact destination for the session, and nothing else: a grant the user did
+/// not see is not a grant. The question names the destination and what the
+/// operation does, so the answer describes the real capability. It is asked
+/// in the chat the request came from, never in whichever chat is visible.
+class PromptApprovalChannel final : public core::policy::IApprovalChannel {
+public:
+    PromptApprovalChannel(ThreadModalHost& modals,
+                          std::function<void()> wake,
+                          std::function<bool(std::string_view)> has_thread)
+        : modals_(modals)
+        , wake_(std::move(wake))
+        , has_thread_(std::move(has_thread)) {}
+
+    core::policy::ApprovalOutcome request(
+        const core::policy::ApprovalRequest& request) override {
+        const auto& origin = request.origin;
+        if (origin.session_id.empty() || !has_thread_ || !has_thread_(origin.session_id)) {
+            // No chat of this interface sent the request, so nobody could
+            // see the question. It is denied rather than left hanging.
+            return core::policy::ApprovalOutcome::unavailable;
+        }
+        auto promise = std::make_shared<std::promise<
+            std::optional<std::vector<std::pair<std::string, std::string>>>>>();
+        auto future = promise->get_future();
+        const std::string question = std::format(
+            "Allow {} to contact {}:{}?",
+            request.subject.id,
+            request.resource.host,
+            request.resource.port);
+        modals_.post_question(core::tools::QuestionRequest{
+            .id = core::utils::random_uuid_v4(),
+            .questions = {core::tools::QuestionItem{
+                .question = question,
+                .header = "Network approval",
+                .options = {
+                    {"Deny", "Block this request."},
+                    {"Allow once", "Allow this request only."},
+                    {"Allow for this session", "Allow this destination in this chat for up to 12 hours."},
+                },
+                .body = "The request can send data to this destination, including in its URL. Request contents are not shown.",
+            }},
+            .session_id = origin.session_id,
+            .promise = promise,
+        });
+        if (wake_) wake_();
+        const auto deadline = std::chrono::steady_clock::now() + kApprovalTimeout;
+        while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+            const bool stopped = origin.stopped && origin.stopped();
+            if (stopped || std::chrono::steady_clock::now() >= deadline) {
+                // A question nobody answers must not hold the request open
+                // forever: it is withdrawn and the request is denied.
+                auto withdrawn = modals_.withdraw_question(origin.session_id, promise);
+                if (withdrawn.has_resolution()) withdrawn.resolve();
+                return stopped ? core::policy::ApprovalOutcome::cancelled
+                               : core::policy::ApprovalOutcome::unavailable;
+            }
+        }
+        const auto answers = future.get();
+        if (!answers || answers->size() != 1 || answers->front().first != question)
+            return core::policy::ApprovalOutcome::denied;
+        const auto& choice = answers->front().second;
+        if (choice == "Allow once") return core::policy::ApprovalOutcome::approved_once;
+        if (choice == "Allow for this session")
+            return core::policy::ApprovalOutcome::approved_for_session;
+        return core::policy::ApprovalOutcome::denied;
+    }
+
+private:
+    // A question nobody answers must not hold a request open forever.
+    static constexpr std::chrono::seconds kApprovalTimeout{120};
+
+    ThreadModalHost& modals_;
+    std::function<void()> wake_;
+    std::function<bool(std::string_view)> has_thread_;
+};
+
 } // namespace
 
 RunResult run(RunOptions opts) {
@@ -918,6 +1001,7 @@ RunResult run(RunOptions opts) {
     Box review_status_box{0, -1, 0, -1};
     WorkspaceDetailsPanelState workspace_details_panel_state;
     Box workspace_status_box{0, -1, 0, -1};
+    Box security_status_box{0, -1, 0, -1};
     bool agents_visualizer_panel_active = false;
     Box agents_status_box{0, -1, 0, -1};
     std::vector<Box> agents_tab_hitboxes;
@@ -1896,6 +1980,9 @@ RunResult run(RunOptions opts) {
         }
         // /clear starts over: drop what tools kept for the old conversation
         // (the Python namespace, the shell session) instead of orphaning it.
+        if (const auto policy = core::policy::active_policy()) {
+            policy->grants()->revoke_session(previous_session_id);
+        }
         core::tools::ToolManager::get_instance().clear_session_state(previous_session_id);
         direct_shell_state->clear_session_state(previous_session_id);
         session_leases.release(previous_session_id);
@@ -5927,6 +6014,21 @@ RunResult run(RunOptions opts) {
         save_runtime_snapshot(current_runtime);
     };
 
+    // Attach the interface's approval channel to the policies. Until this
+    // happens every request that needs a decision is denied, so a headless
+    // session and a session whose interface never came up behave the same.
+    if (!opts.policies.empty()) {
+        auto channel = std::make_shared<PromptApprovalChannel>(
+            thread_modals,
+            [&] { wake_ui(); },
+            [&](std::string_view session_id) {
+                return thread_runtimes.find(session_id) != nullptr;
+            });
+        for (const auto& policy : opts.policies) {
+            policy->attach_approval_channel(channel);
+        }
+    }
+
     configure_runtime_agent = [&](const ThreadRuntime::Ptr& runtime) {
         runtime->agent()->set_permission_fn(make_permission_fn(runtime));
         runtime->agent()->set_loop_break_fn([&, runtime](int rounds) {
@@ -6121,6 +6223,9 @@ RunResult run(RunOptions opts) {
 
         runtime->set_lease(nullptr);
         session_leases.release(target);
+        if (const auto policy = core::policy::active_policy()) {
+            policy->grants()->revoke_session(target);
+        }
         core::tools::ToolManager::get_instance().clear_session_state(target);
         direct_shell_state->clear_session_state(target);
         session_stats_registry->reset(target);
@@ -8165,6 +8270,24 @@ RunResult run(RunOptions opts) {
 
         if (event.is_mouse()
             && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && security_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                const bool was_open = workspace_details_panel_state.active
+                    && workspace_details_panel_state.security;
+                workspace_details_panel_state = {.active = !was_open, .security = true};
+                usage_details_panel_active = false;
+                review_details_panel_active = false;
+                agents_visualizer_panel_active = false;
+                remote_activity_panel_state.active = false;
+            }
+            wake_ui();
+            return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed) {
             const std::size_t target_count = std::min(
                 thread_tab_hitboxes.size(),
@@ -8198,9 +8321,9 @@ RunResult run(RunOptions opts) {
             && workspace_status_box.Contain(event.mouse().x, event.mouse().y)) {
             {
                 std::lock_guard lock(ui_mutex);
-                workspace_details_panel_state = {
-                    .active = !workspace_details_panel_state.active,
-                };
+                const bool was_open = workspace_details_panel_state.active
+                    && !workspace_details_panel_state.security;
+                workspace_details_panel_state = {.active = !was_open};
                 usage_details_panel_active = false;
                 agents_visualizer_panel_active = false;
                 remote_activity_panel_state.active = false;
@@ -8422,10 +8545,13 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             if (workspace_details_panel_state.active) {
+                const auto policy = core::policy::active_policy();
+                const auto& sandbox = core::landrun::LandrunSettings::instance();
                 workspace_event_handled = handle_workspace_details_event(
                     workspace_details_panel_state, event,
-                    workspace_details_entry_count(
-                        agent->workspace_snapshot().snapshot()));
+                    workspace_details_panel_state.security
+                        ? security_detail_entries(sandbox.mode(), sandbox.excluded_paths(), policy.get()).size()
+                        : workspace_details_entry_count(agent->workspace_snapshot().snapshot()));
             }
         }
         if (workspace_event_handled) {
@@ -10378,9 +10504,17 @@ RunResult run(RunOptions opts) {
                 }),
                 {});
         } else if (workspace_panel_snapshot.active) {
-            bottom_el = render_workspace_details_panel(
-                visible_workspace.snapshot(), workspace_panel_snapshot.selected,
-                std::clamp(Terminal::Size().dimy / 2 - 5, 1, 12));
+            const auto max_lines = std::clamp(Terminal::Size().dimy / 2 - 5, 1, 12);
+            if (workspace_panel_snapshot.security) {
+                const auto policy = core::policy::active_policy();
+                const auto& sandbox = core::landrun::LandrunSettings::instance();
+                bottom_el = render_security_details_panel(
+                    security_detail_entries(sandbox.mode(), sandbox.excluded_paths(), policy.get()),
+                    workspace_panel_snapshot.selected, max_lines);
+            } else {
+                bottom_el = render_workspace_details_panel(
+                    visible_workspace.snapshot(), workspace_panel_snapshot.selected, max_lines);
+            }
         } else if (usage_panel_visible) {
             auto total = core::budget::BudgetTracker::get_instance().session_total(
                 visible_session_id);
@@ -10652,13 +10786,23 @@ RunResult run(RunOptions opts) {
 
         // Build right side of status bar: current folder + context left
         workspace_status_box = {0, -1, 0, -1};
+        security_status_box = {0, -1, 0, -1};
         Element right_el;
         if (quit_confirm_active()) {
             right_el = text(" Press " + quit_confirm_key + " again to quit ")
                 | color(ColorTextMuted);
         } else {
             Elements right_items;
-            // Keep the workspace protection affordance quiet and colocated with its scope.
+            const bool policy_active = static_cast<bool>(core::policy::active_policy());
+            const bool sandbox_active = core::landrun::LandrunSettings::instance().enabled();
+            const auto security_label = format_security_status_label(sandbox_active, policy_active);
+            if (!security_label.empty()) {
+                right_items.push_back(
+                    text(security_label)
+                    | color(workspace_panel_snapshot.active && workspace_panel_snapshot.security
+                                ? Color(ColorYellowBright) : ColorTextSecondary)
+                    | reflect(security_status_box));
+            }
             std::string cwd_str = format_cwd();
             if (!cwd_str.empty()) {
                 const auto workspace_count = workspace_details_workspace_count(
@@ -10667,10 +10811,9 @@ RunResult run(RunOptions opts) {
                     cwd_str += std::format(" (+{})", workspace_count - 1);
                 }
                 right_items.push_back(
-                    text(format_workspace_status_label(
-                        cwd_str,
-                        core::landrun::LandrunSettings::instance().enabled()))
-                    | color(workspace_panel_snapshot.active ? Color(ColorYellowBright) : ColorTextSecondary)
+                    text(format_workspace_status_label(cwd_str))
+                    | color(workspace_panel_snapshot.active && !workspace_panel_snapshot.security
+                                ? Color(ColorYellowBright) : ColorTextSecondary)
                     | reflect(workspace_status_box));
             }
             // Context left percentage
@@ -10882,16 +11025,9 @@ RunResult run(RunOptions opts) {
         auto status_el = text("");
         if (show_status_footer || quit_confirm_active()) {
             if (remote_mcp_status_visible) {
-                // Symmetric fillers center the MCP status pill in the space
-                // between the two clusters; it yields to them on narrow
-                // terminals instead of overlapping either side.
-                status_el = hbox({
-                    left_el,
-                    filler(),
-                    std::move(remote_mcp_status_el),
-                    filler(),
-                    std::move(right_el),
-                }) | xflex;
+                status_el = render_centered_footer(
+                    std::move(left_el), std::move(remote_mcp_status_el),
+                    std::move(right_el)) | xflex;
             } else {
                 status_el = hbox({
                     left_el | xflex,

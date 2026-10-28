@@ -11,6 +11,8 @@
 #include "core/tools/LandrunToolPolicy.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/goal/GoalVerifier.hpp"
+#include "core/scm/EphemeralWorktree.hpp"
 #include "core/workspace/SensitivePathPolicy.hpp"
 #include "core/workspace/PathVisibility.hpp"
 
@@ -56,6 +58,44 @@ TEST_CASE("landrun modes expose one authoritative capability contract",
     REQUIRE(core::landrun::landrun_workspace_writable(LandrunMode::off));
     REQUIRE_FALSE(core::landrun::landrun_workspace_writable(LandrunMode::read_only));
     REQUIRE(core::landrun::landrun_workspace_writable(LandrunMode::workspace_write));
+}
+
+TEST_CASE("sandboxed goals cannot use the unconfined legacy command runner", "[landrun][policy]") {
+    const auto marker = std::filesystem::temp_directory_path()
+        / ("filo-goal-runner-probe-" + std::to_string(::getpid()));
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        core::landrun::LandrunSettings::instance().configure_startup({
+            .mode = core::landrun::LandrunMode::workspace_write});
+        const auto result = core::goal::make_popen_command_runner()(
+            "touch '" + marker.string() + "'");
+        ::_exit(result.exit_code == 126 && !std::filesystem::exists(marker) ? 0 : 1);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK_FALSE(std::filesystem::exists(marker));
+    std::filesystem::remove(marker, ec);
+}
+
+TEST_CASE("sandbox mode refuses unconfined ephemeral worktree creation", "[landrun][policy]") {
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        core::landrun::LandrunSettings::instance().configure_startup({
+            .mode = core::landrun::LandrunMode::workspace_write});
+        const auto result = core::scm::EphemeralWorktree::create(
+            std::filesystem::current_path(), "security-test");
+        ::_exit(result.has_value() ? 1 : 0);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
 }
 
 TEST_CASE("read-only landrun mode blocks native mutation tools only",

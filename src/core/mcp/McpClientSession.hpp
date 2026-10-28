@@ -16,6 +16,8 @@
 #include <memory>
 #include "../config/ConfigManager.hpp"
 #include "../tools/Tool.hpp"
+#include "../net/EgressScope.hpp"
+#include "../policy/PolicyTypes.hpp"
 
 namespace core::mcp {
 
@@ -115,6 +117,16 @@ public:
     [[nodiscard]] virtual bool supports_resources() const noexcept = 0;
     [[nodiscard]] virtual bool supports_prompts() const noexcept = 0;
     [[nodiscard]] virtual bool supports_sampling() const noexcept = 0;
+
+    /**
+     * The network destination of a remote session.
+     *
+     * Empty for a local stdio server: its boundary is the process tree, not a
+     * destination, so it cannot be authorized as a network principal.
+     */
+    [[nodiscard]] virtual std::optional<core::policy::Resource> network_endpoint() const {
+        return std::nullopt;
+    }
 
     // Graceful shutdown.
     virtual void shutdown() noexcept = 0;
@@ -224,6 +236,9 @@ public:
         // transport adapter does not currently implement.
         return false;
     }
+    [[nodiscard]] std::optional<core::policy::Resource> network_endpoint() const override {
+        return endpoint_;
+    }
     void shutdown() noexcept override;
 
 private:
@@ -234,7 +249,8 @@ private:
     };
 
     [[nodiscard]] cpr::Header build_request_headers(bool include_protocol_header) const;
-    [[nodiscard]] HttpJsonResponse post_json_once(const std::string& body,
+    [[nodiscard]] HttpJsonResponse post_json_once(core::net::EgressScope& scope,
+                                                  const std::string& body,
                                                   bool include_protocol_header);
     [[nodiscard]] HttpJsonResponse post_json(const std::string& body,
                                              bool include_protocol_header = true);
@@ -244,6 +260,8 @@ private:
     void update_negotiated_protocol_version(std::string_view initialize_result);
 
     std::string url_;
+    // The destination this session talks to, resolved once from the URL.
+    std::optional<core::policy::Resource> endpoint_;
     std::string server_name_;
     std::string protocol_version_{"2025-11-25"};
     std::string session_id_;

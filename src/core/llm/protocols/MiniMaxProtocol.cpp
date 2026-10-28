@@ -169,7 +169,8 @@ void MiniMaxProtocol::prepare_request(ChatRequest& req) {
 
 void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_url,
                                      const core::auth::AuthInfo& auth,
-                                     const std::function<bool()>& cancelled) {
+                                     const std::function<bool()>& cancelled,
+                                     const ProtocolRequester& requester) {
     // Exact counting pays for its extra round trip only for large histories.
     // The request goes to the same configured endpoint, with no redirect or
     // cross-origin fallback. Failure retains the conservative local budget.
@@ -191,26 +192,27 @@ void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_ur
                 body += '"' + std::string(field.key) + "\":" + simdjson::to_string(field.value);
             }
             body += '}';
-            std::string count_body;
             auto headers = build_headers(auth);
             prepare_headers(headers, req, base_url);
-            const auto response = cpr::Post(cpr::Url{build_url(base_url, req.model) + "/count_tokens"},
-                headers, cpr::Body{body}, cpr::Timeout{1500}, cpr::ConnectTimeout{500}, cpr::Redirect{false},
-                cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {
-                    constexpr std::size_t max_bytes = 16 * 1024;
-                    if (bytes.size() > max_bytes - count_body.size()) return false;
-                    count_body.append(bytes);
-                    return true;
-                }},
-                cpr::ProgressCallback{[&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
-                    return !cancelled || !cancelled();
-                }});
-            if (response.status_code == 200 && response.error.code == cpr::ErrorCode::OK) {
-                simdjson::padded_string result(count_body);
-                simdjson::dom::element value;
-                int64_t tokens = 0;
-                if (parser.parse(result).get(value) == simdjson::SUCCESS
-                    && value["input_tokens"].get(tokens) == simdjson::SUCCESS && tokens > 0) counted = static_cast<std::size_t>(tokens);
+            // The provider performs the request, so the count is decided like
+            // every other request this call makes. Without one the local
+            // estimate below is used.
+            if (requester) {
+                const auto response = requester(protocols::ProtocolRequest{
+                    .url = build_url(base_url, req.model) + "/count_tokens",
+                    .headers = headers,
+                    .body = std::move(body),
+                    .timeout = std::chrono::milliseconds{1500},
+                    .connect_timeout = std::chrono::milliseconds{500},
+                    .max_response_bytes = 16 * 1024,
+                });
+                if (response.status_code == 200 && response.error.empty()) {
+                    simdjson::padded_string result(response.body);
+                    simdjson::dom::element value;
+                    int64_t tokens = 0;
+                    if (parser.parse(result).get(value) == simdjson::SUCCESS
+                        && value["input_tokens"].get(tokens) == simdjson::SUCCESS && tokens > 0) counted = static_cast<std::size_t>(tokens);
+                }
             }
         } catch (...) { /* Optional estimation must not make the model unavailable. */ }
     }

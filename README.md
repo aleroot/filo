@@ -302,6 +302,7 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 - `--steering [default|fallback|none|<path>]` which project steering files to load; overrides the saved `steering_mode` setting for that run. `fallback` walks the workspace roots in order and uses the first one that has any. A bare path selects a custom file or directory.
 - `--no-steering` alias for `--steering none`
 - `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
+- `--policy <kind>=<argument>` enforce a policy, repeatable. `network=ask` asks before a destination you did not configure; `network=<file>` loads a policy file (JSON). The network policy requires `--sandbox`. See [Network policy](#network-policy).
 
 </details>
 
@@ -479,6 +480,72 @@ changes can still use their saved diffs; unsupported, excluded, or over-budget
 paths are reported as incomplete coverage. Deleting a session removes its
 checkpoints. External services and processes that deliberately detach from a
 managed process group are outside this recovery boundary.
+
+## Network policy
+
+A model can be talked into sending your project somewhere else, and nothing
+in its logs has to show it. `--policy` decides every request that carries the
+conversation, a file or tool arguments, before it leaves the process, and binds
+the connection to that decision.
+
+```bash
+filo --sandbox workspace-write --policy network=ask
+filo --sandbox workspace-write --policy network=./policy.json
+```
+
+`network=ask` asks before a destination you did not configure; `network=<file>`
+loads a JSON policy. With `network=ask`, the provider you selected and the MCP
+servers you configured are allowed unless a rule refuses them. In a JSON
+policy, `default: deny` also denies those destinations unless a rule allows
+them. `--policy` names the kind,
+so a new kind is a new name and not a new flag; `network` is the only one
+today.
+
+```json
+{
+  "version": 1, "default": "deny",
+  "rules": [{"id": "github", "effect": "allow", "principal": "web_tool",
+             "host": "api.github.com", "port": 443}]
+}
+```
+
+This example only allows the listed web tool destination. Add explicit rules
+for the selected model provider and any MCP servers you want to use.
+
+A rule may narrow `principal` (`web_tool`, `child_process`, `mcp_server`,
+`model_provider`, optionally `kind:name`), `operation` (`read`, `write`,
+`connect`, `invoke`, `infer`), `flow` (`inbound`, `outbound`,
+`bidirectional`), `host` (`example.com`, `*.example.com` or a CIDR range) and
+`port` (a number or `low-high`). Read from the given path only, never the
+workspace; a file that does not parse stops startup.
+
+Web fetches are `read` operations with `bidirectional` flow: the URL can
+contain data sent to the destination. An inbound-only rule does not allow them.
+
+The decision binds the connection: no proxy, no redirect, and a host name
+reaches only public addresses (`localhost` only loopback, other private hosts
+only as an IP literal). Covered: the model provider (Kimi video uploads and
+MiniMax token counts included), remote MCP servers, direct web fetches. A
+question is shown in the chat that caused it and withdrawn when it stops. Your
+own sign-in is not filtered; a refused MCP server is refused before it is
+contacted, so its sign-in is never renewed.
+
+Under a policy:
+
+- web search and local stdio MCP servers are unavailable
+- shell processes have no network, so `git` over the network and package installs fail
+- a WebSocket provider falls back to HTTPS
+- sign-in and catalog refreshes that carry no conversation are not mediated
+
+The provider you selected still receives the conversation, and an approved
+destination can still receive data in a URL: this is destination authorization,
+not a guarantee against data disclosure.
+Approvals show the destination, not the request contents. A session approval is
+limited to that chat and expires after 12 hours or when the chat is closed.
+On macOS sandboxed commands can broadly read host files, with exceptions for
+known sensitive paths; the sandbox is not a general file-confidentiality
+boundary. Tool output can be included in the conversation sent to the model
+provider. Use a provider you trust with that data.
 
 ## Settings
 

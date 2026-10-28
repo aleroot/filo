@@ -353,11 +353,18 @@ TEST_CASE("authentication recovery panel does not promise an unsafe retry",
     CHECK_THAT(output, !Catch::Matchers::ContainsSubstring("Sign in and retry"));
 }
 
-TEST_CASE("workspace status uses a lock only for an enabled sandbox",
+TEST_CASE("security status shows whether sandbox or network policy is active",
           "[tui][status-bar][sandbox]") {
-    CHECK(format_workspace_status_label("~/project", false) == " ~/project ");
-    CHECK(format_workspace_status_label("~/project", true) == " 🔒 ~/project ");
-    CHECK(format_workspace_status_label("", true).empty());
+    CHECK(format_workspace_status_label("~/project") == " ~/project ");
+    CHECK(format_workspace_status_label("").empty());
+    CHECK(format_security_status_label(false, false).empty());
+    CHECK(format_security_status_label(true, false) == " 🔒");
+    CHECK(format_security_status_label(false, true) == " 🔒");
+    CHECK(format_security_status_label(true, true) == " 🔒");
+    CHECK(format_security_status_label(false, false)
+          + format_workspace_status_label("~/project") == " ~/project ");
+    CHECK(format_security_status_label(true, false)
+          + format_workspace_status_label("~/project") == " 🔒 ~/project ");
 }
 
 TEST_CASE("thread tabs spin while working and flag unseen finished work",

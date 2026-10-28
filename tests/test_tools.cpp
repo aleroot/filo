@@ -25,6 +25,8 @@
 #include "core/tools/WebBackendAdapters.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/tools/WebSearchTool.hpp"
+#include "core/policy/PolicySnapshot.hpp"
+#include "core/policy/PolicyRules.hpp"
 #include "core/tools/shell/ShellSession.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/workspace/FileAccessScope.hpp"
@@ -57,6 +59,177 @@
 #include <vector>
 
 using namespace core::tools;
+
+TEST_CASE("network policy blocks tools that cannot mediate their own network access",
+          "[tools][mcp][policy]") {
+    class ExternalTool final : public Tool {
+    public:
+        bool called = false;
+        ToolDefinition get_definition() const override {
+            return {.name = "external_test", .annotations = {.read_only_hint = true},
+                    .network_mediation = NetworkMediation::unmediated};
+        }
+        std::string execute(const std::string&, const core::context::SessionContext&) override {
+            called = true;
+            return R"({"ok":true})";
+        }
+    };
+    ToolManager manager;
+    auto tool = std::make_shared<ExternalTool>();
+    manager.register_tool(tool);
+    auto invocation = ToolInvocationContext{
+        .session_context = test_support::make_workspace_session_context(),
+        .policy = std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}), std::make_shared<core::policy::GrantStore>())};
+    const auto blocked = manager.execute_tool("external_test", "{}", invocation);
+    CHECK_THAT(blocked, Catch::Matchers::ContainsSubstring("without mediation"));
+    CHECK_FALSE(tool->called);
+    invocation.policy.reset();
+    const auto allowed = manager.execute_tool("external_test", "{}", invocation);
+    CHECK_THAT(allowed, Catch::Matchers::ContainsSubstring("\"ok\":true"));
+    CHECK(tool->called);
+}
+
+TEST_CASE("network policy refuses unconfined in-process code", "[tools][policy]") {
+    class EmbeddedTool final : public Tool {
+    public:
+        bool called = false;
+        ToolDefinition get_definition() const override {
+            return {.name = "embedded_test", .network_mediation = NetworkMediation::unmediated};
+        }
+        std::string execute(const std::string&, const core::context::SessionContext&) override {
+            called = true;
+            return R"({"ok":true})";
+        }
+    };
+    ToolManager manager;
+    auto tool = std::make_shared<EmbeddedTool>();
+    manager.register_tool(tool);
+    auto invocation = ToolInvocationContext{
+        .session_context = test_support::make_workspace_session_context(),
+        .policy = std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}), std::make_shared<core::policy::GrantStore>())};
+    const auto blocked = manager.execute_tool("embedded_test", "{}", invocation);
+    CHECK_THAT(blocked, Catch::Matchers::ContainsSubstring("without mediation"));
+    CHECK_FALSE(tool->called);
+}
+
+TEST_CASE("a question a tool raises is asked in the chat that called it", "[tools][policy]") {
+    class ProbeTool final : public Tool {
+    public:
+        ToolDefinition get_definition() const override {
+            return {.name = "origin_probe", .network_mediation = NetworkMediation::mediated};
+        }
+        std::string execute(const std::string&, const core::context::SessionContext&) override {
+            return R"({"ok":true})";
+        }
+        std::string execute(const std::string&, const ToolInvocationContext& invocation) override {
+            (void)invocation.policy->authorize(core::policy::NetworkIntent{
+                .subject = {.kind = core::policy::PrincipalKind::web_tool, .id = "origin_probe"},
+                .action = {.operation = core::policy::OperationKind::read,
+                           .flow = core::policy::DataFlow::inbound},
+                .resource = {.host = "example.com", .port = 443}}, nullptr);
+            return R"({"ok":true})";
+        }
+    };
+    class RecordingChannel final : public core::policy::IApprovalChannel {
+    public:
+        core::policy::ApprovalContext origin;
+        core::policy::ApprovalOutcome request(const core::policy::ApprovalRequest& request) override {
+            origin = request.origin;
+            return core::policy::ApprovalOutcome::denied;
+        }
+    };
+    auto channel = std::make_shared<RecordingChannel>();
+    ToolManager manager;
+    manager.register_tool(std::make_shared<ProbeTool>());
+    bool chat_stopped = false;
+    auto invocation = ToolInvocationContext{
+        .session_context = test_support::make_workspace_session_context(
+            core::context::SessionTransport::cli, "chat-a"),
+        .cancellation_requested = [&] { return chat_stopped; },
+        .policy = std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}, core::policy::Effect::ask),
+            std::make_shared<core::policy::GrantStore>(), channel)};
+
+    (void)manager.execute_tool("origin_probe", "{}", invocation);
+    CHECK(channel->origin.session_id == "chat-a");
+    // The question watches the calling chat's stop state, not another's.
+    REQUIRE(channel->origin.stopped);
+    CHECK_FALSE(channel->origin.stopped());
+    chat_stopped = true;
+    CHECK(channel->origin.stopped());
+
+    // A delegated worker asks in the chat it works for.
+    chat_stopped = false;
+    auto worker = invocation;
+    worker.session_context.session_id = "worker-1";
+    worker.session_context.root_session_id = "chat-a";
+    (void)manager.execute_tool("origin_probe", "{}", worker);
+    CHECK(channel->origin.session_id == "chat-a");
+    CHECK(core::policy::ApprovalOriginScope::current() == nullptr);
+}
+
+TEST_CASE("the tool manager enforces the policy of the process and refuses a different one",
+          "[tools][policy]") {
+    class ExternalTool final : public Tool {
+    public:
+        bool called = false;
+        ToolDefinition get_definition() const override {
+            return {.name = "external_guard_test", .network_mediation = NetworkMediation::unmediated};
+        }
+        std::string execute(const std::string&, const core::context::SessionContext&) override {
+            called = true;
+            return R"({"ok":true})";
+        }
+    };
+    auto required = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({}), std::make_shared<core::policy::GrantStore>());
+    auto different = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({}, core::policy::Effect::allow),
+        std::make_shared<core::policy::GrantStore>());
+    ToolManager manager;
+    auto tool = std::make_shared<ExternalTool>();
+    manager.register_tool(tool);
+    auto context = test_support::make_workspace_session_context();
+
+    // Without a policy the tool may run.
+    const auto unconstrained = manager.execute_tool("external_guard_test", "{}", context);
+    CHECK_THAT(unconstrained, Catch::Matchers::ContainsSubstring("\"ok\":true"));
+    CHECK(tool->called);
+
+    // The policy of the process is the one every tool must obey.
+    core::policy::ScopedActivePolicyForTesting installed(required);
+    tool->called = false;
+    const auto blocked = manager.execute_tool("external_guard_test", "{}", context);
+    CHECK_THAT(blocked, Catch::Matchers::ContainsSubstring("without mediation"));
+    CHECK_FALSE(tool->called);
+    const auto conflict = manager.execute_tool("external_guard_test", "{}",
+        ToolInvocationContext{.session_context = context, .policy = different});
+    CHECK_THAT(conflict, Catch::Matchers::ContainsSubstring("conflicting policy"));
+    CHECK_FALSE(tool->called);
+
+    // A worker that must not ask a person holds a copy of the same policy
+    // without the channel. It is the same policy, so it is not a conflict.
+    const auto inherited = std::make_shared<core::policy::PolicySnapshot>(
+        required->without_approval_channel());
+    CHECK(inherited->identity() == required->identity());
+    const auto inherited_result = manager.execute_tool("external_guard_test", "{}",
+        ToolInvocationContext{.session_context = context, .policy = inherited});
+    CHECK_THAT(inherited_result, Catch::Matchers::ContainsSubstring("without mediation"));
+}
+
+TEST_CASE("network policy refuses a shell without OS confinement", "[tools][policy]") {
+    if (core::landrun::LandrunSettings::instance().enabled())
+        SKIP("This check requires the unsandboxed startup mode.");
+    ShellTool shell;
+    const auto result = shell.execute(R"({"command":"echo should-not-run"})",
+        ToolInvocationContext{
+            .session_context = test_support::make_workspace_session_context(),
+            .policy = std::make_shared<core::policy::PolicySnapshot>(
+                core::policy::PolicySet({}), std::make_shared<core::policy::GrantStore>())});
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("requires an active OS sandbox"));
+}
 
 namespace {
 

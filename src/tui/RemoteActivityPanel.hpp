@@ -35,6 +35,11 @@ struct RemoteFooterStatus {
 [[nodiscard]] ftxui::Element render_remote_footer_status(
     const RemoteFooterStatus& status);
 
+/// Center the middle item in the footer, yielding to the side items when
+/// space is too narrow to keep it centered without overlap.
+[[nodiscard]] ftxui::Element render_centered_footer(
+    ftxui::Element left, ftxui::Element middle, ftxui::Element right);
+
 [[nodiscard]] ftxui::Element render_remote_activity_panel(
     const core::mcp::RemoteActivitySnapshot& snapshot,
     std::size_t selected_activity);

@@ -1,5 +1,6 @@
 #include "CurlWebSocketTransport.hpp"
 #include "HttpHeaderUtils.hpp"
+#include "core/net/EgressScope.hpp"
 #include "core/net/NetworkTraffic.hpp"
 #if defined(__APPLE__)
 #include "AppleWebSocketTransport.hpp"
@@ -200,6 +201,9 @@ CurlWebSocketTransport::CurlWebSocketTransport(std::chrono::milliseconds idle_ti
 CurlWebSocketTransport::~CurlWebSocketTransport() = default;
 
 bool CurlWebSocketTransport::runtime_supports_url(std::string_view url) noexcept {
+    // A WebSocket connection cannot be bound to a network policy decision, so
+    // while one has to be, the caller uses HTTPS, which can.
+    if (core::net::binding_required()) return false;
 #if defined(__APPLE__)
     return !websocket_scheme(url).empty();
 #else

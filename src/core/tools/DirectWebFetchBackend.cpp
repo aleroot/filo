@@ -5,17 +5,23 @@
 #include "WebBackendSupport.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
+#include "../net/EgressScope.hpp"
+#include "../policy/PolicySnapshot.hpp"
 
 #include <cpr/cpr.h>
+#include <curl/curl.h>
 
 #include <algorithm>
 #include <cstring>
+#include <charconv>
 #include <expected>
 #include <format>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 namespace core::tools::web {
 
@@ -24,6 +30,15 @@ namespace {
 constexpr int kFetchTimeoutMs = 60000;
 constexpr int kMaxFetchBytes = 2 * 1024 * 1024;
 constexpr int kMaxRedirects = 5;
+
+// The policy judges the authority the transport will actually use, parsed
+// with the same URL library the transport uses, not a substring extracted
+// from tool input.
+[[nodiscard]] core::policy::Subject fetch_subject(std::string_view tool_name) {
+    return core::policy::Subject{
+        .kind = core::policy::PrincipalKind::web_tool,
+        .id = tool_name.empty() ? std::string(names::kFetchUrl) : std::string(tool_name)};
+}
 
 // A fetched page is up to kMaxFetchBytes. Every step below rewrites it in
 // place, since none of them makes text longer: no lowered copy of the page per
@@ -213,6 +228,7 @@ void erase_tag_blocks(std::string& html,
 class DirectWebFetchBackend final : public IWebFetchBackend {
 public:
     [[nodiscard]] bool preserves_bytes() const noexcept override { return true; }
+    [[nodiscard]] bool enforces_network_policy() const noexcept override { return true; }
     [[nodiscard]] std::string_view name() const noexcept override {
         return "direct-http-fetch";
     }
@@ -234,13 +250,38 @@ public:
         body.reserve(static_cast<std::size_t>(std::min(max_bytes, 64 * 1024)));
         bool truncated = false;
 
+        // The policy covers the whole chain: a redirect is decided as a
+        // destination of its own, because the page may move anywhere.
+        core::net::EgressScope scope(
+            context.policy,
+            fetch_subject(request.policy_tool),
+            // The URL and headers leave the process and can contain data,
+            // even though the tool's purpose is to retrieve a document.
+            core::policy::Action{.operation = core::policy::OperationKind::read,
+                                 .flow = core::policy::DataFlow::bidirectional});
+
         cpr::Response response;
         for (int redirect_count = 0; redirect_count <= kMaxRedirects; ++redirect_count) {
             if (context.cancellation_requested && context.cancellation_requested())
                 return std::unexpected("Request cancelled.");
             body.clear();
             truncated = false;
-            response = cpr::Download(
+            cpr::Session session;
+            session.SetUrl(cpr::Url{current_url});
+            session.SetHeader(cpr::Header{
+                {"Accept", "text/markdown, text/html, text/plain, */*"},
+                {"User-Agent", "filo/1.0 (+https://github.com/alessio/filo)"},
+            });
+            session.SetRedirect(cpr::Redirect{false});
+            session.SetProgressCallback(cpr::ProgressCallback{[&context](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t,
+                cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
+                return !context.cancellation_requested || !context.cancellation_requested();
+            }});
+            session.SetTimeout(cpr::Timeout{kFetchTimeoutMs});
+            if (const auto refusal = scope.admit(session)) {
+                return std::unexpected(*refusal);
+            }
+            response = session.Download(
                 cpr::WriteCallback{[&body, &truncated, &context, max_bytes](
                                        std::string_view data,
                                        intptr_t) {
@@ -254,18 +295,7 @@ public:
                     }
                     body.append(data);
                     return true;
-                }},
-                cpr::Url{current_url},
-                cpr::Header{
-                    {"Accept", "text/markdown, text/html, text/plain, */*"},
-                    {"User-Agent", "filo/1.0 (+https://github.com/alessio/filo)"},
-                },
-                cpr::Redirect{false},
-                cpr::ProgressCallback{[&context](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t,
-                    cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
-                    return !context.cancellation_requested || !context.cancellation_requested();
-                }},
-                cpr::Timeout{kFetchTimeoutMs});
+                }});
 
             // Returning false from the write callback intentionally aborts
             // libcurl once the bounded buffer is full.  That is a successful

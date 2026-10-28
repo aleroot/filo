@@ -33,6 +33,7 @@ ToolDefinition PythonInterpreterTool::get_definition() const {
             .destructive_hint = true,  // can modify files, make network calls, etc.
             .open_world_hint  = true,
         },
+        .network_mediation = core::tools::NetworkMediation::unmediated,
     };
 }
 

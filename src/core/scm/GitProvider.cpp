@@ -1,4 +1,8 @@
 #include "GitProvider.hpp"
+#include "../landrun/ConfinedCommand.hpp"
+#include "../landrun/LandrunPolicyCompiler.hpp"
+#include "../landrun/LandrunSettings.hpp"
+#include "../workspace/SessionWorkspace.hpp"
 #include <array>
 #include <cctype>
 #include <charconv>
@@ -28,26 +32,40 @@ struct CommandResult {
 };
 
 CommandResult exec_cmd(
+    const std::filesystem::path &root,
     const std::string &cmd,
     std::size_t max_output = std::numeric_limits<std::size_t>::max()) {
   std::array<char, 128> buffer;
   CommandResult result;
+  const auto append = [&](std::string_view chunk) {
+    for (const unsigned char byte : chunk) {
+      result.fingerprint ^= byte;
+      result.fingerprint *= 1099511628211ULL;
+    }
+    const std::size_t remaining = max_output - std::min(max_output, result.output.size());
+    const std::size_t kept = std::min(chunk.size(), remaining);
+    result.output.append(chunk.data(), kept);
+    result.truncated = result.truncated || kept != chunk.size();
+  };
   // Redirect stderr to /dev/null
   std::string full_cmd = cmd + " 2>/dev/null";
+  const auto mode = core::landrun::LandrunSettings::instance().mode();
+  if (core::landrun::landrun_enabled(mode)) {
+    if (root.empty()) return result;
+    const core::workspace::SessionWorkspace workspace{
+        core::workspace::WorkspaceSnapshot{.primary = root, .enforce = true}};
+    const auto policy = core::landrun::LandrunPolicyCompiler::compile(workspace, mode);
+    const auto confined = core::landrun::run_confined_command(policy, full_cmd, append);
+    result.exit_code = confined.exit_code;
+    return result;
+  }
   std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(full_cmd.c_str(), "r"),
                                             pclose);
   if (!pipe)
     return result;
   while (const auto count = std::fread(
              buffer.data(), sizeof(char), buffer.size(), pipe.get())) {
-    for (std::size_t i = 0; i < count; ++i) {
-      result.fingerprint ^= static_cast<unsigned char>(buffer[i]);
-      result.fingerprint *= 1099511628211ULL;
-    }
-    const std::size_t remaining = max_output - std::min(max_output, result.output.size());
-    const std::size_t kept = std::min(count, remaining);
-    result.output.append(buffer.data(), kept);
-    result.truncated = result.truncated || kept != count;
+    append(std::string_view(buffer.data(), count));
   }
 
   const int status = pclose(pipe.release());
@@ -79,7 +97,7 @@ std::string git_command(const std::filesystem::path &root_dir,
 
 std::string capture_git(const std::filesystem::path &root_dir,
                         std::string_view args) {
-  const auto result = exec_cmd(git_command(root_dir, args));
+  const auto result = exec_cmd(root_dir, git_command(root_dir, args));
   return result.exit_code == 0 ? result.output : std::string{};
 }
 
@@ -180,7 +198,7 @@ std::optional<std::vector<bool>> GitProvider::ignored_paths(
 
   const auto command = git_command(root_dir_, "check-ignore --stdin -z")
       + " < " + shell_single_quote(temp->path());
-  const auto checked = exec_cmd(command);
+  const auto checked = exec_cmd(root_dir_, command);
   // check-ignore returns 1 when none of the supplied paths are ignored.
   if (checked.exit_code != 0 && checked.exit_code != 1) return std::nullopt;
 
@@ -205,7 +223,7 @@ std::string GitProvider::get_status_summary() const {
   // --short: Concise output
   // --no-optional-locks: Avoid taking locks
   constexpr std::size_t kMaxStatusChars = 12 * 1024;
-  const auto captured = exec_cmd(git_command(
+  const auto captured = exec_cmd(root_dir_, git_command(
       root_dir_,
       "--no-optional-locks status --porcelain=v1 --branch --no-ahead-behind "
       "--untracked-files=normal"),
@@ -272,13 +290,13 @@ std::vector<BranchRef> GitProvider::list_branch_refs() const {
 
 std::optional<RepositorySnapshot> GitProvider::repository_snapshot() const {
   const auto revision =
-      exec_cmd(git_command(root_dir_, "rev-parse --verify HEAD"), 256);
+      exec_cmd(root_dir_, git_command(root_dir_, "rev-parse --verify HEAD"), 256);
   if (revision.exit_code != 0) {
     return std::nullopt;
   }
-  const auto branch = exec_cmd(
+  const auto branch = exec_cmd(root_dir_,
       git_command(root_dir_, "symbolic-ref --quiet --short HEAD"), 512);
-  const auto status = exec_cmd(
+  const auto status = exec_cmd(root_dir_,
       git_command(root_dir_, "--no-optional-locks status --porcelain=v1 -z "
                              "--untracked-files=normal"),
       1024 * 1024);
@@ -341,13 +359,13 @@ std::optional<std::string> GitProvider::review_patch() const {
   constexpr std::size_t limit = 64 * 1024;
   // Disable repo-configured diff helpers and textconv: gathering evidence
   // must not execute code from the repository.
-  auto patch = exec_cmd(git_command(root_dir_,
+  auto patch = exec_cmd(root_dir_, git_command(root_dir_,
       "--no-pager diff --no-ext-diff --no-textconv --no-color HEAD --"), limit);
   if (patch.exit_code != 0) {
     // An unborn repository has no HEAD but can already have staged files.
-    patch = exec_cmd(git_command(root_dir_,
+    patch = exec_cmd(root_dir_, git_command(root_dir_,
         "--no-pager diff --no-ext-diff --no-textconv --no-color --cached --"), limit);
-    auto unstaged = exec_cmd(git_command(root_dir_,
+    auto unstaged = exec_cmd(root_dir_, git_command(root_dir_,
         "--no-pager diff --no-ext-diff --no-textconv --no-color --"), limit);
     if (patch.exit_code != 0 || unstaged.exit_code != 0)
       return std::nullopt;

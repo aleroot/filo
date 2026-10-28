@@ -132,7 +132,15 @@ McpSessionBackedTool::McpSessionBackedTool(std::shared_ptr<IMcpClientSession> se
                                            core::tools::ToolDefinition def)
     : session_(std::move(session))
     , server_name_(std::move(server_name))
-    , def_(std::move(def)) {}
+    , def_(std::move(def)) {
+    // A remote MCP server authorizes its own destination; a local stdio server
+    // runs a process tree Filo does not confine, so it cannot be constrained
+    // and must not pretend otherwise.
+    def_.network_mediation =
+        (session_ && session_->network_endpoint())
+            ? core::tools::NetworkMediation::mediated
+            : core::tools::NetworkMediation::unmediated;
+}
 
 std::string McpSessionBackedTool::make_error(std::string_view message) const {
     return std::format(

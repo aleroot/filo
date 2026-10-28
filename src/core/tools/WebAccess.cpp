@@ -56,6 +56,9 @@ WebAccess::WebAccess(std::vector<std::shared_ptr<IWebSearchBackend>> search_back
 std::expected<SearchResponse, std::string>
 WebAccess::search(const SearchRequest& request,
                   const ToolInvocationContext& context) const {
+    if (context.policy) {
+        return std::unexpected("Network policy: web search backend enforcement is not available.");
+    }
     for (const auto& backend : search_backends_) {
         if (!backend || !backend->supports(context)) continue;
         return backend->search(request, context);
@@ -75,6 +78,7 @@ WebAccess::fetch(const FetchRequest& request,
     for (const auto& backend : fetch_backends_) {
         if (!backend || !backend->supports(context)) continue;
         if (request.preserve_bytes && !backend->preserves_bytes()) continue;
+        if (context.policy && !backend->enforces_network_policy()) continue;
         return backend->fetch(request, context);
     }
     return std::unexpected("No URL fetch backend is available.");

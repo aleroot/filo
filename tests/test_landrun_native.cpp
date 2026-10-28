@@ -1,16 +1,20 @@
 #include "core/landrun/LandrunDriverFactory.hpp"
+#include "core/landrun/ConfinedCommand.hpp"
 #include "core/landrun/LandrunHelper.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
 #include "core/landrun/LandrunReadiness.hpp"
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/tools/shell/PosixShellExecutor.hpp"
+#include "core/scm/GitProvider.hpp"
+#include "core/review/Git.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <iostream>
 #include <spawn.h>
@@ -19,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <unistd.h>
 
 extern char** environ;
@@ -350,6 +355,102 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(base, ec);
         return 26;
     }
+    // Compare real Git results with and without confinement. This also checks
+    // that the helper launched from GitProvider can dispatch from this test
+    // executable and that binary status records retain their fingerprint.
+    if (std::filesystem::exists(source_root / ".git", ec) && !ec) {
+        const auto baseline = core::scm::GitProvider(source_root).repository_snapshot();
+        if (!baseline) {
+            std::cerr << "could not obtain baseline Git snapshot\n";
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const pid_t git_child = ::fork();
+        if (git_child == 0) {
+            core::landrun::LandrunSettings::instance().configure_startup({
+                .mode = core::landrun::LandrunMode::workspace_write});
+            const auto confined = core::scm::GitProvider(source_root).repository_snapshot();
+            const auto revision = core::review::GitClient(source_root).rev_parse("HEAD");
+            ::_exit(confined && revision && confined->revision == baseline->revision
+                    && *revision == baseline->revision
+                    && confined->status_fingerprint == baseline->status_fingerprint ? 0 : 1);
+        }
+        int git_status = 0;
+        if (git_child < 0 || ::waitpid(git_child, &git_status, 0) != git_child
+            || !WIFEXITED(git_status) || WEXITSTATUS(git_status) != 0) {
+            std::cerr << "confined Git snapshot did not match baseline\n";
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+    }
+    {
+        // Git status may execute a repository-configured fsmonitor helper. A
+        // real listener proves that the helper runs but cannot connect when
+        // GitProvider is launched through Landrun.
+        const auto repository = base / "git-network-fixture";
+        std::filesystem::create_directories(repository, ec);
+        if (ec) return 26;
+        const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in endpoint{};
+        endpoint.sin_family = AF_INET;
+        endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t endpoint_size = sizeof(endpoint);
+        if (listener < 0 || ::bind(listener, reinterpret_cast<sockaddr*>(&endpoint), sizeof(endpoint)) != 0
+            || ::listen(listener, 4) != 0
+            || ::getsockname(listener, reinterpret_cast<sockaddr*>(&endpoint), &endpoint_size) != 0) {
+            if (listener >= 0) ::close(listener);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const auto marker = repository / "hook-ran";
+        const auto hook = repository / "fsmonitor-hook";
+        {
+            std::ofstream tracked(repository / "tracked");
+            tracked << "test\n";
+            std::ofstream script(hook);
+            script << "#!/bin/sh\nprintf invoked > " << shell_quote(marker.string())
+                   << "\ncurl -s --max-time 1 http://127.0.0.1:"
+                   << ntohs(endpoint.sin_port)
+                   << "/ >/dev/null 2>&1\nprintf 'token\\000'\n";
+        }
+        std::filesystem::permissions(hook, std::filesystem::perms::owner_all, ec);
+        const std::string git = "git -C " + shell_quote(repository.string());
+        if (ec || ::system((git + " init -q").c_str()) != 0
+            || ::system((git + " -c core.fsmonitor=false add tracked").c_str()) != 0
+            || ::system((git + " config core.fsmonitor " + shell_quote(hook.string())).c_str()) != 0) {
+            ::close(listener);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        (void)core::scm::GitProvider(repository).get_status_summary();
+        pollfd incoming{.fd = listener, .events = POLLIN, .revents = 0};
+        const bool baseline_connected = ::poll(&incoming, 1, 0) == 1;
+        while (::poll(&incoming, 1, 0) == 1) {
+            const int connection = ::accept(listener, nullptr, nullptr);
+            if (connection < 0) break;
+            ::close(connection);
+        }
+        const bool baseline_ran = std::filesystem::exists(marker, ec);
+        std::filesystem::remove(marker, ec);
+        const pid_t git_child = ::fork();
+        if (git_child == 0) {
+            core::landrun::LandrunSettings::instance().configure_startup({
+                .mode = core::landrun::LandrunMode::workspace_write});
+            const auto status = core::scm::GitProvider(repository).get_status_summary();
+            ::_exit(!status.empty() && std::filesystem::exists(marker) ? 0 : 1);
+        }
+        int git_status = 0;
+        const bool child_ok = git_child > 0 && ::waitpid(git_child, &git_status, 0) == git_child
+            && WIFEXITED(git_status) && WEXITSTATUS(git_status) == 0;
+        incoming.revents = 0;
+        const bool sandbox_connected = ::poll(&incoming, 1, 0) != 0;
+        ::close(listener);
+        if (!baseline_connected || !baseline_ran || !child_ok || sandbox_connected) {
+            std::cerr << "Git fsmonitor network confinement failed\n";
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+    }
     const auto shell_denied_file = source_root
         / (".filo-native-denied-" + std::to_string(::getpid()));
     int shell_denied_fd = ::open(
@@ -373,6 +474,74 @@ int main(int argc, char** argv) {
         std::filesystem::remove(shell_denied_file, ec);
         std::filesystem::remove_all(base, ec);
         return 26;
+    }
+    {
+        std::string bytes;
+        const auto result = core::landrun::run_confined_command(
+            shell_policy, "printf 'a\\000b'; exit 7",
+            [&](std::string_view chunk) { bytes.append(chunk); });
+        if (result.exit_code != 7 || bytes != std::string("a\0b", 3)) {
+            std::cerr << "confined command did not preserve output or exit status: "
+                      << result.error << '\n';
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const auto timeout = core::landrun::run_confined_command(
+            shell_policy, "sleep 5", [](std::string_view) {}, std::chrono::milliseconds(100));
+        if (!timeout.timed_out) {
+            std::cerr << "confined command timeout was not enforced\n";
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in endpoint{};
+        endpoint.sin_family = AF_INET;
+        endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        endpoint.sin_port = 0;
+        socklen_t endpoint_size = sizeof(endpoint);
+        if (listener < 0 || ::bind(listener, reinterpret_cast<sockaddr*>(&endpoint), sizeof(endpoint)) != 0
+            || ::listen(listener, 2) != 0
+            || ::getsockname(listener, reinterpret_cast<sockaddr*>(&endpoint), &endpoint_size) != 0) {
+            if (listener >= 0) ::close(listener);
+            std::cerr << "could not start local network boundary fixture\n";
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const int baseline = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (baseline < 0 || ::connect(baseline, reinterpret_cast<sockaddr*>(&endpoint), endpoint_size) != 0) {
+            if (baseline >= 0) ::close(baseline);
+            ::close(listener);
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        const int accepted = ::accept(listener, nullptr, nullptr);
+        ::close(baseline);
+        if (accepted < 0) {
+            ::close(listener);
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
+        ::close(accepted);
+        const auto python_ok = core::landrun::run_confined_command(
+            shell_policy, "python3 -c 'pass'", [](std::string_view) {});
+        const std::string probe = "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", "
+            + std::to_string(ntohs(endpoint.sin_port)) + "), timeout=2)'";
+        const auto denied = core::landrun::run_confined_command(
+            shell_policy, probe, [](std::string_view) {});
+        pollfd incoming{.fd = listener, .events = POLLIN, .revents = 0};
+        const int pending = ::poll(&incoming, 1, 0);
+        ::close(listener);
+        if (python_ok.exit_code != 0 || denied.exit_code == 0 || denied.timed_out || pending != 0) {
+            std::cerr << "confined command network boundary failed\n";
+            std::filesystem::remove(shell_denied_file, ec);
+            std::filesystem::remove_all(base, ec);
+            return 26;
+        }
     }
     shell.configure_landrun(std::move(shell_policy));
     const auto global_tmp_file = std::filesystem::path("/tmp")

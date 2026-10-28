@@ -1,6 +1,10 @@
 #include "Git.hpp"
 
+#include "../landrun/ConfinedCommand.hpp"
+#include "../landrun/LandrunPolicyCompiler.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include "../utils/StringUtils.hpp"
+#include "../workspace/SessionWorkspace.hpp"
 
 #include <array>
 #include <cstdio>
@@ -53,7 +57,8 @@ int normalize_pipe_exit_status(int status) {
 #endif
 }
 
-bool run_command_capture(std::string_view command,
+bool run_command_capture(const std::filesystem::path& repository,
+                         std::string_view command,
                          std::string& output,
                          std::string& error,
                          int* exit_code = nullptr) {
@@ -61,6 +66,27 @@ bool run_command_capture(std::string_view command,
     error.clear();
 
     const std::string command_str(command);
+    const auto mode = core::landrun::LandrunSettings::instance().mode();
+    if (core::landrun::landrun_enabled(mode)) {
+        if (repository.empty()) {
+            error = "cannot confine Git without a repository root";
+            if (exit_code) *exit_code = -1;
+            return false;
+        }
+        const core::workspace::SessionWorkspace workspace{
+            core::workspace::WorkspaceSnapshot{.primary = repository, .enforce = true}};
+        const auto policy = core::landrun::LandrunPolicyCompiler::compile(workspace, mode);
+        const auto result = core::landrun::run_confined_command(
+            policy, command, [&](std::string_view chunk) { output.append(chunk); });
+        if (exit_code) *exit_code = result.exit_code;
+        if (result.exit_code != 0) {
+            error = result.error.empty()
+                ? std::format("confined Git exited with status {}", result.exit_code)
+                : result.error;
+            return false;
+        }
+        return true;
+    }
     FILE* pipe = open_pipe_read(command_str.c_str());
     if (!pipe) {
         error = std::format("could not execute `{}`", command_str);
@@ -123,7 +149,7 @@ std::optional<std::string> run_git_stdout(const std::filesystem::path& repositor
     std::string error;
     int exit_code = 0;
     const std::string command = git_command(repository, args);
-    if (!run_command_capture(command, output, error, &exit_code)) {
+    if (!run_command_capture(repository, command, output, error, &exit_code)) {
         if (error_detail) {
             const std::string detail = trim_ascii_copy(output);
             *error_detail = detail.empty() ? error : detail;
@@ -141,7 +167,7 @@ std::optional<std::string> run_git_stdout_allow_exit(const std::filesystem::path
     std::string error;
     int exit_code = 0;
     const std::string command = git_command(repository, args);
-    if (run_command_capture(command, output, error, &exit_code)
+    if (run_command_capture(repository, command, output, error, &exit_code)
         || exit_code == allowed_exit_code) {
         return trim_ascii_copy(output);
     }

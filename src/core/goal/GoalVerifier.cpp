@@ -1,4 +1,5 @@
 #include "GoalVerifier.hpp"
+#include "../landrun/LandrunSettings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -258,6 +259,14 @@ Verdict GoalVerifier::verify(const Node &node,
 CommandRunner make_popen_command_runner() {
     return [](std::string_view command) -> CommandResult {
         CommandResult result;
+        // This legacy runner executes through popen outside Landrun. Never let
+        // a sandboxed goal silently escape its child-process network boundary.
+        // Structured verification recipes already run via the sandboxed shell.
+        if (core::landrun::LandrunSettings::instance().enabled()) {
+            result.exit_code = 126;
+            result.output = "Legacy goal shell checks are unavailable in sandbox mode; use a verification recipe.";
+            return result;
+        }
         std::string shell_command;
 #if !defined(_WIN32)
         if (!timeout_binary().empty()) {

@@ -70,6 +70,8 @@ public:
 
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual bool supports(const ToolInvocationContext& context) const = 0;
+    // Only backends that enforce the policy at every actual request may opt in.
+    [[nodiscard]] virtual bool enforces_network_policy() const noexcept { return false; }
     [[nodiscard]] virtual std::expected<FetchResponse, std::string>
     fetch(const FetchRequest& request, const ToolInvocationContext& context) const = 0;
 };

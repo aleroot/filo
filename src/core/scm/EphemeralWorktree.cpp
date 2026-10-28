@@ -1,4 +1,5 @@
 #include "EphemeralWorktree.hpp"
+#include "../landrun/LandrunSettings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -152,6 +153,11 @@ EphemeralWorktree::~EphemeralWorktree() { release(); }
 std::optional<EphemeralWorktree>
 EphemeralWorktree::create(const std::filesystem::path &repository_root,
                           std::string_view label) {
+  // Worktree creation can run repository-defined checkout filters and hooks.
+  // This implementation launches Git on the host, outside Landrun, so it must
+  // not run while the user has requested process confinement.
+  if (core::landrun::LandrunSettings::instance().enabled())
+    return std::nullopt;
   std::error_code ec;
   if (repository_root.empty() ||
       !std::filesystem::is_directory(repository_root, ec))

@@ -1,12 +1,16 @@
 #include "McpClientSession.hpp"
 #include "McpOAuth.hpp"
 #include "../landrun/LandrunSettings.hpp"
+#include "../policy/PolicySnapshot.hpp"
+#include "../net/EgressScope.hpp"
 #include "core/net/NetworkTraffic.hpp"
 #include "core/version/Version.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <cpr/cpr.h>
+
+#include <memory>
 
 // POSIX
 #include <unistd.h>
@@ -1214,6 +1218,26 @@ std::string StdioMcpSession::get_prompt(const std::string& prompt_name,
 // HttpMcpSession
 // ===========================================================================
 
+namespace {
+
+// The policy that governs one remote MCP server's traffic.
+//
+// A remote server is a trust boundary of its own: Filo can constrain the
+// connection to it, but not what the server does with what it receives. The
+// server the user configured is implicitly allowed for an ask default.
+[[nodiscard]] core::policy::Subject server_subject(const std::string& server) {
+    return core::policy::Subject{.kind = core::policy::PrincipalKind::mcp_server, .id = server};
+}
+
+[[nodiscard]] core::policy::Action server_action() {
+    // The exchange is bidirectional: the client sends the call and the server
+    // answers. The grant shown to the user says so.
+    return core::policy::Action{.operation = core::policy::OperationKind::invoke,
+                                .flow = core::policy::DataFlow::bidirectional};
+}
+
+} // namespace
+
 HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config,
                                McpSamplingCallback sampling_callback,
                                std::chrono::milliseconds request_timeout,
@@ -1227,6 +1251,9 @@ HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config,
     , sampling_callback_(std::move(sampling_callback)) {
     if (url_.empty()) {
         throw std::runtime_error("MCP HTTP session: 'url' is empty");
+    }
+    if (const auto destination = core::net::parse_http_destination(url_); destination.valid) {
+        endpoint_ = core::policy::Resource{.host = destination.host, .port = destination.port};
     }
 
     // When auth_ owns Authorization, keep only non-Authorization extras here.
@@ -1274,8 +1301,13 @@ cpr::Header HttpMcpSession::build_request_headers(bool include_protocol_header) 
 }
 
 HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json_once(
+    core::net::EgressScope& scope,
     const std::string& body,
     bool include_protocol_header) {
+    // The server is decided before its headers are built, so a refused server
+    // never sends its refresh token anywhere.
+    if (const auto refusal = scope.authorize(url_))
+        throw std::runtime_error("MCP HTTP: " + *refusal);
     cpr::Header headers = build_request_headers(include_protocol_header);
 
     // Clamp to int32 for cpr; request_timeout_ is already non-negative.
@@ -1285,12 +1317,27 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json_once(
               static_cast<std::int64_t>(std::numeric_limits<int32_t>::max())))
         : static_cast<int32_t>(kDefaultMcpHttpTimeout.count());
 
-    cpr::Response r = cpr::Post(
-        cpr::Url{url_},
-        headers,
-        cpr::Body{body},
-        cpr::Timeout{timeout_ms}
-    );
+    cpr::Response r;
+    if (scope.enforcing()) {
+        // The decision has to reach the socket. A raw Post would connect to
+        // whatever the name resolved to, including a metadata address, and
+        // would honour an ambient proxy the user did not approve.
+        cpr::Session session;
+        session.SetUrl(cpr::Url{url_});
+        session.SetHeader(headers);
+        session.SetBody(cpr::Body{body});
+        session.SetRedirect(cpr::Redirect{false});
+        session.SetTimeout(cpr::Timeout{timeout_ms});
+        if (const auto refusal = scope.admit(session))
+            throw std::runtime_error("MCP HTTP: " + *refusal);
+        r = session.Post();
+    } else {
+        r = cpr::Post(
+            cpr::Url{url_},
+            headers,
+            cpr::Body{body},
+            cpr::Timeout{timeout_ms});
+    }
     const bool request_observed =
         r.error.code == cpr::ErrorCode::OK || r.status_code != 0 || !r.text.empty();
     core::net::NetworkTrafficStats::get_instance().record({
@@ -1312,12 +1359,16 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json_once(
 
 HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& body,
                                                            bool include_protocol_header) {
-    auto response = post_json_once(body, include_protocol_header);
+    // The scope covers the whole exchange, the sign-in renewal that a 401
+    // triggers included.
+    core::net::EgressScope scope(core::policy::active_policy(),
+                                 server_subject(server_name_), server_action(), url_);
+    auto response = post_json_once(scope, body, include_protocol_header);
 
     // Mid-session OAuth recovery: one forced refresh + single retry on 401.
     if (response.status_code == 401 && auth_ && auth_->can_refresh()) {
         if (auth_->refresh_after_unauthorized()) {
-            response = post_json_once(body, include_protocol_header);
+            response = post_json_once(scope, body, include_protocol_header);
         }
     }
 
@@ -1435,11 +1486,25 @@ void HttpMcpSession::shutdown() noexcept {
     if (session_id_.empty()) return;
 
     try {
+        core::net::EgressScope scope(core::policy::active_policy(),
+                                     server_subject(server_name_), server_action(), url_);
         cpr::Header headers = build_request_headers(/*include_protocol_header=*/true);
-        [[maybe_unused]] const auto response = cpr::Delete(
-            cpr::Url{url_},
-            headers,
-            cpr::Timeout{static_cast<int32_t>(request_timeout_.count())});
+        const auto timeout = cpr::Timeout{static_cast<int32_t>(request_timeout_.count())};
+        if (scope.enforcing()) {
+            cpr::Session session;
+            session.SetUrl(cpr::Url{url_});
+            session.SetHeader(headers);
+            session.SetTimeout(timeout);
+            session.SetRedirect(cpr::Redirect{false});
+            if (!scope.admit(session)) {
+                [[maybe_unused]] const auto response = session.Delete();
+            }
+        } else {
+            [[maybe_unused]] const auto response = cpr::Delete(
+                cpr::Url{url_},
+                headers,
+                timeout);
+        }
     } catch (...) {}
 
     session_id_.clear();

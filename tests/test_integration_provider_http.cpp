@@ -17,6 +17,7 @@
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ToolCallAssembly.hpp"
 #include "core/llm/transport/CurlWebSocketTransport.hpp"
+#include "core/llm/transport/ProviderEgress.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
@@ -26,6 +27,9 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/net/EgressScope.hpp"
+#include "core/policy/PolicyRules.hpp"
+#include "core/policy/PolicySnapshot.hpp"
 #include "core/utils/Gzip.hpp"
 
 #include <atomic>
@@ -446,6 +450,380 @@ TEST_CASE("Qwen Token Plan stops HTTP retries when the weekly quota is exhausted
     CHECK_THAT(error, Catch::Matchers::ContainsSubstring("09-09 09:25:00 UTC"));
     CHECK(provider->get_last_rate_limit_info().unified_overage_status == "rejected");
     CHECK(provider->get_last_rate_limit_info().subscription_ends_at == 0);
+}
+
+TEST_CASE("a provider endpoint is authorized before the conversation leaves the process",
+          "[integration][provider][policy]") {
+    httplib::Server server;
+    std::atomic<int> hits{0};
+    server.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++hits;
+        const std::string body =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n";
+        response.set_chunked_content_provider("text/event-stream",
+            [body](std::size_t offset, httplib::DataSink& sink) {
+                const auto size = std::min(std::size_t{13}, body.size() - offset);
+                if (!sink.write(body.data() + offset, size)) return false;
+                if (offset + size == body.size()) sink.done();
+                return true;
+            });
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    const auto base_url = std::format("http://127.0.0.1:{}/v1", port);
+    ChatRequest request;
+    request.model = "test-model";
+    request.stream = true;
+    request.messages = {Message{.role = "user", .content = "Hello."}};
+
+    // An explicit deny of the endpoint refuses the request before it is
+    // sent: the provider receives nothing at all. A destination the user
+    // configured does not override a matching rule.
+    core::policy::PolicyRule deny;
+    deny.id = "deny-provider";
+    deny.effect = core::policy::Effect::deny;
+    deny.principal = core::policy::PrincipalKind::model_provider;
+    deny.host = core::policy::HostPattern::parse("127.0.0.1").value();
+    deny.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
+    auto denied_policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({deny}, core::policy::Effect::ask),
+        std::make_shared<core::policy::GrantStore>());
+    core::policy::ScopedActivePolicyForTesting installed(denied_policy);
+    auto denied = std::make_shared<HttpLLMProvider>(
+        base_url,
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "policy-test");
+    std::string error_text;
+    denied->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error_text += chunk.content;
+    });
+    CHECK_THAT(error_text, Catch::Matchers::ContainsSubstring("Network policy"));
+    CHECK(hits == 0);
+
+    // A policy that names the endpoint lets the request through.
+    core::policy::PolicyRule allow;
+    allow.id = "allow-provider";
+    allow.effect = core::policy::Effect::allow;
+    allow.principal = core::policy::PrincipalKind::model_provider;
+    allow.principal_id = "policy-test";
+    allow.host = core::policy::HostPattern::parse("127.0.0.1").value();
+    allow.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
+    auto allowed_policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({allow}, core::policy::Effect::deny),
+        std::make_shared<core::policy::GrantStore>());
+    core::policy::ScopedActivePolicyForTesting allow_installed(allowed_policy);
+    auto allowed = std::make_shared<HttpLLMProvider>(
+        base_url,
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "policy-test");
+    std::string answer;
+    std::string allowed_error;
+    allowed->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) allowed_error += chunk.content;
+        answer += chunk.content;
+    });
+    CHECK(allowed_error == "");
+    CHECK(answer == "Done.");
+    CHECK(hits == 1);
+
+    // The provider's own endpoint replaces a default of ask. Nothing is
+    // asked, and a headless session has no channel that could ask.
+    auto configured_policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({}, core::policy::Effect::ask),
+        std::make_shared<core::policy::GrantStore>());
+    core::policy::ScopedActivePolicyForTesting configured_installed(configured_policy);
+    auto configured = std::make_shared<HttpLLMProvider>(
+        base_url,
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "policy-test");
+    std::string configured_error;
+    configured->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) configured_error += chunk.content;
+    });
+    CHECK(configured_error == "");
+    CHECK(hits == 2);
+}
+
+TEST_CASE("a protected provider request does not follow a redirect", "[integration][provider][policy]") {
+    httplib::Server approved;
+    httplib::Server other;
+    std::atomic<int> approved_hits{0};
+    std::atomic<int> other_hits{0};
+    const int other_port = other.bind_to_any_port("127.0.0.1");
+    const int approved_port = approved.bind_to_any_port("127.0.0.1");
+    if (approved_port <= 0 || other_port <= 0)
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    approved.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++approved_hits;
+        response.status = 307;
+        response.set_header("Location", std::format("http://127.0.0.1:{}/v1/chat/completions", other_port));
+        response.set_content("STAYED-ON-APPROVED-HOST", "text/plain");
+    });
+    other.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++other_hits;
+        response.set_content("MOVED-TO-OTHER-HOST", "text/plain");
+    });
+    std::jthread approved_thread([&] { approved.listen_after_bind(); });
+    std::jthread other_thread([&] { other.listen_after_bind(); });
+    ScopedServerStop stop_approved(approved);
+    ScopedServerStop stop_other(other);
+    wait_until_running(approved);
+    wait_until_running(other);
+
+    auto policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({}, core::policy::Effect::ask),
+        std::make_shared<core::policy::GrantStore>());
+    core::policy::ScopedActivePolicyForTesting installed(policy);
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", approved_port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "policy-test");
+    ChatRequest request;
+    request.model = "test-model";
+    request.stream = true;
+    request.messages = {Message{.role = "user", .content = "Hello."}};
+    std::string error;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error += chunk.content;
+    });
+    CHECK(approved_hits == 1);
+    CHECK(other_hits == 0);
+    CHECK_THAT(error, Catch::Matchers::ContainsSubstring("STAYED-ON-APPROVED-HOST"));
+    CHECK_THAT(error, !Catch::Matchers::ContainsSubstring("MOVED-TO-OTHER-HOST"));
+}
+
+TEST_CASE("a provider's preparation requests are authorized and bound before they leave",
+          "[integration][provider][policy]") {
+    // Kimi uploads a local video while the request is prepared, before the
+    // conversation is sent. That upload is the provider's traffic too.
+    const auto dir = make_temp_dir("filo_policy_preparation");
+    const auto video = dir / "clip.mp4";
+    {
+        std::ofstream out(video, std::ios::binary | std::ios::trunc);
+        out << "fake-video";
+    }
+    httplib::Server server;
+    httplib::Server elsewhere;
+    std::atomic<int> uploads{0};
+    std::atomic<int> completions{0};
+    std::atomic<int> moved{0};
+    std::atomic<bool> redirect_uploads{false};
+    const int elsewhere_port = elsewhere.bind_to_any_port("127.0.0.1");
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0 || elsewhere_port <= 0)
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    server.Post("/v1/files", [&](const auto&, auto& response) {
+        ++uploads;
+        if (redirect_uploads) {
+            response.status = 307;
+            response.set_header("Location",
+                                std::format("http://127.0.0.1:{}/v1/files", elsewhere_port));
+            return;
+        }
+        response.set_content(R"({"id":"file_policy_video"})", "application/json");
+    });
+    server.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++completions;
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n",
+            "text/event-stream");
+    });
+    elsewhere.Post("/v1/files", [&](const auto&, auto& response) {
+        ++moved;
+        response.set_content(R"({"id":"file_moved"})", "application/json");
+    });
+    std::jthread server_thread([&] { server.listen_after_bind(); });
+    std::jthread elsewhere_thread([&] { elsewhere.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    ScopedServerStop stop_elsewhere(elsewhere);
+    wait_until_running(server);
+    wait_until_running(elsewhere);
+
+    const auto make_provider = [&] {
+        return std::make_shared<HttpLLMProvider>(
+            std::format("http://127.0.0.1:{}/v1", port),
+            core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+            "test-model",
+            std::make_unique<KimiProtocol>(),
+            core::config::ApiType::Unknown,
+            "policy-test");
+    };
+    const auto send_video = [&](HttpLLMProvider& provider) {
+        ChatRequest request;
+        request.model = "test-model";
+        request.stream = true;
+        request.messages = {Message{
+            .role = "user",
+            .content = "Summarise this clip.",
+            .content_parts = {ContentPart::make_text("Summarise this clip."),
+                              ContentPart::make_video(video.string(), "video/mp4")},
+        }};
+        std::string error;
+        provider.stream_response(request, [&](const StreamChunk& chunk) {
+            if (chunk.is_error) error += chunk.content;
+        });
+        return error;
+    };
+
+    // An explicit deny of the endpoint is decided before preparation, so not
+    // even the upload is sent.
+    core::policy::PolicyRule deny;
+    deny.id = "deny-provider";
+    deny.effect = core::policy::Effect::deny;
+    deny.principal = core::policy::PrincipalKind::model_provider;
+    deny.host = core::policy::HostPattern::parse("127.0.0.1").value();
+    deny.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
+    {
+        core::policy::ScopedActivePolicyForTesting installed(
+            std::make_shared<core::policy::PolicySnapshot>(
+                core::policy::PolicySet({deny}, core::policy::Effect::ask),
+                std::make_shared<core::policy::GrantStore>()));
+        auto denied = make_provider();
+        CHECK_THAT(send_video(*denied), Catch::Matchers::ContainsSubstring("Network policy"));
+    }
+    CHECK(uploads == 0);
+    CHECK(completions == 0);
+
+    // The upload is bound like the request it prepares: a redirect cannot
+    // carry the file to a host the decision never named.
+    core::policy::ScopedActivePolicyForTesting installed(
+        std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}, core::policy::Effect::ask),
+            std::make_shared<core::policy::GrantStore>()));
+    auto configured = make_provider();
+    redirect_uploads = true;
+    CHECK_THAT(send_video(*configured), Catch::Matchers::ContainsSubstring("307"));
+    CHECK(uploads == 1);
+    CHECK(moved == 0);
+    CHECK(completions == 0);
+
+    // The configured endpoint replaces a default of ask: upload and request go.
+    redirect_uploads = false;
+    CHECK(send_video(*configured).empty());
+    CHECK(uploads == 2);
+    CHECK(completions == 1);
+}
+
+TEST_CASE("a configured localhost provider is reachable under a policy",
+          "[integration][provider][policy]") {
+    httplib::Server server;
+    std::atomic<int> hits{0};
+    server.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++hits;
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n",
+            "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    // `localhost` is not an IP literal, but it can only mean loopback. An
+    // ask default implicitly allows the endpoint the user configured.
+    core::policy::ScopedActivePolicyForTesting installed(
+        std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({}, core::policy::Effect::ask),
+            std::make_shared<core::policy::GrantStore>()));
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://localhost:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "local-model");
+    ChatRequest request;
+    request.model = "test-model";
+    request.stream = true;
+    request.messages = {Message{.role = "user", .content = "Hello."}};
+    std::string answer;
+    std::string error;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error += chunk.content;
+        else answer += chunk.content;
+    });
+    CHECK(error.empty());
+    CHECK(answer == "Done.");
+    CHECK(hits == 1);
+}
+
+TEST_CASE("a provider request that needs a decision is asked in the chat that sent it",
+          "[integration][provider][policy]") {
+    httplib::Server server;
+    std::atomic<int> hits{0};
+    server.Post("/v1/chat/completions", [&](const auto&, auto& response) {
+        ++hits;
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n",
+            "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    class RecordingChannel final : public core::policy::IApprovalChannel {
+    public:
+        std::string session_id;
+        int requests = 0;
+        core::policy::ApprovalOutcome request(const core::policy::ApprovalRequest& request) override {
+            ++requests;
+            session_id = request.origin.session_id;
+            return core::policy::ApprovalOutcome::approved_once;
+        }
+    };
+    auto channel = std::make_shared<RecordingChannel>();
+    core::policy::PolicyRule ask;
+    ask.id = "ask-provider";
+    ask.effect = core::policy::Effect::ask;
+    ask.principal = core::policy::PrincipalKind::model_provider;
+    core::policy::ScopedActivePolicyForTesting installed(
+        std::make_shared<core::policy::PolicySnapshot>(
+            core::policy::PolicySet({ask}, core::policy::Effect::deny),
+            std::make_shared<core::policy::GrantStore>(), channel));
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        "policy-test");
+    ChatRequest request;
+    request.model = "test-model";
+    request.stream = true;
+    request.session_id = "chat-b";
+    request.messages = {Message{.role = "user", .content = "Hello."}};
+    std::string error;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error += chunk.content;
+    });
+    CHECK(error.empty());
+    // Asked once, in the chat that sent the request, before anything left.
+    CHECK(channel->requests == 1);
+    CHECK(channel->session_id == "chat-b");
+    CHECK(hits == 1);
 }
 
 TEST_CASE("HttpLLMProvider preserves streamed non-2xx JSON error bodies",
@@ -869,7 +1247,14 @@ TEST_CASE("KimiProtocol uploads local videos as files and serializes ms referenc
 
     KimiProtocol protocol;
     const std::string base_url = std::format("http://127.0.0.1:{}/v1", port);
-    REQUIRE_NOTHROW(protocol.prepare_media_uploads(req, base_url, auth));
+    // The provider owns the transport: the protocol asks it to perform the
+    // upload, exactly as it does during a real request.
+    std::atomic_bool cancelled{false};
+    core::llm::transport::ProviderEgress egress("kimi", base_url, "", cancelled);
+    const auto requester = [&egress](const core::llm::protocols::ProtocolRequest& request) {
+        return egress.post(request);
+    };
+    REQUIRE_NOTHROW(protocol.prepare_media_uploads(req, base_url, auth, requester));
 
     REQUIRE(uploads.load() == 1);
     CHECK(authorization == "Bearer test-token");
@@ -890,7 +1275,7 @@ TEST_CASE("KimiProtocol uploads local videos as files and serializes ms referenc
             ContentPart::make_video(video.string(), "video/mp4"),
         },
     });
-    REQUIRE_NOTHROW(protocol.prepare_media_uploads(cached_req, base_url, auth));
+    REQUIRE_NOTHROW(protocol.prepare_media_uploads(cached_req, base_url, auth, requester));
     CHECK(uploads.load() == 1);
     CHECK(cached_req.messages[0].content_parts[0].url == "ms://file_kimi_video_123");
 }

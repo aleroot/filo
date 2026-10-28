@@ -398,11 +398,11 @@ constexpr std::size_t kVideoUploadCacheMaxEntries = 128;
     return {};
 }
 
-[[nodiscard]] std::string kimi_upload_error(const cpr::Response& response) {
+[[nodiscard]] std::string kimi_upload_error(const protocols::ProtocolResponse& response) {
     std::string message;
-    if (!response.text.empty()) {
+    if (!response.body.empty()) {
         simdjson::dom::parser parser;
-        simdjson::padded_string padded(response.text);
+        simdjson::padded_string padded(response.body);
         simdjson::dom::element doc;
         if (parser.parse(padded).get(doc) == simdjson::SUCCESS) {
             std::string_view value;
@@ -413,7 +413,7 @@ constexpr std::size_t kVideoUploadCacheMaxEntries = 128;
         }
     }
     if (message.empty()) {
-        message = response.text.empty() ? response.error.message : response.text;
+        message = response.body.empty() ? response.error : response.body;
     }
     return message.empty() ? std::format("HTTP {}", response.status_code) : message;
 }
@@ -1222,7 +1222,8 @@ void KimiProtocol::prepare_request(ChatRequest& request) {
 
 void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                                          std::string_view base_url,
-                                         const core::auth::AuthInfo& auth) {
+                                         const core::auth::AuthInfo& auth,
+                                         const ProtocolRequester& requester) {
     for (auto& msg : request.messages) {
         for (auto& part : msg.content_parts) {
             if (part.type != ContentPartType::Video || part.path.empty() || !part.url.empty()) {
@@ -1260,18 +1261,24 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                 continue;
             }
 
-            cpr::Header headers = multipart_headers(build_headers(auth));
-            cpr::Response response = cpr::Post(
-                cpr::Url{append_path(base_url, "/files")},
-                headers,
-                cpr::Timeout{kVideoUploadTimeoutMs},
-                cpr::Multipart{
+            // The provider performs the upload, so the request is decided
+            // like every other request this call makes.
+            if (!requester) {
+                throw std::runtime_error(
+                    "Kimi video upload needs the provider's transport");
+            }
+            const protocols::ProtocolResponse response = requester(protocols::ProtocolRequest{
+                .url = append_path(base_url, "/files"),
+                .headers = multipart_headers(build_headers(auth)),
+                .multipart = cpr::Multipart{
                     {"file", cpr::File{part.path}},
                     {"purpose", "video"},
-                });
+                },
+                .timeout = std::chrono::milliseconds{kVideoUploadTimeoutMs},
+            });
 
-            if (response.error) {
-                throw std::runtime_error("Kimi video upload failed: " + response.error.message);
+            if (!response.error.empty()) {
+                throw std::runtime_error("Kimi video upload failed: " + response.error);
             }
             if (response.status_code < 200 || response.status_code >= 300) {
                 throw std::runtime_error(std::format(
@@ -1280,7 +1287,7 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                     kimi_upload_error(response)));
             }
 
-            std::string file_id = parse_uploaded_file_id(response.text);
+            std::string file_id = parse_uploaded_file_id(response.body);
             if (file_id.empty()) {
                 throw std::runtime_error("Kimi video upload response did not include a file id.");
             }

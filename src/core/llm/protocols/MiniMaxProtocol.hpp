@@ -22,7 +22,8 @@ public:
     std::string serialize(const ChatRequest& req) const override;
     void prepare_context(ChatRequest& req, std::string_view base_url,
                          const core::auth::AuthInfo& auth,
-                         const std::function<bool()>& cancelled) override;
+                         const std::function<bool()>& cancelled,
+                         const ProtocolRequester& requester) override;
     cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
     void prepare_headers(cpr::Header& headers, const ChatRequest& request,
                          std::string_view base_url) override;

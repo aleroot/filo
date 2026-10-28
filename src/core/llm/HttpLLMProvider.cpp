@@ -4,6 +4,7 @@
 #include "protocols/ApiProtocol.hpp"
 #include "transport/CurlWebSocketTransport.hpp"
 #include "transport/HttpHeaderUtils.hpp"
+#include "transport/ProviderEgress.hpp"
 #include "../auth/OAuthErrors.hpp"
 #include "../logging/Logger.hpp"
 #include "../net/NetworkTraffic.hpp"
@@ -66,7 +67,8 @@ namespace {
         std::string_view base_url,
         const std::shared_ptr<core::auth::ICredentialSource>& cred_source,
         const protocols::ApiProtocolBase& protocol_template,
-        const std::atomic_bool& cancelled) {
+        const std::atomic_bool& cancelled,
+        const protocols::ProtocolRequester& requester) {
         PreparedHttpStreamRequest prepared;
         prepared.protocol = protocol_template.clone();
 
@@ -80,9 +82,9 @@ namespace {
         }
         req.auth_properties = auth.properties;
         prepared.protocol->prepare_request(req);
-        prepared.protocol->prepare_media_uploads(req, base_url, auth);
+        prepared.protocol->prepare_media_uploads(req, base_url, auth, requester);
         prepared.protocol->prepare_context(req, base_url, auth,
-            [&] { return cancelled.load(std::memory_order_acquire); });
+            [&] { return cancelled.load(std::memory_order_acquire); }, requester);
         prepared.model = req.model;
         // The WebSocket path serializes its own frame. Avoid holding a second
         // complete encoded history for an HTTP fallback that may never run.
@@ -581,6 +583,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         return;
     }
 
+    // Every request this call sends, the protocol's own included, goes out under the network policy when one is installed.
+    transport::ProviderEgress egress(provider_name_, base_url_, request.session_id, cancel_requested_);
+    if (const auto& refusal = egress.refusal()) {
+        callback(StreamChunk::make_error("\n[" + *refusal + "]"));
+        callback(StreamChunk::make_final());
+        return;
+    }
+
     PreparedHttpStreamRequest prepared;
     ChatRequest effective_request = request;
 
@@ -649,8 +659,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             return;
         }
 
+        // The provider owns the transport: a request a protocol needs is
+        // performed here, under the same decision as the chat request.
+        const protocols::ProtocolRequester requester =
+            [&egress](const protocols::ProtocolRequest& request) {
+                return egress.post(request);
+            };
         prepared = prepare_stream_request(
-            std::move(effective_request), effective_default_model, base_url_, cred_source_, *protocol_, cancel_requested_);
+            std::move(effective_request), effective_default_model, base_url_, cred_source_, *protocol_, cancel_requested_, requester);
         if (cancel_requested_.load(std::memory_order_acquire)) {
             callback(StreamChunk::make_final());
             return;
@@ -697,6 +713,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
      protocol  = std::move(prepared.protocol),
      request_metadata = std::move(prepared.request),
      auth = std::move(prepared.auth),
+     &egress,
      callback] () mutable {
 
         const auto abandon_websocket = [&] {
@@ -1102,6 +1119,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         && !cancel_requested->load(std::memory_order_acquire);
                 }));
 
+                if (const auto refusal = egress.admit(session)) {
+                    callback(StreamChunk::make_error("\n[" + *refusal + "]"));
+                    callback(StreamChunk::make_final());
+                    return;
+                }
                 cpr::Response r = session.Post();
                 // CPR's custom header callback can leave Response::header empty.
                 // Give protocol lifecycle/retry hooks the headers we collected.

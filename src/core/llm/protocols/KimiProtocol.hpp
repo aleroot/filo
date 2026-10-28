@@ -156,7 +156,8 @@ public:
 
     void prepare_media_uploads(ChatRequest& request,
                                std::string_view base_url,
-                               const core::auth::AuthInfo& auth) override;
+                               const core::auth::AuthInfo& auth,
+                               const ProtocolRequester& requester) override;
 
     /**
      * @brief Build HTTP headers, adding Kimi-specific X-Msh-* headers.

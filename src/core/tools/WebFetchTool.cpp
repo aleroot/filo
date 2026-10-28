@@ -67,6 +67,8 @@ ToolDefinition WebFetchTool::get_definition() const {
             .idempotent_hint = false,
             .open_world_hint = true,
         },
+        // The fetch backend authorizes every request, including redirects.
+        .network_mediation = NetworkMediation::mediated,
     };
 }
 

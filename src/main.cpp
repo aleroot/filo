@@ -21,6 +21,8 @@
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunStatus.hpp"
+#include "core/policy/PolicyFamily.hpp"
+#include "core/tools/ToolManager.hpp"
 #include "core/workspace/FileAccessScope.hpp"
 #include "core/version/Version.hpp"
 #include "tui/MainApp.hpp"
@@ -96,6 +98,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> trusted_tools;
     std::string startup_model;
     std::string sandbox_mode = "off";
+    std::vector<std::string> policy_options;
     std::optional<std::string> requested_sandbox_mode;
     bool sandbox_status = false;
     std::vector<std::filesystem::path> sandbox_excluded_paths;
@@ -195,6 +198,11 @@ int main(int argc, char** argv) {
         "otherwise off (default), read-only, or workspace-write.")
         ->expected(0, 1)
         ->check(CLI::IsMember(core::landrun::landrun_mode_names()));
+    app.add_option(
+        "--policy", policy_options,
+        "Enforce a policy, as <kind>=<argument>. network=ask asks before a "
+        "destination you did not configure; network=<file> loads a policy "
+        "file. The network policy requires --sandbox.");
     app.add_option(
         "--sandbox-exclude",
         sandbox_excluded_paths,
@@ -311,6 +319,44 @@ int main(int argc, char** argv) {
     if (!parsed_sandbox_mode.has_value()) {
         std::cerr << "Unsupported sandbox mode: " << sandbox_mode << '\n';
         return 2;
+    }
+
+    // The policies are composed here, before any tool can run, and installed
+    // one by one. A policy that cannot be loaded is a startup failure:
+    // continuing unprotected would claim a guarantee that does not exist.
+    std::vector<std::shared_ptr<const core::policy::IPolicy>> policies;
+    for (const auto& option_text : policy_options) {
+        auto option = core::policy::parse_policy_option(option_text);
+        if (!option) {
+            std::cerr << "Policy option could not be read: " << option.error() << '\n';
+            return 2;
+        }
+        const auto family = core::policy::find_policy_family(option->family);
+        if (!family) {
+            std::cerr << "Unknown policy '" << option->family << "'. Known policies:";
+            for (const auto& known : core::policy::policy_families())
+                std::cerr << ' ' << known->name();
+            std::cerr << '\n';
+            return 2;
+        }
+        if ((*family)->requires_sandbox()
+            && !core::landrun::landrun_enabled(*parsed_sandbox_mode)) {
+            std::cerr << "--policy " << option->family
+                      << " requires --sandbox read-only or --sandbox workspace-write.\n";
+            return 2;
+        }
+        auto policy = (*family)->create(option->argument);
+        if (!policy) {
+            std::cerr << "Policy '" << option->family << "' could not be configured: "
+                      << policy.error() << '\n';
+            return 2;
+        }
+        if (!(*policy)->install()) {
+            std::cerr << "Policy '" << option->family
+                      << "' could not be installed before tool execution.\n";
+            return 1;
+        }
+        policies.push_back(*policy);
     }
 
     auto& landrun_settings = core::landrun::LandrunSettings::instance();
@@ -657,6 +703,13 @@ int main(int argc, char** argv) {
     if (sandbox_status) {
         std::cout << core::landrun::landrun_status_label() << '\n'
                   << core::landrun::landrun_status_detail() << '\n';
+        if (!policies.empty()) {
+            for (const auto& policy : policies) {
+                std::cout << "policy: " << policy->describe() << '\n';
+            }
+        } else {
+            std::cout << "policy: off\n";
+        }
         return 0;
     }
 
@@ -743,6 +796,7 @@ int main(int argc, char** argv) {
         };
         run_opts.remote_mcp_server_enabled = mcp_tcp_mode;
         run_opts.steering_policy = startup_steering_policy;
+        run_opts.policies = std::move(policies);
         if (model_opt->count() > 0) {
             run_opts.startup_model = startup_model;
         }

@@ -64,6 +64,10 @@ std::string ShellTool::execute(
     const std::string& json_args,
     const ToolInvocationContext& invocation)
 {
+    if (invocation.policy
+        && !core::landrun::LandrunSettings::instance().enabled()) {
+        return R"({"error":"Network policy: shell execution requires an active OS sandbox."})";
+    }
     return execute_impl(
         json_args,
         invocation.session_context,

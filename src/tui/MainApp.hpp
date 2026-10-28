@@ -1,11 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "core/context/SteeringLoader.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
+#include "core/policy/PolicyFamily.hpp"
 
 namespace tui {
 
@@ -34,6 +36,9 @@ struct RunOptions {
     /// Drives the isolated remote-activity affordance; outbound MCP clients do
     /// not make it visible.
     bool remote_mcp_server_enabled = false;
+    /// The policies this session must obey. The interface attaches its
+    /// approval channel to them before the first turn.
+    std::vector<std::shared_ptr<const core::policy::IPolicy>> policies{};
 };
 
 struct RunResult {

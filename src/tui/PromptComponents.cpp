@@ -683,15 +683,16 @@ Element render_thread_tab(const ThreadTab& tab, bool animate, std::size_t tick) 
 
 } // namespace
 
-std::string format_workspace_status_label(std::string_view workspace_path,
-                                          bool sandbox_enabled) {
+std::string format_workspace_status_label(std::string_view workspace_path) {
     if (workspace_path.empty()) {
         return {};
     }
 
-    return sandbox_enabled
-        ? " 🔒 " + std::string(workspace_path) + " "
-        : " " + std::string(workspace_path) + " ";
+    return " " + std::string(workspace_path) + " ";
+}
+
+std::string format_security_status_label(bool sandbox_active, bool network_policy_active) {
+    return sandbox_active || network_policy_active ? " 🔒" : "";
 }
 
 std::string format_runtime_status_summary(std::string_view provider_name,

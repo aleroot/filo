@@ -85,6 +85,7 @@
  * @endcode
  */
 
+#include "ProtocolRequest.hpp"
 #include "../Models.hpp"
 #include "../PromptCacheProfile.hpp"
 #include "../ReasoningCapabilities.hpp"
@@ -550,17 +551,25 @@ public:
      * Called after auth resolution and `prepare_request()`, before
      * `serialize()`. Protocols may upload local files and mutate content parts
      * into provider-native URL references.
+     *
+     * A protocol that needs the endpoint to answer before the chat request
+     * asks @p requester to perform that request. It cannot open a socket
+     * itself, so an upload is decided by the provider like any other
+     * request. With no requester the protocol must fail, never fall back to a
+     * request of its own.
      */
     virtual void prepare_media_uploads([[maybe_unused]] ChatRequest& request,
                                        [[maybe_unused]] std::string_view base_url,
-                                       [[maybe_unused]] const core::auth::AuthInfo& auth) {}
+                                       [[maybe_unused]] const core::auth::AuthInfo& auth,
+                                       [[maybe_unused]] const ProtocolRequester& requester) {}
 
     /// Optional endpoint context admission/counting, after media preparation
     /// and before serialization. Network work must be bounded and cancellable.
     virtual void prepare_context([[maybe_unused]] ChatRequest& request,
                                  [[maybe_unused]] std::string_view base_url,
                                  [[maybe_unused]] const core::auth::AuthInfo& auth,
-                                 [[maybe_unused]] const std::function<bool()>& cancelled) {}
+                                 [[maybe_unused]] const std::function<bool()>& cancelled,
+                                 [[maybe_unused]] const ProtocolRequester& requester) {}
 
     /**
      * @brief Mutate HTTP headers after auth/protocol headers are built.

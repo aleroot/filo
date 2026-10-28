@@ -122,6 +122,9 @@ ToolDefinition WebSearchTool::get_definition() const {
             .idempotent_hint = false,
             .open_world_hint = true,
         },
+        // The search layer refuses to run while a policy is active, because
+        // no search backend authorizes its own requests.
+        .network_mediation = NetworkMediation::mediated,
         // Native search needs an active agent provider, which --mcp cannot supply.
         .agent_only = true,
     };

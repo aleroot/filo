@@ -7,6 +7,7 @@
 #include "ToolNames.hpp"
 #include "../context/SessionContext.hpp"
 #include "../landrun/LandrunSettings.hpp"
+#include "../policy/PolicySnapshot.hpp"
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -44,6 +45,21 @@ public:
     static ToolManager& get_instance() {
         static ToolManager instance;
         return instance;
+    }
+
+    /**
+     * The policy every tool that reaches the network must obey.
+     *
+     * It is the policy the process runs under, installed once at startup.
+     * A tool call that names a different policy is refused: one process has
+     * one policy, and two of them cannot be combined safely.
+     */
+    [[nodiscard]] std::shared_ptr<const core::policy::PolicySnapshot> policy_snapshot() const {
+        return core::policy::active_policy();
+    }
+
+    [[nodiscard]] bool policy_enabled() const {
+        return static_cast<bool>(policy_snapshot());
     }
 
     // Thread-safe: called from both the main (TUI) thread and the daemon thread

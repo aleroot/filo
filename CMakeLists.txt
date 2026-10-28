@@ -274,6 +274,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ProviderClientIdentity.cpp
     src/core/llm/ProviderCredentialStatus.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
+    src/core/llm/transport/ProviderEgress.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
     src/core/llm/protocols/ApiProtocol.cpp
     src/core/llm/protocols/ZaiProtocol.cpp
@@ -406,6 +407,7 @@ set(FILO_CORE_SOURCES
     src/core/code/InteractiveCodeRunner.cpp
     src/core/landrun/LandrunDriverFactory.cpp
     src/core/landrun/LandrunDescriptorSanitizer.cpp
+    src/core/landrun/ConfinedCommand.cpp
     src/core/landrun/LandrunEnvironment.cpp
     src/core/landrun/LandrunHelper.cpp
     src/core/landrun/LandrunLaunch.cpp
@@ -417,6 +419,14 @@ set(FILO_CORE_SOURCES
     src/core/landrun/linux/LinuxLandlockDriver.cpp
     src/core/landrun/linux/LinuxSeccompHardening.cpp
     src/core/landrun/macos/MacOSSeatbeltDriver.cpp
+    src/core/policy/ApprovalChannel.cpp
+    src/core/policy/PolicyRules.cpp
+    src/core/policy/PolicySnapshot.cpp
+    src/core/policy/PolicySource.cpp
+    src/core/policy/PolicyFamily.cpp
+    src/core/policy/NetworkPolicyFamily.cpp
+    src/core/net/NetworkAddress.cpp
+    src/core/net/EgressScope.cpp
     src/core/tools/SteeringEnforcement.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/shell/ShellSessions.cpp
@@ -868,6 +878,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_trust_flag_resolver.cpp
     tests/test_work_dir_layout.cpp
     tests/test_landrun.cpp
+    tests/test_network_policy.cpp
     tests/test_sleep_inhibitor.cpp
 )
 
@@ -951,6 +962,15 @@ set_tests_properties(landrun_native_confinement PROPERTIES
 )
 
 add_test(NAME filo_version COMMAND filo --version)
+if(UNIX)
+    find_program(FILO_TEST_PYTHON NAMES python3)
+    if(FILO_TEST_PYTHON)
+        add_test(NAME network_policy_cli_integration
+            COMMAND ${FILO_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_network_policy_cli.py $<TARGET_FILE:filo>)
+        set_tests_properties(network_policy_cli_integration PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 45 LABELS integration)
+    endif()
+endif()
 add_test(NAME filo_config_overlay_cli
     COMMAND ${CMAKE_COMMAND}
         -DFILO_EXECUTABLE=$<TARGET_FILE:filo>
