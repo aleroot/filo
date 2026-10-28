@@ -2845,13 +2845,17 @@ namespace {
 }
 
 [[nodiscard]] Element render_count_pair(std::size_t added, std::size_t deleted) {
-    return hbox({
-        ftxui::text(std::format("+{}", added))
-            | ftxui::color(ColorDiffAdd),
-        ftxui::text(" "),
-        ftxui::text(std::format("-{}", deleted))
-            | ftxui::color(ColorDiffDelete),
-    });
+    Elements counts;
+    if (added > 0) {
+        counts.push_back(ftxui::text(std::format("+{}", added))
+                         | ftxui::color(ColorDiffAdd));
+    }
+    if (deleted > 0) {
+        if (added > 0) counts.push_back(ftxui::text(" "));
+        counts.push_back(ftxui::text(std::format("-{}", deleted))
+                         | ftxui::color(ColorDiffDelete));
+    }
+    return hbox(std::move(counts));
 }
 
 [[nodiscard]] Element render_file_change_kind(core::changes::FileChangeKind kind) {
@@ -2943,11 +2947,11 @@ namespace {
     }
     header.push_back(ftxui::filler());
     header.push_back(ftxui::text("  "));
-    if (change.added > 0 || change.deleted > 0) {
-        header.push_back(render_count_pair(change.added, change.deleted));
-        header.push_back(ftxui::text("  "));
-    }
     header.push_back(render_file_change_kind(change.kind));
+    if (change.added > 0 || change.deleted > 0) {
+        header.push_back(ftxui::text("  "));
+        header.push_back(render_count_pair(change.added, change.deleted));
+    }
     // The affordance carries its own hitbox, so it is reflected before it joins
     // the row: the row's own box covers the whole line, this cell included.
     // Only the glyph is the target; the gap before it still toggles the row.

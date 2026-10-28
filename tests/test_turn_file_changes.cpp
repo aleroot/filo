@@ -20,6 +20,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -94,14 +95,32 @@ TEST_CASE("The turn's file changes follow the answer, one collapsed row per file
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("3 files changed  +3 -1  1 added · 1 modified · 1 deleted"));
     CHECK_THAT(text, ContainsSubstring("▶ src/app.cpp"));
-    CHECK_THAT(text, ContainsSubstring("+2 -1  M"));
+    CHECK_THAT(text, ContainsSubstring("M  +2 -1"));
     CHECK_THAT(text, ContainsSubstring("▶ docs/guide.md"));
-    CHECK_THAT(text, ContainsSubstring("+1 -0  A"));
+    CHECK_THAT(text, ContainsSubstring("A  +1"));
     CHECK_THAT(text, ContainsSubstring("• assets/logo.png  binary"));
     CHECK_THAT(text, ContainsSubstring(" D│"));
     CHECK(text.find("All done.") < text.find("3 files changed"));
     CHECK(text.find("new-app-line") == std::string::npos);
     CHECK(text.find("guide-body-line") == std::string::npos);
+}
+
+TEST_CASE("File change counts omit zero directions in rows and summary",
+          "[tui][turn_file_changes]") {
+    for (const auto& [added, deleted, expected] :
+         std::vector<std::tuple<std::size_t, std::size_t, std::string>>{
+             {3, 0, "+3"}, {0, 4, "-4"}, {3, 4, "+3 -4"}}) {
+        auto answer = make_assistant_message("Done.", "", false);
+        answer.turn_changes.files = {
+            FileChange{.kind = FileChangeKind::Modified, .path = "file.txt",
+                       .added = added, .deleted = deleted},
+        };
+        const auto text = render_text({answer});
+        CHECK_THAT(text, ContainsSubstring("1 file changed  " + expected));
+        CHECK_THAT(text, ContainsSubstring("M  " + expected));
+        CHECK(text.find("+0") == std::string::npos);
+        CHECK(text.find("-0") == std::string::npos);
+    }
 }
 
 TEST_CASE("A renamed file shows its kind letter and previous path",
@@ -121,7 +140,7 @@ TEST_CASE("A renamed file shows its kind letter and previous path",
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("1 file changed  +1 -1  1 renamed"));
     CHECK_THAT(text, ContainsSubstring("▶ src/new_name.cpp  from src/old_name.cpp"));
-    CHECK_THAT(text, ContainsSubstring("+1 -1  R"));
+    CHECK_THAT(text, ContainsSubstring("R  +1 -1"));
 }
 
 TEST_CASE("Every change kind is visible even without line counts",
@@ -166,7 +185,7 @@ TEST_CASE("File status and comparer remain visible beside long paths",
         options.show_diff_comparer_affordance = true;
         options.system_disclosure_hitboxes = &hitboxes;
         const auto text = render_text({answer}, options, width);
-        CHECK_THAT(text, ContainsSubstring("+2 -1  R  ↗"));
+        CHECK_THAT(text, ContainsSubstring("R  +2 -1  ↗"));
         CHECK_THAT(text, ContainsSubstring("↶ undone"));
         const auto& button = hitboxes.at(turn_file_change_open_key(answer.id, change.path));
         const auto& row = hitboxes.at(turn_file_change_key(answer.id, change.path));
@@ -278,7 +297,7 @@ TEST_CASE("A file that cannot be diffed still shows how large the change was",
 
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("1 file changed"));
-    CHECK_THAT(text, ContainsSubstring("-1234  D"));
+    CHECK_THAT(text, ContainsSubstring("D  -1234"));
     CHECK_THAT(text, ContainsSubstring("diff omitted"));
     // Not expandable: there is no diff to open, only a count.
     CHECK_THAT(text, ContainsSubstring("• logs/big.log"));
@@ -314,7 +333,7 @@ TEST_CASE("A modification too large to diff still shows its counts",
 
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("too large to diff"));
-    CHECK_THAT(text, ContainsSubstring("+12 -3  M"));
+    CHECK_THAT(text, ContainsSubstring("M  +12 -3"));
     // Still not expandable: the counts are exact, the diff is not there.
     CHECK_THAT(text, ContainsSubstring("\u2022 src/tui/MainApp.cpp"));
 }
