@@ -1,6 +1,7 @@
 #include "ProviderFactory.hpp"
 #include "core/config/ConfigSource.hpp"
 #include "HttpLLMProvider.hpp"
+#include "AntigravityModelTraits.hpp"
 #include "KimiModelTraits.hpp"
 #include "MimoModelTraits.hpp"
 #include "QwenModelTraits.hpp"
@@ -451,7 +452,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         // Canonical catalog id: Antigravity sessions discover models through
         // the Cloud Code Assist catalog (`gemini-antigravity`), which shares
         // the Gemini api_type but not the public Gemini model list.
-        service_id = "gemini-antigravity";
+        service_id = core::llm::antigravity::kServiceId;
     } else if (canonical_type == "kimi") {
         if (const std::string_view resolved =
                 kimi_service_id(kimi_service_for_endpoint(base_url));

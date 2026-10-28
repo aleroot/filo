@@ -4226,8 +4226,9 @@ RunResult run(RunOptions opts) {
                 if (provider_it == config.providers.end()) {
                     continue;
                 }
-                if (!provider_it->second.model.empty()) {
-                    default_models.push_back(provider_it->second.model);
+                if (const auto& model = provider_it->second.model;
+                    !model.empty() && std::ranges::find(default_models, model) == default_models.end()) {
+                    default_models.push_back(model);
                 }
 
                 std::string catalog_id = source_provider;

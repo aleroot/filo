@@ -243,6 +243,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/providers/MiniMaxProvider.cpp
     src/core/llm/providers/MiniMaxRequestBudget.cpp
     src/core/llm/KimiModelTraits.cpp
+    src/core/llm/AntigravityModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/ZaiModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp

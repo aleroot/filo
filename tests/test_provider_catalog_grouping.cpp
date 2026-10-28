@@ -368,6 +368,39 @@ TEST_CASE("Qwen catalog preserves separate subscription identities for shared mo
     CHECK_FALSE(coding->includes_api_model("qwen-image-2.0"));
 }
 
+TEST_CASE("Provider catalog grouping lists Gemini API and Antigravity under one Gemini",
+          "[llm][provider-catalog]") {
+    const std::vector<std::string> providers{"claude", "gemini", "gemini-oauth", "gemini-pro"};
+
+    const auto groups = core::llm::provider_catalog_groups(providers);
+
+    REQUIRE(groups.size() == 2);
+    const auto& gemini = groups[1];
+    REQUIRE(gemini.provider_name == "gemini");
+    REQUIRE(gemini.sources.size() == 2);
+    for (const std::string_view provider : {"gemini", "gemini-oauth", "gemini-pro"}) {
+        CHECK(gemini.contains_source_provider(provider));
+        CHECK(core::llm::provider_catalog_group_for(provider, providers).provider_name == "gemini");
+    }
+    CHECK(gemini.find_source("gemini-pro") == nullptr);
+
+    const auto* api = gemini.find_source("gemini");
+    REQUIRE(api != nullptr);
+    CHECK(api->category_label == "Gemini API.");
+    CHECK(api->includes_registry_model("gemini-2.5-flash"));
+
+    // ProviderFactory reports this service id for every oauth_google Gemini
+    // provider, which is how a custom-named one finds this source.
+    const auto* antigravity = gemini.find_source("gemini-oauth");
+    REQUIRE(antigravity != nullptr);
+    CHECK(antigravity->service_id == "gemini-antigravity");
+    CHECK(gemini.find_source_by_service_id("gemini-antigravity") == antigravity);
+    CHECK(antigravity->category_label == "Antigravity (Google account).");
+    // Only the authenticated Antigravity catalog says what the account gets.
+    CHECK_FALSE(antigravity->includes_registry_model("gemini-2.5-flash"));
+    CHECK_FALSE(antigravity->includes_registry_model("gemini-3-pro-preview"));
+}
+
 TEST_CASE("Provider catalog family matching respects provider-name boundaries",
           "[llm][provider-catalog]") {
     const std::vector<std::string> providers{

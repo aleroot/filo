@@ -1,4 +1,5 @@
 #include "ModelCatalogProvider.hpp"
+#include "AntigravityModelTraits.hpp"
 #include "catalog/QwenModelCatalogProvider.hpp"
 
 namespace core::llm {
@@ -20,7 +21,7 @@ make_model_catalog_provider(
         case config::ApiType::Gemini:
             // The unofficial Antigravity session path talks to the Cloud Code
             // Assist hosts, whose catalog is `v1internal:fetchAvailableModels`.
-            if (provider_name == "gemini-antigravity"
+            if (provider_name == core::llm::antigravity::kServiceId
                 || provider_name == "gemini-code-assist") {
                 return std::make_unique<CodeAssistModelCatalogProvider>(name);
             }

@@ -2,12 +2,16 @@
 
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
+#include "../AntigravityModelTraits.hpp"
 
 #include <simdjson.h>
 
+#include <algorithm>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace core::llm {
 namespace {
@@ -22,6 +26,60 @@ constexpr std::string_view kDeniedModelIds[] = {
         if (denied == id) return true;
     }
     return false;
+}
+
+/// Folds the per-level SKUs of every family sold at more than one thinking
+/// level into a single model, so the picker lists `claude-opus-5-5` once and
+/// the session's reasoning effort selects the SKU (see AntigravityModelTraits).
+/// The family takes the place of its first SKU; the SKU ids stay reachable as
+/// aliases, so a configured `claude-opus-5-5-high` still resolves to it. Limits
+/// and capabilities are the ones every level shares.
+[[nodiscard]] std::vector<ModelInfo> fold_thinking_variants(std::vector<ModelInfo> skus) {
+    std::map<std::string, std::vector<std::size_t>, std::less<>> families;
+    for (std::size_t i = 0; i < skus.size(); ++i) {
+        if (const auto variant = antigravity::split_thinking_variant(skus[i].canonical_id)) {
+            families[std::string(variant->family)].push_back(i);
+        }
+    }
+
+    std::vector<ModelInfo> models;
+    models.reserve(skus.size());
+    std::vector<bool> folded(skus.size(), false);
+    for (std::size_t i = 0; i < skus.size(); ++i) {
+        if (folded[i]) continue;
+        const auto variant = antigravity::split_thinking_variant(skus[i].canonical_id);
+        const auto family = variant ? families.find(variant->family) : families.end();
+        if (family == families.end() || family->second.size() < 2) {
+            models.push_back(std::move(skus[i]));
+            continue;
+        }
+
+        ModelInfo merged;
+        merged.canonical_id = family->first;
+        merged.provider = skus[i].provider;
+        merged.display_name = skus[i].display_name == skus[i].canonical_id
+            ? family->first
+            : antigravity::family_display_name(skus[i].display_name);
+        merged.capabilities = skus[i].capabilities;
+        const auto shared_limit = [](int32_t current, int32_t sku) {
+            if (sku <= 0) return current;
+            return current <= 0 ? sku : std::min(current, sku);
+        };
+        std::vector<std::string_view> levels;
+        for (const std::size_t index : family->second) {
+            ModelInfo& sku = skus[index];
+            folded[index] = true;
+            levels.push_back(antigravity::split_thinking_variant(sku.canonical_id)->level);
+            merged.capabilities &= sku.capabilities;
+            merged.context_window = shared_limit(merged.context_window, sku.context_window);
+            merged.max_output_tokens =
+                shared_limit(merged.max_output_tokens, sku.max_output_tokens);
+            merged.aliases.push_back(std::move(sku.canonical_id));
+        }
+        merged.reasoning = antigravity::thinking_family_profile(levels);
+        models.push_back(std::move(merged));
+    }
+    return models;
 }
 
 } // namespace
@@ -100,6 +158,7 @@ ModelCatalogResult CodeAssistModelCatalogProvider::parse_models_response(
         result.models.push_back(std::move(info));
     }
 
+    result.models = fold_thinking_variants(std::move(result.models));
     return result;
 }
 

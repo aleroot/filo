@@ -52,6 +52,12 @@ antigravity_wire_profile(std::string_view model);
  *  - one `functionDeclarations` element per tool, the thought-signature bypass
  *    on every replayed call part of Gemini 3+ turns, and the per-SKU fixed
  *    output cap (Claude falls back to the 128000 ceiling);
+ *  - thinking-level families: the backend sells `claude-opus-5-5` & co. as one
+ *    SKU per level (`-low` / `-medium` / `-high`). The catalog folds them into
+ *    one model, this protocol reports an effort ladder for it, and the request
+ *    goes to the SKU of the level the session's effort selects (see
+ *    AntigravityModelTraits). The SKU id, its `model_enum` and `thinkingLevel`
+ *    therefore always agree;
  *  - `User-Agent` identifying the Antigravity hub and nothing else: the real
  *    client sends no `X-Goog-Api-Client` / `Client-Metadata` on these calls,
  *    so neither does Filo;
@@ -76,6 +82,14 @@ public:
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
     [[nodiscard]] std::string_view name() const noexcept override { return "gemini_antigravity"; }
+    /// An effort ladder for a family the wire-profile snapshot sells at several
+    /// thinking levels; empty for single SKUs.
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
+    /// The live Code Assist catalog says which levels a family is sold at; a
+    /// curated card for the same id (the Anthropic `claude-opus-5-5`) does not
+    /// describe this endpoint.
+    [[nodiscard]] bool uses_provider_reasoning_catalog() const noexcept override { return true; }
     /// The hub serves `v1internal:fetchAvailableModels`, so discovery works.
     [[nodiscard]] bool supports_model_catalog() const noexcept override { return true; }
 

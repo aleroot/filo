@@ -69,7 +69,10 @@ private:
  * Used by the unofficial Antigravity session path against the daily
  * `cloudcode-pa` hosts, where `/v1beta/models` does not exist. The response is
  * an id-keyed `models` map rather than a list; internal and retired ids are
- * dropped the way the real hub client filters its picker.
+ * dropped the way the real hub client filters its picker. A family the backend
+ * sells at several thinking levels (`<family>-low|-medium|-high`) is folded
+ * into one model whose reasoning profile lists those levels, so its effort is
+ * chosen like any other model's; the SKU ids remain aliases.
  */
 class CodeAssistModelCatalogProvider final : public ModelCatalogProvider {
 public:

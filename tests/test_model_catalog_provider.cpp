@@ -3,6 +3,7 @@
 
 #include <httplib.h>
 
+#include "core/llm/AntigravityModelTraits.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
@@ -19,8 +20,11 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 
+#include <simdjson.h>
+
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 using namespace core::llm;
@@ -2227,6 +2231,175 @@ TEST_CASE("CodeAssistModelCatalogProvider serves the hub fetchAvailableModels di
     // catalogs report.
     const auto missing = catalog.parse_models_response(R"({"agentModelSorts":[]})");
     CHECK_FALSE(missing.ok());
+}
+
+TEST_CASE("CodeAssistModelCatalogProvider folds thinking-level SKUs into one model",
+          "[llm][model-catalog][antigravity][effort]") {
+    CodeAssistModelCatalogProvider catalog;
+    const auto result = catalog.parse_models_response(R"JSON({
+      "models": {
+        "claude-opus-5-5-high": {"displayName": "Claude Opus 5.5 (High)", "supportsThinking": true,
+                                 "supportsImages": true, "maxTokens": 1000000, "maxOutputTokens": 128000},
+        "gemini-3.1-flash-image": {"displayName": "Gemini 3.1 Flash Image", "maxTokens": 65536},
+        "claude-opus-5-5-low": {"displayName": "Claude Opus 5.5 (Low)", "supportsThinking": true,
+                                "maxTokens": 1000000, "maxOutputTokens": 64000},
+        "gemini-3.8-flash-tiered": {"supportsThinking": true, "maxTokens": 1048576},
+        "gemini-3.8-flash-low": {"displayName": "Gemini 3.8 Flash (Low)", "supportsThinking": true},
+        "gemini-3.8-flash-high": {"displayName": "Gemini 3.8 Flash (High)", "supportsThinking": true},
+        "gemini-3.8-flash-medium": {"displayName": "Gemini 3.8 Flash (Medium)", "supportsThinking": true},
+        "gemini-3.1-pro-low": {"displayName": "Gemini 3.1 Pro", "supportsThinking": true},
+        "gpt-oss-120b-medium": {"displayName": "GPT-OSS 120B (Medium)"}
+      }
+    })JSON");
+
+    REQUIRE(result.ok());
+    std::vector<std::string> ids;
+    for (const auto& model : result.models) ids.push_back(model.canonical_id);
+    // A family takes the place of its first SKU; everything else keeps its
+    // position. One-level ids (and ids that cannot think) stay single SKUs.
+    CHECK(ids == std::vector<std::string>{
+        "claude-opus-5-5", "gemini-3.1-flash-image", "gemini-3.8-flash-tiered",
+        "gemini-3.8-flash", "gemini-3.1-pro-low", "gpt-oss-120b-medium"});
+
+    const auto& opus = result.models[0];
+    CHECK(opus.display_name == "Claude Opus 5.5");
+    CHECK(opus.provider == "gemini-antigravity");
+    CHECK(opus.context_window == 1000000);
+    CHECK(opus.max_output_tokens == 64000);
+    CHECK(opus.supports(ModelCapability::Reasoning));
+    // Only what every level supports.
+    CHECK_FALSE(opus.supports(ModelCapability::Vision));
+    CHECK(opus.aliases == std::vector<std::string>{"claude-opus-5-5-high", "claude-opus-5-5-low"});
+    CHECK(opus.reasoning.complete);
+    CHECK(opus.reasoning.effort.supports_effort());
+    CHECK(opus.reasoning.supported_efforts == std::vector<std::string>{"low", "high"});
+    CHECK(opus.reasoning.catalog_default_effort == "high");
+
+    const auto& flash = result.models[3];
+    CHECK(flash.display_name == "Gemini 3.8 Flash");
+    CHECK(flash.reasoning.supported_efforts
+          == std::vector<std::string>{"low", "medium", "high"});
+
+    // A configured SKU id still resolves to its family's metadata.
+    const auto legacy = resolve_model_metadata("claude-opus-5-5-high", result.models, nullptr);
+    REQUIRE(legacy.model.has_value());
+    CHECK(legacy.model->canonical_id == "claude-opus-5-5");
+}
+
+TEST_CASE("Antigravity folding follows the catalog, not a list of vendors or tiers",
+          "[llm][model-catalog][antigravity][effort]") {
+    // A family Filo has never heard of, sold at tiers the backend does not
+    // use today, still folds into one model with a matching effort ladder.
+    CodeAssistModelCatalogProvider catalog;
+    const auto result = catalog.parse_models_response(R"JSON({"models": {
+        "acme-coder-7-max": {"displayName": "Acme Coder 7 (Max)"},
+        "acme-coder-7-minimal": {"displayName": "Acme Coder 7 (Minimal)"},
+        "acme-coder-7-medium": {"displayName": "Acme Coder 7 (Medium)"}
+    }})JSON");
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    const auto& family = result.models.front();
+    CHECK(family.canonical_id == "acme-coder-7");
+    CHECK(family.display_name == "Acme Coder 7");
+    CHECK(family.reasoning.supported_efforts
+          == std::vector<std::string>{"minimal", "medium", "max"});
+    CHECK(family.reasoning.catalog_default_effort == "max");
+    CHECK(family.reasoning.effort.supports(ReasoningCapability::MinimalEffort));
+    CHECK(family.reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK_FALSE(family.reasoning.effort.supports(ReasoningCapability::XHighEffort));
+
+    using antigravity::select_thinking_level;
+    const auto& profile = family.reasoning;
+    CHECK(select_thinking_level(profile, "minimal", "") == "minimal");
+    CHECK(select_thinking_level(profile, "low", "") == "medium");
+    CHECK(select_thinking_level(profile, " HIGH ", "") == "max");
+    CHECK(select_thinking_level(profile, "ultra", "") == "max");
+    CHECK(select_thinking_level(profile, "", "medium") == "medium");
+    CHECK(select_thinking_level(profile, "off", "minimal") == "minimal");
+    CHECK(select_thinking_level(profile, "", "") == "max");
+    // The requested effort beats the level a configured variant id carries.
+    CHECK(select_thinking_level(profile, "minimal", "max") == "minimal");
+}
+
+TEST_CASE("An Antigravity session sends the SKU its catalog family and effort select",
+          "[llm][model-catalog][antigravity][effort]") {
+    constexpr std::string_view kCatalog = R"JSON({"models": {
+        "gemini-9-test-low": {"displayName": "Gemini 9 Test (Low)", "supportsThinking": true},
+        "gemini-9-test-high": {"displayName": "Gemini 9 Test (High)", "supportsThinking": true}
+    }})JSON";
+    const std::string provider_name = "antigravity-effort-test";
+    auto parsed = CodeAssistModelCatalogProvider(provider_name).parse_models_response(kCatalog);
+    REQUIRE(parsed.ok());
+    ModelCatalogDiscoveryResult success;
+    success.attempted = true;
+    success.fetched = static_cast<int>(parsed.models.size());
+    ModelCatalogAvailability::instance().record_result(provider_name, success, parsed.models);
+
+    httplib::Server server;
+    std::mutex bodies_mutex;
+    std::vector<std::string> bodies;
+    server.Post("/v1internal:fetchAvailableModels",
+                [&](const httplib::Request&, httplib::Response& res) {
+                    res.set_content(std::string(kCatalog), "application/json");
+                });
+    server.Post("/v1internal:streamGenerateContent",
+                [&](const httplib::Request& req, httplib::Response& res) {
+                    {
+                        std::lock_guard lock(bodies_mutex);
+                        bodies.push_back(req.body);
+                    }
+                    res.set_content(
+                        "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\","
+                        "\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n",
+                        "text/event-stream");
+                });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port < 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::thread worker([&] { server.listen_after_bind(); });
+    for (int i = 0; i < 200 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+
+    const auto provider = std::make_shared<HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "gemini-9-test",
+        std::make_unique<core::llm::protocols::GeminiAntigravityProtocol>(),
+        core::config::ApiType::Gemini,
+        provider_name);
+
+    // The family is known only to the live catalog, which offers no medium.
+    const auto capabilities = provider->reasoning_capabilities("gemini-9-test");
+    CHECK(capabilities.supports_effort());
+    CHECK_FALSE(capabilities.supports(ReasoningCapability::MaxEffort));
+
+    const auto send = [&](std::string model, std::string effort) {
+        ChatRequest request;
+        request.model = std::move(model);
+        request.effort = std::move(effort);
+        request.messages.push_back({.role = "user", .content = "Hello"});
+        std::string errors;
+        provider->stream_response(request, [&](const StreamChunk& chunk) {
+            if (chunk.is_error) errors += chunk.content;
+        });
+        CAPTURE(errors);
+        CHECK(errors.empty());
+        std::lock_guard lock(bodies_mutex);
+        REQUIRE_FALSE(bodies.empty());
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(bodies.back()).get(doc) == simdjson::SUCCESS);
+        std::string_view wire_model;
+        REQUIRE(doc["model"].get(wire_model) == simdjson::SUCCESS);
+        return std::string(wire_model);
+    };
+    CHECK(send("gemini-9-test", "low") == "gemini-9-test-low");
+    CHECK(send("gemini-9-test", "") == "gemini-9-test-high");
+    CHECK(send("gemini-9-test", "medium") == "gemini-9-test-high");
+    CHECK(send("gemini-9-test-low", "") == "gemini-9-test-low");
+
+    server.stop();
+    worker.join();
 }
 
 TEST_CASE("Discovery reads the ChatGPT catalog only through the Codex protocol",

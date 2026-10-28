@@ -153,7 +153,7 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         ProviderAuthStyle::XApiKey, {},
     },
     BuiltinProviderDefinition{
-        "gemini", "gemini", {}, config::ApiType::Gemini,
+        "gemini", "gemini", "gemini", config::ApiType::Gemini,
         "https://generativelanguage.googleapis.com", { "GEMINI_API_KEY" },
         ProviderAuthStyle::QueryParam, {},
     },

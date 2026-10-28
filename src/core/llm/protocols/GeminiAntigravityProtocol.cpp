@@ -1,16 +1,19 @@
 #include "GeminiAntigravityProtocol.hpp"
 #include "AntigravityConversationState.hpp"
 #include "GeminiProtocol.hpp"
+#include "../AntigravityModelTraits.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace core::llm::protocols {
 
@@ -137,9 +140,10 @@ constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
     return digit != std::string::npos && lowered[digit] >= '3';
 }
 
-/// `thinkingConfig.thinkingLevel` for a routed id: the caller's effort hint
-/// wins, else the SKU's own `-low` / `-medium` / `-high` suffix. Empty when
-/// neither names a level, in which case the backend applies its default.
+/// `thinkingConfig.thinkingLevel` for an id that is a single SKU: the caller's
+/// effort hint wins, else the SKU's own `-low` / `-medium` / `-high` suffix.
+/// Empty when neither names a level, in which case the backend applies its
+/// default.
 [[nodiscard]] std::string thinking_level_for(std::string_view model,
                                              std::string_view effort) {
     const std::string hint = core::utils::str::to_lower_ascii_copy(effort);
@@ -154,12 +158,51 @@ constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
     return {};
 }
 
-/// Whether the SKU takes a `thinkingConfig` at all: the image-generation SKU is
-/// not thinking-capable, and non-Gemini/non-Claude ids are left alone.
-[[nodiscard]] bool model_supports_thinking(std::string_view model) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-    if (lowered.ends_with("-image")) return false;
-    return lowered.starts_with("gemini-") || lowered.starts_with("claude-");
+/// The profile of `family` in the wire-profile snapshot: the fallback for
+/// when the live catalog has not described it. Empty unless the snapshot sells
+/// it at two or more levels.
+[[nodiscard]] ModelReasoningProfile snapshot_family_profile(std::string_view family) {
+    std::vector<std::string_view> levels;
+    for (const std::string_view level : antigravity::kThinkingLevels) {
+        if (antigravity_wire_profile(antigravity::thinking_variant_id(family, level))) {
+            levels.push_back(level);
+        }
+    }
+    return levels.size() >= 2 ? antigravity::thinking_family_profile(levels) : ModelReasoningProfile{};
+}
+
+/// The SKU a request is sent to and the `thinkingLevel` that goes with it.
+struct WireModel {
+    std::string id;
+    std::string thinking_level;
+};
+
+/// Resolves the requested model to the SKU on the wire. A family sold at
+/// several thinking levels (`claude-opus-5-5`, or a configured variant id such
+/// as `claude-opus-5-5-high`) becomes the SKU of the level the request's effort
+/// selects, so the id, its `model_enum` and `thinkingLevel` always agree. The
+/// levels come from the live catalog when it described the family, else from
+/// the wire-profile snapshot. Any other id is a single SKU and is sent as is.
+[[nodiscard]] WireModel resolve_wire_model(const ChatRequest& req) {
+    const std::string model = normalize_requested_gemini_model(req.model);
+    const auto variant = antigravity::split_thinking_variant(model);
+    const std::string_view family = variant ? variant->family : std::string_view(model);
+
+    const ModelReasoningProfile profile =
+        req.catalog_reasoning && req.catalog_reasoning->supported_efforts.size() >= 2
+        ? *req.catalog_reasoning
+        : snapshot_family_profile(family);
+    if (profile.supported_efforts.empty()) {
+        return {model, thinking_level_for(model, req.effort)};
+    }
+
+    const std::string level = antigravity::select_thinking_level(
+        profile, req.effort, variant ? variant->level : std::string_view{});
+    std::string thinking_level = level;
+    std::ranges::transform(thinking_level, thinking_level.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return {antigravity::thinking_variant_id(family, level), std::move(thinking_level)};
 }
 
 std::string trim_trailing_slashes(std::string_view url) {
@@ -194,9 +237,22 @@ void GeminiAntigravityProtocol::prepare_request(ChatRequest& request) {
     stream_anchor_ = conversation_anchor(request);
 }
 
+ReasoningCapabilities
+GeminiAntigravityProtocol::reasoning_capabilities(std::string_view model) const noexcept {
+    try {
+        const std::string id = normalize_requested_gemini_model(model);
+        const auto variant = antigravity::split_thinking_variant(id);
+        return snapshot_family_profile(variant ? variant->family : std::string_view(id)).effort;
+    } catch (...) {
+        // A capability query must not fail; the live catalog still answers.
+    }
+    return {};
+}
+
 std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
     const std::string anchor = conversation_anchor(req);
-    const std::string model = normalize_requested_gemini_model(req.model);
+    const WireModel wire = resolve_wire_model(req);
+    const std::string& model = wire.id;
     const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
     const bool claude = is_claude_model(model);
     const bool gemini = lowered.starts_with("gemini-");
@@ -261,14 +317,14 @@ std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
     } else if (claude) {
         extras.max_output_tokens_cap = kClaudeMaxOutputTokens;
     }
-    if (model_supports_thinking(model)) {
+    if (antigravity::takes_thinking_config(model)) {
         // includeThoughts is the only way the backend surfaces reasoning: the
         // model thinks either way, but without it no thought parts come back.
         extras.include_thoughts = true;
         if (lowered.ends_with("-tiered")) {
             extras.thinking_budget = -1;
         } else {
-            extras.thinking_level = thinking_level_for(model, req.effort);
+            extras.thinking_level = wire.thinking_level;
         }
     }
 

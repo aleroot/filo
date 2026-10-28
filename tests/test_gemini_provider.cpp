@@ -982,7 +982,8 @@ TEST_CASE("GeminiAntigravityProtocol asks for thought summaries at the SKU's lev
             == simdjson::SUCCESS);
     CHECK(level == "HIGH");
 
-    // The caller's effort hint wins over the SKU suffix.
+    // The caller's effort selects the SKU: a configured variant id is only the
+    // level used when the session does not choose one.
     auto hinted = antigravity_request("gemini-4-argon-high");
     hinted.effort = "low";
     const auto hinted_doc = parse_json(p2, protocol.serialize(hinted));
@@ -990,6 +991,9 @@ TEST_CASE("GeminiAntigravityProtocol asks for thought summaries at the SKU's lev
                 .get(level)
             == simdjson::SUCCESS);
     CHECK(level == "LOW");
+    std::string_view hinted_model;
+    REQUIRE(hinted_doc["model"].get(hinted_model) == simdjson::SUCCESS);
+    CHECK(hinted_model == "gemini-4-argon-low");
 
     // `*-tiered` SKUs budget dynamically instead of pinning a level.
     const auto tiered =
@@ -1006,6 +1010,123 @@ TEST_CASE("GeminiAntigravityProtocol asks for thought summaries at the SKU's lev
         parse_json(p4, protocol.serialize(antigravity_request("gemini-3.1-flash-image")));
     CHECK(image["request"]["generationConfig"]["thinkingConfig"].error()
           == simdjson::NO_SUCH_FIELD);
+}
+
+TEST_CASE("Antigravity thinking families are one model whose effort picks the SKU",
+          "[gemini][antigravity][effort]") {
+    GeminiAntigravityProtocol protocol;
+
+    struct Wire {
+        std::string model;
+        std::string model_enum;
+        std::string level;
+    };
+    const auto wire_for = [&](const ChatRequest& req) {
+        simdjson::dom::parser parser;
+        const auto doc = parse_json(parser, protocol.serialize(req));
+        std::string_view model, model_enum, level;
+        REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
+        REQUIRE(doc["request"]["labels"]["model_enum"].get(model_enum) == simdjson::SUCCESS);
+        REQUIRE(doc["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"].get(level)
+                == simdjson::SUCCESS);
+        return Wire{std::string(model), std::string(model_enum), std::string(level)};
+    };
+    const auto with_effort = [](std::string model, std::string effort) {
+        auto req = antigravity_request(std::move(model));
+        req.effort = std::move(effort);
+        return req;
+    };
+
+    SECTION("the family id resolves to the SKU of the session effort") {
+        const Wire low = wire_for(with_effort("claude-opus-5-5", "low"));
+        CHECK(low.model == "claude-opus-5-5-low");
+        CHECK(low.model_enum == "MODEL_PLACEHOLDER_M400");
+        CHECK(low.level == "LOW");
+
+        const Wire medium = wire_for(with_effort("gemini-4-argon", "medium"));
+        CHECK(medium.model == "gemini-4-argon-medium");
+        CHECK(medium.model_enum == "MODEL_PLACEHOLDER_M418");
+        CHECK(medium.level == "MEDIUM");
+    }
+
+    SECTION("auto and off use the strongest level, levels above high clamp to it") {
+        for (const std::string effort : {"", "none", "high", "xhigh", "max", "ultra"}) {
+            CAPTURE(effort);
+            const Wire wire = wire_for(with_effort("claude-sonnet-5-5", effort));
+            CHECK(wire.model == "claude-sonnet-5-5-high");
+            CHECK(wire.model_enum == "MODEL_PLACEHOLDER_M405");
+            CHECK(wire.level == "HIGH");
+        }
+        CHECK(wire_for(with_effort("gemini-3.8-flash", "minimal")).model == "gemini-3.8-flash-low");
+    }
+
+    SECTION("a configured variant id is the default level, not a pin") {
+        CHECK(wire_for(with_effort("claude-opus-5-5-medium", "")).model
+              == "claude-opus-5-5-medium");
+        const Wire overridden = wire_for(with_effort("claude-opus-5-5-medium", "high"));
+        CHECK(overridden.model == "claude-opus-5-5-high");
+        CHECK(overridden.model_enum == "MODEL_PLACEHOLDER_M402");
+    }
+
+    SECTION("the live catalog decides which levels a family is sold at") {
+        auto req = with_effort("gemini-9-test", "medium");
+        req.catalog_reasoning = ModelReasoningProfile{
+            .effort = ReasoningCapabilities{ReasoningCapability::Effort},
+            .complete = true,
+            .catalog_default_effort = "low",
+            .supported_efforts = {"low", "high"},
+        };
+        simdjson::dom::parser parser;
+        const auto doc = parse_json(parser, protocol.serialize(req));
+        std::string_view model, level;
+        // No medium SKU: the request rounds up to the next level sold, not
+        // down to the catalog default.
+        REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
+        CHECK(model == "gemini-9-test-high");
+        REQUIRE(doc["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"].get(level)
+                == simdjson::SUCCESS);
+        CHECK(level == "HIGH");
+
+        req.effort.clear();
+        const auto defaulted = parse_json(parser, protocol.serialize(req));
+        REQUIRE(defaulted["model"].get(model) == simdjson::SUCCESS);
+        CHECK(model == "gemini-9-test-low");
+    }
+
+    SECTION("single SKUs are sent unchanged") {
+        simdjson::dom::parser parser;
+        const auto doc = parse_json(
+            parser, protocol.serialize(with_effort("gemini-3.1-pro-preview", "medium")));
+        std::string_view model, level;
+        REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
+        CHECK(model == "gemini-3.1-pro-preview");
+        REQUIRE(doc["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"].get(level)
+                == simdjson::SUCCESS);
+        CHECK(level == "MEDIUM");
+
+        simdjson::dom::parser oss_parser;
+        const auto oss = parse_json(
+            oss_parser, protocol.serialize(with_effort("gpt-oss-120b-medium", "high")));
+        REQUIRE(oss["model"].get(model) == simdjson::SUCCESS);
+        CHECK(model == "gpt-oss-120b-medium");
+    }
+
+    SECTION("only families report an effort ladder") {
+        for (const std::string_view family :
+             {"claude-opus-5-5", "claude-sonnet-5-5-low", "gemini-4-argon", "gemini-3.8-flash"}) {
+            CAPTURE(family);
+            const auto capabilities = protocol.reasoning_capabilities(family);
+            CHECK(capabilities.supports_effort());
+            CHECK_FALSE(capabilities.supports(ReasoningCapability::MaxEffort));
+            CHECK_FALSE(capabilities.supports(ReasoningCapability::Disable));
+        }
+        for (const std::string_view single :
+             {"gemini-3.8-flash-tiered", "gemini-3.1-flash-image", "gpt-oss-120b-medium",
+              "gemini-2.5-flash"}) {
+            CAPTURE(single);
+            CHECK(protocol.reasoning_capabilities(single).empty());
+        }
+    }
 }
 
 TEST_CASE("Plain Code Assist serialization is unchanged by Antigravity extras",

@@ -1,5 +1,6 @@
 #include "ProviderCatalogGrouping.hpp"
 
+#include "AntigravityModelTraits.hpp"
 #include "KimiModelTraits.hpp"
 #include "MimoModelTraits.hpp"
 #include "QwenModelTraits.hpp"
@@ -61,6 +62,13 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     return is_kimi_code_provider_name(provider_name);
 }
 
+// Antigravity (`gemini-oauth`, Google sign-in) and the public Gemini API share
+// the "gemini" prefix and registry key but neither credentials nor catalogs.
+[[nodiscard]] bool is_gemini_antigravity_source(std::string_view provider_name) {
+    const std::string name = normalized(provider_name);
+    return name.starts_with("gemini-oauth") || name.starts_with(antigravity::kServiceId);
+}
+
 [[nodiscard]] bool is_qwen_token_plan_source(std::string_view provider_name) {
     return normalized(provider_name).starts_with("qwen-token-plan");
 }
@@ -99,6 +107,13 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     // Kimi Code model availability is controlled by the account/subscription.
     // Keep the configured default as a safety net, but do not supplement the
     // authenticated /models response with guesses from the static registry.
+    return ProviderCatalogModelFilter{.rule = ProviderCatalogModelRule::Include};
+}
+
+[[nodiscard]] ProviderCatalogModelFilter gemini_antigravity_filter() {
+    // The registry's Gemini cards describe the public API. What a Google
+    // account may use through Antigravity (Claude, GPT-OSS, per-level SKUs)
+    // only the authenticated fetchAvailableModels response knows.
     return ProviderCatalogModelFilter{.rule = ProviderCatalogModelRule::Include};
 }
 
@@ -202,6 +217,12 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
             source.api_model_filter = source.registry_model_filter;
         }
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
+    } else if (group_name == "gemini" && is_gemini_antigravity_source(provider_name)) {
+        source.service_id = std::string(antigravity::kServiceId);
+        source.category_label = "Antigravity (Google account).";
+        source.registry_model_filter = gemini_antigravity_filter();
+    } else if (group_name == "gemini") {
+        source.category_label = "Gemini API.";
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();
@@ -306,7 +327,7 @@ bool ProviderCatalogGroup::contains_source_provider(std::string_view provider) c
     // A family may deliberately hide compatibility presets from the picker.
     // They still belong to the visible group for active-selection highlighting.
     return find_source(provider) != nullptr
-        || ((provider_name == "grok" || provider_name == "kimi")
+        || ((provider_name == "grok" || provider_name == "kimi" || provider_name == "gemini")
             && provider_catalog_group_name(provider) == provider_name);
 }
 
@@ -431,6 +452,24 @@ ProviderCatalogGroup provider_catalog_group_for(
             configured_provider_names,
             [](std::string_view configured) { return is_kimi_code_source(configured); },
             "kimi-code");
+        return group;
+    }
+
+    if (group_name == "gemini") {
+        // Every other gemini-* preset is an alias of one of these two
+        // services, so list each service once.
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return !is_gemini_antigravity_source(configured); },
+            "gemini");
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return is_gemini_antigravity_source(configured); },
+            "gemini-oauth");
         return group;
     }
 
