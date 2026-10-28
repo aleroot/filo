@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 using namespace tui;
 using core::changes::FileChange;
@@ -51,10 +52,10 @@ std::string strip_ansi(std::string_view input) {
 }
 
 std::string render_text(const std::vector<UiMessage>& messages,
-                        ConversationRenderOptions options = {}) {
+                        ConversationRenderOptions options = {}, int width = 100) {
     auto content = render_history_content(messages, 0, std::move(options));
     auto screen = ftxui::Screen::Create(
-        ftxui::Dimension::Fixed(100),
+        ftxui::Dimension::Fixed(width),
         ftxui::Dimension::Fit(content, true));
     ftxui::Render(screen, content);
     return strip_ansi(screen.ToString());
@@ -91,13 +92,90 @@ TEST_CASE("The turn's file changes follow the answer, one collapsed row per file
     answer.turn_changes.files = sample_changes();
 
     const auto text = render_text({answer});
-    CHECK_THAT(text, ContainsSubstring("3 files changed  +3 -1"));
+    CHECK_THAT(text, ContainsSubstring("3 files changed  +3 -1  1 added · 1 modified · 1 deleted"));
     CHECK_THAT(text, ContainsSubstring("▶ src/app.cpp"));
-    CHECK_THAT(text, ContainsSubstring("▶ docs/guide.md  new"));
-    CHECK_THAT(text, ContainsSubstring("• assets/logo.png  deleted, binary"));
+    CHECK_THAT(text, ContainsSubstring("+2 -1  M"));
+    CHECK_THAT(text, ContainsSubstring("▶ docs/guide.md"));
+    CHECK_THAT(text, ContainsSubstring("+1 -0  A"));
+    CHECK_THAT(text, ContainsSubstring("• assets/logo.png  binary"));
+    CHECK_THAT(text, ContainsSubstring(" D│"));
     CHECK(text.find("All done.") < text.find("3 files changed"));
     CHECK(text.find("new-app-line") == std::string::npos);
     CHECK(text.find("guide-body-line") == std::string::npos);
+}
+
+TEST_CASE("A renamed file shows its kind letter and previous path",
+          "[tui][turn_file_changes]") {
+    auto answer = make_assistant_message("Renamed.", "", false);
+    answer.turn_changes.files = {
+        FileChange{
+            .kind = FileChangeKind::Renamed,
+            .path = "src/new_name.cpp",
+            .previous_path = "src/old_name.cpp",
+            .diff = "--- a/src/old_name.cpp\n+++ b/src/new_name.cpp\n@@ -1 +1 @@\n-old\n+new\n",
+            .added = 1,
+            .deleted = 1,
+        },
+    };
+
+    const auto text = render_text({answer});
+    CHECK_THAT(text, ContainsSubstring("1 file changed  +1 -1  1 renamed"));
+    CHECK_THAT(text, ContainsSubstring("▶ src/new_name.cpp  from src/old_name.cpp"));
+    CHECK_THAT(text, ContainsSubstring("+1 -1  R"));
+}
+
+TEST_CASE("Every change kind is visible even without line counts",
+          "[tui][turn_file_changes]") {
+    const std::vector<std::pair<FileChangeKind, std::string>> kinds{
+        {FileChangeKind::Added, "A"},
+        {FileChangeKind::Modified, "M"},
+        {FileChangeKind::Deleted, "D"},
+        {FileChangeKind::Renamed, "R"},
+    };
+    for (const auto& [kind, letter] : kinds) {
+        CAPTURE(letter);
+        auto answer = make_assistant_message("Done.", "", false);
+        answer.turn_changes.files = {
+            FileChange{.kind = kind, .path = "新しい.cpp", .previous_path = "古い.cpp"},
+        };
+        const auto text = render_text({answer}, {}, 40);
+        CHECK_THAT(text, ContainsSubstring("• 新しい.cpp"));
+        CHECK_THAT(text, ContainsSubstring(" " + letter + "│"));
+        CHECK(text.find("+0") == std::string::npos);
+        CHECK(text.find("-0") == std::string::npos);
+        if (kind == FileChangeKind::Renamed) {
+            CHECK_THAT(text, ContainsSubstring("from 古い.cpp"));
+        }
+    }
+}
+
+TEST_CASE("File status and comparer remain visible beside long paths",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("Done.", "", false);
+    auto change = sample_changes().front();
+    change.kind = FileChangeKind::Renamed;
+    change.path = std::string(120, 'x') + "/新しい.cpp";
+    change.previous_path = std::string(120, 'y') + "/古い.cpp";
+    answer.turn_changes.files = {change};
+    answer.turn_changes.reverted = true;
+
+    for (const int width : {40, 60, 100}) {
+        CAPTURE(width);
+        std::unordered_map<std::string, ftxui::Box> hitboxes;
+        ConversationRenderOptions options;
+        options.show_diff_comparer_affordance = true;
+        options.system_disclosure_hitboxes = &hitboxes;
+        const auto text = render_text({answer}, options, width);
+        CHECK_THAT(text, ContainsSubstring("+2 -1  R  ↗"));
+        CHECK_THAT(text, ContainsSubstring("↶ undone"));
+        const auto& button = hitboxes.at(turn_file_change_open_key(answer.id, change.path));
+        const auto& row = hitboxes.at(turn_file_change_key(answer.id, change.path));
+        CHECK(button.x_min == button.x_max);
+        CHECK(button.x_min >= row.x_min);
+        CHECK(button.x_max <= row.x_max);
+        CHECK(button.x_max < width - 1);
+        CHECK(button.y_min == row.y_min);
+    }
 }
 
 TEST_CASE("Opening one file shows only that file's diff", "[tui][turn_file_changes]") {
@@ -200,8 +278,8 @@ TEST_CASE("A file that cannot be diffed still shows how large the change was",
 
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("1 file changed"));
-    CHECK_THAT(text, ContainsSubstring("-1234"));
-    CHECK_THAT(text, ContainsSubstring("deleted, diff omitted"));
+    CHECK_THAT(text, ContainsSubstring("-1234  D"));
+    CHECK_THAT(text, ContainsSubstring("diff omitted"));
     // Not expandable: there is no diff to open, only a count.
     CHECK_THAT(text, ContainsSubstring("• logs/big.log"));
 }
@@ -236,8 +314,7 @@ TEST_CASE("A modification too large to diff still shows its counts",
 
     const auto text = render_text({answer});
     CHECK_THAT(text, ContainsSubstring("too large to diff"));
-    CHECK_THAT(text, ContainsSubstring("+12"));
-    CHECK_THAT(text, ContainsSubstring("-3"));
+    CHECK_THAT(text, ContainsSubstring("+12 -3  M"));
     // Still not expandable: the counts are exact, the diff is not there.
     CHECK_THAT(text, ContainsSubstring("\u2022 src/tui/MainApp.cpp"));
 }

@@ -2854,15 +2854,27 @@ namespace {
     });
 }
 
+[[nodiscard]] Element render_file_change_kind(core::changes::FileChangeKind kind) {
+    using core::changes::FileChangeKind;
+    switch (kind) {
+        case FileChangeKind::Added:
+            return ftxui::text("A") | ftxui::color(ColorDiffAdd) | ftxui::bold;
+        case FileChangeKind::Modified:
+            return ftxui::text("M") | ftxui::color(ColorYellowDark) | ftxui::bold;
+        case FileChangeKind::Deleted:
+            return ftxui::text("D") | ftxui::color(ColorDiffDelete) | ftxui::bold;
+        case FileChangeKind::Renamed:
+            return ftxui::text("R") | ftxui::color(ColorDiffHunk) | ftxui::bold;
+    }
+    return ftxui::text("M") | ftxui::color(ColorYellowDark) | ftxui::bold;
+}
+
 [[nodiscard]] std::string file_change_note(const core::changes::FileChange& change) {
     using core::changes::FileChangeContent;
     using core::changes::FileChangeKind;
     std::string note;
-    switch (change.kind) {
-        case FileChangeKind::Added:    note = "new"; break;
-        case FileChangeKind::Deleted:  note = "deleted"; break;
-        case FileChangeKind::Renamed:  note = "renamed from " + change.previous_path; break;
-        case FileChangeKind::Modified: break;
+    if (change.kind == FileChangeKind::Renamed) {
+        note = "from " + change.previous_path;
     }
     const std::string_view detail =
         change.content == FileChangeContent::Binary      ? "binary"
@@ -2874,6 +2886,34 @@ namespace {
         note += detail;
     }
     return note;
+}
+
+[[nodiscard]] std::string file_change_kind_summary(
+    const std::vector<core::changes::FileChange>& files) {
+    using core::changes::FileChangeKind;
+    std::size_t added = 0;
+    std::size_t modified = 0;
+    std::size_t deleted = 0;
+    std::size_t renamed = 0;
+    for (const auto& change : files) {
+        switch (change.kind) {
+            case FileChangeKind::Added:    ++added; break;
+            case FileChangeKind::Modified: ++modified; break;
+            case FileChangeKind::Deleted:  ++deleted; break;
+            case FileChangeKind::Renamed:  ++renamed; break;
+        }
+    }
+    std::vector<std::string> parts;
+    if (added > 0) parts.push_back(std::format("{} added", added));
+    if (modified > 0) parts.push_back(std::format("{} modified", modified));
+    if (deleted > 0) parts.push_back(std::format("{} deleted", deleted));
+    if (renamed > 0) parts.push_back(std::format("{} renamed", renamed));
+    std::string summary;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) summary += " · ";
+        summary += parts[i];
+    }
+    return summary;
 }
 
 // One disclosure per changed file: the header names the file and its line
@@ -2895,15 +2935,19 @@ namespace {
     Elements header{
         ftxui::text(expandable ? (expanded ? "▼ " : "▶ ") : "• ")
             | ftxui::color(ColorYellowDark),
-        ftxui::text(change.path) | ftxui::color(ColorTextSecondary),
+        elided_text(change.path) | ftxui::color(ColorTextSecondary) | ftxui::xflex_shrink,
     };
     if (const auto note = file_change_note(change); !note.empty()) {
-        header.push_back(ftxui::text("  " + note) | ftxui::color(ColorTextMuted) | dim);
+        header.push_back(elided_text("  " + note)
+                         | ftxui::color(ColorTextMuted) | dim | ftxui::xflex_shrink);
     }
     header.push_back(ftxui::filler());
+    header.push_back(ftxui::text("  "));
     if (change.added > 0 || change.deleted > 0) {
         header.push_back(render_count_pair(change.added, change.deleted));
+        header.push_back(ftxui::text("  "));
     }
+    header.push_back(render_file_change_kind(change.kind));
     // The affordance carries its own hitbox, so it is reflected before it joins
     // the row: the row's own box covers the whole line, this cell included.
     // Only the glyph is the target; the gap before it still toggles the row.
@@ -2952,6 +2996,10 @@ namespace {
     if (added > 0 || deleted > 0) {
         summary.push_back(ftxui::text("  "));
         summary.push_back(render_count_pair(added, deleted));
+    }
+    if (const auto breakdown = file_change_kind_summary(files); !breakdown.empty()) {
+        summary.push_back(elided_text("  " + breakdown)
+                          | ftxui::color(ColorTextMuted) | dim | ftxui::xflex_shrink);
     }
     if (msg.turn_changes.reverted) {
         // The summary is still what the turn did; this says the workspace is
