@@ -10,6 +10,10 @@
 #include <utility>
 #include <unordered_map>
 
+namespace core::llm::codex {
+class IUsageSource;
+}
+
 namespace core::llm {
 class IProviderClientIdentitySource;
 }
@@ -168,7 +172,8 @@ public:
     explicit CodexResponsesProtocol(bool include_reasoning_encrypted = true,
                                     std::string default_service_tier = {},
                                     std::shared_ptr<IProviderClientIdentitySource>
-                                        client_identity_source = {});
+                                        client_identity_source = {},
+                                    std::shared_ptr<codex::IUsageSource> usage = {});
 
     [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
         const noexcept override {
@@ -182,6 +187,11 @@ public:
     [[nodiscard]] cpr::Header build_headers(
         const core::auth::AuthInfo& auth) const override;
     void on_response(const HttpResponse& response) override;
+    /// Adds the account's `/wham/usage` reading: workspaces metered by credits
+    /// stream no quota headers or windows, only this endpoint reports them.
+    void enrich_rate_limit(std::string_view base_url,
+                           const cpr::Header& request_headers,
+                           const HttpResponse& response) override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override;
 
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
@@ -266,6 +276,7 @@ private:
         bool prewarm) const;
 
     std::shared_ptr<IProviderClientIdentitySource> client_identity_source_;
+    std::shared_ptr<codex::IUsageSource> usage_;
     std::shared_ptr<TransportState> transport_state_ = std::make_shared<TransportState>();
     std::shared_ptr<RateLimitState> rate_limit_state_;
     mutable std::vector<std::string> active_response_items_;

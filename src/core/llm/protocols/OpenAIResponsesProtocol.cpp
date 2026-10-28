@@ -2,6 +2,7 @@
 #include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
 #include "OpenAIProtocol.hpp"
+#include "../CodexUsageClient.hpp"
 #include "../ModelCatalogProvider.hpp"
 #include "../../auth/CodexClientIdentity.hpp"
 #include "../Models.hpp"
@@ -760,9 +761,37 @@ public:
         apply_update(update);
     }
 
+    /// The account's `/wham/usage` reading, kept apart so a stream that
+    /// reports fewer windows cannot erase it.
+    void apply_account(RateLimitInfo account) {
+        std::lock_guard lock(mutex_);
+        account_ = std::move(account);
+    }
+
+    /// The streamed state, completed by the account reading: a streamed
+    /// window wins over the read one of the same label.
     [[nodiscard]] RateLimitInfo snapshot() const {
         std::lock_guard lock(mutex_);
-        return snapshot_;
+        RateLimitInfo merged = snapshot_;
+        if (!account_) return merged;
+        for (const auto& window : account_->usage_windows) {
+            if (std::ranges::none_of(merged.usage_windows, [&](const UsageWindow& streamed) {
+                    return streamed.label == window.label;
+                })) {
+                merged.usage_windows.push_back(window);
+            }
+        }
+        merged.is_rate_limited |= account_->is_rate_limited;
+        auto& subscription = merged.subscription;
+        const auto& read = account_->subscription;
+        if (subscription.tier_label.empty()) subscription.tier_label = read.tier_label;
+        if (!subscription.supplemental_credits) {
+            subscription.supplemental_credits = read.supplemental_credits;
+        }
+        if (subscription.limit_reached_reason.empty()) {
+            subscription.limit_reached_reason = read.limit_reached_reason;
+        }
+        return merged;
     }
 
 private:
@@ -801,6 +830,7 @@ private:
 
     mutable std::mutex mutex_;
     RateLimitInfo snapshot_;
+    std::optional<RateLimitInfo> account_;
 };
 
 void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
@@ -1054,9 +1084,11 @@ std::string OpenAIResponsesProtocol::build_url(std::string_view base_url,
 CodexResponsesProtocol::CodexResponsesProtocol(bool include_reasoning_encrypted,
                                                std::string default_service_tier,
                                                std::shared_ptr<IProviderClientIdentitySource>
-                                                   client_identity_source)
+                                                   client_identity_source,
+                                               std::shared_ptr<codex::IUsageSource> usage)
     : OpenAIResponsesProtocol(include_reasoning_encrypted, std::move(default_service_tier))
     , client_identity_source_(std::move(client_identity_source))
+    , usage_(usage ? std::move(usage) : codex::make_usage_source())
     , rate_limit_state_(std::make_shared<RateLimitState>()) {}
 
 cpr::Header CodexResponsesProtocol::build_headers(
@@ -1428,7 +1460,8 @@ std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
     auto cloned = std::make_unique<CodexResponsesProtocol>(
         include_reasoning_encrypted_,
         default_service_tier_,
-        client_identity_source_);
+        client_identity_source_,
+        usage_);
     share_continuity_state_with(*cloned);
     cloned->transport_state_ = transport_state_;
     cloned->rate_limit_state_ = rate_limit_state_;
@@ -1714,6 +1747,18 @@ void CodexResponsesProtocol::on_response(const HttpResponse& response) {
     rate_limit_state_->apply_http(
         OpenAIResponsesProtocol::last_rate_limit(),
         parse_codex_rate_limit_headers(response.headers));
+}
+
+void CodexResponsesProtocol::enrich_rate_limit(std::string_view base_url,
+                                               const cpr::Header& request_headers,
+                                               const HttpResponse& response) {
+    // After a transport failure the read would most likely time out too.
+    if (!usage_ || response.status_code == 0) return;
+    try {
+        if (auto account = usage_->read(base_url, request_headers)) {
+            rate_limit_state_->apply_account(std::move(*account));
+        }
+    } catch (...) { /* Usage is best-effort and must not fail generation. */ }
 }
 
 RateLimitInfo CodexResponsesProtocol::last_rate_limit() const noexcept {

@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/CodexUsageClient.hpp"
 #include "core/llm/Models.hpp"
 
 #include <chrono>
@@ -451,6 +452,133 @@ TEST_CASE("CodexResponsesProtocol - merges sparse websocket quota updates",
     CHECK(info.subscription.tier_label == "ChatGPT pro");
     REQUIRE(info.subscription.supplemental_credits.has_value());
     CHECK(info.subscription.supplemental_credits->balance == "12.00");
+}
+
+namespace {
+// The shape `GET /wham/usage` returned live for a business workspace metered
+// by credits (2026-10-28): no rate-limit windows, only a monthly spend limit.
+constexpr std::string_view kCreditWorkspaceUsage = R"({
+  "plan_type": "business",
+  "rate_limit": null,
+  "code_review_rate_limit": null,
+  "additional_rate_limits": null,
+  "credits": {"has_credits": true, "unlimited": false, "overage_limit_reached": false,
+              "balance": null},
+  "spend_control": {"reached": false, "individual_limit": {
+      "source": "workspace_spend_controls", "unit": "credit", "limit": "2000",
+      "used": "479.59", "remaining": "1520.41", "used_percent": 24,
+      "remaining_percent": 76, "reset_after_seconds": 305719, "reset_at": 1793491200}},
+  "rate_limit_reached_type": null,
+  "promo": null
+})";
+} // namespace
+
+TEST_CASE("Codex usage decodes a credit-metered workspace's monthly limit",
+          "[openai][codex][usage]") {
+    const auto info = codex::parse_usage(kCreditWorkspaceUsage);
+    REQUIRE(info.has_value());
+    REQUIRE(info->usage_windows.size() == 1);
+    CHECK(info->usage_windows[0].label == "30d");
+    CHECK(info->usage_windows[0].utilization == Catch::Approx(0.24f));
+    CHECK(info->usage_windows[0].resets_at == 1'793'491'200);
+    CHECK_FALSE(info->is_rate_limited);
+    CHECK(info->subscription.tier_label == "ChatGPT business");
+    REQUIRE(info->subscription.supplemental_credits.has_value());
+    CHECK(info->subscription.supplemental_credits->available);
+    CHECK(info->subscription.supplemental_credits->balance.empty());
+}
+
+TEST_CASE("Codex usage decodes plan windows, feature limits and limit state",
+          "[openai][codex][usage]") {
+    const auto info = codex::parse_usage(R"({
+      "plan_type": "pro",
+      "rate_limit": {"allowed": false, "limit_reached": true,
+        "primary_window": {"used_percent": 100, "limit_window_seconds": 18000,
+                           "reset_after_seconds": 60, "reset_at": 2000000000},
+        "secondary_window": {"used_percent": 40, "limit_window_seconds": 604800,
+                             "reset_after_seconds": 600, "reset_at": 2000000600}},
+      "additional_rate_limits": [{"limit_name": "GPT-5.3-Codex-Spark",
+        "metered_feature": "codex_bengalfox",
+        "rate_limit": {"allowed": true, "limit_reached": false,
+          "primary_window": {"used_percent": 5, "limit_window_seconds": 18000,
+                             "reset_after_seconds": 1, "reset_at": 2000000001}}}],
+      "spend_control": {"reached": false, "individual_limit": null},
+      "rate_limit_reached_type": {"type": "rate_limit_reached"}
+    })");
+    REQUIRE(info.has_value());
+    REQUIRE(info->usage_windows.size() == 3);
+    CHECK(info->usage_windows[0].label == "5h");
+    CHECK(info->usage_windows[0].utilization == Catch::Approx(1.0f));
+    CHECK(info->usage_windows[1].label == "7d");
+    CHECK(info->usage_windows[1].resets_at == 2'000'000'600);
+    CHECK(info->usage_windows[2].label == "codex_bengalfox 5h");
+    CHECK(info->is_rate_limited);
+    CHECK(info->subscription.limit_reached_reason == "rate_limit_reached");
+
+    CHECK_FALSE(codex::parse_usage("not json").has_value());
+}
+
+TEST_CASE("Codex usage is read only next to a ChatGPT backend",
+          "[openai][codex][usage]") {
+    CHECK(codex::usage_url("https://chatgpt.com/backend-api/codex/")
+          == "https://chatgpt.com/backend-api/wham/usage");
+    CHECK(codex::usage_url("https://chat.openai.com/backend-api/codex")
+          == "https://chat.openai.com/backend-api/wham/usage");
+    CHECK_FALSE(codex::usage_url("https://api.openai.com/v1").has_value());
+    CHECK_FALSE(codex::usage_url("https://proxy.example/backend-api/codex").has_value());
+}
+
+TEST_CASE("CodexResponsesProtocol adds the account usage to streamed quota",
+          "[openai][responses][codex][rate-limit][usage]") {
+    int reads = 0;
+    std::string read_url;
+    cpr::Header read_headers;
+    auto usage = codex::make_usage_source([&](std::string_view url, const cpr::Header& headers) {
+        ++reads;
+        read_url = std::string(url);
+        read_headers = headers;
+        return std::optional<std::string>(kCreditWorkspaceUsage);
+    });
+    CodexResponsesProtocol protocol(true, {}, {}, usage);
+    const cpr::Header request_headers{
+        {"Authorization", "Bearer token"},
+        {"chatgpt-account-id", "account"},
+        {"Content-Type", "application/json"},
+    };
+
+    protocol.on_response(HttpResponse{200, "", {}});
+    protocol.enrich_rate_limit("https://chatgpt.com/backend-api/codex", request_headers,
+                               HttpResponse{200, "", {}});
+    auto info = protocol.last_rate_limit();
+    CHECK(reads == 1);
+    CHECK(read_url == "https://chatgpt.com/backend-api/wham/usage");
+    CHECK(read_headers.at("Authorization") == "Bearer token");
+    CHECK(read_headers.at("chatgpt-account-id") == "account");
+    CHECK_FALSE(read_headers.contains("Content-Type"));
+    REQUIRE(info.usage_windows.size() == 1);
+    CHECK(info.usage_windows[0].label == "30d");
+    CHECK(info.subscription.tier_label == "ChatGPT business");
+
+    // A streamed update cannot erase the reading; its own windows come first,
+    // and a clone shares the state.
+    auto clone = protocol.clone();
+    (void)clone->parse_event(
+        "event: codex.rate_limits\n"
+        "data: {\"type\":\"codex.rate_limits\",\"plan_type\":\"business\",\"rate_limits\":"
+        "{\"primary\":{\"used_percent\":10,\"window_minutes\":300}}}");
+    info = protocol.last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.usage_windows[1].label == "30d");
+
+    // Readings are cached per account.
+    clone->enrich_rate_limit("https://chatgpt.com/backend-api/codex", request_headers,
+                             HttpResponse{200, "", {}});
+    CHECK(reads == 1);
+    // A transport failure skips the read.
+    protocol.enrich_rate_limit("https://chatgpt.com/backend-api/codex",
+                               {{"Authorization", "Bearer other"}}, HttpResponse{0, "", {}});
+    CHECK(reads == 1);
 }
 
 TEST_CASE("OpenAIResponsesProtocol ignores private Codex quota headers",

@@ -705,6 +705,21 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 protocol->abandon_websocket_request(request_metadata);
             }
         };
+        const auto enrich_rate_limit = [&](const cpr::Header& request_headers,
+                                           const protocols::HttpResponse& response) {
+            try {
+                protocol->enrich_rate_limit(self->base_url_, request_headers, response);
+            } catch (const std::exception& e) {
+                core::logging::warn(
+                    "Protocol '{}' rate-limit enrichment failed: {}",
+                    protocol->name(),
+                    e.what());
+            } catch (...) {
+                core::logging::warn(
+                    "Protocol '{}' rate-limit enrichment failed: unknown exception",
+                    protocol->name());
+            }
+        };
         const auto read_auth = [&] {
             if (self->cred_source_) {
                 auth = self->cred_source_->get_auth();
@@ -810,6 +825,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             }
                             const protocols::HttpResponse response{200, "", result.response_headers};
                             protocol->on_response(response);
+                            enrich_rate_limit(ws->websocket_headers, response);
                             self->set_last_rate_limit_info(protocol->last_rate_limit());
                             return;
                         }
@@ -1284,18 +1300,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     continue;
                 }
 
-                try {
-                    protocol->enrich_rate_limit(self->base_url_, headers, http_resp);
-                } catch (const std::exception& e) {
-                    core::logging::warn(
-                        "Protocol '{}' rate-limit enrichment failed: {}",
-                        protocol->name(),
-                        e.what());
-                } catch (...) {
-                    core::logging::warn(
-                        "Protocol '{}' rate-limit enrichment failed: unknown exception",
-                        protocol->name());
-                }
+                enrich_rate_limit(headers, http_resp);
 
                 auto rate_limit_info = protocol->last_rate_limit();
 
