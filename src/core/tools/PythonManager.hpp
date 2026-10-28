@@ -3,7 +3,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -19,6 +21,7 @@ struct PythonExecResult {
     std::string output;       // captured stdout (+ stderr appended if non-empty)
     bool        success = true;
     std::string error;        // exception text when success == false
+    bool        interrupted = false;  // cancelled through the predicate
 };
 
 #pragma GCC diagnostic push
@@ -63,6 +66,23 @@ public:
      */
     PythonExecResult execute(const std::string& code, std::string_view scope = {});
 
+    /**
+     * Cancellable execute(): when @p cancellation_requested turns true the
+     * running code gets a KeyboardInterrupt, raised at its next bytecode.
+     *
+     * Code blocked inside a C call (time.sleep, a socket read, a subprocess
+     * wait) only sees that exception once the call returns, and no thread but
+     * Python's main one can cut such a call short. So the code runs on its own
+     * thread, and if it has not unwound within @p grace after the interrupt,
+     * this returns an interrupted result and leaves it to finish there.
+     * Later calls wait for it (each wait is itself cancellable), and code
+     * whose call was cancelled before it started never runs.
+     */
+    PythonExecResult execute(const std::string& code,
+                             std::string_view scope,
+                             const std::function<bool()>& cancellation_requested,
+                             std::chrono::milliseconds grace = std::chrono::milliseconds(1000));
+
     /** Take the process-wide Python execution lock.
      *
      * Foreign Python entry points (e.g. Python skill calls) hold this while
@@ -100,6 +120,14 @@ private:
     std::shared_ptr<Scope> acquire_scope(std::string_view scope);
     void retire(std::shared_ptr<Scope> scope);
     static void release(Scope& scope);
+
+    struct Run;
+    // Runs @p code in @p scope; execution_mutex_ must be held. With @p run,
+    // the executing thread is published to it for interruption.
+    PythonExecResult execute_locked(const std::string& code, std::string_view scope, Run* run);
+    // Raises KeyboardInterrupt in @p run's code until it has finished, from a
+    // helper thread, so the caller never waits for the GIL.
+    void interrupt(std::shared_ptr<Run> run);
 
     // interpreter_ declared first → destroyed last (calls Py_Finalize).
     std::unique_ptr<py::scoped_interpreter> interpreter_;

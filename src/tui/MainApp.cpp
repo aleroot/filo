@@ -16,6 +16,7 @@
 #include "SessionReplay.hpp"
 #include "core/changes/WorkspaceMutationGate.hpp"
 #include "SessionPicker.hpp"
+#include "CtrlCPolicy.hpp"
 #include "ThreadRuntime.hpp"
 #include "SelectionClipboardCopier.hpp"
 #include "Text.hpp"
@@ -1947,17 +1948,27 @@ RunResult run(RunOptions opts) {
         return terminals;
     };
 
-    // Esc and /stop are scoped to the visible thread. Ctrl+C is the one
-    // process-wide exception: stop every running thread, or quit if idle.
+    // Esc, /stop and Ctrl+C are all scoped to the visible thread. Ctrl+C is
+    // graded (see CtrlCPolicy.hpp): it reaches other threads only by quitting.
     auto current_thread_has_stoppable_activity = [&]() -> bool {
         return !list_active_terminals().empty()
             || (current_runtime && current_runtime->turn_active())
             || (current_runtime && current_runtime->review_activity().active);
     };
 
-    auto any_thread_has_stoppable_activity = [&]() -> bool {
-        return current_thread_has_stoppable_activity()
-            || !thread_runtimes.running_session_ids().empty();
+    auto other_threads_working = [&]() -> std::size_t {
+        std::size_t working = 0;
+        for (const auto& runtime : thread_runtimes.snapshot()) {
+            if (runtime == current_runtime || runtime->agent() == agent) {
+                continue;
+            }
+            if (runtime->turn_active()
+                || runtime->review_activity().active
+                || direct_shell_state->has_active_for(runtime->session_id())) {
+                ++working;
+            }
+        }
+        return working;
     };
 
     auto stop_current_thread = [&]() -> core::commands::CommandOperationResult {
@@ -1979,39 +1990,6 @@ RunResult run(RunOptions opts) {
                 ? "Stop requested for the active terminal command."
                 : "Stop requested for the active generation and any running subagents.",
         };
-    };
-
-    auto stop_all_threads = [&]() -> core::commands::CommandOperationResult {
-        if (!any_thread_has_stoppable_activity()) {
-            return {.ok = false, .message = "Nothing is currently running."};
-        }
-        const bool had_terminal = !list_active_terminals().empty();
-        const bool had_direct_shell =
-            direct_shell_state && direct_shell_state->has_active_for(session_id);
-
-        agent->request_stop();
-        std::size_t hidden_stopped = 0;
-        for (const auto& runtime : thread_runtimes.snapshot()) {
-            if ((runtime->turn_active() || runtime->review_activity().active)
-                && runtime->agent() != agent) {
-                runtime->agent()->request_stop();
-                ++hidden_stopped;
-            }
-        }
-        if (had_direct_shell && direct_shell_state) {
-            [[maybe_unused]] const bool interrupted =
-                direct_shell_state->interrupt_active_for(session_id);
-        }
-        std::string message = had_terminal
-            ? "Stop requested for the active terminal command."
-            : "Stop requested for the active generation and any running subagents.";
-        if (hidden_stopped > 0) {
-            message += std::format(
-                " Also stopping {} hidden thread{}.",
-                hidden_stopped,
-                hidden_stopped == 1 ? "" : "s");
-        }
-        return {.ok = true, .message = message};
     };
 
     // /stop keeps the historical name; it remains the visible-thread stop.
@@ -9966,16 +9944,53 @@ RunResult run(RunOptions opts) {
             return true;
         }
         if (is_ctrl_c_event(event)) {
-            // Process-wide interrupt. Esc and /stop stay on this tab; Ctrl+C
-            // is the global exception — stop every running thread, or quit
-            // immediately when the process is idle.
-            if (!any_thread_has_stoppable_activity()) {
-                screen.ExitLoopClosure()();
+            // Graded and scoped to this tab: the running tool, else the
+            // session, else the app (confirmed when other tabs are working).
+            const bool direct_shell_running =
+                direct_shell_state->has_active_for(session_id);
+            const std::size_t others_working = other_threads_working();
+            const auto action = decide_ctrl_c({
+                .tool_running = direct_shell_running || agent->tools_running(),
+                .session_running = current_thread_has_stoppable_activity(),
+                .other_threads_working = others_working,
+            });
+            if (action == CtrlCAction::InterruptTool) {
+                reset_quit_confirm();
+                const bool shell_interrupted = direct_shell_running
+                    && direct_shell_state->interrupt_active_for(session_id);
+                const bool tools_interrupted = agent->interrupt_running_tools();
+                if (tools_interrupted || shell_interrupted) {
+                    const bool session_running = current_runtime
+                        && (current_runtime->turn_active()
+                            || current_runtime->review_activity().active);
+                    append_history(session_running
+                        ? "\n»  Interrupted the running tool; the session continues. "
+                          "Press Ctrl+C again to stop the session.\n"
+                        : "\n»  Interrupted the running command.\n");
+                    return true;
+                }
+                // The tool finished before the press reached it: the press
+                // belongs to the level below.
+            }
+            if (action == CtrlCAction::InterruptTool
+                || action == CtrlCAction::StopSession) {
+                reset_quit_confirm();
+                if (const auto result = stop_current_thread(); result.ok) {
+                    append_history(std::format("\n»  {}\n", result.message));
+                }
                 return true;
             }
-            const auto result = stop_all_threads();
-            reset_quit_confirm();
-            append_history(std::format("\n»  {}\n", result.message));
+            if (action == CtrlCAction::ConfirmExit
+                && !confirm_quit_or_arm("Ctrl+C")) {
+                append_history(std::format(
+                    "\n»  {} other thread{} still working. Press Ctrl+C again to quit "
+                    "and stop {}.\n",
+                    others_working,
+                    others_working == 1 ? " is" : "s are",
+                    others_working == 1 ? "it" : "them"));
+                return true;
+            }
+            screen.ExitLoopClosure()();
             return true;
         }
 

@@ -1525,7 +1525,8 @@ public:
             "  Ctrl+L   Clear the screen\n"
             "  Esc      Stop active generation or terminal command\n"
             "  Esc Esc  Clear draft to history, or open rewind menu on empty input\n"
-            "  Ctrl+C   Stop active generation or terminal command; quits when idle\n"
+            "  Ctrl+C   Interrupt this tab's running tool, else stop its session; quits when idle\n"
+            "           (asks again first if other tabs are still working)\n"
         );
     }
 };

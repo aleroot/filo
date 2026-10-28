@@ -1144,6 +1144,106 @@ TEST_CASE("Clearing history discards late tool results and prevents stale recurs
     CHECK(agent->get_history().empty());
 }
 
+namespace {
+
+// Runs until its invocation is cancelled, like a tool that honours Ctrl+C.
+class CancellableWaitTool final : public core::tools::Tool {
+public:
+    explicit CancellableWaitTool(std::string name) : name_(std::move(name)) {}
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .title = "Cancellable wait tool",
+            .description = "Waits until its invocation is cancelled.",
+            .parameters = {},
+            .annotations = {.read_only_hint = true, .idempotent_hint = true},
+        };
+    }
+
+    [[nodiscard]] std::string execute(const std::string&,
+                                      const core::context::SessionContext&) override {
+        return R"({"error":"needs an invocation"})";
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::tools::ToolInvocationContext& invocation) override {
+        entered_.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!(invocation.cancellation_requested && invocation.cancellation_requested())) {
+            if (std::chrono::steady_clock::now() > deadline) return R"({"output":"timed out"})";
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return R"({"output":"partial"})";
+    }
+
+    void wait_until_entered() const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!entered_.load(std::memory_order_acquire)) {
+            REQUIRE(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+private:
+    std::string name_;
+    std::atomic<bool> entered_{false};
+};
+
+} // namespace
+
+TEST_CASE("Interrupting running tools cancels the tool but not the turn",
+          "[agent][tool][interrupt]") {
+    const std::string tool_name = "cancellable_wait_interrupt_tool";
+    auto tool = std::make_shared<CancellableWaitTool>(tool_name);
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(tool);
+    auto provider = std::make_shared<ToolThenTextCapturingProvider>(tool_name);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    CHECK_FALSE(agent->tools_running());
+    CHECK_FALSE(agent->interrupt_running_tools());
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message(
+        "run the waiting tool",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&] {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        });
+
+    tool->wait_until_entered();
+    CHECK(agent->tools_running());
+    CHECK(agent->interrupt_running_tools());
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&] { return done; }));
+    }
+
+    // The turn went on: the model saw the interrupted result and answered.
+    CHECK_FALSE(agent->is_stop_requested());
+    CHECK_FALSE(agent->tools_running());
+    CHECK(provider->call_count() == 2);
+    const auto history = agent->get_history();
+    const auto tool_message = std::ranges::find(history, std::string("tool"), &core::llm::Message::role);
+    REQUIRE(tool_message != history.end());
+    CHECK_THAT(tool_message->content, Catch::Matchers::StartsWith(R"({"interrupted_by_user":")"));
+    CHECK_THAT(tool_message->content, Catch::Matchers::ContainsSubstring(R"("output":"partial")"));
+    CHECK(history.back().role == "assistant");
+    CHECK(history.back().content == "finished");
+}
+
 TEST_CASE("Provider changes apply after the complete tool turn",
           "[agent][provider][tool][regression]") {
     const std::string tool_name = "blocking_provider_freeze_tool";

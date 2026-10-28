@@ -206,4 +206,70 @@ TEST_CASE("Clearing a session with a running Python call waits for it to finish"
     CHECK_THAT(run(tool, observer, probe_alive_code(probe)), ContainsSubstring("released"));
 }
 
+TEST_CASE("Cancelling a python call interrupts running code and keeps its namespace",
+          "[python][interrupt]") {
+    core::tools::PythonInterpreterTool tool;
+    const auto context = python_session(unique_session("interrupt-loop"));
+    std::atomic<bool> cancel{false};
+    const core::tools::ToolInvocationContext invocation{
+        .session_context = context,
+        .cancellation_requested = [&] { return cancel.load(); },
+    };
+
+    std::string result;
+    std::jthread running([&] {
+        result = tool.execute(
+            R"({"code":"spins = 0\nwhile True:\n    spins += 1\n"})", invocation);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto cancelled_at = std::chrono::steady_clock::now();
+    cancel = true;
+    running.join();
+
+    CHECK(std::chrono::steady_clock::now() - cancelled_at < std::chrono::seconds(1));
+    CHECK_THAT(result, ContainsSubstring(R"("success":false)"));
+    CHECK_THAT(result, ContainsSubstring("Interrupted by the user (KeyboardInterrupt)"));
+    // The interrupt reached only that call: the next one runs normally.
+    CHECK_THAT(run(tool, context, "print(spins > 0)"), ContainsSubstring("True"));
+}
+
+TEST_CASE("A python call blocked in C returns after the grace and later calls wait for it",
+          "[python][interrupt]") {
+    auto& manager = core::tools::PythonManager::get_instance();
+    const auto scope = unique_session("interrupt-blocked");
+    std::atomic<bool> cancel{false};
+
+    std::jthread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel = true;
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = manager.execute(
+        "import time\ntime.sleep(1.0)\nfinished = True\n", scope,
+        [&] { return cancel.load(); }, std::chrono::milliseconds(200));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(result.interrupted);
+    CHECK_FALSE(result.success);
+    CHECK_THAT(result.error, ContainsSubstring("keeps running in the background"));
+    CHECK(elapsed < std::chrono::milliseconds(900));
+    // The next call waits for the sleep to return; the pending interrupt then
+    // stops the code before its last line.
+    const auto after = manager.execute("print('finished' in globals())", scope);
+    CHECK(after.success);
+    CHECK_THAT(after.output, ContainsSubstring("False"));
+}
+
+TEST_CASE("A python call cancelled before it starts never runs", "[python][interrupt]") {
+    core::tools::PythonInterpreterTool tool;
+    const auto context = python_session(unique_session("interrupt-early"));
+    const core::tools::ToolInvocationContext invocation{
+        .session_context = context,
+        .cancellation_requested = [] { return true; },
+    };
+    CHECK_THAT(tool.execute(R"({"code":"ran = True"})", invocation),
+               ContainsSubstring("before the code started"));
+    CHECK_THAT(run(tool, context, "print('ran' in globals())"), ContainsSubstring("False"));
+}
+
 #endif // FILO_ENABLE_PYTHON

@@ -1,7 +1,10 @@
 #include "PythonManager.hpp"
 #include "../logging/Logger.hpp"
+#include "../utils/DetachedWorkTracker.hpp"
 #include <pybind11/eval.h>
+#include <condition_variable>
 #include <cstdlib>
+#include <thread>
 #include <utility>
 #include <Python.h>
 
@@ -194,10 +197,123 @@ std::unique_lock<std::mutex> PythonManager::lock_execution() {
     return std::unique_lock<std::mutex>(execution_mutex_);
 }
 
+/**
+ * @brief One cancellable execution, shared by the caller that waits for it,
+ *        the thread that runs it, and the thread that interrupts it.
+ */
+struct PythonManager::Run {
+    std::mutex              mutex;
+    std::condition_variable settled;
+    bool                    done = false;     // guarded by mutex
+    PythonExecResult        result;           // guarded by mutex
+    std::atomic<bool>       cancelled{false};
+    // Guarded by the GIL: true exactly while py::exec runs for this call, so
+    // an interrupt can never land in code that is not this call's.
+    bool                    in_exec = false;
+    unsigned long           thread_id = 0;
+
+    [[nodiscard]] bool finished() {
+        std::lock_guard lock(mutex);
+        return done;
+    }
+};
+
+namespace {
+
+PythonExecResult interrupted_result(std::string error, std::string output = {}) {
+    return {.output = std::move(output), .success = false,
+            .error = std::move(error), .interrupted = true};
+}
+
+} // namespace
+
 PythonExecResult PythonManager::execute(const std::string& code, std::string_view scope_key) {
     // Held across the stream swap, the code, and the restore: the three only
     // form one atomic step for other Python entry points when serialised.
     std::lock_guard<std::mutex> exec_lock(execution_mutex_);
+    return execute_locked(code, scope_key, nullptr);
+}
+
+PythonExecResult PythonManager::execute(const std::string& code,
+                                        std::string_view scope_key,
+                                        const std::function<bool()>& cancellation_requested,
+                                        std::chrono::milliseconds grace) {
+    if (!cancellation_requested) return execute(code, scope_key);
+    if (cancellation_requested()) {
+        return interrupted_result("Interrupted by the user before the code started.");
+    }
+
+    // The code runs on its own thread so that this one can always answer the
+    // interrupt, even while the code is stuck in a C call. Detached and
+    // counted, like every other detached agent thread.
+    auto run = std::make_shared<Run>();
+    std::thread([this, run, code, scope = std::string(scope_key)] {
+        const core::utils::DetachedWorkTracker::Guard detached_guard{
+            core::utils::DetachedWorkTracker::instance()};
+        PythonExecResult result;
+        try {
+            std::lock_guard<std::mutex> exec_lock(execution_mutex_);
+            result = run->cancelled.load(std::memory_order_acquire)
+                ? interrupted_result("Interrupted by the user before the code started.")
+                : execute_locked(code, scope, run.get());
+        } catch (const std::exception& e) {
+            result = {.success = false, .error = std::string("Python execution failed: ") + e.what()};
+        } catch (...) {
+            result = {.success = false, .error = "Python execution failed with an unknown error."};
+        }
+        {
+            std::lock_guard lock(run->mutex);
+            run->result = std::move(result);
+            run->done = true;
+        }
+        run->settled.notify_all();
+    }).detach();
+
+    constexpr auto kPollInterval = std::chrono::milliseconds(50);
+    std::unique_lock lock(run->mutex);
+    while (!run->settled.wait_for(lock, kPollInterval, [&] { return run->done; })) {
+        if (!cancellation_requested()) continue;
+        run->cancelled.store(true, std::memory_order_release);
+        lock.unlock();
+        interrupt(run);
+        lock.lock();
+        if (!run->settled.wait_for(lock, grace, [&] { return run->done; })) {
+            return interrupted_result(
+                "Interrupted by the user. The code is blocked in a call that cannot be cut "
+                "short, so it keeps running in the background until that call returns; "
+                "later python calls wait for it.");
+        }
+        break;
+    }
+    return std::move(run->result);
+}
+
+void PythonManager::interrupt(std::shared_ptr<Run> run) {
+    // Raising the exception needs the GIL, and code inside a C call that does
+    // not release it would block whoever asks for it; so a helper thread asks,
+    // never the caller. It re-raises until the code is gone, because Python
+    // code may catch one KeyboardInterrupt (a bare `except:`) and carry on.
+    std::thread([this, run = std::move(run)] {
+        const core::utils::DetachedWorkTracker::Guard detached_guard{
+            core::utils::DetachedWorkTracker::instance()};
+        constexpr auto kRepeatInterval = std::chrono::milliseconds(200);
+        while (!run->finished()) {
+            if (initialized_.load(std::memory_order_acquire)) {
+                const PyGILState_STATE gil = PyGILState_Ensure();
+                if (run->in_exec) {
+                    PyThreadState_SetAsyncExc(run->thread_id, PyExc_KeyboardInterrupt);
+                }
+                PyGILState_Release(gil);
+            }
+            std::unique_lock lock(run->mutex);
+            run->settled.wait_for(lock, kRepeatInterval, [&] { return run->done; });
+        }
+    }).detach();
+}
+
+PythonExecResult PythonManager::execute_locked(const std::string& code,
+                                               std::string_view scope_key,
+                                               Run* run) {
     ensure_initialized();
 
     // Acquire the GIL before any Python C API calls.
@@ -226,11 +342,35 @@ PythonExecResult PythonManager::execute(const std::string& code, std::string_vie
 
     // The guard restores the streams on every exit path of the block below.
     StreamRedirect redirect(buf_out, buf_err);
+    // Published and withdrawn under the GIL, which the interrupting thread
+    // holds while it raises: the exception reaches this exec or nothing.
+    struct ExecWindow {
+        Run* run;
+        explicit ExecWindow(Run* r) : run(r) {
+            if (!run) return;
+            run->thread_id = PyThread_get_thread_ident();
+            run->in_exec = true;
+        }
+        ~ExecWindow() {
+            if (!run) return;
+            run->in_exec = false;
+            // An exception raised as the code finished may still be pending;
+            // drop it so it never surfaces in a later, unrelated call.
+            PyThreadState_SetAsyncExc(run->thread_id, nullptr);
+        }
+    };
     try {
-        // Use the scope's dict for both globals and locals so that function
-        // definitions and assignments persist across calls (REPL semantics).
-        py::exec(py::str(code), scope->globals, scope->globals);
-        result.success = true;
+        const ExecWindow window{run};
+        // Checked inside the window: a cancel that lands after this check
+        // finds in_exec set and interrupts the exec instead.
+        if (run && run->cancelled.load(std::memory_order_acquire)) {
+            result.success = false;
+        } else {
+            // Use the scope's dict for both globals and locals so that function
+            // definitions and assignments persist across calls (REPL semantics).
+            py::exec(py::str(code), scope->globals, scope->globals);
+            result.success = true;
+        }
     } catch (const py::error_already_set& e) {
         result.success = false;
         result.error   = e.what();
@@ -244,6 +384,10 @@ PythonExecResult PythonManager::execute(const std::string& code, std::string_vie
     // Restore before reading the buffers: the real streams are back as soon
     // as the code is done, and getvalue() works on the detached buffers.
     redirect.restore();
+    if (run && !result.success && run->cancelled.load(std::memory_order_acquire)) {
+        result.interrupted = true;
+        result.error = "Interrupted by the user (KeyboardInterrupt).";
+    }
 
     result.output = py::str(buf_out.attr("getvalue")()).cast<std::string>();
     std::string err_str = py::str(buf_err.attr("getvalue")()).cast<std::string>();

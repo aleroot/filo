@@ -19,6 +19,9 @@ class PythonInterpreterTool : public Tool {
 public:
     ToolDefinition get_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
+    /// Honors the invocation's cancellation predicate: the running code is
+    /// interrupted (KeyboardInterrupt) and the call returns promptly.
+    std::string execute(const std::string& json_args, const ToolInvocationContext& invocation) override;
     void clear_session_state(std::string_view session_id) override;
     void move_session_state(std::string_view from, std::string_view to) override;
 };

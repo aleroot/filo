@@ -161,6 +161,16 @@ public:
     /// Clear the stop flag (call before starting a new turn).
     void clear_stop_request();
 
+    /// Interrupt the tool calls executing right now without stopping the turn.
+    /// Each interrupted call sees its cancellation predicate turn true (a
+    /// running shell command is killed), its result tells the model the user
+    /// interrupted it, and the agentic loop then continues. Returns false and
+    /// does nothing when no tool call is executing.
+    bool interrupt_running_tools();
+
+    /// True while at least one approved tool call is executing.
+    [[nodiscard]] bool tools_running() const;
+
     /// Check if the current/last turn ended with an error (provider, transport, or configuration failure). Reset when a new turn starts.
     [[nodiscard]] bool last_turn_failed() const;
 
@@ -696,6 +706,14 @@ private:
 
     // Cancellation support
     std::atomic<bool> stop_requested_{false};
+    // One entry per executing tool call; interrupt_running_tools() flags them
+    // all. Registration and flagging share the mutex, so a call is either
+    // interrupted or started after the interrupt — never missed in between.
+    struct RunningToolCall {
+        std::atomic<bool> interrupted{false};
+    };
+    mutable std::mutex running_tools_mutex_;
+    std::vector<std::shared_ptr<RunningToolCall>> running_tools_;
     std::atomic<bool> turn_in_progress_{false};
     // Turn outcome: set when a turn ends through an error path.
     std::atomic<bool> turn_failed_{false};

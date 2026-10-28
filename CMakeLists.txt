@@ -807,6 +807,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_thread_catalog.cpp
     tests/test_session_picker.cpp
     tests/test_thread_runtime.cpp
+    tests/test_ctrl_c_policy.cpp
     tests/test_thread_modal_host.cpp
     tests/test_prompt_cache_guard.cpp
     tests/test_deadline_scheduler.cpp
@@ -1056,6 +1057,7 @@ source_group(
         tests/test_thread_catalog.cpp
         tests/test_session_picker.cpp
         tests/test_thread_runtime.cpp
+        tests/test_ctrl_c_policy.cpp
         tests/test_thread_modal_host.cpp
         tests/test_prompt_cache_guard.cpp
         tests/test_deadline_scheduler.cpp

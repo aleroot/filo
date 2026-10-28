@@ -84,6 +84,24 @@ private:
     return result.find("\"error\"") != std::string::npos;
 }
 
+// Marks a result whose call the user interrupted (Ctrl+C) while it ran, so
+// the model knows why it is partial and does not simply run it again. The
+// tool's own fields are kept: a killed shell command still reports its output.
+[[nodiscard]] std::string annotate_user_interrupt(std::string result) {
+    constexpr std::string_view kField =
+        R"("interrupted_by_user":"The user interrupted this tool call while it was running; )"
+        R"(any output is partial. Do not run it again unless the user asks.")";
+    const auto first = result.find_first_not_of(" \t\r\n");
+    if (first != std::string::npos && result[first] == '{') {
+        const auto next = result.find_first_not_of(" \t\r\n", first + 1);
+        const bool empty_object = next != std::string::npos && result[next] == '}';
+        result.insert(first + 1, empty_object ? std::string(kField) : std::string(kField) + ",");
+        return result;
+    }
+    return "{" + std::string(kField) + R"(,"output":")"
+        + core::utils::escape_json_string(result) + "\"}";
+}
+
 void sanitize_tool_arguments(core::llm::Message& message) {
     if (message.role != "assistant") return;
     for (auto& call : message.tool_calls) {
@@ -537,6 +555,36 @@ bool Agent::is_stop_requested() const {
 
 void Agent::clear_stop_request() {
     stop_requested_.store(false, std::memory_order_release);
+}
+
+bool Agent::interrupt_running_tools() {
+    {
+        std::lock_guard lock(running_tools_mutex_);
+        if (running_tools_.empty()) {
+            return false;
+        }
+        for (const auto& call : running_tools_) {
+            call->interrupted.store(true, std::memory_order_release);
+        }
+    }
+    // A shell command does not poll its predicate: kill it. Only when one is
+    // actually running, so an idle session keeps its shell (cwd, env).
+    const auto context = session_context_snapshot();
+    if (!context.session_id.empty()) {
+        const auto shells = skill_manager_.shell_sessions();
+        const auto commands = shells->active_commands();
+        if (std::ranges::any_of(commands, [&](const auto& command) {
+                return command.session_id == context.session_id;
+            })) {
+            shells->interrupt(context.session_id);
+        }
+    }
+    return true;
+}
+
+bool Agent::tools_running() const {
+    std::lock_guard lock(running_tools_mutex_);
+    return !running_tools_.empty();
 }
 
 bool Agent::last_turn_failed() const {
@@ -3023,6 +3071,31 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      parent_mode_for_task,
                      on_subagent_event = turn_callbacks.on_subagent_event]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
+                        // Registered for exactly as long as the call executes,
+                        // so interrupt_running_tools() reaches it and nothing
+                        // that has not started or already finished.
+                        const auto running_call = std::make_shared<RunningToolCall>();
+                        {
+                            std::lock_guard lock(self->running_tools_mutex_);
+                            self->running_tools_.push_back(running_call);
+                        }
+                        struct RunningToolRegistration {
+                            Agent& agent;
+                            const std::shared_ptr<RunningToolCall>& call;
+                            bool registered = true;
+                            void release() {
+                                if (!std::exchange(registered, false)) return;
+                                std::lock_guard lock(agent.running_tools_mutex_);
+                                std::erase(agent.running_tools_, call);
+                            }
+                            ~RunningToolRegistration() { release(); }
+                        } running_registration{*self, running_call};
+                        // A tool call ends early on a turn stop (Esc, /stop)
+                        // or on an interrupt of just the running tools.
+                        const auto tool_cancelled = [self, running_call] {
+                            return self->is_stop_requested()
+                                || running_call->interrupted.load(std::memory_order_acquire);
+                        };
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                             SubagentOrchestrator::RunContext run_context{
@@ -3036,12 +3109,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 },
                                 .parent_tool_call_id = tc.id,
                                 .on_subagent_event = on_subagent_event,
-                                // Propagate the parent's stop request (Esc /
-                                // Ctrl+C) to the delegated worker so cancelling
-                                // a turn also cancels its running subagents.
-                                .cancellation_requested = [self]() {
-                                    return self->is_stop_requested();
-                                },
+                                // Propagate the parent's stop request (Esc,
+                                // /stop) and a tool interrupt (Ctrl+C) to the
+                                // delegated worker, so cancelling a turn or
+                                // this call also cancels the running subagent.
+                                .cancellation_requested = tool_cancelled,
                                 .memory_system = self->memory_system_,
                                 .execution_journal = self->execution_journal(),
                                 // The worker's edits belong to this turn's
@@ -3072,10 +3144,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     .provider_name = active_provider_name_for_task,
                                     .model_name = active_model_for_task,
                                     .provider = provider_for_task,
-                                    .cancellation_requested = [self] { return self->is_stop_requested(); },
+                                    .cancellation_requested = tool_cancelled,
                                     .session_stats = self->session_stats_registry_,
                                     .change_tracker = recovery_turn_state->change_tracker,
                                 });
+                        }
+                        running_registration.release();
+                        if (running_call->interrupted.load(std::memory_order_acquire)) {
+                            result = annotate_user_interrupt(std::move(result));
                         }
                         {
                             std::lock_guard lock(self->history_mutex_);

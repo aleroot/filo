@@ -37,6 +37,11 @@ ToolDefinition PythonInterpreterTool::get_definition() const {
 }
 
 std::string PythonInterpreterTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
+    return execute(json_args, ToolInvocationContext{.session_context = context});
+}
+
+std::string PythonInterpreterTool::execute(const std::string& json_args, const ToolInvocationContext& invocation) {
+    const auto& context = invocation.session_context;
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -72,7 +77,7 @@ std::string PythonInterpreterTool::execute(const std::string& json_args, const c
         manager.clear_scope(scope);
         if (code_view.empty()) return R"({"output":"Python namespace cleared.","success":true})";
     }
-    auto result = manager.execute(std::string(code_view), scope);
+    auto result = manager.execute(std::string(code_view), scope, invocation.cancellation_requested);
 
     std::string escaped_output = core::utils::escape_json_string(result.output);
     if (result.success) {
