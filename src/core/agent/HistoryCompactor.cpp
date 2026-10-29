@@ -1,4 +1,5 @@
 #include "HistoryCompactor.hpp"
+#include "../utils/DetachedWorkTracker.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <atomic>
@@ -68,6 +69,8 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
     const auto start_failure_status = callbacks.on_status;
     const auto start_failure_finish = callbacks.on_finished;
     auto task = [request = std::move(request), callbacks = std::move(callbacks)]() mutable {
+        const core::utils::DetachedWorkTracker::Guard detached_guard{
+            core::utils::DetachedWorkTracker::instance()};
         const FinishGuard finish_guard(callbacks);
         emit(callbacks, start_status(request.reason));
 
@@ -76,46 +79,54 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
             return;
         }
 
-        auto summary = std::make_shared<std::string>();
-        auto completed = std::make_shared<std::atomic<bool>>(false);
+        auto provider = request.provider;
+        if (auto isolated = provider->fork_for_parallel_request()) {
+            provider = std::move(isolated);
+        }
+
+        std::string summary;
+        bool completed = false;
+        bool failed = false;
         try {
             const auto reason = request.reason;
             core::llm::ChatRequest llm_request = build_request(request);
-            request.provider->stream_response(
+            provider->stream_response(
                 llm_request,
-                [summary, callbacks, completed, reason](const core::llm::StreamChunk& chunk) {
+                [&summary, &completed, &failed](const core::llm::StreamChunk& chunk) {
                     if (chunk.reset_attempt) {
-                        summary->clear();
+                        summary.clear();
                         return;
                     }
-                    if (!chunk.content.empty()) *summary += chunk.content;
+                    if (!chunk.content.empty()) summary += chunk.content;
                     if (!chunk.is_final) return;
 
-                    completed->store(true, std::memory_order_release);
-                    if (chunk.is_error) {
-                        emit(callbacks, "\xe2\x9c\x97  History compaction failed.\n\n");
-                        return;
-                    }
-
-                    const std::string compacted = core::utils::str::trim_ascii_copy(*summary);
-                    if (compacted.empty()) {
-                        emit(callbacks, "\xe2\x9c\x97  History compaction failed: empty summary.\n\n");
-                        return;
-                    }
-
-                    const auto status = callbacks.on_summary
-                        ? callbacks.on_summary(compacted)
-                        : HistoryCompactionApplyStatus::Applied;
-                    emit(
-                        callbacks,
-                        status == HistoryCompactionApplyStatus::Applied
-                            ? success_status(reason)
-                            : stale_status(reason));
+                    completed = true;
+                    failed = chunk.is_error;
                 });
 
-            if (!completed->load(std::memory_order_acquire)) {
+            if (!completed) {
                 emit(callbacks, "\xe2\x9c\x97  History compaction failed: stream ended without a final response.\n\n");
+                return;
             }
+            if (failed) {
+                emit(callbacks, "\xe2\x9c\x97  History compaction failed.\n\n");
+                return;
+            }
+
+            const std::string compacted = core::utils::str::trim_ascii_copy(summary);
+            if (compacted.empty()) {
+                emit(callbacks, "\xe2\x9c\x97  History compaction failed: empty summary.\n\n");
+                return;
+            }
+
+            const auto status = callbacks.on_summary
+                ? callbacks.on_summary(compacted)
+                : HistoryCompactionApplyStatus::Applied;
+            emit(
+                callbacks,
+                status == HistoryCompactionApplyStatus::Applied
+                    ? success_status(reason)
+                    : stale_status(reason));
         } catch (const std::exception& e) {
             emit(callbacks, std::format(
                 "\xe2\x9c\x97  History compaction failed: {}\n\n",

@@ -786,7 +786,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     auto frame = std::move(ws->websocket_frame);
                     bool retry_connection = false;
                     while (!frame.payload.empty()) {
-                        bool terminal_forwarded = false;
+                        std::optional<StreamChunk> terminal_chunk;
                         bool output_emitted = false;
                         bool stream_error = false;
                         bool retryable = false;
@@ -812,12 +812,18 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     for (const auto& chunk : parsed.chunks) {
                                         output_emitted |= !chunk.content.empty() || !chunk.reasoning_content.empty()
                                             || !chunk.tools.empty() || !chunk.continuation_items.empty();
-                                        callback(chunk);
-                                        terminal_forwarded |= chunk.is_final;
+                                        // Hold the terminal chunk until stream_text() returns so
+                                        // callbacks that reset or reuse the transport on is_final
+                                        // do not re-enter CurlWebSocketTransport::mutex_.
+                                        if (chunk.is_final) {
+                                            terminal_chunk = chunk;
+                                        } else {
+                                            callback(chunk);
+                                        }
                                     }
-                                    if (parsed.done && !terminal_forwarded) {
-                                        callback(StreamChunk::make_final(parsed.stop_reason, parsed.incomplete_tool_call));
-                                        terminal_forwarded = true;
+                                    if (parsed.done && !terminal_chunk) {
+                                        terminal_chunk = StreamChunk::make_final(
+                                            parsed.stop_reason, parsed.incomplete_tool_call);
                                     }
                                 } else {
                                     for (const auto& chunk : parsed.chunks) {
@@ -827,12 +833,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                         }
                                     }
                                 }
-                                return parsed.done || terminal_forwarded || stream_error;
+                                return parsed.done || terminal_chunk.has_value() || stream_error;
                             }, &self->cancel_requested_, timeouts.inactivity);
                         protocol->observe_response_headers(result.response_headers, request_metadata);
                         if (self->cancel_requested_.load(std::memory_order_acquire)) {
                             abandon_websocket();
-                            if (!terminal_forwarded) callback(StreamChunk::make_final());
+                            callback(terminal_chunk.value_or(StreamChunk::make_final()));
                             return;
                         }
                         if (result.completed() && !stream_error) {
@@ -844,6 +850,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             protocol->on_response(response);
                             enrich_rate_limit(ws->websocket_headers, response);
                             self->set_last_rate_limit_info(protocol->last_rate_limit());
+                            callback(terminal_chunk.value_or(StreamChunk::make_final()));
                             return;
                         }
                         abandon_websocket();

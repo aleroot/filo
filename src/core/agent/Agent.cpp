@@ -1314,34 +1314,45 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
 // ---------------------------------------------------------------------------
 
 void Agent::clear_history() {
-    std::lock_guard lock(history_mutex_);
-    ++conversation_generation_;
-    journal_unlocked("clear", "{}");
-    history_.clear();
-    context_summary_.clear();
-    project_facts_snapshot_.reset();
-    consecutive_failure_rounds_ = 0;
-    orchestrator_.clear_sessions();
-    reset_efficiency_tracking_unlocked();
-    prompt_cache_.reset();
-    if (provider_) {
-        provider_->reset_conversation_state();
+    std::shared_ptr<core::llm::LLMProvider> provider;
+    {
+        std::lock_guard lock(history_mutex_);
+        ++conversation_generation_;
+        journal_unlocked("clear", "{}");
+        history_.clear();
+        context_summary_.clear();
+        project_facts_snapshot_.reset();
+        consecutive_failure_rounds_ = 0;
+        orchestrator_.clear_sessions();
+        reset_efficiency_tracking_unlocked();
+        prompt_cache_.reset();
+        provider = provider_;
+        ensure_system_prompt();
+        refresh_context_window_snapshot_unlocked();
     }
-    ensure_system_prompt();
-    refresh_context_window_snapshot_unlocked();
+    if (provider) {
+        provider->reset_conversation_state();
+    }
 }
 
 void Agent::compact_history(std::string summary) {
-    std::lock_guard lock(history_mutex_);
-    auto plan = HistoryCompactionPlanner::plan(
-        history_,
-        context_summary_,
-        compaction_policy(provider_, active_model_));
-    const auto active_skill_context = collect_active_skill_context(history_);
-    apply_compaction_unlocked(
-        std::move(summary),
-        std::move(plan),
-        active_skill_context);
+    std::shared_ptr<core::llm::LLMProvider> provider;
+    {
+        std::lock_guard lock(history_mutex_);
+        auto plan = HistoryCompactionPlanner::plan(
+            history_,
+            context_summary_,
+            compaction_policy(provider_, active_model_));
+        const auto active_skill_context = collect_active_skill_context(history_);
+        apply_compaction_unlocked(
+            std::move(summary),
+            std::move(plan),
+            active_skill_context);
+        provider = provider_;
+    }
+    if (provider) {
+        provider->reset_conversation_state();
+    }
 }
 
 void Agent::apply_compaction_unlocked(
@@ -1377,12 +1388,6 @@ void Agent::apply_compaction_unlocked(
     // The summary starts a new prefix: nothing cached for the old one can be
     // read again, so there is nothing left to keep warm or warn about.
     prompt_cache_.reset();
-    if (provider_) {
-        // Every provider must discard transport continuation handles after a
-        // history rewrite. This does not affect authentication or session-owned
-        // execution state.
-        provider_->reset_conversation_state();
-    }
     ensure_system_prompt();
     history_.insert(
         history_.end(),
@@ -1487,6 +1492,7 @@ void Agent::launch_compaction_transaction(
                  active_skill_context = std::move(active_skill_context),
                  done_callback = std::move(done_callback)](std::string summary) mutable {
                 bool applied = false;
+                std::shared_ptr<core::llm::LLMProvider> provider_to_reset;
                 {
                     std::lock_guard lock(self->history_mutex_);
                     if (self->history_revision_ == base_revision) {
@@ -1494,8 +1500,15 @@ void Agent::launch_compaction_transaction(
                             std::move(summary),
                             std::move(plan),
                             std::move(active_skill_context));
+                        provider_to_reset = self->provider_;
                         applied = true;
                     }
+                }
+                if (provider_to_reset) {
+                    // Every provider must discard transport continuation handles
+                    // after a history rewrite. Reset outside history_mutex_ so
+                    // transport locks are never acquired under Agent::history_mutex_.
+                    provider_to_reset->reset_conversation_state();
                 }
                 applied_flag->store(applied, std::memory_order_release);
                 if (applied && done_callback) {
@@ -3556,75 +3569,79 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
         repair.removed_empty_messages);
   }
 
-  std::lock_guard lock(history_mutex_);
-  ++conversation_generation_;
-  current_mode_ = agent_mode_from_string(mode);
-  context_summary_ = context_summary;
-  project_facts_snapshot_.reset();
-  for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-    if (!is_repository_context_message(*it))
-      continue;
-    if (const auto state = decode_repository_context_state(it->input_text)) {
-      project_facts_snapshot_ = core::context::ProjectFactsSnapshot{
-          .status = state->first,
-          .tree = state->second,
-      };
-    }
-    break;
-  }
-  consecutive_failure_rounds_ = 0;
-  orchestrator_.clear_sessions();
-  reset_efficiency_tracking_unlocked();
-  // A replaced conversation has its own cache; a resumed one is re-seeded by
-  // restore_prompt_cache_activity once its last activity is known.
-  prompt_cache_.reset();
-  if (provider_) {
-    provider_->reset_conversation_state();
-  }
-
-  // Remove any stale system message — ensure_system_prompt() inserts a fresh
-  // one.
-  std::erase_if(messages,
-                [](const core::llm::Message &m) { return m.role == "system"; });
-  if (const auto invalid = core::llm::validate_tool_transcript(messages);
-      invalid.has_value()) {
-    core::logging::warn(
-        "Truncated malformed saved tool transcript at history index {}: {}",
-        invalid->message_index, invalid->reason);
-    messages.resize(invalid->message_index);
-  }
-  if (execution_journal_ && kind != HistoryLoad::Resume) {
-    // A review unit swaps the conversation out and back once per group. The
-    // swapped messages are already in the journal, so copying them on every
-    // swap only multiplied its size; markers keep the sequence readable.
-    core::utils::JsonWriter event;
-    {
-      auto object = event.object();
-      event.kv_num("messages_before", std::ranges::count_if(history_,
-          [](const core::llm::Message& m) { return m.role != "system"; })).comma();
-      event.kv_num("messages_after", messages.size());
-    }
-    journal_unlocked(kind == HistoryLoad::Detach ? "detach" : "reattach", event.view());
-  } else if (execution_journal_) {
-    core::utils::JsonWriter event;
-    {
-      auto object = event.object();
-      event.kv_str("context_summary", context_summary).comma();
-      event.kv_str("working_dir", session_context_.workspace_view().primary().string()).comma();
-      event.kv_str("origin", "resume_snapshot").comma();
-      event.key("messages");
-      auto array = event.array();
-      bool first = true;
-      for (const auto& message : messages) {
-        if (!first) event.comma();
-        first = false;
-        event.raw(core::session::SessionStore::message_json(message));
+  std::shared_ptr<core::llm::LLMProvider> provider_to_reset;
+  {
+    std::lock_guard lock(history_mutex_);
+    ++conversation_generation_;
+    current_mode_ = agent_mode_from_string(mode);
+    context_summary_ = context_summary;
+    project_facts_snapshot_.reset();
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+      if (!is_repository_context_message(*it))
+        continue;
+      if (const auto state = decode_repository_context_state(it->input_text)) {
+        project_facts_snapshot_ = core::context::ProjectFactsSnapshot{
+            .status = state->first,
+            .tree = state->second,
+        };
       }
+      break;
     }
-    journal_unlocked("resume", event.view());
+    consecutive_failure_rounds_ = 0;
+    orchestrator_.clear_sessions();
+    reset_efficiency_tracking_unlocked();
+    // A replaced conversation has its own cache; a resumed one is re-seeded by
+    // restore_prompt_cache_activity once its last activity is known.
+    prompt_cache_.reset();
+    provider_to_reset = provider_;
+
+    // Remove any stale system message — ensure_system_prompt() inserts a fresh
+    // one.
+    std::erase_if(messages,
+                  [](const core::llm::Message &m) { return m.role == "system"; });
+    if (const auto invalid = core::llm::validate_tool_transcript(messages);
+        invalid.has_value()) {
+      core::logging::warn(
+          "Truncated malformed saved tool transcript at history index {}: {}",
+          invalid->message_index, invalid->reason);
+      messages.resize(invalid->message_index);
+    }
+    if (execution_journal_ && kind != HistoryLoad::Resume) {
+      // A review unit swaps the conversation out and back once per group. The
+      // swapped messages are already in the journal, so copying them on every
+      // swap only multiplied its size; markers keep the sequence readable.
+      core::utils::JsonWriter event;
+      {
+        auto object = event.object();
+        event.kv_num("messages_before", std::ranges::count_if(history_,
+            [](const core::llm::Message& m) { return m.role != "system"; })).comma();
+        event.kv_num("messages_after", messages.size());
+      }
+      journal_unlocked(kind == HistoryLoad::Detach ? "detach" : "reattach", event.view());
+    } else if (execution_journal_) {
+      core::utils::JsonWriter event;
+      {
+        auto object = event.object();
+        event.kv_str("context_summary", context_summary).comma();
+        event.kv_str("working_dir", session_context_.workspace_view().primary().string()).comma();
+        event.kv_str("origin", "resume_snapshot").comma();
+        event.key("messages");
+        auto array = event.array();
+        bool first = true;
+        for (const auto& message : messages) {
+          if (!first) event.comma();
+          first = false;
+          event.raw(core::session::SessionStore::message_json(message));
+        }
+      }
+      journal_unlocked("resume", event.view());
+    }
+    history_ = std::move(messages);
+    refresh_stable_prompt_state_unlocked();
   }
-  history_ = std::move(messages);
-  refresh_stable_prompt_state_unlocked();
+  if (provider_to_reset) {
+    provider_to_reset->reset_conversation_state();
+  }
 }
 
 std::string Agent::get_mode() const {

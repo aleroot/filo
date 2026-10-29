@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/agent/HistoryCompactor.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/ApiProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
@@ -712,3 +713,127 @@ TEST_CASE("Native WebSocket transport rejects invalid UTF-8 without an Objective
     CHECK_FALSE(transport.matches_connection("invalid-utf8"));
 }
 #endif
+
+TEST_CASE("WebSocket terminal chunk callback can reset conversation state and chain requests without deadlocking",
+          "[transport][websocket][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"warm_1"}})"},
+        {R"({"type":"response.output_text.delta","delta":"summary checkpoint"})",
+         R"({"type":"response.completed","response":{"id":"resp_1"}})"},
+        {R"({"type":"response.completed","response":{"id":"warm_2"}})"},
+        {R"({"type":"response.output_text.delta","delta":"follow-up turn"})",
+         R"({"type":"response.completed","response":{"id":"resp_2"}})"},
+    }, {1});
+
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()),
+        nullptr,
+        "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown,
+        "codex");
+
+    core::llm::ChatRequest first_request;
+    first_request.model = "gpt-5.6-sol";
+    first_request.session_id = "ws-deadlock-regression";
+    first_request.transport_turn_id = "turn-1";
+    first_request.messages = {{.role = "user", .content = "compact conversation"}};
+
+    std::string first_text;
+    std::string second_text;
+    std::promise<void> completed;
+    auto completed_future = completed.get_future();
+
+    std::jthread worker([&] {
+        provider->stream_response(first_request, [&](const core::llm::StreamChunk& chunk) {
+            first_text += chunk.content;
+            if (!chunk.is_final) return;
+
+            // Reproduces compaction / turn continuation callbacks that reset
+            // conversation state and start a follow-up request from inside the
+            // terminal chunk callback.
+            provider->reset_conversation_state();
+
+            core::llm::ChatRequest second_request;
+            second_request.model = "gpt-5.6-sol";
+            second_request.session_id = "ws-deadlock-regression";
+            second_request.transport_turn_id = "turn-2";
+            second_request.messages = {{.role = "user", .content = "continue"}};
+
+            provider->stream_response(second_request, [&](const core::llm::StreamChunk& inner) {
+                second_text += inner.content;
+                if (inner.is_final) {
+                    completed.set_value();
+                }
+            });
+        });
+    });
+
+    REQUIRE(completed_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK(first_text == "summary checkpoint");
+    CHECK(second_text == "follow-up turn");
+#endif
+}
+
+TEST_CASE("HistoryCompactor over WebSocket forks the provider and resets conversation state without deadlocking",
+          "[transport][websocket][compaction][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"warm_compact"}})"},
+        {R"({"type":"response.output_text.delta","delta":"Compacted summary checkpoint."})",
+         R"({"type":"response.completed","response":{"id":"resp_compact"}})"},
+    });
+
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()),
+        nullptr,
+        "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown,
+        "codex");
+
+    std::mutex history_mutex;
+    std::string applied_summary;
+    std::promise<void> finished;
+    auto finished_future = finished.get_future();
+
+    core::agent::HistoryCompactor compactor;
+    compactor.compact_async(
+        core::agent::HistoryCompactionRequest{
+            .history = {{.role = "user", .content = "Summarize this session."}},
+            .provider = provider,
+            .model = "gpt-5.6-sol",
+            .reason = core::agent::HistoryCompactionReason::Auto,
+        },
+        core::agent::HistoryCompactionCallbacks{
+            .on_summary = [&](std::string summary) {
+                {
+                    std::lock_guard lock(history_mutex);
+                    applied_summary = std::move(summary);
+                }
+                provider->reset_conversation_state();
+                return core::agent::HistoryCompactionApplyStatus::Applied;
+            },
+            .on_finished = [&]() {
+                finished.set_value();
+            },
+        });
+
+    REQUIRE(finished_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    std::lock_guard lock(history_mutex);
+    CHECK(applied_summary == "Compacted summary checkpoint.");
+#endif
+}

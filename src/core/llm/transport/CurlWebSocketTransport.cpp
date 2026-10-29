@@ -390,8 +390,8 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
         if (done) {
             return WebSocketStreamResult{
                 .status = WebSocketStreamResult::Status::Completed,
-                .http_status = connection_->http_status,
-                .response_headers = connection_->response_headers,
+                .http_status = connection_ ? connection_->http_status : 0,
+                .response_headers = connection_ ? connection_->response_headers : cpr::Header{},
                 .request_sent = true,
                 .connection_reused = connection_reused,
             };

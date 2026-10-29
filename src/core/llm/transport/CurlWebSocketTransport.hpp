@@ -70,7 +70,7 @@ private:
         const cpr::Header& headers);
 
     std::chrono::milliseconds idle_timeout_;
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
     std::unique_ptr<Connection> connection_;
 #if defined(__APPLE__)
     std::unique_ptr<AppleWebSocketTransport> native_;

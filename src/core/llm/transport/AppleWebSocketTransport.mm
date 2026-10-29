@@ -242,9 +242,11 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
                     .request_sent = true,
                     .connection_reused = reused,
                 };
-                std::lock_guard lock(impl_->state->mutex);
-                result.http_status = impl_->state->status;
-                result.response_headers = impl_->state->headers;
+                if (impl_->state) {
+                    std::lock_guard lock(impl_->state->mutex);
+                    result.http_status = impl_->state->status;
+                    result.response_headers = impl_->state->headers;
+                }
                 return result;
             }
         }
