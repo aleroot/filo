@@ -341,37 +341,17 @@ TEST_CASE("MiniMax retries plan rate limits on a seconds-scale schedule", "[mini
     CHECK(MiniMaxProtocol(true).clone()->stream_retry_policy() == policy);
 }
 
-TEST_CASE("MiniMax image input supports pinned data and native URL sources", "[minimax][vision]") {
+TEST_CASE("MiniMax image input supports native URL sources", "[minimax][vision]") {
     MiniMaxProtocol protocol(true);
     auto req = request();
     req.messages.back().content_parts = {
-        ContentPart::make_image_url("data:image/png;base64,cG5nLWJ5dGVz"),
+        ContentPart::make_image_url("https://example.test/diagram.png"),
         ContentPart::make_image_url("https://example.test/screenshot.png")};
     protocol.prepare_request(req);
     const auto payload = protocol.serialize(req); valid_json(payload);
-    CHECK_THAT(payload, ContainsSubstring(R"("type":"base64","media_type":"image/png","data":"cG5nLWJ5dGVz")"));
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"url","url":"https://example.test/diagram.png")"));
     CHECK_THAT(payload, ContainsSubstring(R"("type":"url","url":"https://example.test/screenshot.png")"));
     CHECK(providers::MiniMaxRequestBudget::estimate_request(req) >= 30000);
-    // The last base64 quartet distinguishes exactly 10 MiB from one byte over.
-    constexpr std::size_t image_limit = 10 * 1024 * 1024;
-    auto data = "data:image/png;base64," + std::string((image_limit + 2) / 3 * 4, 'A');
-    data.replace(data.size() - 2, 2, "==");
-    req.messages.back().content_parts = {ContentPart::make_image_url(data)};
-    CHECK_NOTHROW(protocol.prepare_request(req));
-    data[data.size() - 2] = 'A';
-    req.messages.back().content_parts = {ContentPart::make_image_url(std::move(data))};
-    CHECK_THROWS(protocol.prepare_request(req));
-    const auto path = std::filesystem::temp_directory_path() / ("filo-minimax-image-"
-        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".png");
-    { std::ofstream file(path); file << 'A'; }
-    std::filesystem::resize_file(path, image_limit + 1);
-    auto pinned = ContentPart::make_image_url("data:image/png;base64,cG5nLWJ5dGVz");
-    pinned.path = path.string();
-    req.messages.back().content_parts = {pinned};
-    CHECK_NOTHROW(protocol.prepare_request(req));
-    req.messages.back().content_parts.front().url.clear();
-    CHECK_THROWS(protocol.prepare_request(req));
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("MiniMax context configuration survives forks and supplies compaction estimates", "[minimax][budget]") {

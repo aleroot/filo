@@ -292,6 +292,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ClaudeBilling.cpp
     src/core/llm/ClaudeCodeClient.cpp
     src/core/llm/protocols/MiniMaxProtocol.cpp
+    src/core/llm/protocols/MiniMaxImage.cpp
     src/core/llm/MiniMaxModelTraits.cpp
     src/core/llm/MiniMaxUsageClient.cpp
     src/core/llm/protocols/GeminiProtocol.cpp
@@ -789,6 +790,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mistral_provider.cpp
     tests/test_mimo_provider.cpp
     tests/test_minimax_provider.cpp
+    tests/test_minimax_image.cpp
     tests/test_usage_snapshot_cache.cpp
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
@@ -1057,6 +1059,7 @@ source_group(
         tests/test_mistral_provider.cpp
         tests/test_mimo_provider.cpp
         tests/test_minimax_provider.cpp
+        tests/test_minimax_image.cpp
         tests/test_usage_snapshot_cache.cpp
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp

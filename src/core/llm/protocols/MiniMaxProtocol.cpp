@@ -1,4 +1,5 @@
 #include "MiniMaxProtocol.hpp"
+#include "MiniMaxImage.hpp"
 #include "SseUtils.hpp"
 #include "../MiniMaxModelTraits.hpp"
 #include "../catalog/MiniMaxModelCatalogProvider.hpp"
@@ -149,21 +150,7 @@ void MiniMaxProtocol::prepare_request(ChatRequest& req) {
     if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
         throw std::invalid_argument("MiniMax does not support JSON-schema output; use JSON-object output and validate it.");
     }
-    for (const auto& message : req.messages) for (const auto& part : message.content_parts) {
-        if (part.type != ContentPartType::Image) continue;
-        const auto inline_data = decode_inline_data_url(part.type, part.url);
-        if (inline_data && inline_data->decoded_size > 10 * 1024 * 1024) {
-            throw std::invalid_argument("MiniMax images must be at most 10 MiB.");
-        }
-        // A pinned URL/data source takes precedence over its original file.
-        const bool uses_local_file = part.url.empty()
-            || (is_data_url_for_media(part.type, part.url) && !inline_data);
-        if (uses_local_file && !part.path.empty()) {
-            std::error_code error;
-            const auto size = std::filesystem::file_size(part.path, error);
-            if (!error && size > 10 * 1024 * 1024) throw std::invalid_argument("MiniMax images must be at most 10 MiB.");
-        }
-    }
+    prepare_minimax_images(req);
     req.max_tokens = std::clamp(req.max_tokens.value_or(kMiniMaxOutputLimit), 1, kMiniMaxOutputLimit);
 }
 
