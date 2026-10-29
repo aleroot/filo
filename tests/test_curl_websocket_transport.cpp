@@ -12,8 +12,10 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -687,7 +689,9 @@ TEST_CASE("WebSocket transport discards a connection when its consumer throws",
 #endif
 }
 
-#if defined(__APPLE__)
+// These pin NSURLSession behaviour, so they follow the transport actually built
+// rather than the platform: FILO_WEBSOCKET_FORCE_CURL selects libcurl on a Mac.
+#if defined(FILO_WEBSOCKET_NATIVE_APPLE)
 TEST_CASE("Native WebSocket handshake timeout does not shorten the generation idle budget",
           "[transport][websocket][regression][timeout]") {
     // Codex reasoning can remain silent longer than the 15-second handshake
@@ -792,7 +796,6 @@ TEST_CASE("HistoryCompactor over WebSocket forks the provider and resets convers
     }
 
     LoopbackWebSocketServer server({
-        {R"({"type":"response.completed","response":{"id":"warm_compact"}})"},
         {R"({"type":"response.output_text.delta","delta":"Compacted summary checkpoint."})",
          R"({"type":"response.completed","response":{"id":"resp_compact"}})"},
     });
@@ -833,7 +836,464 @@ TEST_CASE("HistoryCompactor over WebSocket forks the provider and resets convers
         });
 
     REQUIRE(finished_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    // A compaction request carries no transport_turn_id, so
+    // CodexResponsesProtocol sends no prewarm frame ahead of it: exactly one
+    // request goes out, and it must be the one the response below answers.
+    CHECK(server.received_payloads().size() == 1);
     std::lock_guard lock(history_mutex);
     CHECK(applied_summary == "Compacted summary checkpoint.");
+#endif
+}
+
+namespace {
+
+#if !defined(_WIN32)
+// Runs one stream_text() call off-thread and hands the result back, so a
+// regression that re-introduces a deadlock fails the assertion instead of
+// hanging the whole suite. Everything the worker touches is shared, so it stays
+// valid even if the worker has to be abandoned.
+class StreamProbe {
+public:
+    void start(CurlWebSocketTransport& transport,
+               const std::string& url,
+               std::string_view connection_key,
+               CurlWebSocketTransport::MessageCallback on_message,
+               std::string payload = R"({"type":"response.create","sequence":1})") {
+        worker_ = std::thread([state = state_, &transport, url, key = std::string(connection_key),
+                               on_message = std::move(on_message), payload = std::move(payload)] {
+            auto streamed = transport.stream_text(url, key, {}, payload, on_message);
+            {
+                std::lock_guard lock(state->mutex);
+                state->result = std::move(streamed);
+            }
+            state->ready.notify_all();
+        });
+    }
+
+    // Returns false (and abandons the thread) if the stream never finished.
+    [[nodiscard]] bool wait(std::chrono::seconds budget) {
+        bool ready = false;
+        {
+            std::unique_lock lock(state_->mutex);
+            ready = state_->ready.wait_for(lock, budget, [&] { return state_->result.has_value(); });
+        }
+        if (ready) {
+            worker_.join();
+        } else {
+            worker_.detach();
+        }
+        return ready;
+    }
+
+    [[nodiscard]] WebSocketStreamResult result() const {
+        std::lock_guard lock(state_->mutex);
+        return *state_->result;
+    }
+
+    ~StreamProbe() {
+        if (worker_.joinable()) worker_.detach();
+    }
+
+private:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::optional<WebSocketStreamResult> result;
+    };
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+    std::thread worker_;
+};
+
+// Accepts connections and never answers them: a server that is slow, or
+// silent, to upgrade.
+class SilentServer {
+public:
+    SilentServer() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) throw std::runtime_error("socket failed");
+        int reuse = 1;
+        ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0
+            || ::listen(listen_fd_, 4) != 0
+            || ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            close_socket(listen_fd_);
+            throw std::runtime_error("silent server setup failed");
+        }
+        port_ = ntohs(addr.sin_port);
+        thread_ = std::thread([this] {
+            while (true) {
+                const int client = ::accept(listen_fd_, nullptr, nullptr);
+                if (client < 0) return;
+                std::lock_guard lock(mutex_);
+                clients_.push_back(client);
+            }
+        });
+    }
+    ~SilentServer() {
+        close_socket(listen_fd_);
+        if (thread_.joinable()) thread_.join();
+        std::lock_guard lock(mutex_);
+        for (const int client : clients_) close_socket(client);
+    }
+    [[nodiscard]] int port() const noexcept { return port_; }
+
+private:
+    int listen_fd_ = -1;
+    int port_ = 0;
+    std::mutex mutex_;
+    std::vector<int> clients_;
+    std::thread thread_;
+};
+
+[[nodiscard]] bool wait_until(const std::function<bool()>& condition, std::chrono::seconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+#endif
+
+} // namespace
+
+TEST_CASE("WebSocket consumer may reset the transport from inside a non-final message",
+          "[transport][websocket][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("linked libcurl does not support ws://");
+    }
+
+    LoopbackWebSocketServer server({{
+        R"({"type":"response.output_text.delta","delta":"one"})",
+        R"({"type":"response.output_text.delta","delta":"two"})",
+        R"({"type":"response.completed","response":{"id":"resp_1"}})",
+    }});
+
+    // A generous idle budget: the stream has to end because it was reset, not
+    // because it ran out of time.
+    CurlWebSocketTransport transport(std::chrono::seconds(30));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+    auto delivered = std::make_shared<std::atomic<int>>(0);
+
+    StreamProbe probe;
+    const auto started = std::chrono::steady_clock::now();
+    probe.start(transport, url, "reset-from-callback",
+                [delivered, &transport](std::string_view) {
+                    delivered->fetch_add(1, std::memory_order_acq_rel);
+                    // Abandon the stream from inside the consumer callback and
+                    // report "not done". The transport used to hold its own
+                    // mutex across this call, so reset() either self-deadlocked
+                    // on it or — once the mutex was made recursive — destroyed
+                    // the connection underneath the receive loop still using it.
+                    transport.reset();
+                    return false;
+                });
+
+    REQUIRE(probe.wait(std::chrono::seconds(20)));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(delivered->load(std::memory_order_acquire) == 1);
+    CHECK(probe.result().status == WebSocketStreamResult::Status::Aborted);
+    // It must have noticed the reset, not sat out the idle budget waiting for a
+    // connection that reset() had already cancelled.
+    CHECK(elapsed < std::chrono::seconds(10));
+    CHECK(probe.result().message.find("idle timeout") == std::string::npos);
+#endif
+}
+
+TEST_CASE("Resetting a WebSocket stream from another thread aborts it instead of blocking",
+          "[transport][websocket][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("linked libcurl does not support ws://");
+    }
+
+    // One message, then the server parks reading a second client frame, so the
+    // connection stays open and silent for the rest of the test.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.output_text.delta","delta":"only"})"},
+        {},
+    });
+
+    CurlWebSocketTransport transport(std::chrono::seconds(30));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+    auto signalled = std::make_shared<std::atomic<bool>>(false);
+    auto first_message = std::make_shared<std::promise<void>>();
+
+    StreamProbe probe;
+    probe.start(transport, url, "concurrent-reset",
+                [signalled, first_message](std::string_view) {
+                    if (!signalled->exchange(true, std::memory_order_acq_rel)) {
+                        first_message->set_value();
+                    }
+                    return false;
+                });
+
+    REQUIRE(first_message->get_future().wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+
+    // While the receive loop held the transport mutex, this blocked until the
+    // stream above finished — for a quiet connection, the whole idle budget.
+    // That is how a background reset froze the thread that asked for it.
+    const auto reset_started = std::chrono::steady_clock::now();
+    transport.reset();
+    const auto reset_elapsed = std::chrono::steady_clock::now() - reset_started;
+
+    REQUIRE(probe.wait(std::chrono::seconds(20)));
+    CHECK(reset_elapsed < std::chrono::seconds(5));
+    CHECK(probe.result().status == WebSocketStreamResult::Status::Aborted);
+#endif
+}
+
+TEST_CASE("A WebSocket stream from another thread waits for the active one instead of breaking it",
+          "[transport][websocket][regression][concurrency]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("linked libcurl does not support ws://");
+    }
+
+    // Each response is held back, so the second caller arrives while the first
+    // is still streaming.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.output_text.delta","delta":"first"})",
+         R"({"type":"response.completed","response":{"id":"resp_1"}})"},
+        {R"({"type":"response.output_text.delta","delta":"second"})",
+         R"({"type":"response.completed","response":{"id":"resp_2"}})"},
+    }, {}, false, std::chrono::milliseconds(300));
+
+    CurlWebSocketTransport transport(std::chrono::seconds(10));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+    const auto until_completed = [](std::string_view message) {
+        return message.find("response.completed") != std::string_view::npos;
+    };
+
+    StreamProbe first;
+    first.start(transport, url, "shared", until_completed,
+                R"({"type":"response.create","sequence":1})");
+    REQUIRE(wait_until([&] { return server.received_payloads().size() == 1; }, std::chrono::seconds(10)));
+
+    // A shared provider (the API gateway, MCP sampling) does this. The second
+    // caller used to be refused, and the refusal reset the transport, which
+    // aborted the first caller's stream with it.
+    StreamProbe second;
+    second.start(transport, url, "shared", until_completed,
+                 R"({"type":"response.create","sequence":2})");
+
+    REQUIRE(first.wait(std::chrono::seconds(20)));
+    REQUIRE(second.wait(std::chrono::seconds(20)));
+    CHECK(first.result().completed());
+    CHECK(second.result().completed());
+    CHECK(second.result().connection_reused);
+    const auto received = server.received_payloads();
+    REQUIRE(received.size() == 2);
+    CHECK(received[1].find(R"("sequence":2)") != std::string::npos);
+#endif
+}
+
+TEST_CASE("A WebSocket stream re-entered from its own callback is refused as Busy",
+          "[transport][websocket][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("linked libcurl does not support ws://");
+    }
+
+    LoopbackWebSocketServer server({{
+        R"({"type":"response.output_text.delta","delta":"outer"})",
+        R"({"type":"response.completed","response":{"id":"resp_1"}})",
+    }});
+
+    CurlWebSocketTransport transport(std::chrono::seconds(10));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+    auto inner = std::make_shared<std::optional<WebSocketStreamResult>>();
+
+    StreamProbe outer;
+    outer.start(transport, url, "reentrant", [&transport, url, inner](std::string_view message) {
+        if (!inner->has_value()) {
+            // Waiting here for the outer stream would wait for ourselves.
+            *inner = transport.stream_text(url, "reentrant", {},
+                                           R"({"type":"response.create","sequence":2})",
+                                           [](std::string_view) { return true; });
+        }
+        return message.find("response.completed") != std::string_view::npos;
+    });
+
+    REQUIRE(outer.wait(std::chrono::seconds(20)));
+    REQUIRE(inner->has_value());
+    CHECK((*inner)->status == WebSocketStreamResult::Status::Busy);
+    CHECK_FALSE((*inner)->request_sent);
+    // The refusal left the outer stream alone.
+    CHECK(outer.result().completed());
+    CHECK(server.received_payloads().size() == 1);
+#endif
+}
+
+TEST_CASE("Resetting a WebSocket transport during the handshake neither blocks nor waits for the server",
+          "[transport][websocket][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("linked libcurl does not support ws://");
+    }
+
+    SilentServer server;
+    CurlWebSocketTransport transport(std::chrono::seconds(30));
+    const std::string url = "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses";
+
+    StreamProbe probe;
+    const auto started = std::chrono::steady_clock::now();
+    probe.start(transport, url, "silent-upgrade", [](std::string_view) { return true; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // The handshake used to run under the transport mutex, so this waited for
+    // the server: forever, without a handshake deadline. It is what a UI thread
+    // clearing the conversation would have been stuck behind.
+    const auto reset_started = std::chrono::steady_clock::now();
+    transport.reset();
+    CHECK(std::chrono::steady_clock::now() - reset_started < std::chrono::seconds(1));
+    CHECK_FALSE(transport.matches_connection("silent-upgrade"));
+
+    REQUIRE(probe.wait(std::chrono::seconds(20)));
+    CHECK(probe.result().status == WebSocketStreamResult::Status::Aborted);
+    CHECK_FALSE(probe.result().request_sent);
+    // Well inside the 15 s handshake deadline: the reset ended it.
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(5));
+#endif
+}
+
+TEST_CASE("Concurrent requests on one Codex provider share its WebSocket without aborting each other",
+          "[transport][websocket][codex][regression][concurrency]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+
+    // No transport_turn_id, so no prewarm: one frame and one response per
+    // request. The responses are identical because either caller may go first.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.output_text.delta","delta":"shared answer"})",
+         R"({"type":"response.completed","response":{"id":"resp_1"}})"},
+        {R"({"type":"response.output_text.delta","delta":"shared answer"})",
+         R"({"type":"response.completed","response":{"id":"resp_2"}})"},
+    }, {}, false, std::chrono::milliseconds(300));
+
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()),
+        nullptr,
+        "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown,
+        "codex");
+
+    struct Outcome {
+        std::string text;
+        bool error = false;
+        bool final = false;
+    };
+    const auto run = [&](Outcome& outcome, std::string session) {
+        core::llm::ChatRequest request;
+        request.model = "gpt-5.6-sol";
+        request.session_id = std::move(session);
+        request.messages = {{.role = "user", .content = "hello"}};
+        provider->stream_response(request, [&](const core::llm::StreamChunk& chunk) {
+            if (chunk.reset_attempt) {
+                outcome.text.clear();
+                return;
+            }
+            outcome.text += chunk.content;
+            outcome.error |= chunk.is_error;
+            outcome.final |= chunk.is_final;
+        });
+    };
+
+    Outcome a;
+    Outcome b;
+    // One session, like two gateway requests on the same conversation key, so
+    // both map onto the one connection the loopback server accepts.
+    std::thread first([&] { run(a, "concurrent"); });
+    REQUIRE(wait_until([&] { return server.received_payloads().size() == 1; }, std::chrono::seconds(10)));
+    std::thread second([&] { run(b, "concurrent"); });
+    first.join();
+    second.join();
+
+    CHECK(a.final);
+    CHECK(b.final);
+    CHECK_FALSE(a.error);
+    CHECK_FALSE(b.error);
+    CHECK(a.text == "shared answer");
+    CHECK(b.text == "shared answer");
+    // Both went over the WebSocket; neither was pushed onto a retry or HTTPS.
+    CHECK(server.received_payloads().size() == 2);
+#endif
+}
+
+TEST_CASE("Resetting conversation state mid-stream aborts the WebSocket response instead of retrying it",
+          "[transport][websocket][codex][regression][deadlock]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+
+    // Half a response, then silence: the stream is in flight when it is reset.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.output_text.delta","delta":"partial"})"},
+        {},
+    });
+
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()),
+        nullptr,
+        "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown,
+        "codex");
+
+    core::llm::ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.session_id = "reset-mid-stream";
+    request.messages = {{.role = "user", .content = "hello"}};
+
+    auto partial_seen = std::make_shared<std::promise<void>>();
+    auto finished = std::make_shared<std::promise<core::llm::StreamChunk>>();
+    auto partial_future = partial_seen->get_future();
+    auto finished_future = finished->get_future();
+    std::thread worker([provider, request, partial_seen, finished] {
+        bool partial_signalled = false;
+        provider->stream_response(request, [&](const core::llm::StreamChunk& chunk) {
+            if (!chunk.content.empty() && !chunk.is_final && !partial_signalled) {
+                partial_signalled = true;
+                partial_seen->set_value();
+            }
+            if (chunk.is_final) finished->set_value(chunk);
+        });
+    });
+
+    REQUIRE(partial_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    // What /clear or an applied compaction does while a turn is streaming.
+    provider->reset_conversation_state();
+
+    REQUIRE(finished_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    const auto terminal = finished_future.get();
+    worker.join();
+    CHECK(terminal.is_error);
+    CHECK(terminal.content.find("reset before the response completed") != std::string::npos);
+    // Resending would replay history the owner has just replaced.
+    CHECK(server.received_payloads().size() == 1);
 #endif
 }

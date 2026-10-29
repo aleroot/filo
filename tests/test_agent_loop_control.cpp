@@ -873,6 +873,94 @@ private:
     int completed_ = 0;
 };
 
+// Mirrors LlamaCppProvider, which serializes inference with a non-recursive
+// mutex it legitimately holds across every callback. A provider owns its own
+// locking; what it cannot survive is the Agent re-entering stream_response()
+// from inside that callback, which self-deadlocks on the very lock the provider
+// is holding. Truncated-turn recovery and completion-hook continuations both
+// used to chain the next step that way.
+class LockAcrossCallbackProvider : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        std::scoped_lock lock(inference_mutex_);
+        const int call = call_count_.fetch_add(1, std::memory_order_acq_rel);
+
+        core::llm::StreamChunk partial;
+        partial.content = "partial answer ";
+        callback(partial);
+
+        core::llm::StreamChunk terminal;
+        terminal.is_final = true;
+        if (call == 0) {
+            // Truncated turn: the Agent recovers by chaining another step.
+            terminal.stop_reason = "max_tokens";
+        } else {
+            terminal.content = "finished";
+        }
+        callback(terminal);
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return call_count_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::mutex inference_mutex_;  // deliberately not recursive
+    std::atomic<int> call_count_{0};
+};
+
+// Returns from stream_response() at once and delivers the response later from
+// its own thread, which the LLMProvider contract allows. A continuation the
+// Agent defers until stream_response() returns must still run when the final
+// chunk only arrives after that.
+class AsyncTruncatingProvider : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        const int call = call_count_.fetch_add(1, std::memory_order_acq_rel);
+        std::lock_guard lock(workers_mutex_);
+        workers_.emplace_back([callback = std::move(callback), call] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            core::llm::StreamChunk partial;
+            partial.content = "partial answer ";
+            callback(partial);
+
+            core::llm::StreamChunk terminal;
+            terminal.is_final = true;
+            if (call == 0) {
+                terminal.stop_reason = "max_tokens";
+            } else {
+                terminal.content = "finished";
+            }
+            callback(terminal);
+        });
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return call_count_.load(std::memory_order_acquire);
+    }
+
+    // Joined by the test, never from a worker: the last reference to the Agent
+    // (and so to this provider) may be released on one.
+    void join_all() {
+        for (std::size_t joined = 0;;) {
+            std::thread worker;
+            {
+                std::lock_guard lock(workers_mutex_);
+                if (joined == workers_.size()) return;
+                worker = std::move(workers_[joined++]);
+            }
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+private:
+    std::atomic<int> call_count_{0};
+    std::mutex workers_mutex_;
+    std::vector<std::thread> workers_;
+};
+
 void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
                    const std::string& prompt,
                    core::agent::Agent::TurnCallbacks callbacks) {
@@ -2796,4 +2884,49 @@ TEST_CASE("Recalled memories are ranked against the prompt that opened the conve
     REQUIRE(later_editor != std::string::npos);
     REQUIRE(later_revert != std::string::npos);
     CHECK(later_editor < later_revert);
+}
+
+TEST_CASE("Agent chains a truncated-turn continuation only after the provider stream unwinds",
+          "[agent][loop][provider][regression][deadlock]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto provider = std::make_shared<LockAcrossCallbackProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    // send_and_wait() bounds the turn at 5s, so a self-deadlock on the
+    // provider's own lock fails here instead of hanging the suite.
+    send_and_wait(agent, "Continue past the output limit.");
+
+    // Two streams: the truncated turn and its recovery. While the recovery was
+    // started from inside the terminal chunk callback, it re-entered
+    // stream_response() while the provider still held inference_mutex_ and
+    // blocked forever on it.
+    CHECK(provider->call_count() == 2);
+    const auto history = agent->get_history();
+    CHECK(std::ranges::any_of(history, [](const core::llm::Message& message) {
+        return message.role == "assistant" && message.content.find("finished") != std::string::npos;
+    }));
+}
+
+TEST_CASE("Agent runs a truncated-turn continuation from a provider that finishes asynchronously",
+          "[agent][loop][provider][regression]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto provider = std::make_shared<AsyncTruncatingProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    // A continuation parked "until stream_response() returns" would wait for a
+    // return that has already happened, and the turn would never finish.
+    send_and_wait(agent, "Continue past the output limit.");
+    provider->join_all();
+
+    CHECK(provider->call_count() == 2);
+    const auto history = agent->get_history();
+    CHECK(std::ranges::any_of(history, [](const core::llm::Message& message) {
+        return message.role == "assistant" && message.content.find("finished") != std::string::npos;
+    }));
 }

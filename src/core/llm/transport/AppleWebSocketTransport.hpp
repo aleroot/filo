@@ -18,6 +18,11 @@ public:
         const std::atomic_bool* cancelled, std::chrono::milliseconds idle);
 private:
     struct Impl;
+    // Both require Impl::mutex to be held; they exist so stream_text() can set
+    // a connection up and tear one down without re-entering a non-recursive
+    // lock from a path that already holds it.
+    void reset_locked();
+    [[nodiscard]] bool matches_connection_locked(std::string_view key) const;
     std::unique_ptr<Impl> impl_;
 };
 

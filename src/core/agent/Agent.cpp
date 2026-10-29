@@ -2244,6 +2244,42 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto continuation_accum   =
         std::make_shared<std::vector<core::llm::ContinuationItem>>();
     auto already_stopped      = std::make_shared<std::atomic<bool>>(false);
+    // A turn continuation — output-limit recovery, or a completion hook that
+    // asks to keep going — must not start while provider->stream_response() is
+    // still on the stack. A provider is entitled to hold its own locks across
+    // the callback (llama.cpp serializes inference with inference_mutex_), so
+    // re-entering stream_response() from inside it self-deadlocks on whichever
+    // lock the provider happens to be holding. A continuation requested during
+    // the call is parked and run once the call returns; one requested after it
+    // (a provider that finishes asynchronously) runs straight away, as nothing
+    // is left on this stack to wait for.
+    struct ContinuationSlot {
+        std::mutex mutex;
+        bool stream_returned = false;
+        std::function<void()> pending;
+
+        void run_or_park(std::function<void()> continuation) {
+            {
+                std::lock_guard lock(mutex);
+                if (!stream_returned) {
+                    pending = std::move(continuation);
+                    return;
+                }
+            }
+            continuation();
+        }
+
+        void release() {
+            std::function<void()> continuation;
+            {
+                std::lock_guard lock(mutex);
+                stream_returned = true;
+                continuation = std::move(pending);
+            }
+            if (continuation) continuation();
+        }
+    };
+    auto pending_continuation = std::make_shared<ContinuationSlot>();
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
@@ -2252,7 +2288,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
          already_stopped, turn_state,
          step_session_context, provider_name_snapshot,
-         shared_request, request_started_at](
+         shared_request, request_started_at, pending_continuation](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -2549,7 +2585,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 return;
             }
 
-            self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
+            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
+                                               turn_callbacks, turn_state] {
+                self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
+            });
             return;
         }
 
@@ -2619,8 +2658,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
               done_callback();
               return;
             }
-            self->step(text_callback, tool_callback, done_callback,
-                       turn_callbacks, turn_state);
+            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
+                                               turn_callbacks, turn_state] {
+                self->step(text_callback, tool_callback, done_callback,
+                           turn_callbacks, turn_state);
+            });
           };
           const auto fail_with = [&](std::string message) {
             const std::string warning = std::format("\n\n[{}]", message);
@@ -3477,6 +3519,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         on_stream_chunk(core::llm::StreamChunk::make_error(
             "\n[Provider startup error: unknown exception]"));
     }
+
+    // stream_response() has returned, so no provider lock is held any more and
+    // a continuation the callback asked for may re-enter the provider.
+    pending_continuation->release();
 }
 
 // ---------------------------------------------------------------------------

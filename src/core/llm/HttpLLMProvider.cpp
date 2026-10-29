@@ -716,9 +716,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
      &egress,
      callback] () mutable {
 
+        // Forgets this request's continuation state. It deliberately leaves the
+        // transport alone: stream_text() already drops a connection that failed,
+        // while it still owns it, and a reset() issued after it has returned
+        // could abort another caller's stream that has since taken over.
         const auto abandon_websocket = [&] {
             if (protocol->supports_websocket_transport()) {
-                self->websocket_.client->reset();
                 protocol->abandon_websocket_request(request_metadata);
             }
         };
@@ -797,13 +800,21 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             ws->websocket_url, ws->websocket_connection_key,
                             ws->websocket_headers, frame.payload,
                             [&](std::string_view event) {
+                                // A failed generation leaves the socket in an unknown
+                                // state, so it is dropped here, while this stream still
+                                // owns the transport. The reset makes stream_text()
+                                // report Aborted; stream_error decides what happens next.
+                                const auto end_failed_generation = [&] {
+                                    self->websocket_.client->reset();
+                                    return true;
+                                };
                                 auto parsed = protocol->parse_event(event);
                                 if (parsed.stream_error) {
                                     stream_error = true;
                                     retryable = parsed.retryable_stream_error;
                                     retry_after = parsed.rate_limit.retry_after;
                                     error_message = std::move(parsed.stream_error_message);
-                                    return true;
+                                    return end_failed_generation();
                                 }
                                 if (!frame.suppress_output) {
                                     if (parsed.prompt_tokens > 0 || parsed.completion_tokens > 0) {
@@ -812,9 +823,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     for (const auto& chunk : parsed.chunks) {
                                         output_emitted |= !chunk.content.empty() || !chunk.reasoning_content.empty()
                                             || !chunk.tools.empty() || !chunk.continuation_items.empty();
-                                        // Hold the terminal chunk until stream_text() returns so
-                                        // callbacks that reset or reuse the transport on is_final
-                                        // do not re-enter CurlWebSocketTransport::mutex_.
+                                        // Held until stream_text() has returned and the response
+                                        // is committed: an is_final callback may reset the
+                                        // transport (which would abort an uncommitted response)
+                                        // or chain the next request (refused as Busy while this
+                                        // stream still owns the socket).
                                         if (chunk.is_final) {
                                             terminal_chunk = chunk;
                                         } else {
@@ -833,12 +846,32 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                         }
                                     }
                                 }
-                                return parsed.done || terminal_chunk.has_value() || stream_error;
+                                if (stream_error) return end_failed_generation();
+                                return parsed.done || terminal_chunk.has_value();
                             }, &self->cancel_requested_, timeouts.inactivity);
+                        if (result.status == transport::WebSocketStreamResult::Status::Busy) {
+                            // Re-entered from inside this transport's own callback; the
+                            // outer stream owns the socket. Nothing was sent, so this
+                            // request goes over HTTPS and the transport stays enabled.
+                            abandon_websocket();
+                            protocol = protocol->clone();
+                            break;
+                        }
                         protocol->observe_response_headers(result.response_headers, request_metadata);
                         if (self->cancel_requested_.load(std::memory_order_acquire)) {
                             abandon_websocket();
                             callback(terminal_chunk.value_or(StreamChunk::make_final()));
+                            return;
+                        }
+                        if (result.status == transport::WebSocketStreamResult::Status::Aborted
+                            && !stream_error) {
+                            // reset_conversation_state() ran while this was in flight. The
+                            // response belongs to discarded state: committing it would
+                            // chain the new conversation onto it, and retrying it would
+                            // resend history the owner has already replaced.
+                            abandon_websocket();
+                            callback(StreamChunk::make_error(
+                                "\n[WebSocket stream was reset before the response completed]"));
                             return;
                         }
                         if (result.completed() && !stream_error) {
