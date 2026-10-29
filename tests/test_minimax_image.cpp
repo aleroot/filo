@@ -75,10 +75,41 @@ TEST_CASE("MiniMax labels a local image by its content, not its extension", "[mi
     const auto path = temp_file("photo.png", kJpeg);
     auto request = request_with({ContentPart::make_image(path.string())});
     prepare_minimax_images(request);
-    const auto& part = request.messages.front().content_parts.front();
-    CHECK(part.type == ContentPartType::Image);
-    CHECK(part.mime_type == "image/jpeg");
-    CHECK(part.url == data_url("image/jpeg", kJpeg));
+    const auto& parts = request.messages.front().content_parts;
+    REQUIRE(parts.size() == 2);
+    CHECK(parts[1].type == ContentPartType::Image);
+    CHECK(parts[1].mime_type == "image/jpeg");
+    CHECK(parts[1].url == data_url("image/jpeg", kJpeg));
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MiniMax tells the model which file each attached image is", "[minimax][vision]") {
+    const auto path = temp_file("shot \"1\" & <2>.png", kPng);
+    auto request = request_with({ContentPart::make_text("What color is "), ContentPart::make_image(path.string()),
+                                 ContentPart::make_image_url(data_url("image/png", kPng))});
+    request.messages.insert(request.messages.begin(), Message{.role = "assistant", .content_parts = {
+        ContentPart::make_image(path.string())}});
+    prepare_minimax_images(request);
+
+    const auto& parts = request.messages.back().content_parts;
+    REQUIRE(parts.size() == 4);
+    REQUIRE(parts[0].type == ContentPartType::Text);
+    // temp_file prefixes the name with a timestamp; only the chosen suffix needs escaping.
+    const std::string_view suffix = "shot \"1\" & <2>.png";
+    const auto unescaped = [&](const std::string& value) { return value.substr(0, value.size() - suffix.size()); };
+    const std::string escaped_suffix = "shot &quot;1&quot; &amp; &lt;2&gt;.png";
+    CHECK(parts[0].text == "<system-reminder>\nThe user provided local attachments for this turn. "
+                           "Use the exact file paths below and do not guess filenames.\n"
+                           "<attachment name=\"" + unescaped(path.filename().string()) + escaped_suffix
+                           + "\" mime=\"image/png\" path=\"" + unescaped(path.string()) + escaped_suffix
+                           + "\" kind=\"image\" inline=\"true\">\n"
+                           "This media attachment is also provided inline to the model.\n"
+                           "</attachment>\n</system-reminder>");
+    CHECK(parts[1].text == "What color is ");
+    CHECK(parts[2].type == ContentPartType::Image);
+    CHECK(parts[3].type == ContentPartType::Image);
+    // Only user turns carry the reminder; a pasted image has no file to name.
+    CHECK(request.messages.front().content_parts.size() == 1);
     std::filesystem::remove(path);
 }
 
@@ -93,13 +124,47 @@ TEST_CASE("MiniMax withholds images its endpoint would reject instead of failing
                                  ContentPart::make_image_url(data_url("image/png", over_limit))});
     prepare_minimax_images(request);
     const auto& parts = request.messages.front().content_parts;
-    REQUIRE(parts.size() == 4);
-    CHECK(parts[0].type == ContentPartType::Text);
-    CHECK(parts[0].text == unavailable_image_attachment_text(bmp.string()));
-    CHECK(parts[1].text == unavailable_image_attachment_text("<image>"));
-    CHECK(parts[2].type == ContentPartType::Image);
-    CHECK(parts[3].text == unavailable_image_attachment_text("<image>"));
+    REQUIRE(parts.size() == 5);
+    const std::string unsupported = "[Image omitted: MiniMax accepts only JPEG, PNG, GIF or WebP images up to 10 MiB";
+    CHECK_THAT(parts[0].text, ContainsSubstring(
+        "<attachment name=\"" + bmp.filename().string() + "\" mime=\"image/bmp\" path=\"" + bmp.string()
+        + "\" kind=\"image\" inline=\"false\">\nThis image was not sent inline: MiniMax accepts only"));
+    CHECK(parts[1].text == unsupported + ". Original file: " + bmp.string() + "]");
+    CHECK(parts[2].text == unsupported + "]");
+    CHECK(parts[3].type == ContentPartType::Image);
+    CHECK(parts[4].text == unsupported + "]");
     std::filesystem::remove(bmp);
+}
+
+TEST_CASE("MiniMax inlines at most four images per message", "[minimax][vision]") {
+    const auto png = ContentPart::make_image_url(data_url("image/png", kPng));
+    auto request = request_with({png, png, png, png, png, ContentPart::make_image_url("https://example.test/a.png")});
+    prepare_minimax_images(request);
+    const auto& parts = request.messages.front().content_parts;
+    REQUIRE(parts.size() == 6);
+    for (std::size_t i = 0; i < kMiniMaxImagesPerMessage; ++i) CHECK(parts[i].type == ContentPartType::Image);
+    CHECK(parts[4].text == "[Image omitted: MiniMax accepts at most 4 images per message]");
+    CHECK(parts[5].url == "https://example.test/a.png");
+}
+
+TEST_CASE("MiniMax keeps only the newest images of a long conversation", "[minimax][vision]") {
+    const auto png = ContentPart::make_image_url(data_url("image/png", kPng));
+    ChatRequest request;
+    request.model = "MiniMax-M3";
+    for (int turn = 0; turn < 6; ++turn) {
+        request.messages.push_back(Message{.role = "user", .content_parts = {png, png, png, png}});
+        request.messages.push_back(Message{.role = "assistant", .content = "Seen."});
+    }
+    prepare_minimax_images(request);
+    std::size_t images = 0;
+    for (const auto& message : request.messages) {
+        for (const auto& part : message.content_parts) images += part.type == ContentPartType::Image;
+    }
+    CHECK(images == kMiniMaxImagesPerRequest);
+    for (const auto& part : request.messages.front().content_parts) {
+        CHECK(part.text == "[Image omitted: this request keeps only the 20 most recent images]");
+    }
+    CHECK(request.messages[2].content_parts.front().type == ContentPartType::Image);
 }
 
 TEST_CASE("MiniMax sends the detected media type on the wire", "[minimax][vision]") {

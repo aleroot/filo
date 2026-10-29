@@ -1,5 +1,6 @@
 #include "MiniMaxProtocol.hpp"
 #include "MiniMaxImage.hpp"
+#include "MiniMaxPromptCache.hpp"
 #include "SseUtils.hpp"
 #include "../MiniMaxModelTraits.hpp"
 #include "../catalog/MiniMaxModelCatalogProvider.hpp"
@@ -174,7 +175,10 @@ void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_ur
             if (parser.parse(padded).get_object().get(document) != simdjson::SUCCESS) throw std::runtime_error("Invalid token-count request");
             std::string body = "{";
             for (const auto field : document) {
-                if (field.key != "model" && field.key != "messages" && field.key != "system" && field.key != "tools") continue;
+                // MiniMax Code counts with the request's own thinking and tool
+                // choice (`messages-count-tokens-payload.ts`).
+                if (field.key != "model" && field.key != "messages" && field.key != "system" && field.key != "tools"
+                    && field.key != "thinking" && field.key != "tool_choice") continue;
                 if (body.size() > 1) body += ',';
                 body += '"' + std::string(field.key) + "\":" + simdjson::to_string(field.value);
             }
@@ -236,7 +240,8 @@ std::string MiniMaxProtocol::serialize(const ChatRequest& req) const {
         }
     };
     auto payload = AnthropicSerializer::serialize(req, kMiniMaxOutputLimit, options);
-    if (payload.size() > 64 * 1024 * 1024) throw std::invalid_argument("MiniMax request exceeds the 64 MiB body limit.");
+    add_minimax_cache_breakpoints(payload);
+    if (payload.size() > kMiniMaxRequestBodyLimit) throw std::invalid_argument("MiniMax request exceeds the 64 MiB body limit.");
     return payload;
 }
 

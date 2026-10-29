@@ -132,4 +132,22 @@ find_case_insensitive(std::string_view haystack, std::string_view needle) {
     return trim_trailing(value, '/');
 }
 
+/// Escapes the five XML special characters, so @p value is safe as element
+/// text and inside a single- or double-quoted attribute.
+[[nodiscard]] inline std::string escape_xml(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char ch : value) {
+        switch (ch) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '"': escaped += "&quot;"; break;
+        case '\'': escaped += "&apos;"; break;
+        default: escaped += ch; break;
+        }
+    }
+    return escaped;
+}
+
 } // namespace core::utils::str

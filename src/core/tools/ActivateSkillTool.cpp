@@ -4,6 +4,7 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/StringUtils.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
 #include <filesystem>
@@ -51,34 +52,6 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
         if (part == "..") return false;
     }
     return true;
-}
-
-[[nodiscard]] std::string xml_escape(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size());
-    for (const char ch : value) {
-        switch (ch) {
-        case '&':
-            escaped += "&amp;";
-            break;
-        case '<':
-            escaped += "&lt;";
-            break;
-        case '>':
-            escaped += "&gt;";
-            break;
-        case '"':
-            escaped += "&quot;";
-            break;
-        case '\'':
-            escaped += "&apos;";
-            break;
-        default:
-            escaped += ch;
-            break;
-        }
-    }
-    return escaped;
 }
 
 [[nodiscard]] std::string build_input_schema(
@@ -133,7 +106,7 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
     std::string_view body,
     bool truncated) {
     std::ostringstream out;
-    out << "<skill_content name=\"" << xml_escape(skill.name) << "\">\n";
+    out << "<skill_content name=\"" << core::utils::str::escape_xml(skill.name) << "\">\n";
     if (!skill.compatibility.empty()) {
         out << "Compatibility: " << skill.compatibility << "\n\n";
     }

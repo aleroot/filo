@@ -293,6 +293,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ClaudeCodeClient.cpp
     src/core/llm/protocols/MiniMaxProtocol.cpp
     src/core/llm/protocols/MiniMaxImage.cpp
+    src/core/llm/protocols/MiniMaxPromptCache.cpp
     src/core/llm/MiniMaxModelTraits.cpp
     src/core/llm/MiniMaxUsageClient.cpp
     src/core/llm/protocols/GeminiProtocol.cpp

@@ -100,3 +100,10 @@ TEST_CASE("str ASCII whitespace helpers preserve UTF-8 non-breaking spaces",
     REQUIRE(core::utils::str::collapse_ascii_whitespace_copy(input)
             == nbsp + " a b " + nbsp);
 }
+
+TEST_CASE("str::escape_xml escapes the five XML special characters",
+          "[utils][ascii]") {
+    REQUIRE(core::utils::str::escape_xml(R"(<a href="x">Tom & 'Jerry'</a>)")
+            == "&lt;a href=&quot;x&quot;&gt;Tom &amp; &apos;Jerry&apos;&lt;/a&gt;");
+    REQUIRE(core::utils::str::escape_xml("plain/path.png") == "plain/path.png");
+}

@@ -1,6 +1,7 @@
 #pragma once
 #include "ModelRegistry.hpp"
 #include "MiniMaxEndpoints.hpp"
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,6 +16,8 @@ inline constexpr int kMiniMaxContextWindow = 1000000;
 // boundary); the only other value the context config accepts.
 inline constexpr int kMiniMaxConservativeContextWindow = 512000;
 inline constexpr int kMiniMaxOutputLimit = 128000;
+// MiniMax Code's `max_request_body_bytes` for the Messages endpoint.
+inline constexpr std::size_t kMiniMaxRequestBodyLimit = 64 * 1024 * 1024;
 
 [[nodiscard]] std::string canonical_minimax_model(std::string_view model);
 [[nodiscard]] std::optional<ModelInfo> minimax_model_info(std::string_view model);

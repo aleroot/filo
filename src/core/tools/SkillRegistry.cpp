@@ -2,6 +2,7 @@
 #include "../landrun/LandrunSettings.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/AsciiUtils.hpp"
+#include "../utils/StringUtils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -220,34 +221,6 @@ field(const ParsedFrontmatter& parsed, std::string_view key) {
         if (part == "..") return false;
     }
     return true;
-}
-
-[[nodiscard]] std::string xml_escape(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size());
-    for (const char ch : value) {
-        switch (ch) {
-        case '&':
-            escaped += "&amp;";
-            break;
-        case '<':
-            escaped += "&lt;";
-            break;
-        case '>':
-            escaped += "&gt;";
-            break;
-        case '"':
-            escaped += "&quot;";
-            break;
-        case '\'':
-            escaped += "&apos;";
-            break;
-        default:
-            escaped += ch;
-            break;
-        }
-    }
-    return escaped;
 }
 
 /// A project-local skills directory and the label it is reported under.
@@ -512,13 +485,13 @@ std::string SkillRegistry::build_catalog_prompt(const std::vector<fs::path>& wor
     out << "<available_skills>\n";
     for (const auto& skill : skills) {
         out << "  <skill>\n"
-            << "    <name>" << xml_escape(skill.name) << "</name>\n"
-            << "    <description>" << xml_escape(skill.description) << "</description>\n";
+            << "    <name>" << core::utils::str::escape_xml(skill.name) << "</name>\n"
+            << "    <description>" << core::utils::str::escape_xml(skill.description) << "</description>\n";
         // Only annotated when the skill belongs to another workspace: a
         // single-root session's catalog stays byte-identical, so the cached
         // prompt prefix is not disturbed and no redundant path is emitted.
         if (skill.from_additional_workspace && !skill.workspace_root.empty()) {
-            out << "    <workspace>" << xml_escape(skill.workspace_root.string())
+            out << "    <workspace>" << core::utils::str::escape_xml(skill.workspace_root.string())
                 << "</workspace>\n";
         }
         out << "  </skill>\n";

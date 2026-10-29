@@ -14,6 +14,7 @@
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/llm/protocols/MiniMaxProtocol.hpp"
+#include "core/llm/protocols/MiniMaxPromptCache.hpp"
 #include "core/llm/MiniMaxModelTraits.hpp"
 #include "core/llm/MiniMaxUsageClient.hpp"
 #include "core/llm/ProviderDefinition.hpp"
@@ -149,7 +150,7 @@ TEST_CASE("MiniMax keeps required thinking and all supported effort levels", "[m
         const std::string expected = std::string(effort) == "off" || std::string(effort) == "none" ? "low"
             : std::string(effort).empty() || std::string(effort) == "auto" ? "max" : effort;
         CHECK_THAT(payload, ContainsSubstring("\"effort\":\"" + expected + "\""));
-        for (const auto field : {"billing", "temperature", "budget_tokens", "block_binding", "display", "cache_control", "service_tier"}) CHECK_THAT(payload, !ContainsSubstring(field));
+        for (const auto field : {"billing", "temperature", "budget_tokens", "block_binding", "display", "service_tier"}) CHECK_THAT(payload, !ContainsSubstring(field));
     }
     auto m3 = request("MiniMax-M3");
     MiniMaxProtocol api;
@@ -164,6 +165,73 @@ TEST_CASE("MiniMax keeps required thinking and all supported effort levels", "[m
     }
     // M Plan serves both curated models; only their thinking policies differ.
     CHECK_NOTHROW(protocol.prepare_request(m3));
+}
+
+TEST_CASE("MiniMax marks MiniMax Code's prompt-cache breakpoints", "[minimax][cache]") {
+    constexpr std::string_view marker = R"("cache_control":{"type":"ephemeral"})";
+    const auto markers = [&](std::string_view json) {
+        std::size_t count = 0;
+        for (auto at = json.find(marker); at != std::string_view::npos; at = json.find(marker, at + 1)) ++count;
+        return count;
+    };
+    const auto marked = [&](simdjson::dom::element block) { return markers(simdjson::to_string(block)) == 1; };
+    MiniMaxProtocol protocol;
+    auto req = request("MiniMax-M3");
+    Tool read, write;
+    read.function.name = "read";
+    write.function.name = "write_file";
+    req.tools = {read, write};
+    req.messages.push_back({.role = "assistant", .content = "Which file?"});
+    req.messages.push_back({.role = "user", .content_parts = {ContentPart::make_text("a"), ContentPart::make_text("b")}});
+    protocol.prepare_request(req);
+
+    auto payload = protocol.serialize(req);
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(payload);
+    simdjson::dom::object doc;
+    REQUIRE(parser.parse(padded).get_object().get(doc) == simdjson::SUCCESS);
+    CHECK(markers(payload) == 3);
+    CHECK(doc["cache_control"].error() == simdjson::NO_SUCH_FIELD);
+    CHECK(marked(doc["system"].at(0)));
+    CHECK_FALSE(marked(doc["tools"].at(0)));
+    CHECK(marked(doc["tools"].at(1)));
+    CHECK_FALSE(marked(doc["messages"].at(0)));
+    CHECK_FALSE(marked(doc["messages"].at(2)["content"].at(0)));
+    CHECK(marked(doc["messages"].at(2)["content"].at(1)));
+
+    // Plain-string user content becomes a text block that can carry the marker.
+    req.messages.resize(2);
+    req.tools.clear();
+    payload = protocol.serialize(req);
+    padded = simdjson::padded_string(payload);
+    REQUIRE(parser.parse(padded).get_object().get(doc) == simdjson::SUCCESS);
+    CHECK(markers(payload) == 2);
+    CHECK(simdjson::to_string(doc["messages"].at(0)["content"])
+          == R"([{"type":"text","text":"Hello","cache_control":{"type":"ephemeral"}}])");
+
+    // An agent step ends in tool results: the last one carries the marker.
+    ToolCall call;
+    call.id = "toolu_1";
+    call.function = {.name = "read", .arguments = "{}"};
+    req.messages.push_back({.role = "assistant", .tool_calls = {call, call}});
+    req.messages.push_back({.role = "tool", .content = "first", .tool_call_id = "toolu_1"});
+    req.messages.push_back({.role = "tool", .content = "second", .tool_call_id = "toolu_1"});
+    payload = protocol.serialize(req);
+    padded = simdjson::padded_string(payload);
+    REQUIRE(parser.parse(padded).get_object().get(doc) == simdjson::SUCCESS);
+    CHECK(markers(payload) == 2);
+    CHECK_FALSE(marked(doc["messages"].at(2)["content"].at(0)));
+    CHECK(marked(doc["messages"].at(2)["content"].at(1)));
+
+    // A trailing assistant turn is not user history and stays unmarked.
+    req.messages.push_back({.role = "assistant", .content = "Prefill"});
+    CHECK(markers(protocol.serialize(req)) == 1);
+
+    // A payload that does not parse is sent as it is, without markers.
+    std::string truncated = R"({"system":[{"type":"text","text":"a"}],"messages":[)";
+    const std::string original = truncated;
+    add_minimax_cache_breakpoints(truncated);
+    CHECK(truncated == original);
 }
 
 TEST_CASE("MiniMax rejects mismatched key types and leaves unknown formats usable", "[minimax][auth]") {
