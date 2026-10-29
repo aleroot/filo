@@ -2844,16 +2844,97 @@ namespace {
     return caveats;
 }
 
-[[nodiscard]] Element render_count_pair(std::size_t added, std::size_t deleted) {
-    Elements counts;
-    if (added > 0) {
-        counts.push_back(ftxui::text(std::format("+{}", added))
-                         | ftxui::color(ColorDiffAdd));
+/// The columns at the end of a file-change row.
+///
+/// Every row of the box draws the same columns, so the kind letter, the
+/// counts and the comparer affordance line up down the list instead of
+/// drifting sideways with each row's own numbers. A row without a count in a
+/// column leaves that column blank rather than showing a zero.
+struct FileChangeColumns {
+    std::size_t added = 0;    ///< Width of the "+N" column.
+    std::size_t deleted = 0;  ///< Width of the "-N" column.
+    bool arrow = false;       ///< Whether the comparer affordance column is drawn.
+};
+
+/// The width of a signed count, e.g. "+20" is three cells wide.
+[[nodiscard]] std::size_t count_token_width(std::size_t count) {
+    return std::format("+{}", count).size();
+}
+
+/// The width of the kind letter and the spaces around it: "  M  ".
+constexpr std::size_t kFileChangeKindColumn = 5;
+
+/// The width of the comparer affordance column: two spaces and the glyph.
+constexpr std::size_t kFileChangeArrowColumn = 3;
+
+/// The columns shared by the rows the box draws.
+///
+/// The summary's totals belong to the same table, so they widen the count
+/// columns and the numbers of the rows below line up under them.
+[[nodiscard]] FileChangeColumns file_change_columns(
+    const std::vector<core::changes::FileChange>& files,
+    std::size_t shown,
+    std::size_t total_added,
+    std::size_t total_deleted,
+    const ConversationRenderOptions& options) {
+    FileChangeColumns columns;
+    // The totals are the sum of the rows, so no row has a wider count.
+    if (total_added > 0) {
+        columns.added = count_token_width(total_added);
     }
-    if (deleted > 0) {
-        if (added > 0) counts.push_back(ftxui::text(" "));
-        counts.push_back(ftxui::text(std::format("-{}", deleted))
-                         | ftxui::color(ColorDiffDelete));
+    if (total_deleted > 0) {
+        columns.deleted = count_token_width(total_deleted);
+    }
+    for (std::size_t i = 0; i < shown; ++i) {
+        const auto& change = files[i];
+        if (options.show_diff_comparer_affordance
+            && options.system_disclosure_hitboxes != nullptr
+            && !change.diff.empty()) {
+            columns.arrow = true;
+        }
+    }
+    return columns;
+}
+
+/// A count in a fixed-width column.
+///
+/// The sign is the first cell of the column, so the "+" of every added count
+/// and the "-" of every deleted one stand in the same column, in the rows and
+/// in the summary above them. The number follows its sign and the rest of
+/// the column stays empty.
+[[nodiscard]] Element render_count_field(std::size_t count,
+                                        std::size_t width,
+                                        char sign,
+                                        Color color) {
+    if (width == 0) {
+        return ftxui::text("");
+    }
+    if (count == 0) {
+        return ftxui::text(std::string(width, ' '));
+    }
+    const auto token = std::format("{}{}", sign, count);
+    Elements field;
+    field.push_back(ftxui::text(token) | ftxui::color(color));
+    if (token.size() < width) {
+        field.push_back(ftxui::text(std::string(width - token.size(), ' ')));
+    }
+    return hbox(std::move(field));
+}
+
+/// The counts of a row, in the columns the whole box shares.
+///
+/// A row without a count in a column leaves that column blank, so the rows
+/// that have one keep their numbers in the same place.
+[[nodiscard]] Element render_change_counts(std::size_t added,
+                                           std::size_t deleted,
+                                           const FileChangeColumns& columns) {
+    Elements counts;
+    if (columns.added > 0) {
+        counts.push_back(render_count_field(added, columns.added, '+', ColorDiffAdd));
+    }
+    if (columns.deleted > 0) {
+        if (columns.added > 0) counts.push_back(ftxui::text(" "));
+        counts.push_back(render_count_field(deleted, columns.deleted, '-', ColorDiffDelete));
     }
     return hbox(std::move(counts));
 }
@@ -2924,7 +3005,8 @@ namespace {
 // counts; opening it shows the turn's net diff for that file.
 [[nodiscard]] Element render_file_change(const UiMessage& msg,
                                          const core::changes::FileChange& change,
-                                         const ConversationRenderOptions& options) {
+                                         const ConversationRenderOptions& options,
+                                         const FileChangeColumns& columns) {
     const std::string key = turn_file_change_key(msg.id, change.path);
     const bool expandable = !change.diff.empty();
     bool expanded = options.expand_system_details;
@@ -2939,7 +3021,9 @@ namespace {
     Elements header{
         ftxui::text(expandable ? (expanded ? "▼ " : "▶ ") : "• ")
             | ftxui::color(ColorYellowDark),
-        elided_text(change.path) | ftxui::color(ColorTextSecondary) | ftxui::xflex_shrink,
+        // A path that has to be shortened keeps its tail: the name of the
+        // file is what tells two of them apart.
+        elided_path_text(change.path) | ftxui::color(ColorTextSecondary) | ftxui::xflex_shrink,
     };
     if (const auto note = file_change_note(change); !note.empty()) {
         header.push_back(elided_text("  " + note)
@@ -2948,9 +3032,14 @@ namespace {
     header.push_back(ftxui::filler());
     header.push_back(ftxui::text("  "));
     header.push_back(render_file_change_kind(change.kind));
-    if (change.added > 0 || change.deleted > 0) {
+    // The counts sit in columns shared by every row of the box, so the kind
+    // letter, the numbers and the affordance line up down the list. A row
+    // without a count leaves its column blank instead of shifting the ones
+    // below it.
+    const bool has_counts = columns.added > 0 || columns.deleted > 0;
+    if (has_counts) {
         header.push_back(ftxui::text("  "));
-        header.push_back(render_count_pair(change.added, change.deleted));
+        header.push_back(render_change_counts(change.added, change.deleted, columns));
     }
     // The affordance carries its own hitbox, so it is reflected before it joins
     // the row: the row's own box covers the whole line, this cell included.
@@ -2958,12 +3047,18 @@ namespace {
     const bool comparable = options.show_diff_comparer_affordance
         && expandable
         && options.system_disclosure_hitboxes != nullptr;
-    if (comparable) {
+    if (columns.arrow) {
         header.push_back(ftxui::text("  "));
-        header.push_back(
-            (ftxui::text("\u2197") | ftxui::color(ColorTextSecondary))
-            | reflect((*options.system_disclosure_hitboxes)[
-                turn_file_change_open_key(msg.id, change.path)]));
+        if (comparable) {
+            header.push_back(
+                (ftxui::text("\u2197") | ftxui::color(ColorTextSecondary))
+                | reflect((*options.system_disclosure_hitboxes)[
+                    turn_file_change_open_key(msg.id, change.path)]));
+        } else {
+            // The column is reserved for the rows that have one; this row
+            // keeps the space so the counts beside it stay aligned.
+            header.push_back(ftxui::text(" "));
+        }
     }
     Element header_el = hbox(std::move(header));
     if (expandable && options.system_disclosure_hitboxes != nullptr) {
@@ -2993,14 +3088,12 @@ namespace {
         deleted += change.deleted;
     }
     const std::size_t count = files.size();
+    const std::size_t shown = std::min(count, kMaxRenderedFileChanges);
+    const auto columns = file_change_columns(files, shown, added, deleted, options);
     Elements summary{
         ftxui::text(std::format("{} {} changed", count, count == 1 ? "file" : "files"))
             | ftxui::color(ColorTextSecondary) | ftxui::bold,
     };
-    if (added > 0 || deleted > 0) {
-        summary.push_back(ftxui::text("  "));
-        summary.push_back(render_count_pair(added, deleted));
-    }
     if (const auto breakdown = file_change_kind_summary(files); !breakdown.empty()) {
         summary.push_back(elided_text("  " + breakdown)
                           | ftxui::color(ColorTextMuted) | dim | ftxui::xflex_shrink);
@@ -3012,11 +3105,23 @@ namespace {
         summary.push_back(ftxui::text("\u21b6 undone")
                           | ftxui::color(ColorTextMuted) | dim);
     }
+    if (columns.added > 0 || columns.deleted > 0) {
+        // The totals sit in the same columns as the numbers of the rows
+        // below, so the box reads as one table: the totals line up over the
+        // counts they are the sum of.
+        summary.push_back(ftxui::filler());
+        summary.push_back(ftxui::text(std::string(kFileChangeKindColumn, ' ')));
+        summary.push_back(render_change_counts(added, deleted, columns));
+        if (columns.arrow) {
+            // The affordance column belongs to the rows, but the totals end
+            // where the rows' numbers end, so the space is reserved here too.
+            summary.push_back(ftxui::text(std::string(kFileChangeArrowColumn, ' ')));
+        }
+    }
 
     Elements rows{hbox(std::move(summary))};
-    const std::size_t shown = std::min(count, kMaxRenderedFileChanges);
     for (std::size_t i = 0; i < shown; ++i) {
-        rows.push_back(render_file_change(msg, files[i], options));
+        rows.push_back(render_file_change(msg, files[i], options, columns));
     }
     if (shown < count) {
         rows.push_back(ftxui::text(std::format("… {} more not listed", count - shown))

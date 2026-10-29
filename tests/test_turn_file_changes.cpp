@@ -13,22 +13,27 @@
 #include <ftxui/screen/screen.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <random>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 using namespace tui;
 using core::changes::FileChange;
 using core::changes::FileChangeContent;
 using core::changes::FileChangeKind;
 using Catch::Matchers::ContainsSubstring;
+using Catch::Matchers::EndsWith;
 
 namespace {
 
@@ -85,6 +90,72 @@ std::vector<FileChange> sample_changes() {
     };
 }
 
+std::vector<std::string> split_lines(std::string_view text) {
+    std::vector<std::string> lines;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto end = text.find('\n', start);
+        auto line = text.substr(start, end == std::string_view::npos
+                                           ? std::string_view::npos
+                                           : end - start);
+        // The screen ends its lines with a carriage return.
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        lines.emplace_back(line);
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return lines;
+}
+
+/// The line without the spaces that pad it to the width of the box.
+std::string trimmed(std::string_view text) {
+    const auto end = text.find_last_not_of(' ');
+    if (end == std::string_view::npos) return {};
+    return std::string(text.substr(0, end + 1));
+}
+
+/// The line of the box that carries the summary of the turn.
+std::string summary_line(std::string_view text) {
+    for (const auto& line : split_lines(text)) {
+        if (line.find("changed") != std::string::npos) return line;
+    }
+    return {};
+}
+
+/// The content of a line of the box, without the border that frames it.
+std::string box_content(std::string_view line) {
+    constexpr std::string_view border = "\u2502";  // │
+    std::string_view content = line;
+    if (content.starts_with(border)) content.remove_prefix(border.size());
+    if (content.ends_with(border)) content.remove_suffix(border.size());
+    return trimmed(content);
+}
+
+/// The column of the sign of every count token of @p sign in @p line.
+std::vector<std::size_t> count_sign_columns(std::string_view line, char sign) {
+    std::vector<std::size_t> columns;
+    for (std::size_t i = 0; i + 1 < line.size(); ++i) {
+        if (line[i] != sign) continue;
+        if (!std::isdigit(static_cast<unsigned char>(line[i + 1]))) continue;
+        columns.push_back(i);
+    }
+    return columns;
+}
+
+/// The column of the kind letter of @p line, if it has one.
+std::optional<std::size_t> kind_column(std::string_view line) {
+    for (std::size_t i = 0; i < line.size(); ++i) {
+        const char letter = line[i];
+        if (letter != 'M' && letter != 'A' && letter != 'D' && letter != 'R') {
+            continue;
+        }
+        const bool blank_before = i == 0 || line[i - 1] == ' ';
+        const bool blank_after = i + 1 == line.size() || line[i + 1] == ' ';
+        if (blank_before && blank_after) return i;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 TEST_CASE("The turn's file changes follow the answer, one collapsed row per file",
@@ -93,16 +164,58 @@ TEST_CASE("The turn's file changes follow the answer, one collapsed row per file
     answer.turn_changes.files = sample_changes();
 
     const auto text = render_text({answer});
-    CHECK_THAT(text, ContainsSubstring("3 files changed  +3 -1  1 added · 1 modified · 1 deleted"));
+    CHECK_THAT(text, ContainsSubstring("3 files changed  1 added · 1 modified · 1 deleted"));
+    // The totals close the summary line, in the columns the rows below use.
+    CHECK_THAT(box_content(summary_line(text)), EndsWith("+3 -1"));
     CHECK_THAT(text, ContainsSubstring("▶ src/app.cpp"));
     CHECK_THAT(text, ContainsSubstring("M  +2 -1"));
     CHECK_THAT(text, ContainsSubstring("▶ docs/guide.md"));
     CHECK_THAT(text, ContainsSubstring("A  +1"));
     CHECK_THAT(text, ContainsSubstring("• assets/logo.png  binary"));
-    CHECK_THAT(text, ContainsSubstring(" D│"));
+    // The row without counts keeps the column of the ones that have them.
+    CHECK_THAT(text, ContainsSubstring(" D "));
     CHECK(text.find("All done.") < text.find("3 files changed"));
     CHECK(text.find("new-app-line") == std::string::npos);
     CHECK(text.find("guide-body-line") == std::string::npos);
+}
+
+TEST_CASE("The counts of every file change share one column",
+          "[tui][turn_file_changes]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    // The totals are wider than any single row's count, so the columns only
+    // hold if the sign comes first in every one of them.
+    answer.turn_changes.files = {
+        FileChange{.kind = FileChangeKind::Modified, .path = "src/app.cpp",
+                   .added = 90, .deleted = 1},
+        FileChange{.kind = FileChangeKind::Added, .path = "docs/guide.md",
+                   .added = 13},
+        FileChange{.kind = FileChangeKind::Deleted,
+                   .content = FileChangeContent::Binary,
+                   .path = "assets/logo.png"},
+        FileChange{.kind = FileChangeKind::Modified, .path = "src/other.cpp",
+                   .added = 5, .deleted = 40},
+    };
+
+    const auto text = render_text({answer});
+    std::vector<std::size_t> kinds;
+    std::vector<std::size_t> added;
+    std::vector<std::size_t> deleted;
+    for (const auto& line : split_lines(text)) {
+        if (const auto column = kind_column(line); column.has_value()) {
+            kinds.push_back(*column);
+        }
+        for (const auto column : count_sign_columns(line, '+')) added.push_back(column);
+        for (const auto column : count_sign_columns(line, '-')) deleted.push_back(column);
+    }
+
+    // The summary's totals and the four rows share the columns: the sign of
+    // every count stands in the same place, whichever row it belongs to.
+    REQUIRE(added.size() == 4);
+    REQUIRE(deleted.size() == 3);
+    REQUIRE(kinds.size() == 4);
+    for (const auto column : added) CHECK(column == added.front());
+    for (const auto column : deleted) CHECK(column == deleted.front());
+    for (const auto column : kinds) CHECK(column == kinds.front());
 }
 
 TEST_CASE("File change counts omit zero directions in rows and summary",
@@ -116,7 +229,8 @@ TEST_CASE("File change counts omit zero directions in rows and summary",
                        .added = added, .deleted = deleted},
         };
         const auto text = render_text({answer});
-        CHECK_THAT(text, ContainsSubstring("1 file changed  " + expected));
+        CHECK_THAT(text, ContainsSubstring("1 file changed"));
+        CHECK_THAT(box_content(summary_line(text)), EndsWith(expected));
         CHECK_THAT(text, ContainsSubstring("M  " + expected));
         CHECK(text.find("+0") == std::string::npos);
         CHECK(text.find("-0") == std::string::npos);
@@ -138,7 +252,8 @@ TEST_CASE("A renamed file shows its kind letter and previous path",
     };
 
     const auto text = render_text({answer});
-    CHECK_THAT(text, ContainsSubstring("1 file changed  +1 -1  1 renamed"));
+    CHECK_THAT(text, ContainsSubstring("1 file changed  1 renamed"));
+    CHECK_THAT(box_content(summary_line(text)), EndsWith("+1 -1"));
     CHECK_THAT(text, ContainsSubstring("▶ src/new_name.cpp  from src/old_name.cpp"));
     CHECK_THAT(text, ContainsSubstring("R  +1 -1"));
 }
@@ -863,3 +978,4 @@ TEST_CASE("A revert repeats what its summary could not cover",
     CHECK_THAT(revert_omissions(changes),
                ContainsSubstring("too many files to detail fully"));
 }
+

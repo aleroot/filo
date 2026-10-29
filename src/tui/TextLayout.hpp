@@ -31,4 +31,9 @@ namespace tui {
 /// the terminal is resized.
 [[nodiscard]] ftxui::Element elided_text(std::string text);
 
+/// A single-line path element that shortens the path from the *left* when it
+/// does not fit: the file name is what tells two paths apart, so the tail is
+/// worth more than the directory above it.
+[[nodiscard]] ftxui::Element elided_path_text(std::string path);
+
 } // namespace tui

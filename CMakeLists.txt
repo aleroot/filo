@@ -44,7 +44,8 @@ option(FILO_ENABLE_IPO "Enable interprocedural optimization for Release-like bui
 option(FILO_ENABLE_NATIVE_TUNING "Enable host-specific CPU tuning (-march=native)" OFF)
 option(FILO_ENABLE_TSAN "Enable ThreadSanitizer instrumentation" OFF)
 option(FILO_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
-option(FILO_BUILD_INTEGRATION_TESTS "Build the test_integration binary and its ctest entries" ON)
+option(FILO_BUILD_INTEGRATION_TESTS
+    "Build the integration test binaries (test_integration, test_landrun_native) and their ctest entries" ON)
 
 if(CMAKE_GENERATOR STREQUAL "Xcode")
     set(CMAKE_XCODE_GENERATE_SCHEME ON CACHE BOOL "Generate Xcode schemes" FORCE)
@@ -955,14 +956,21 @@ set_target_properties(test_tui_freeze PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
-add_executable(test_landrun_native tests/test_landrun_native.cpp)
-target_link_libraries(test_landrun_native PRIVATE filo_core)
-set_target_properties(test_landrun_native PROPERTIES FOLDER "Tests")
-add_test(NAME landrun_native_confinement COMMAND test_landrun_native)
-set_tests_properties(landrun_native_confinement PROPERTIES
-    SKIP_RETURN_CODE 77
-    TIMEOUT 30
-)
+# The native sandbox test drives Landlock and Seatlock for real: it forks
+# children, confines them, and proves the network is denied. That needs a host
+# sandbox and a writable temp tree, so it is an integration test and follows
+# the same local-only gate as test_integration. CI configures with
+# FILO_BUILD_INTEGRATION_TESTS=OFF and never builds or runs it.
+if(FILO_BUILD_INTEGRATION_TESTS)
+    add_executable(test_landrun_native tests/test_landrun_native.cpp)
+    target_link_libraries(test_landrun_native PRIVATE filo_core)
+    set_target_properties(test_landrun_native PROPERTIES FOLDER "Tests")
+    add_test(NAME landrun_native_confinement COMMAND test_landrun_native)
+    set_tests_properties(landrun_native_confinement PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 30
+    )
+endif()
 
 add_test(NAME filo_version COMMAND filo --version)
 if(UNIX)
@@ -984,9 +992,9 @@ set_tests_properties(filo_version PROPERTIES
     TIMEOUT 10
 )
 
-set(filo_ftxui_consumers filo filo_tests test_agent_freeze test_tui_freeze test_landrun_native)
+set(filo_ftxui_consumers filo filo_tests test_agent_freeze test_tui_freeze)
 if(FILO_BUILD_INTEGRATION_TESTS)
-    list(APPEND filo_ftxui_consumers test_integration)
+    list(APPEND filo_ftxui_consumers test_integration test_landrun_native)
 endif()
 foreach(filo_ftxui_consumer ${filo_ftxui_consumers})
     target_compile_definitions(${filo_ftxui_consumer}

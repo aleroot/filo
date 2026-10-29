@@ -44,6 +44,40 @@ private:
     ftxui::Element rendered_;
 };
 
+/// A path that is shortened from the left, so the name of the file survives
+/// the narrowing.
+class ElidedPath final : public ftxui::Node {
+public:
+    explicit ElidedPath(std::string value)
+        : value_(std::move(value)) {}
+
+    void ComputeRequirement() override {
+        requirement_ = {};
+        requirement_.min_x = ftxui::string_width(value_);
+        requirement_.min_y = 1;
+    }
+
+    void SetBox(ftxui::Box box) override {
+        Node::SetBox(box);
+        const int width = box.x_max - box.x_min + 1;
+        rendered_ = ftxui::text(fit_path_column(value_, width));
+        rendered_->ComputeRequirement();
+        rendered_->SetBox(box);
+    }
+
+    void Select(ftxui::Selection& selection) override {
+        if (rendered_) rendered_->Select(selection);
+    }
+
+    void Render(ftxui::Screen& screen) override {
+        if (rendered_) rendered_->Render(screen);
+    }
+
+private:
+    std::string value_;
+    ftxui::Element rendered_;
+};
+
 } // namespace
 
 std::string fit_column(std::string_view text, int width) {
@@ -123,6 +157,10 @@ std::string fit_path_column(std::string_view path, int width) {
 
 ftxui::Element elided_text(std::string text) {
     return std::make_shared<ElidedText>(std::move(text));
+}
+
+ftxui::Element elided_path_text(std::string path) {
+    return std::make_shared<ElidedPath>(std::move(path));
 }
 
 } // namespace tui
