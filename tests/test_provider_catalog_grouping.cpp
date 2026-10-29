@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderDefinition.hpp"
@@ -183,6 +184,89 @@ TEST_CASE("Provider catalog grouping falls back to one configured Grok alias",
     CHECK(group.sources.front().provider_name == "grok-fast");
     for (const auto& provider : providers) {
         CHECK(group.contains_source_provider(provider));
+    }
+}
+
+TEST_CASE("Provider catalog grouping collapses Claude presets under Claude",
+          "[llm][provider-catalog][claude]") {
+    // The thinking preset changes request settings, not the service catalog.
+    const std::vector<std::string> providers{
+        "claude-thinking", "claude", "custom-provider", "claudette",
+    };
+    const auto groups = core::llm::provider_catalog_groups(providers);
+
+    REQUIRE(groups.size() == 3);
+    const auto& claude = groups.front();
+    CHECK(claude.provider_name == "claude");
+    REQUIRE(claude.sources.size() == 1);
+    CHECK(claude.sources.front().provider_name == "claude");
+    CHECK(claude.sources.front().service_id == "claude");
+    CHECK(claude.contains_source_provider("claude"));
+    CHECK(claude.contains_source_provider("claude-thinking"));
+    CHECK_FALSE(claude.contains_source_provider("claudette"));
+    CHECK(groups[1].provider_name == "custom-provider");
+    CHECK(groups[2].provider_name == "claudette");
+
+    const auto alias_group =
+        core::llm::provider_catalog_group_for("claude-thinking", providers);
+    CHECK(alias_group.provider_name == "claude");
+    REQUIRE(alias_group.sources.size() == 1);
+    CHECK(alias_group.sources.front().provider_name == "claude");
+}
+
+TEST_CASE("Provider catalog grouping supports an alias-only Claude configuration",
+          "[llm][provider-catalog][claude]") {
+    const std::vector<std::string> providers{"claude-thinking"};
+    const auto groups = core::llm::provider_catalog_groups(providers);
+
+    REQUIRE(groups.size() == 1);
+    CHECK(groups.front().provider_name == "claude");
+    REQUIRE(groups.front().sources.size() == 1);
+    CHECK(groups.front().sources.front().provider_name == "claude-thinking");
+    CHECK(groups.front().contains_source_provider("claude-thinking"));
+}
+
+TEST_CASE("Compatibility catalog presets preserve configured source preferences",
+          "[llm][provider-catalog]") {
+    const std::string family = GENERATE("claude", "grok");
+    CAPTURE(family);
+    const std::string alias = family == "claude" ? "claude-thinking" : "grok-mini";
+    const std::string missing_alias = family + "-missing";
+    const std::vector<std::string> providers{family, alias};
+
+    SECTION("A preferred alias keeps its routing identity") {
+        const std::array<std::string_view, 4> preferences{
+            "qwen-token-plan", missing_alias, alias, family,
+        };
+        auto group = core::llm::provider_catalog_group_for(
+            family, providers, preferences);
+        core::llm::retain_preferred_provider_catalog_source(group, preferences);
+
+        REQUIRE(group.sources.size() == 1);
+        CHECK(group.sources.front().provider_name == alias);
+        CHECK(group.sources.front().service_id == alias);
+        CHECK(group.contains_source_provider(alias));
+        CHECK(group.contains_source_provider(family));
+    }
+
+    SECTION("Preference order still favors the saved canonical profile") {
+        const std::array<std::string_view, 2> preferences{family, alias};
+        const auto group = core::llm::provider_catalog_group_for(
+            alias, providers, preferences);
+
+        REQUIRE(group.sources.size() == 1);
+        CHECK(group.sources.front().provider_name == family);
+    }
+
+    SECTION("Unconfigured preferences cannot introduce a source") {
+        const std::array<std::string_view, 2> preferences{
+            missing_alias, "custom-provider",
+        };
+        const auto group = core::llm::provider_catalog_group_for(
+            family, providers, preferences);
+
+        REQUIRE(group.sources.size() == 1);
+        CHECK(group.sources.front().provider_name == family);
     }
 }
 

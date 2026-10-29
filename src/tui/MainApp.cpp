@@ -4017,24 +4017,24 @@ RunResult run(RunOptions opts) {
         return description;
     };
 
+    // A vendor group can contain multiple endpoint sources. Model selection
+    // does not select an endpoint, so both picker levels resolve the effective
+    // source from saved/active configuration before building rows.
+    const std::string auth_default_provider =
+        config_manager.get_auth_default_provider();
+    const std::array<std::string_view, 3> preferred_sources{
+        auth_default_provider,
+        manual_provider_name,
+        config.default_provider,
+    };
+
     auto provider_model_rows = [&](std::string_view provider_name) {
         std::vector<tui::ModelPickerRow> rows;
         std::unordered_set<std::string> seen_selections;
         std::unordered_set<std::string> seen_services;
 
-        auto catalog_group =
-            core::llm::provider_catalog_group_for(provider_name, sorted_provider_names);
-
-        // A vendor group can contain multiple endpoint sources. Model
-        // selection does not select an endpoint, so resolve the source from
-        // saved/active configuration before building rows.
-        const std::string auth_default_provider =
-            config_manager.get_auth_default_provider();
-        const std::array<std::string_view, 3> preferred_sources{
-            auth_default_provider,
-            manual_provider_name,
-            config.default_provider,
-        };
+        auto catalog_group = core::llm::provider_catalog_group_for(
+            provider_name, sorted_provider_names, preferred_sources);
         core::llm::retain_preferred_provider_catalog_source(
             catalog_group, preferred_sources);
 
@@ -4270,8 +4270,8 @@ RunResult run(RunOptions opts) {
 
     auto model_provider_rows = [&]() {
         std::vector<tui::ModelProviderPickerRow> rows;
-        const auto catalog_groups =
-            core::llm::provider_catalog_groups(sorted_provider_names);
+        const auto catalog_groups = core::llm::provider_catalog_groups(
+            sorted_provider_names, preferred_sources);
         rows.reserve(catalog_groups.size());
         for (const auto& catalog_group : catalog_groups) {
             if (catalog_group.sources.empty()) {

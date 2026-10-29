@@ -327,7 +327,8 @@ bool ProviderCatalogGroup::contains_source_provider(std::string_view provider) c
     // A family may deliberately hide compatibility presets from the picker.
     // They still belong to the visible group for active-selection highlighting.
     return find_source(provider) != nullptr
-        || ((provider_name == "grok" || provider_name == "kimi" || provider_name == "gemini")
+        || ((provider_name == "grok" || provider_name == "claude"
+             || provider_name == "kimi" || provider_name == "gemini")
             && provider_catalog_group_name(provider) == provider_name);
 }
 
@@ -386,20 +387,27 @@ std::string provider_catalog_selection_key(
 
 ProviderCatalogGroup provider_catalog_group_for(
     std::string_view provider_name,
-    std::span<const std::string> configured_provider_names) {
+    std::span<const std::string> configured_provider_names,
+    std::span<const std::string_view> preferred_sources) {
     const std::string group_name = provider_catalog_group_name(provider_name);
     ProviderCatalogGroup group{
         .provider_name = group_name,
         .sources = {},
     };
 
-    if (group_name == "grok") {
-        // Every built-in Grok preset is a routing alias for the same xAI
-        // service and returns the same authenticated model catalog. Querying
-        // and rendering every preset repeats that catalog once per alias.
-        // Prefer the canonical provider so model selections retain the active
-        // credentials/profile; fall back to the first configured Grok alias
-        // for custom configurations that omit it.
+    if (group_name == "grok" || group_name == "claude") {
+        // Compatibility presets share one service catalog. Resolve explicit
+        // profile preferences before collapsing aliases so their credentials
+        // and request settings survive model selection.
+        for (const auto preferred : preferred_sources) {
+            if (provider_catalog_group_name(preferred) == group_name
+                && contains_name(configured_provider_names, preferred)) {
+                group.sources.push_back(source_for_provider(preferred, group_name));
+                return group;
+            }
+        }
+        // Otherwise prefer the canonical provider, then the first configured
+        // alias for configurations that omit it.
         if (contains_name(configured_provider_names, group_name)) {
             group.sources.push_back(source_for_provider(group_name, group_name));
             return group;
@@ -494,7 +502,8 @@ ProviderCatalogGroup provider_catalog_group_for(
 }
 
 std::vector<ProviderCatalogGroup> provider_catalog_groups(
-    std::span<const std::string> configured_provider_names) {
+    std::span<const std::string> configured_provider_names,
+    std::span<const std::string_view> preferred_sources) {
     std::vector<ProviderCatalogGroup> groups;
     std::unordered_set<std::string> seen;
 
@@ -503,7 +512,8 @@ std::vector<ProviderCatalogGroup> provider_catalog_groups(
         if (!seen.insert(group_name).second) {
             continue;
         }
-        auto group = provider_catalog_group_for(group_name, configured_provider_names);
+        auto group = provider_catalog_group_for(
+            group_name, configured_provider_names, preferred_sources);
         if (!group.sources.empty()) {
             groups.push_back(std::move(group));
         }

@@ -148,7 +148,7 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         ProviderAuthStyle::Bearer, "responses",
     },
     BuiltinProviderDefinition{
-        "claude", "anthropic", {}, config::ApiType::Anthropic,
+        "claude", "anthropic", "claude", config::ApiType::Anthropic,
         "https://api.anthropic.com", { "ANTHROPIC_API_KEY" },
         ProviderAuthStyle::XApiKey, {},
     },

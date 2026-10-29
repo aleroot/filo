@@ -76,11 +76,17 @@ void retain_preferred_provider_catalog_source(
     std::string_view service_id,
     std::string_view model_id);
 
+/// Compatibility presets use the first configured preference in their family
+/// before falling back to the canonical provider or first configured alias.
 [[nodiscard]] ProviderCatalogGroup provider_catalog_group_for(
     std::string_view provider_name,
-    std::span<const std::string> configured_provider_names);
+    std::span<const std::string> configured_provider_names,
+    std::span<const std::string_view> preferred_sources = {});
 
+/// Collapses every family with the same preferences as
+/// provider_catalog_group_for so both picker levels resolve one source.
 [[nodiscard]] std::vector<ProviderCatalogGroup> provider_catalog_groups(
-    std::span<const std::string> configured_provider_names);
+    std::span<const std::string> configured_provider_names,
+    std::span<const std::string_view> preferred_sources = {});
 
 } // namespace core::llm
