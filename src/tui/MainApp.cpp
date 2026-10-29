@@ -1847,6 +1847,26 @@ RunResult run(RunOptions opts) {
         return {};
     }
 
+    // Remote MCP clients see the project of every open thread, with the
+    // visible thread's primary as theirs. The source reads the registry, so
+    // it is cleared before the registry is destroyed.
+    core::workspace::Workspace::get_instance().set_remote_source([&thread_runtimes] {
+        const auto current = thread_runtimes.current();
+        if (!current) {
+            return core::workspace::Workspace::get_instance().snapshot();
+        }
+        std::vector<core::workspace::SessionWorkspace> sessions;
+        for (const auto& runtime : thread_runtimes.ordered_snapshot()) {
+            sessions.push_back(runtime->agent()->workspace_snapshot());
+        }
+        return core::workspace::merged_workspace(current->agent()->workspace_snapshot(), sessions);
+    });
+    struct RemoteWorkspaceSourceReset {
+        ~RemoteWorkspaceSourceReset() {
+            core::workspace::Workspace::get_instance().set_remote_source({});
+        }
+    } remote_workspace_source_reset;
+
     auto allocate_project_thread_name = [&]() {
         const auto base_name = project_base_name_for(agent->workspace_snapshot().primary());
         std::unordered_set<std::string> used_names;

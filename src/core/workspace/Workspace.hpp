@@ -3,6 +3,8 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <vector>
 
 namespace core::workspace {
@@ -28,6 +30,8 @@ struct WorkspaceSnapshot {
 
 class Workspace {
 public:
+    using SnapshotSource = std::function<WorkspaceSnapshot()>;
+
     static Workspace& get_instance() {
         static Workspace instance;
         return instance;
@@ -50,6 +54,15 @@ public:
     [[nodiscard]] std::vector<std::filesystem::path> ordered_roots() const;
     [[nodiscard]] std::filesystem::path resolve_path(const std::filesystem::path& target_path) const;
 
+    /// The workspace remote clients (MCP over HTTP) see. A host that owns
+    /// sessions beyond the startup layout, as the TUI with its threads,
+    /// installs a source for as long as those sessions live; an empty source
+    /// restores snapshot(). Setting a source waits for calls in flight, so the
+    /// host can clear it before its sessions are destroyed.
+    void set_remote_source(SnapshotSource source);
+    /// The installed source's snapshot, else snapshot().
+    [[nodiscard]] WorkspaceSnapshot remote_snapshot() const;
+
     // True when the path is inside the project roots or the readable/writable
     // half of the configured scratch scope.
     [[nodiscard]] bool allows_read(const std::filesystem::path& target_path) const;
@@ -62,6 +75,8 @@ private:
     std::vector<std::filesystem::path> additional_;
     bool enforce_{false};
     FileAccessScope scratch_;
+    mutable std::mutex remote_source_mutex_;
+    SnapshotSource remote_source_;
 };
 
 } // namespace core::workspace

@@ -168,6 +168,59 @@ TEST_CASE("ordered_roots is the single workspace ordering rule", "[Workspace][mu
     }
 }
 
+TEST_CASE("merged_workspace shows every session's project around the active primary",
+          "[Workspace][multiroot]") {
+    using core::workspace::merged_workspace;
+    using core::workspace::SessionWorkspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    const auto path = [](std::string_view name) {
+        return SessionWorkspace::normalize_path(std::filesystem::path("/tmp") / name);
+    };
+    const auto first = SessionWorkspace{WorkspaceSnapshot{
+        .primary = path("filo_merged_first"),
+        .additional = {path("filo_merged_shared"), path("filo_merged_first_note.png")},
+        .attached_files = {path("filo_merged_first_note.png")},
+        .enforce = true,
+    }};
+    const auto active = SessionWorkspace{WorkspaceSnapshot{
+        .primary = path("filo_merged_active"),
+        .additional = {path("filo_merged_shared")},
+        .enforce = true,
+    }};
+
+    const auto merged = merged_workspace(active, {first, active});
+
+    CHECK(merged.primary == path("filo_merged_active"));
+    CHECK(merged.additional
+          == std::vector{path("filo_merged_shared"), path("filo_merged_first")});
+    CHECK(merged.attached_files.empty());
+    CHECK(merged.enforce);
+}
+
+TEST_CASE("Remote clients see the installed workspace source, else the startup layout",
+          "[Workspace]") {
+    using core::workspace::SessionWorkspace;
+    using core::workspace::Workspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    auto& workspace = Workspace::get_instance();
+    const auto startup = SessionWorkspace::normalize_path("/tmp/filo_remote_startup");
+    const auto thread = SessionWorkspace::normalize_path("/tmp/filo_remote_thread");
+    workspace.initialize(startup, {}, true);
+
+    CHECK(workspace.remote_snapshot().primary == startup);
+
+    workspace.set_remote_source([&] { return WorkspaceSnapshot{.primary = thread}; });
+    CHECK(workspace.remote_snapshot().primary == thread);
+
+    workspace.set_remote_source({});
+    CHECK(workspace.remote_snapshot().primary == startup);
+
+    std::error_code ec;
+    workspace.initialize(std::filesystem::current_path(ec), {}, false);
+}
+
 TEST_CASE("SessionContext delegates to its owned SessionWorkspace", "[Workspace][SessionContext]") {
     using core::context::SessionContext;
     using core::workspace::WorkspaceSnapshot;

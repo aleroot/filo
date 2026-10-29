@@ -395,4 +395,24 @@ private:
     WorkspaceSnapshot snapshot_;
 };
 
+/**
+ * The workspace a process with several sessions shows to remote clients.
+ * @p active keeps its primary, enforcement, and scratch scope; every project
+ * root of @p sessions joins as an additional directory, in session order.
+ * Attachments stay with the session that granted them.
+ */
+[[nodiscard]] inline WorkspaceSnapshot merged_workspace(
+    const SessionWorkspace& active,
+    const std::vector<SessionWorkspace>& sessions) {
+    auto merged = active.without_attachments().snapshot();
+    for (const auto& session : sessions) {
+        for (auto& root : session.without_attachments().ordered_roots()) {
+            if (root != merged.primary && !std::ranges::contains(merged.additional, root)) {
+                merged.additional.push_back(std::move(root));
+            }
+        }
+    }
+    return merged;
+}
+
 } // namespace core::workspace

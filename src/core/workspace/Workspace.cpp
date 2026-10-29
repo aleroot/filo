@@ -35,6 +35,19 @@ std::vector<std::filesystem::path> Workspace::ordered_roots() const {
     return core::workspace::ordered_roots(primary_, additional_);
 }
 
+void Workspace::set_remote_source(SnapshotSource source) {
+    std::lock_guard lock(remote_source_mutex_);
+    remote_source_ = std::move(source);
+}
+
+WorkspaceSnapshot Workspace::remote_snapshot() const {
+    std::lock_guard lock(remote_source_mutex_);
+    if (remote_source_) {
+        return remote_source_();
+    }
+    return snapshot();
+}
+
 std::filesystem::path Workspace::resolve_path(const std::filesystem::path& target_path) const {
     return SessionWorkspace(snapshot()).resolve_path(target_path);
 }

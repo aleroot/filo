@@ -863,7 +863,7 @@ take_pending_server_response(HttpSessionState& session,
     core::mcp::McpProtocolMode mode = core::mcp::McpProtocolMode::legacy) {
     detail::McpDispatchResult result;
     const auto snapshot = workspace_override.value_or(
-        core::workspace::Workspace::get_instance().snapshot());
+        core::workspace::Workspace::get_instance().remote_snapshot());
     auto session_context = core::context::make_session_context(
         snapshot,
         core::context::SessionTransport::mcp_http,
