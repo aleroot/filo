@@ -16,6 +16,7 @@
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/MemoryTool.hpp"
 #include "core/tools/TaskTool.hpp"
 #include "core/tools/VerificationTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
@@ -75,8 +76,8 @@ private:
 
 class NamedNoopTool final : public core::tools::Tool {
 public:
-    explicit NamedNoopTool(std::string name)
-        : name_(std::move(name)) {}
+    explicit NamedNoopTool(std::string name, bool destructive = false)
+        : name_(std::move(name)), destructive_(destructive) {}
 
     [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
         return {
@@ -85,7 +86,8 @@ public:
             .description = "No-op tool used for request filtering tests.",
             .parameters = {},
             .annotations = {
-                .read_only_hint = true,
+                .read_only_hint = !destructive_,
+                .destructive_hint = destructive_,
                 .idempotent_hint = true,
             },
         };
@@ -99,6 +101,7 @@ public:
 
 private:
     std::string name_;
+    bool destructive_;
 };
 
 class NoopLoopTool final : public core::tools::Tool {
@@ -293,6 +296,57 @@ public:
 private:
     mutable std::mutex mutex_;
     std::vector<core::llm::ChatRequest> requests_;
+};
+
+class MemoryFailureProvider final : public core::llm::LLMProvider {
+public:
+    explicit MemoryFailureProvider(bool correct, bool unsolicited = false,
+                                   bool denied = false)
+        : correct_(correct), unsolicited_(unsolicited), denied_(denied) {}
+
+    void stream_response(const core::llm::ChatRequest& request,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        requests_.push_back(request);
+        const auto call = requests_.size();
+        if (call <= 2 || (call == 3 && unsolicited_)) {
+            core::llm::ToolCall tool;
+            tool.index = 0;
+            tool.id = std::format("memory-failure-{}", call);
+            tool.type = "function";
+            tool.function.name = std::string(core::tools::names::kMemory);
+            tool.function.arguments = std::format(
+                R"({{"action":"remember","content":"{}"}})",
+                call == 2 && correct_ ? "A concise durable fact" : std::string(1275, 'x'));
+            std::vector<core::llm::ToolCall> calls{std::move(tool)};
+            if (call == 3 && denied_) {
+                core::llm::ToolCall other;
+                other.index = 1;
+                other.id = "denied-companion";
+                other.type = "function";
+                other.function.name = "memory_denied_companion";
+                other.function.arguments = "{}";
+                calls.push_back(std::move(other));
+            }
+            callback(core::llm::StreamChunk{.tools = std::move(calls), .is_final = true});
+        } else if (call == 3 && !correct_) {
+            core::llm::ToolCall tool;
+            tool.index = 0;
+            tool.id = "other-work";
+            tool.type = "function";
+            tool.function.name = std::string(kLoopToolName);
+            tool.function.arguments = "{}";
+            callback(core::llm::StreamChunk{.tools = {std::move(tool)}, .is_final = true});
+        } else {
+            callback(core::llm::StreamChunk::make_content("The requested answer."));
+            callback(core::llm::StreamChunk::make_final());
+        }
+    }
+
+    std::vector<core::llm::ChatRequest> requests_;
+private:
+    bool correct_;
+    bool unsolicited_;
+    bool denied_;
 };
 
 class AutoQualityProvider final : public core::llm::LLMProvider {
@@ -991,6 +1045,91 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
 }
 
 } // namespace
+
+TEST_CASE("Memory write failures cannot prevent the agent completing the task",
+          "[agent][memory][loop][regression]") {
+    bool correct = false;
+    bool unsolicited = false;
+    SECTION("a corrected write is accepted") { correct = true; }
+    SECTION("repeated failures leave other tools available") {}
+    SECTION("unsolicited memory calls are rejected and get a final response") { unsolicited = true; }
+
+    TempDir temp(std::filesystem::temp_directory_path() /
+        std::format("filo_memory_loop_{}", std::chrono::steady_clock::now().time_since_epoch().count()));
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<core::tools::MemoryTool>(
+        core::memory::MemoryStore{temp.path() / "memory.json"}));
+    tools.register_tool(std::make_shared<NoopLoopTool>());
+    auto provider = std::make_shared<MemoryFailureProvider>(correct, unsolicited);
+    auto context = test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+        .primary = temp.path(), .enforce = true, .version = 1});
+    auto agent = std::make_shared<core::agent::Agent>(provider, tools, context);
+    agent->set_permission_fn([](std::string_view, std::string_view) { return true; });
+    int loop_breaks = 0;
+    agent->set_loop_break_fn([&](int) { ++loop_breaks; });
+    send_and_wait(agent, "Answer the question.");
+    CHECK(loop_breaks == 0);
+    CHECK(std::ranges::any_of(agent->get_history(), [](const auto& message) {
+        return message.role == "assistant" && message.content == "The requested answer.";
+    }));
+    REQUIRE(provider->requests_.size() == (correct ? 3 : 4));
+    const auto has_tool = [](const auto& request, std::string_view name) {
+        return std::ranges::any_of(request.tools, [&](const auto& tool) {
+            return tool.function.name == name;
+        });
+    };
+    CHECK(has_tool(provider->requests_[1], core::tools::names::kMemory));
+    CHECK(has_tool(provider->requests_[2], core::tools::names::kMemory) == correct);
+    if (correct) {
+        CHECK(std::ranges::any_of(agent->get_history(), [](const auto& message) {
+            return message.role == "tool" && message.name == core::tools::names::kMemory
+                && message.content.contains("\"ok\":true");
+        }));
+    }
+    if (!correct) {
+        CHECK(has_tool(provider->requests_[2], kLoopToolName));
+        CHECK(std::ranges::any_of(provider->requests_[2].messages, [](const auto& message) {
+            return message.synthetic && message.content.contains("Memory writes failed repeatedly");
+        }));
+        if (unsolicited) CHECK(provider->requests_[3].tools.empty());
+        const auto history = agent->get_history();
+        CHECK(std::ranges::count_if(history, [](const auto& message) {
+            return message.role == "tool" && message.content.contains("memory_content_too_long");
+        }) == 2);
+        if (unsolicited) CHECK(std::ranges::any_of(history, [](const auto& message) {
+            return message.role == "tool" && message.content.contains("Memory is unavailable");
+        }));
+    }
+    send_and_wait(agent, "A new turn.");
+    CHECK(has_tool(provider->requests_.back(), core::tools::names::kMemory));
+}
+
+TEST_CASE("A denied tool pauses even alongside a disabled memory call",
+          "[agent][memory][loop][permission]") {
+    TempDir temp(std::filesystem::temp_directory_path() /
+        std::format("filo_memory_denial_{}", std::chrono::steady_clock::now().time_since_epoch().count()));
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<core::tools::MemoryTool>(
+        core::memory::MemoryStore{temp.path() / "memory.json"}));
+    tools.register_tool(std::make_shared<NamedNoopTool>("memory_denied_companion", true));
+    auto provider = std::make_shared<MemoryFailureProvider>(false, true, true);
+    auto agent = std::make_shared<core::agent::Agent>(provider, tools,
+        test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+            .primary = temp.path(), .enforce = true, .version = 1}));
+    agent->set_permission_fn([](std::string_view name, std::string_view) {
+        return name != "memory_denied_companion";
+    });
+
+    send_and_wait(agent, "Answer the question.");
+    CHECK(provider->requests_.size() == 3);
+    const auto history = agent->get_history();
+    CHECK(std::ranges::any_of(history, [](const auto& message) {
+        return message.role == "tool" && message.content.contains("denied by user");
+    }));
+    CHECK(std::ranges::none_of(history, [](const auto& message) {
+        return message.role == "assistant" && message.content == "The requested answer.";
+    }));
+}
 
 TEST_CASE("Agent prepares owned high-context requests without losing history",
           "[agent][context-edit][regression]") {

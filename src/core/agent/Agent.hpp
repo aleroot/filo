@@ -479,6 +479,9 @@ private:
             pending_runtime_recoveries;
         std::mutex recovery_mutex;
         bool final_response_after_repeat_stop_requested = false;
+        // A failed optional memory write gets one correction attempt per turn.
+        int memory_write_failure_rounds = 0;
+        bool memory_disabled_for_turn = false;
         // Counts at most one memory recall per user turn; guarded by
         // history_mutex alongside the stable prompt projection.
         bool memory_recall_recorded = false;

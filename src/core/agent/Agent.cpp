@@ -2165,7 +2165,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     if (provider->capabilities().supports_tool_calls) {
         request.tools = skill_manager_.get_all_tools(session_context_snapshot().transport);
         std::erase_if(request.tools, [&](const core::llm::Tool& tool) {
-            return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks);
+            return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks)
+                || (turn_state->memory_disabled_for_turn
+                    && tool.function.name == core::tools::names::kMemory);
         });
         if (tool_is_allowed_for_turn(SubagentOrchestrator::kTaskToolName, turn_callbacks)) {
             request.tools.push_back(orchestrator_.task_tool_definition());
@@ -2180,6 +2182,16 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 .function = read_tool_result_tool_.get_definition(),
             });
         }
+    }
+
+    if (turn_state->memory_disabled_for_turn) {
+        request.messages.push_back(core::llm::Message{
+            .role = "user",
+            .content = "Memory writes failed repeatedly and memory is unavailable for the rest of this turn. "
+                       "Continue the user's task using other tools if needed. Do not claim that a failed "
+                       "memory update was saved; if the user explicitly requested it, report the failure.",
+            .synthetic = true,
+        });
     }
 
     if (turn_callbacks.reserve_final_step && turn_state->max_steps > 0
@@ -2762,6 +2774,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 None,
                 InvalidArguments,
                 BlockedByTurnAllowList,
+                MemoryDisabled,
                 BlockedByHook,
                 UserDenied,
                 SkippedAfterEarlierDenial,
@@ -2848,6 +2861,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
+                }
+                if (turn_state->memory_disabled_for_turn
+                    && tc.function.name == core::tools::names::kMemory) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::MemoryDisabled;
+                    tool_callback(tc.function.name, "[memory unavailable for this turn]");
+                    continue;
                 }
                 if (!tool_is_allowed_for_turn(tc.function.name, turn_callbacks)) {
                     approved[i] = false;
@@ -3025,6 +3045,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         denied_reasons[i] == DeniedReason::SkippedAfterEarlierDenial;
                     const bool blocked_by_turn_allow_list =
                         denied_reasons[i] == DeniedReason::BlockedByTurnAllowList;
+                    const bool memory_disabled = denied_reasons[i] == DeniedReason::MemoryDisabled;
                     const bool blocked_by_hook =
                         denied_reasons[i] == DeniedReason::BlockedByHook;
                     std::string error_payload;
@@ -3051,6 +3072,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     } else if (skipped_after_denial) {
                         error_payload =
                             R"({"error":"Tool call skipped after a previous denial in this step."})";
+                    } else if (memory_disabled) {
+                        error_payload = R"({"error":"Memory is unavailable for the rest of this turn after repeated write failures. Continue the user's task without memory."})";
                     } else if (blocked_by_turn_allow_list) {
                         error_payload =
                             R"({"error":"Tool call blocked by the turn tool allow-list."})";
@@ -3347,6 +3370,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
             // 3. Collect results and assess failures
             int failure_count = 0;
+            int failed_memory_writes = 0;
+            int ignored_memory_failures = 0;
+            bool memory_write_succeeded = false;
+            bool rejected_disabled_memory = false;
             const bool dedup_requested_stop =
                 dedup_stop_requested->load(std::memory_order_acquire);
             for (std::size_t i = 0; i < tool_messages.size(); ++i) {
@@ -3354,6 +3381,20 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 const bool tool_ok = !is_tool_error(msg.content);
                 if (!tool_ok) ++failure_count;
                 const auto& tool_call = (*tool_calls_accum)[i];
+                if (denied_reasons[i] == DeniedReason::MemoryDisabled) {
+                    rejected_disabled_memory = true;
+                    if (!tool_ok) ++ignored_memory_failures;
+                } else if ((approved[i] || denied_reasons[i] == DeniedReason::InvalidArguments)
+                           && tool_call.function.name == core::tools::names::kMemory) {
+                    const auto action = core::utils::json::string_field(tool_call.function.arguments, "action");
+                    if (action == "remember" || action == "update" || action == "merge") {
+                        if (tool_ok) memory_write_succeeded = true;
+                        else {
+                            ++failed_memory_writes;
+                            ++ignored_memory_failures;
+                        }
+                    }
+                }
                 const int32_t argument_tokens =
                     core::session::SessionStats::estimate_payload_tokens(
                         tool_call.function.arguments);
@@ -3401,13 +3442,21 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
 
             // 4. Loop-breaker: stop if all tools failed for N rounds in a row
-            const bool all_failed = (failure_count == static_cast<int>(tool_messages.size()))
-                                 && !tool_messages.empty();
+            if (failed_memory_writes > 0) ++turn_state->memory_write_failure_rounds;
+            else if (memory_write_succeeded) turn_state->memory_write_failure_rounds = 0;
+            if (turn_state->memory_write_failure_rounds >= 2) {
+                turn_state->memory_disabled_for_turn = true;
+            }
+            // Memory capture is ancillary: its failures have their own bounded
+            // recovery and must not trip the general tool loop breaker.
+            const int relevant_calls = static_cast<int>(tool_messages.size()) - ignored_memory_failures;
+            const bool all_failed = relevant_calls > 0
+                && failure_count - ignored_memory_failures == relevant_calls;
             {
                 std::lock_guard lock(self->history_mutex_);
                 if (all_failed) {
                     ++self->consecutive_failure_rounds_;
-                } else {
+                } else if (relevant_calls > 0) {
                     self->consecutive_failure_rounds_ = 0;
                 }
             }
@@ -3444,6 +3493,27 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 return;
             }
 
+            // A denial always pauses, even when another call in the same batch
+            // attempted to use disabled memory.
+            if (denied_any) {
+                done_callback();
+                return;
+            }
+
+            if (rejected_disabled_memory) {
+                if (!turn_callbacks.allow_tool_calls
+                    || turn_state->final_response_after_repeat_stop_requested) {
+                    done_callback();
+                    return;
+                }
+                turn_state->final_response_after_repeat_stop_requested = true;
+                auto final_callbacks = turn_callbacks;
+                final_callbacks.allow_tool_calls = false;
+                self->step(text_callback, tool_callback, done_callback,
+                           std::move(final_callbacks), turn_state);
+                return;
+            }
+
             if (dedup_requested_stop) {
                 if (!turn_state->final_response_after_repeat_stop_requested) {
                     turn_state->final_response_after_repeat_stop_requested = true;
@@ -3457,13 +3527,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         turn_state);
                     return;
                 }
-                done_callback();
-                return;
-            }
-
-            // A "No, suggest something" denial should pause the current loop so
-            // the user can provide guidance without new permission prompts.
-            if (denied_any) {
                 done_callback();
                 return;
             }
