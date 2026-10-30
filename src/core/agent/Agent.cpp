@@ -2150,9 +2150,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
     const auto context_before_edit = core::context::ContextWindowTracker::snapshot(
         request.messages, provider, request.model);
-    if (context_before_edit.max_context_tokens > 0
-        && context_before_edit.estimated_context_tokens * 100
-            >= static_cast<std::size_t>(context_before_edit.max_context_tokens) * 65) {
+    if (SemanticHistoryEditor::should_edit(
+            context_before_edit.estimated_context_tokens,
+            static_cast<std::size_t>(std::max(0, context_before_edit.max_context_tokens)),
+            !provider->capabilities().is_local
+                && provider->prompt_cache_profile(request.model).remote(),
+            static_cast<std::size_t>(std::max(0, request.max_tokens.value_or(0))))) {
         auto edited = SemanticHistoryEditor::edit(std::move(request.messages));
         if (edited.superseded_results > 0) {
             core::logging::debug(

@@ -2,6 +2,7 @@
 
 #include "ToolCallDeduplicator.hpp"
 
+#include <algorithm>
 #include <format>
 #include <string>
 #include <unordered_map>
@@ -25,6 +26,23 @@ namespace {
 }
 
 } // namespace
+
+bool SemanticHistoryEditor::should_edit(std::size_t estimated_tokens,
+                                        std::size_t max_context_tokens,
+                                        bool has_remote_prompt_cache,
+                                        std::size_t reserved_output_tokens) noexcept {
+    if (max_context_tokens == 0) return false;
+    const auto threshold = has_remote_prompt_cache ? 90u : 65u;
+    // Divide first to avoid overflow for unusually large estimates.
+    const auto required = (max_context_tokens / 100) * threshold
+        + ((max_context_tokens % 100) * threshold + 99) / 100;
+    // The original threshold for non-cached providers remains history-only.
+    // An explicit output budget reduces the room available to a remote prompt;
+    // saturate at zero rather than overflowing on an unusually large budget.
+    const auto reserved = has_remote_prompt_cache
+        ? std::min(reserved_output_tokens, required) : 0;
+    return estimated_tokens >= required - reserved;
+}
 
 SemanticHistoryEditResult SemanticHistoryEditor::edit(
     std::vector<core::llm::Message> history,

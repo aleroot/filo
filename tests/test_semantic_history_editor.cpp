@@ -2,6 +2,7 @@
 
 #include "core/agent/SemanticHistoryEditor.hpp"
 
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +34,25 @@ std::string large_payload(char fill) {
 }
 
 } // namespace
+
+TEST_CASE("semantic history editing defers cache-breaking changes until high pressure",
+          "[agent][context-edit]") {
+    using core::agent::SemanticHistoryEditor;
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(649, 1000, false));
+    CHECK(SemanticHistoryEditor::should_edit(650, 1000, false));
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(899, 1000, true));
+    CHECK(SemanticHistoryEditor::should_edit(900, 1000, true));
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(1000, 0, true));
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(1, 3, true));
+    CHECK(SemanticHistoryEditor::should_edit(3, 3, true));
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(699, 1000, true, 200));
+    CHECK(SemanticHistoryEditor::should_edit(700, 1000, true, 200));
+    CHECK(SemanticHistoryEditor::should_edit(0, 1000, true, 1000));
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(649, 1000, false, 1000));
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    CHECK_FALSE(SemanticHistoryEditor::should_edit(1, maximum, true));
+    CHECK(SemanticHistoryEditor::should_edit(maximum, maximum, true));
+}
 
 TEST_CASE("semantic history editor removes only superseded observation payloads",
           "[agent][context-edit]") {

@@ -28,6 +28,14 @@ struct SemanticHistoryEditResult {
  */
 class SemanticHistoryEditor {
 public:
+    /// Defer cache-breaking edits while there is room for an explicit output
+    /// budget. Near the limit, reducing the request takes priority over reuse.
+    [[nodiscard]] static bool should_edit(
+        std::size_t estimated_tokens,
+        std::size_t max_context_tokens,
+        bool has_remote_prompt_cache,
+        std::size_t reserved_output_tokens = 0) noexcept;
+
     // Pass an owned request history with std::move to edit it without copying
     // its payloads again. Passing an lvalue still preserves the caller's data.
     [[nodiscard]] static SemanticHistoryEditResult edit(

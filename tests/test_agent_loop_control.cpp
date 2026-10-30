@@ -12,6 +12,7 @@
 #include "core/memory/MemoryStore.hpp"
 #include "core/memory/MemorySystem.hpp"
 #include "core/memory/ToolRecoveryMemory.hpp"
+#include "core/session/SessionStore.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -272,8 +273,18 @@ private:
 class CapturingProvider final : public core::llm::LLMProvider {
 public:
     int context_size = 0;
+    bool remote_cache = false;
+    bool local = false;
 
     [[nodiscard]] int max_context_size() const noexcept override { return context_size; }
+    [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
+        return {.is_local = local};
+    }
+    [[nodiscard]] core::llm::PromptCacheProfile prompt_cache_profile(std::string_view) const noexcept override {
+        return remote_cache
+            ? core::llm::PromptCacheProfile::estimated(std::chrono::minutes(5))
+            : core::llm::PromptCacheProfile::none();
+    }
 
     void stream_response(
         const core::llm::ChatRequest& request,
@@ -1187,6 +1198,84 @@ TEST_CASE("Agent prepares owned high-context requests without losing history",
             CHECK(std::ranges::any_of(requests.front().messages, [&](const auto& message) {
                 return message.role == original.role && message.content == original.content;
             }));
+    }
+}
+
+TEST_CASE("Agent preserves the remote cache prefix until context pressure is critical",
+          "[agent][context-edit][prompt]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    provider->remote_cache = true;
+    core::tools::ToolManager tools;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context());
+    std::vector<core::llm::Message> history;
+    for (const std::string id : {"old", "latest"}) {
+        core::llm::ToolCall call;
+        call.id = id;
+        call.function.name = "read";
+        call.function.arguments = R"({"path":"src/a.cpp"})";
+        history.push_back({.role = "assistant", .tool_calls = {std::move(call)}});
+        history.push_back({.role = "tool", .content = R"({"content":")"
+            + std::string(200'000, 'x') + R"("})", .name = "read", .tool_call_id = id});
+    }
+    for (int i = 0; i < 8; ++i)
+        history.push_back({.role = "assistant", .content = std::string(16'000, 'a' + i)});
+
+    SECTION("the previous request stays unchanged across turns") {
+        provider->context_size = 200'000;
+        agent->load_history(history, "", "BUILD");
+        send_and_wait(agent, "Continue.");
+        send_and_wait(agent, "Continue again.");
+        const auto requests = provider->requests_snapshot();
+        REQUIRE(requests.size() == 2);
+        REQUIRE(requests[1].messages.size() >= requests[0].messages.size());
+        for (std::size_t i = 0; i < requests[0].messages.size(); ++i) {
+            CHECK(core::session::SessionStore::message_json(requests[0].messages[i])
+                  == core::session::SessionStore::message_json(requests[1].messages[i]));
+        }
+        const auto old = std::ranges::find_if(requests[1].messages, [](const auto& message) {
+            return message.tool_call_id == "old";
+        });
+        REQUIRE(old != requests[1].messages.end());
+        CHECK_FALSE(old->content.contains("superseded_tool_result"));
+    }
+    SECTION("critical pressure can still shrink the request") {
+        provider->context_size = 145'000;
+        agent->load_history(history, "", "BUILD");
+        send_and_wait(agent, "Continue.");
+        const auto requests = provider->requests_snapshot();
+        REQUIRE(requests.size() == 1);
+        const auto old = std::ranges::find_if(requests[0].messages, [](const auto& message) {
+            return message.tool_call_id == "old";
+        });
+        REQUIRE(old != requests[0].messages.end());
+        CHECK(old->content.contains("superseded_tool_result"));
+    }
+    SECTION("a requested output budget can trigger earlier reduction") {
+        provider->context_size = 200'000;
+        agent->load_history(history, "", "BUILD");
+        send_and_wait(agent, "Continue.",
+            core::agent::Agent::TurnCallbacks{.max_tokens_override = 50'000});
+        const auto requests = provider->requests_snapshot();
+        REQUIRE(requests.size() == 1);
+        const auto old = std::ranges::find_if(requests[0].messages, [](const auto& message) {
+            return message.tool_call_id == "old";
+        });
+        REQUIRE(old != requests[0].messages.end());
+        CHECK(old->content.contains("superseded_tool_result"));
+    }
+    SECTION("a local provider uses the original threshold even with a cache profile") {
+        provider->context_size = 200'000;
+        provider->local = true;
+        agent->load_history(history, "", "BUILD");
+        send_and_wait(agent, "Continue.");
+        const auto requests = provider->requests_snapshot();
+        REQUIRE(requests.size() == 1);
+        const auto old = std::ranges::find_if(requests[0].messages, [](const auto& message) {
+            return message.tool_call_id == "old";
+        });
+        REQUIRE(old != requests[0].messages.end());
+        CHECK(old->content.contains("superseded_tool_result"));
     }
 }
 
