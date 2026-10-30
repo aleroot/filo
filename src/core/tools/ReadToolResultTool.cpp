@@ -18,7 +18,7 @@ ToolDefinition ReadToolResultTool::get_definition() const {
         .name = std::string(names::kReadToolResult),
         .title = std::string(names::kReadToolResultTitle),
         .description =
-            "Reads a byte range from a complete oversized tool result previously offloaded by "
+            "Reads a byte range from a complete tool result previously offloaded by "
             "Filo. Use the opaque reference returned in the original tool response and paginate "
             "with next_offset until complete.",
         .input_schema =

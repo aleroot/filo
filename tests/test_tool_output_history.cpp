@@ -5,6 +5,7 @@
 #include "core/agent/ToolOutputHistory.hpp"
 #include "core/agent/ToolResultStore.hpp"
 #include "core/context/SteeringLoader.hpp"
+#include "core/config/ConfigManager.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
@@ -17,9 +18,12 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <format>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -92,6 +96,40 @@ public:
         const core::context::SessionContext&) override {
         return std::string(R"({"error":")") + std::string(120 * 1024, 'e') + R"("})";
     }
+};
+
+class MediumReadTool final : public core::tools::Tool {
+public:
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {.name = "read", .title = "Test read", .description = "Returns test content.",
+                .parameters = {}, .annotations = {.read_only_hint = true, .idempotent_hint = true}};
+    }
+
+    [[nodiscard]] std::string execute(const std::string&,
+                                      const core::context::SessionContext&) override {
+        return std::string(R"({"content":")") + std::string(6000, 'a') + R"("})";
+    }
+};
+
+class ScopedCompressionConfig final {
+public:
+    explicit ScopedCompressionConfig(const std::filesystem::path& root) {
+        if (const char* current = std::getenv("XDG_CONFIG_HOME")) previous_ = current;
+        std::filesystem::create_directories(root / "config");
+        std::filesystem::create_directories(root / ".filo");
+        std::ofstream(root / ".filo" / "settings.json") << R"({"context_compression":"ultra"})";
+        ::setenv("XDG_CONFIG_HOME", (root / "config").string().c_str(), 1);
+        core::config::ConfigManager::get_instance().load(root);
+    }
+    ~ScopedCompressionConfig() {
+        if (previous_) ::setenv("XDG_CONFIG_HOME", previous_->c_str(), 1);
+        else ::unsetenv("XDG_CONFIG_HOME");
+        core::config::ConfigManager::get_instance().load();
+    }
+    ScopedCompressionConfig(const ScopedCompressionConfig&) = delete;
+    ScopedCompressionConfig& operator=(const ScopedCompressionConfig&) = delete;
+private:
+    std::optional<std::string> previous_;
 };
 
 class ToolThenFinalProvider final : public core::llm::LLMProvider {
@@ -464,14 +502,17 @@ TEST_CASE("ToolOutputHistory full mode returns cached stubs for unchanged read o
         limits,
         "full",
         ctx);
-    const std::string second = core::agent::tool_output_history::clamp_for_history(
+    const auto second_result = core::agent::tool_output_history::prepare_for_history(
         "read",
         raw,
         limits,
         "full",
         ctx);
+    const auto& second = second_result.content;
 
     CHECK(first == raw);
+    CHECK(raw.size() < limits.max_chars);
+    CHECK(second_result.needs_recovery);
     CHECK(second.size() < raw.size());
     CHECK_THAT(second, Catch::Matchers::ContainsSubstring(R"("compression":"full")"));
     CHECK_THAT(second, Catch::Matchers::ContainsSubstring("[cached read]"));
@@ -479,6 +520,24 @@ TEST_CASE("ToolOutputHistory full mode returns cached stubs for unchanged read o
     CHECK_THAT(second, Catch::Matchers::ContainsSubstring("unchanged"));
     CHECK_THAT(second, !Catch::Matchers::ContainsSubstring(R"("ref":)"));
     CHECK_THAT(second, !Catch::Matchers::ContainsSubstring("[cached F"));
+}
+
+TEST_CASE("ToolOutputHistory reports recovery for ultra compression and passthrough",
+          "[agent][tool-history]") {
+    using namespace core::agent::tool_output_history;
+    const Limits limits{.max_chars = 12 * 1024, .head_chars = 8 * 1024, .tail_chars = 4 * 1024};
+    const std::string raw = std::string(R"({"content":")")
+        + std::string(6000, 'a') + R"("})";
+    const Context context{.tool_arguments = R"({"path":"example.txt"})",
+                          .session_id = "ultra-recovery-test"};
+    const auto compact = prepare_for_history("read", raw, limits, "ultra", context);
+    REQUIRE(raw.size() < limits.max_chars);
+    CHECK(compact.needs_recovery);
+    CHECK(compact.content.size() < raw.size());
+
+    const auto unchanged = prepare_for_history("read", raw, limits, "off", context);
+    CHECK_FALSE(unchanged.needs_recovery);
+    CHECK(unchanged.content == raw);
 }
 
 TEST_CASE("ToolOutputHistory full mode keeps explicit line-range reads",
@@ -1049,6 +1108,68 @@ TEST_CASE("Agent stores oversized tool output in compact history format", "[agen
             CHECK(restored == expected);
             CHECK_FALSE(store.read("another-session", reference, 0, 4096).has_value());
         }
+    }
+    REQUIRE(found);
+}
+
+TEST_CASE("Agent preserves the original tool result when offloading fails", "[agent][tool-history]") {
+    TempDir root;
+    const auto blocked_root = root.path() / "not-a-directory";
+    std::ofstream(blocked_root) << "block directory creation";
+    auto provider = std::make_shared<ToolThenFinalProvider>(std::string(kLargeOutputToolName));
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<LargeOutputTool>());
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context(), blocked_root);
+    send_and_wait(agent, "Run large output tool");
+
+    const std::string expected =
+        std::string(R"({"output":")") + std::string(120 * 1024, 'x') + R"("})";
+    bool found = false;
+    for (const auto& msg : agent->get_history()) {
+        if (msg.role == "tool" && msg.name == kLargeOutputToolName) {
+            found = true;
+            CHECK(msg.content == expected);
+        }
+    }
+    REQUIRE(found);
+}
+
+TEST_CASE("Agent makes below-limit ultra compression recoverable", "[agent][tool-history]") {
+    TempDir root;
+    ScopedCompressionConfig config(root.path());
+    REQUIRE(core::config::ConfigManager::get_instance().get_config().context_compression == "ultra");
+    core::tools::ToolManager tools;
+    tools.register_tool(std::make_shared<MediumReadTool>());
+    auto provider = std::make_shared<ToolThenFinalProvider>("read");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context(), root.path() / "results");
+    send_and_wait(agent, "Read test content");
+
+    const std::string expected = std::string(R"({"content":")") + std::string(6000, 'a') + R"("})";
+    REQUIRE(expected.size() < core::agent::tool_output_history::limits_for_tool("read").max_chars);
+    bool found = false;
+    for (const auto& msg : agent->get_history()) {
+        if (msg.role != "tool" || msg.name != "read") continue;
+        found = true;
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded{msg.content};
+        simdjson::dom::element document;
+        REQUIRE(parser.parse(padded).get(document) == simdjson::SUCCESS);
+        std::string_view reference;
+        REQUIRE(document["offload"]["reference"].get(reference) == simdjson::SUCCESS);
+        core::agent::ToolResultStore store(root.path() / "results");
+        std::string restored;
+        std::uint64_t offset = 0;
+        while (true) {
+            const auto chunk = store.read({}, reference, offset);
+            REQUIRE(chunk.has_value());
+            restored += chunk->content;
+            if (chunk->complete) break;
+            REQUIRE(chunk->next_offset > offset);
+            offset = chunk->next_offset;
+        }
+        CHECK(restored == expected);
     }
     REQUIRE(found);
 }

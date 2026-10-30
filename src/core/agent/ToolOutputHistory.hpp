@@ -17,6 +17,19 @@ struct Limits {
     std::size_t tail_chars = 3 * 1024;
 };
 
+struct HistoryOutput {
+    std::string content;
+    // All current transforms that change the output discard information.
+    bool needs_recovery = false;
+};
+
+[[nodiscard]] HistoryOutput prepare_for_history(
+    std::string_view tool_name,
+    std::string_view raw_output,
+    Limits limits,
+    std::string_view compression_mode,
+    Context context);
+
 [[nodiscard]] Limits limits_for_tool(std::string_view tool_name);
 
 [[nodiscard]] Limits limits_for_tool(

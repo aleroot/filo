@@ -3275,7 +3275,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 core::config::ConfigManager::get_instance()
                                     .get_config()
                                     .tool_output_token_limit)));
-                        auto compact_result = tool_output_history::clamp_for_history(
+                        auto compact_result = tool_output_history::prepare_for_history(
                             tc.function.name,
                             result,
                             history_limits,
@@ -3286,23 +3286,24 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 .tool_arguments = tc.function.arguments,
                                 .session_id = session_context.session_id,
                             });
-                        if (result.size() > history_limits.max_chars) {
+                        if (compact_result.needs_recovery) {
                             if (auto stored = self->tool_result_store_.store(
                                     session_context.session_id,
                                     tc.id,
                                     result);
                                 stored.has_value()) {
-                                compact_result = ToolResultStore::attach_reference(
-                                    std::move(compact_result),
+                                compact_result.content = ToolResultStore::attach_reference(
+                                    std::move(compact_result.content),
                                     *stored);
                             } else {
                                 core::logging::warn(
-                                    "[Agent] Could not offload oversized {} result: {}",
+                                    "[Agent] Could not offload {} result; preserving original: {}",
                                     tc.function.name,
                                     stored.error());
+                                compact_result.content = std::move(result);
                             }
                         }
-                        result = std::move(compact_result);
+                        result = std::move(compact_result.content);
                         auto dedup_final = deduplicator->finalize_for_model(
                             dedup_index,
                             std::move(result));

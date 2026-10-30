@@ -1328,6 +1328,15 @@ std::string clamp_for_history(
     Limits limits,
     std::string_view compression_mode,
     Context context) {
+    return prepare_for_history(tool_name, raw_output, limits, compression_mode, context).content;
+}
+
+HistoryOutput prepare_for_history(
+    std::string_view tool_name,
+    std::string_view raw_output,
+    Limits limits,
+    std::string_view compression_mode,
+    Context context) {
     const CompressionProfile profile =
         compression_profile(tool_name, limits, parse_compression_mode(compression_mode));
     if (core::tools::names::is_read_tool(tool_name)) {
@@ -1336,15 +1345,15 @@ std::string clamp_for_history(
         // Re-compressing it would destroy the relationship to source locations.
         if (raw_output.size() <= 128 * 1024
             && core::utils::json::first_string_field(raw_output, {"read_view"}).has_value())
-            return std::string(raw_output);
+            return {std::string(raw_output), false};
         if (is_instruction_file(path)) {
-            return std::string(raw_output);
+            return {std::string(raw_output), false};
         }
         // Keep explicit line slices intact so the transcript metric and the
         // model both see the requested source, not a 12 KiB structural digest.
         if (raw_output.size() <= 128 * 1024
             && is_line_range_request(context.tool_arguments)) {
-            return std::string(raw_output);
+            return {std::string(raw_output), false};
         }
     }
 
@@ -1356,10 +1365,10 @@ std::string clamp_for_history(
                     context,
                     profile);
                 compressed.has_value() && compressed->size() < raw_output.size()) {
-                return *compressed;
+                return {std::move(*compressed), true};
             }
         }
-        return std::string(raw_output);
+        return {std::string(raw_output), false};
     }
 
     if (uses_full_compression(profile.mode)) {
@@ -1369,7 +1378,7 @@ std::string clamp_for_history(
                 context,
                 profile);
             compressed.has_value() && compressed->size() < raw_output.size()) {
-            return *compressed;
+            return {std::move(*compressed), true};
         }
     }
 
@@ -1380,7 +1389,7 @@ std::string clamp_for_history(
                 profile.limits,
                 context);
             compressed.has_value() && compressed->size() < raw_output.size()) {
-            return *compressed;
+            return {std::move(*compressed), true};
         }
     }
 
@@ -1410,7 +1419,7 @@ std::string clamp_for_history(
             writer.kv_str("tail", tail);
         }
     }
-    return std::move(writer).take();
+    return {std::move(writer).take(), true};
 }
 
 } // namespace core::agent::tool_output_history
