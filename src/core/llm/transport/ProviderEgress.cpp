@@ -66,7 +66,9 @@ protocols::ProtocolResponse ProviderEgress::post(
         return response;
     }
     const auto performed = session.Post();
-    response.status_code = performed.status_code;
+    // libcurl exposes the HTTP status as a long, although HTTP status codes
+    // are three digits (and zero indicates that no response was received).
+    response.status_code = static_cast<int>(performed.status_code);
     response.body = std::move(body);
     if (performed.error) response.error = performed.error.message;
     return response;

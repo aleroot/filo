@@ -69,6 +69,13 @@ CPMAddPackage("gh:simdjson/simdjson@5.0.1")
 set(FILO_FTXUI_VERSION 7.0.3)
 string(REGEX REPLACE "[^0-9]" "" FILO_FTXUI_ABI_EPOCH "${FILO_FTXUI_VERSION}")
 CPMAddPackage("gh:ArthurSonzogni/FTXUI@${FILO_FTXUI_VERSION}")
+if(APPLE AND TARGET screen)
+    # FTXUI's ref.cpp only forces inline symbol exports for Windows DLLs.
+    # On macOS it produces an empty object, which libtool warns about.
+    get_target_property(filo_ftxui_screen_sources screen SOURCES)
+    list(FILTER filo_ftxui_screen_sources EXCLUDE REGEX "(^|/)src/ftxui/util/ref\\.cpp$")
+    set_property(TARGET screen PROPERTY SOURCES "${filo_ftxui_screen_sources}")
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     foreach(ftxui_target screen dom component)
         if(TARGET ${ftxui_target})
@@ -87,10 +94,11 @@ endif()
 # already baked in — avoids "unable to get local issuer certificate" errors
 # that occur when CPR builds its own curl from source without a CA path.
 if(APPLE)
-    find_library(FILO_SYSTEM_CURL_LIBRARY curl REQUIRED)
-    add_library(CURL::libcurl UNKNOWN IMPORTED GLOBAL)
+    # Let the active SDK resolve the library at link time. An absolute path
+    # cached by find_library becomes invalid when Xcode replaces its SDK.
+    add_library(CURL::libcurl INTERFACE IMPORTED GLOBAL)
     set_target_properties(CURL::libcurl PROPERTIES
-        IMPORTED_LOCATION "${FILO_SYSTEM_CURL_LIBRARY}"
+        INTERFACE_LINK_LIBRARIES "-lcurl"
     )
     set(CPR_USE_EXISTING_CURL_TARGET ON CACHE BOOL "" FORCE)
 else()
@@ -103,6 +111,17 @@ CPMAddPackage(
     VERSION 1.14.2
     EXCLUDE_FROM_ALL YES
 )
+if(APPLE AND TARGET cpr)
+    # CPR 1.14.2's parameters.cpp and payload.cpp are empty placeholders.
+    # ssl_ctx.cpp has definitions only with the OpenSSL backend; macOS uses
+    # DarwinSSL by default. Avoid adding empty objects to the static archive.
+    get_target_property(filo_cpr_sources cpr SOURCES)
+    list(FILTER filo_cpr_sources EXCLUDE REGEX "(^|/)(parameters|payload)\\.cpp$")
+    if(NOT CPR_FORCE_OPENSSL_BACKEND)
+        list(FILTER filo_cpr_sources EXCLUDE REGEX "(^|/)ssl_ctx\\.cpp$")
+    endif()
+    set_property(TARGET cpr PROPERTY SOURCES "${filo_cpr_sources}")
+endif()
 
 # Add cpp-httplib for HTTP server support.
 #
@@ -654,30 +673,24 @@ target_link_libraries(filo_core
 )
 
 # zlib backs core::utils::gzip: Claude request bodies (as Claude Code sends
-# them) and compressed configuration bundles. On Apple, link the SDK
-# library directly: ZLIB::ZLIB would add the SDK's usr/include as a system
+# them) and compressed configuration bundles. On Apple, link by name so the
+# active SDK supplies the library: ZLIB::ZLIB would add its usr/include as a system
 # include and break libc++'s include_next (see the cpp-httplib note above).
 if(APPLE)
-    find_library(FILO_ZLIB_LIBRARY z REQUIRED)
-    target_link_libraries(filo_core PUBLIC ${FILO_ZLIB_LIBRARY})
+    target_link_libraries(filo_core PUBLIC -lz)
 else()
     find_package(ZLIB REQUIRED)
     target_link_libraries(filo_core PUBLIC ZLIB::ZLIB)
 endif()
 
 if(APPLE)
-    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
-    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
-    find_library(CFNETWORK_FRAMEWORK CFNetwork REQUIRED)
-    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
-    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
     target_link_libraries(filo_core
         PUBLIC
-            ${FOUNDATION_FRAMEWORK}
-            ${APPKIT_FRAMEWORK}
-            ${CFNETWORK_FRAMEWORK}
-            ${COREFOUNDATION_FRAMEWORK}
-            ${IOKIT_FRAMEWORK}
+            "-framework Foundation"
+            "-framework AppKit"
+            "-framework CFNetwork"
+            "-framework CoreFoundation"
+            "-framework IOKit"
     )
 endif()
 
