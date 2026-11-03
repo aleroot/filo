@@ -18,6 +18,7 @@
 #include "../tools/Tool.hpp"
 #include "../net/EgressScope.hpp"
 #include "../policy/PolicyTypes.hpp"
+#include "McpServerStatus.hpp"
 
 namespace core::mcp {
 
@@ -118,6 +119,10 @@ public:
     [[nodiscard]] virtual bool supports_prompts() const noexcept = 0;
     [[nodiscard]] virtual bool supports_sampling() const noexcept = 0;
 
+    /// What the server reported in its initialize result; empty before
+    /// initialize() returns.
+    [[nodiscard]] virtual McpServerInfo server_info() const { return {}; }
+
     /**
      * The network destination of a remote session.
      *
@@ -161,6 +166,7 @@ public:
     [[nodiscard]] bool supports_sampling() const noexcept override {
         return client_sampling_enabled_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] McpServerInfo server_info() const override { return server_info_; }
     void shutdown() noexcept override;
 
 private:
@@ -202,6 +208,8 @@ private:
     std::atomic<bool> server_supports_resources_{false};
     std::atomic<bool> server_supports_prompts_{false};
     std::atomic<bool> client_sampling_enabled_{false};
+    // Written by initialize() before the session is shared, read only after.
+    McpServerInfo server_info_;
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +247,7 @@ public:
     [[nodiscard]] std::optional<core::policy::Resource> network_endpoint() const override {
         return endpoint_;
     }
+    [[nodiscard]] McpServerInfo server_info() const override { return server_info_; }
     void shutdown() noexcept override;
 
 private:
@@ -276,6 +285,8 @@ private:
     std::atomic<bool> server_tools_advertised_{false};
     std::atomic<bool> server_supports_resources_{false};
     std::atomic<bool> server_supports_prompts_{false};
+    // Written by initialize() before the session is shared, read only after.
+    McpServerInfo server_info_;
 };
 
 // Normalize a Streamable HTTP response body to a single JSON-RPC message.

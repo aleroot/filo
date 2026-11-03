@@ -4,6 +4,7 @@
 #include "../tools/ToolManager.hpp"
 #include "../config/ConfigManager.hpp"
 #include "McpClientSession.hpp"
+#include "McpServerStatus.hpp"
 #include <string>
 #include <vector>
 #include <memory>
@@ -54,6 +55,11 @@ public:
     // Returns registered MCP tool names (for diagnostics / /help display).
     [[nodiscard]] std::vector<std::string> registered_tool_names() const;
 
+    // One entry per configured server, in configuration order, including
+    // servers that are still connecting or failed. Never blocks on a
+    // connection in progress.
+    [[nodiscard]] std::vector<McpServerStatus> server_statuses() const;
+
 private:
     McpConnectionManager() noexcept = default;
 
@@ -63,9 +69,18 @@ private:
         std::vector<std::string> tool_names;
     };
 
+    struct StatusEntry {
+        McpServerStatus status;
+        std::shared_ptr<McpServerActivity> activity;
+    };
+
     mutable std::mutex mutex_;
     std::vector<ServerEntry> servers_;
     std::shared_ptr<McpSamplingBridge> sampling_bridge_;
+    // Separate lock: connect_all holds mutex_ for the whole handshake, while
+    // the UI reads statuses on every frame.
+    mutable std::mutex status_mutex_;
+    std::vector<StatusEntry> statuses_;
 };
 
 } // namespace core::mcp

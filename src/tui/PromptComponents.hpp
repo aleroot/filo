@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnchoredPopover.hpp"
 #include "Autocomplete.hpp"
 #include "DiffPreview.hpp"
 #include "CodeBlockRunner.hpp"
@@ -193,9 +194,10 @@ ftxui::Element render_startup_banner_panel(std::string_view provider_name,
                                            std::string_view clock_label = {},
                                            const std::vector<ThreadTab>& thread_tabs = {},
                                            std::vector<ftxui::Box>* thread_tab_hitboxes = nullptr,
-                                           ftxui::Box* context_sources_hitbox = nullptr,
+                                           const PopoverTrigger& context_sources_trigger = {},
                                            bool animate = false,
-                                           std::size_t tick = 0);
+                                           std::size_t tick = 0,
+                                           const PopoverTrigger& mcp_servers_trigger = {});
 
 ftxui::Element render_model_selection_panel(int selected_index,
                                             std::string_view manual_description,

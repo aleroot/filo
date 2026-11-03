@@ -681,6 +681,54 @@ Element render_thread_tab(const ThreadTab& tab, bool animate, std::size_t tick) 
     return rendered;
 }
 
+// The summary is rendered as two parts so the MCP count can be clicked.
+std::string format_runtime_status_prefix(std::string_view provider_name,
+                                         std::string_view model_name) {
+    return std::format(
+        "provider: {}  —  model: {}  —  ",
+        provider_name,
+        model_name.empty() ? "<provider default>" : model_name);
+}
+
+std::string format_mcp_status_label(int mcp_server_count) {
+    return std::format("MCP servers: {}", mcp_server_count);
+}
+
+/// Summary whose MCP label is the trigger of the MCP servers popover. `wrap`
+/// breaks at word boundaries like a paragraph; otherwise it stays on one line.
+Element render_runtime_status_summary(std::string_view provider_name,
+                                      std::string_view model_name,
+                                      int mcp_server_count,
+                                      const PopoverTrigger& mcp_servers_trigger,
+                                      bool wrap) {
+    const std::string prefix = format_runtime_status_prefix(provider_name, model_name);
+    auto mcp_label = render_popover_trigger(format_mcp_status_label(mcp_server_count),
+                                            mcp_servers_trigger);
+    if (!wrap) {
+        return hbox({text(prefix), std::move(mcp_label)}) | color(ColorText);
+    }
+    Elements words;
+    std::size_t start = 0;
+    while (start < prefix.size()) {
+        const auto end = prefix.find(' ', start);
+        const auto token_end = end == std::string::npos ? prefix.size() : end + 1;
+        words.push_back(text(prefix.substr(start, token_end - start)));
+        start = token_end;
+    }
+    words.push_back(std::move(mcp_label));
+    return flexbox(std::move(words)) | color(ColorText) | xflex;
+}
+
+/// "🤖 AGENTS.md, FILO.md ▾": the trigger of the agent-instructions popover.
+/// The padding stays outside the clickable area.
+Element render_context_sources_trigger(std::string_view label, const PopoverTrigger& trigger) {
+    return hbox({
+        text(" "),
+        render_popover_trigger(std::format("🤖 {}", label), trigger),
+        text(" "),
+    }) | color(ColorTextSecondary);
+}
+
 } // namespace
 
 std::string format_workspace_status_label(std::string_view workspace_path) {
@@ -698,11 +746,8 @@ std::string format_security_status_label(bool sandbox_active, bool network_polic
 std::string format_runtime_status_summary(std::string_view provider_name,
                                           std::string_view model_name,
                                           int mcp_server_count) {
-    return std::format(
-        "provider: {}  —  model: {}  —  MCP servers: {}",
-        provider_name,
-        model_name.empty() ? "<provider default>" : model_name,
-        mcp_server_count);
+    return format_runtime_status_prefix(provider_name, model_name)
+        + format_mcp_status_label(mcp_server_count);
 }
 
 std::string format_model_status_badge(std::string_view provider_name,
@@ -819,11 +864,15 @@ Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view clock_label,
                                     const std::vector<ThreadTab>& thread_tabs,
                                     std::vector<Box>* thread_tab_hitboxes,
-                                    Box* context_sources_hitbox,
+                                    const PopoverTrigger& context_sources_trigger,
                                     bool animate,
-                                    std::size_t tick) {
-    if (context_sources_hitbox) {
-        *context_sources_hitbox = {0, -1, 0, -1};
+                                    std::size_t tick,
+                                    const PopoverTrigger& mcp_servers_trigger) {
+    if (context_sources_trigger.hitbox) {
+        *context_sources_trigger.hitbox = kEmptyBox;
+    }
+    if (mcp_servers_trigger.hitbox) {
+        *mcp_servers_trigger.hitbox = kEmptyBox;
     }
     static constexpr std::array<std::string_view, 6> kBannerLogoLines = {
         "  ███████╗██╗██╗      ██████╗",
@@ -875,13 +924,9 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }
     Elements banner_right_column{std::move(clock)};
     if (show_thread_tabs && !context_sources_label.empty()) {
-        auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
-            | color(ColorTextSecondary)
-            | ftxui::align_right;
-        if (context_sources_hitbox) {
-            label_el = std::move(label_el) | reflect(*context_sources_hitbox);
-        }
-        banner_right_column.push_back(std::move(label_el));
+        banner_right_column.push_back(
+            render_context_sources_trigger(context_sources_label, context_sources_trigger)
+            | ftxui::align_right);
     }
     rows.push_back(hbox({
         vbox(std::move(logo_rows)),
@@ -890,30 +935,23 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }));
 
     rows.push_back(text(""));
-    const std::string summary = format_runtime_status_summary(
-        provider_name,
-        model_name,
-        mcp_server_count);
-
     if (!context_sources_label.empty() || show_thread_tabs) {
         Elements summary_row{
-            text(summary) | color(ColorText),
+            render_runtime_status_summary(provider_name, model_name, mcp_server_count,
+                                          mcp_servers_trigger, /*wrap=*/false),
             filler(),
         };
         if (!show_thread_tabs && !context_sources_label.empty()) {
-            auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
-                | color(ColorTextSecondary);
-            if (context_sources_hitbox) {
-                label_el = std::move(label_el) | reflect(*context_sources_hitbox);
-            }
-            summary_row.push_back(std::move(label_el));
+            summary_row.push_back(
+                render_context_sources_trigger(context_sources_label, context_sources_trigger));
         }
         if (show_thread_tabs) {
             summary_row.push_back(std::move(rendered_thread_tabs));
         }
         rows.push_back(hbox(std::move(summary_row)));
     } else {
-        rows.push_back(paragraph(summary) | color(ColorText) | xflex);
+        rows.push_back(render_runtime_status_summary(
+            provider_name, model_name, mcp_server_count, mcp_servers_trigger, /*wrap=*/true));
     }
 
     const auto hint_lines = split_lines(std::string(provider_setup_hint));

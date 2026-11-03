@@ -33,6 +33,8 @@
 #include "RemoteActivityPanel.hpp"
 #include "UsageDetailsPanel.hpp"
 #include "WorkspaceDetailsPanel.hpp"
+#include "AnchoredPopover.hpp"
+#include "McpServersPanel.hpp"
 #include "AgentsVisualizerPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
@@ -1002,11 +1004,18 @@ RunResult run(RunOptions opts) {
     WorkspaceDetailsPanelState workspace_details_panel_state;
     Box workspace_status_box{0, -1, 0, -1};
     Box security_status_box{0, -1, 0, -1};
-    bool agents_visualizer_panel_active = false;
+    // "MCP servers: N" in the banner opens the connected-server popover.
+    McpServersPanelState mcp_servers_panel_state;
+    Box mcp_servers_status_box = kEmptyBox;
+    Box mcp_servers_popover_box = kEmptyBox;
+    // The context-sources label ("🤖 AGENTS.md") opens the agent-instructions
+    // popover, which drops down from it like the MCP servers one.
+    AgentsVisualizerPanelState agents_visualizer_panel_state;
     Box agents_status_box{0, -1, 0, -1};
+    Box agents_visualizer_popover_box = kEmptyBox;
     std::vector<Box> agents_tab_hitboxes;
-    std::size_t agents_visualizer_selected_file = 0;
-    int agents_visualizer_scroll_offset = 0;
+    // Lines of the selected file the popover showed in the last frame.
+    int agents_visualizer_page = 1;
     std::vector<Box> thread_tab_hitboxes;
     std::vector<std::string> thread_tab_session_ids;
     SelectionClipboardCopier selection_clipboard_copier;
@@ -5587,8 +5596,9 @@ RunResult run(RunOptions opts) {
                 cur_policy.enable_source(value.substr(5));
             } else if (value == "view") {
                 std::lock_guard lock(ui_mutex);
-                agents_visualizer_panel_active = true;
-                agents_visualizer_scroll_offset = 0;
+                agents_visualizer_panel_state.active = true;
+                agents_visualizer_panel_state.scroll_offset = 0;
+                mcp_servers_panel_state.active = false;
                 return {};
             }
             apply_steering_policy(cur_policy);
@@ -8292,15 +8302,33 @@ RunResult run(RunOptions opts) {
         if (event.is_mouse()
             && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed
+            && mcp_servers_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                mcp_servers_panel_state = {.active = !mcp_servers_panel_state.active};
+                workspace_details_panel_state.active = false;
+                usage_details_panel_active = false;
+                review_details_panel_active = false;
+                agents_visualizer_panel_state.active = false;
+                remote_activity_panel_state.active = false;
+            }
+            wake_ui();
+            return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
             && security_status_box.Contain(event.mouse().x, event.mouse().y)) {
             {
                 std::lock_guard lock(ui_mutex);
                 const bool was_open = workspace_details_panel_state.active
                     && workspace_details_panel_state.security;
                 workspace_details_panel_state = {.active = !was_open, .security = true};
+                mcp_servers_panel_state.active = false;
                 usage_details_panel_active = false;
                 review_details_panel_active = false;
-                agents_visualizer_panel_active = false;
+                agents_visualizer_panel_state.active = false;
                 remote_activity_panel_state.active = false;
             }
             wake_ui();
@@ -8345,8 +8373,9 @@ RunResult run(RunOptions opts) {
                 const bool was_open = workspace_details_panel_state.active
                     && !workspace_details_panel_state.security;
                 workspace_details_panel_state = {.active = !was_open};
+                mcp_servers_panel_state.active = false;
                 usage_details_panel_active = false;
-                agents_visualizer_panel_active = false;
+                agents_visualizer_panel_state.active = false;
                 remote_activity_panel_state.active = false;
             }
             wake_ui();
@@ -8377,6 +8406,7 @@ RunResult run(RunOptions opts) {
             {
                 std::lock_guard lock(ui_mutex);
                 usage_details_panel_active = !usage_details_panel_active;
+                mcp_servers_panel_state.active = false;
                 workspace_details_panel_state.active = false;
                 review_details_panel_active = false;
             }
@@ -8391,9 +8421,10 @@ RunResult run(RunOptions opts) {
             {
                 std::lock_guard lock(ui_mutex);
                 review_details_panel_active = !review_details_panel_active;
+                mcp_servers_panel_state.active = false;
                 usage_details_panel_active = false;
                 workspace_details_panel_state.active = false;
-                agents_visualizer_panel_active = false;
+                agents_visualizer_panel_state.active = false;
                 remote_activity_panel_state.active = false;
             }
             wake_ui();
@@ -8436,107 +8467,45 @@ RunResult run(RunOptions opts) {
             && agents_status_box.Contain(event.mouse().x, event.mouse().y)) {
             {
                 std::lock_guard lock(ui_mutex);
-                agents_visualizer_panel_active = !agents_visualizer_panel_active;
+                agents_visualizer_panel_state.active = !agents_visualizer_panel_state.active;
+                mcp_servers_panel_state.active = false;
                 workspace_details_panel_state.active = false;
-                if (agents_visualizer_panel_active) {
+                if (agents_visualizer_panel_state.active) {
                     const auto pol = agent ? agent->session_context_snapshot().steering_policy : agent_session_context.steering_policy;
                     reload_steering(pol);
-                    agents_visualizer_scroll_offset = 0;
+                    agents_visualizer_panel_state.scroll_offset = 0;
                 }
             }
             wake_ui();
             return true;
         }
 
-        if (event.is_mouse()
-            && event.mouse().button == Mouse::Left
-            && event.mouse().motion == Mouse::Pressed
-            && agents_visualizer_panel_active) {
-            for (std::size_t i = 0; i < agents_tab_hitboxes.size(); ++i) {
-                if (agents_tab_hitboxes[i].Contain(event.mouse().x, event.mouse().y)) {
-                    {
-                        std::lock_guard lock(ui_mutex);
-                        agents_visualizer_selected_file = i;
-                        agents_visualizer_scroll_offset = 0;
-                    }
-                    wake_ui();
-                    return true;
-                }
-            }
-        }
-
-        if (agents_visualizer_panel_active && event.is_mouse()) {
-            if (event.mouse().button == Mouse::WheelUp) {
-                {
-                    std::lock_guard lock(ui_mutex);
-                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 3);
-                }
-                wake_ui();
-                return true;
-            }
-            if (event.mouse().button == Mouse::WheelDown) {
-                {
-                    std::lock_guard lock(ui_mutex);
-                    agents_visualizer_scroll_offset += 3;
-                }
-                wake_ui();
-                return true;
-            }
-        }
-
-        bool agents_panel_was_active = false;
+        auto agents_event = AgentsVisualizerEventResult::ignored;
+        bool agents_popover_dismissed = false;
         {
             std::lock_guard lock(ui_mutex);
-            if (agents_visualizer_panel_active) {
-                if (is_panel_dismiss_event(event)) {
-                    agents_visualizer_panel_active = false;
-                    agents_panel_was_active = true;
-                } else if (event == Event::ArrowUp || event == Event::Character('k') || event == Event::Character('K')) {
-                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 1);
-                    agents_panel_was_active = true;
-                } else if (event == Event::ArrowDown || event == Event::Character('j') || event == Event::Character('J')) {
-                    agents_visualizer_scroll_offset += 1;
-                    agents_panel_was_active = true;
-                } else if (event == Event::PageUp) {
-                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 10);
-                    agents_panel_was_active = true;
-                } else if (event == Event::PageDown) {
-                    agents_visualizer_scroll_offset += 10;
-                    agents_panel_was_active = true;
-                } else if (event == Event::Home) {
-                    agents_visualizer_scroll_offset = 0;
-                    agents_panel_was_active = true;
-                } else if (event == Event::ArrowLeft || event == Event::TabReverse) {
-                    if (!steering_context.files.empty()) {
-                        agents_visualizer_selected_file = (agents_visualizer_selected_file + steering_context.files.size() - 1) % steering_context.files.size();
-                        agents_visualizer_scroll_offset = 0;
+            if (agents_visualizer_panel_state.active) {
+                agents_event = handle_agents_visualizer_panel_event(
+                    agents_visualizer_panel_state, event, steering_context.files,
+                    agents_visualizer_page, agents_visualizer_popover_box,
+                    agents_tab_hitboxes);
+                agents_popover_dismissed = !agents_visualizer_panel_state.active;
+                if (agents_event == AgentsVisualizerEventResult::toggle_selected_file && agent) {
+                    const auto& cur = steering_context.files[agents_visualizer_panel_state.selected_file];
+                    auto pol = agent->session_context_snapshot().steering_policy;
+                    if (cur.enabled) {
+                        pol.disable_source(cur.label);
+                    } else {
+                        pol.enable_source(cur.label);
                     }
-                    agents_panel_was_active = true;
-                } else if (event == Event::ArrowRight || event == Event::Tab) {
-                    if (!steering_context.files.empty()) {
-                        agents_visualizer_selected_file = (agents_visualizer_selected_file + 1) % steering_context.files.size();
-                        agents_visualizer_scroll_offset = 0;
-                    }
-                    agents_panel_was_active = true;
-                } else if (event == Event::Character('u')
-                           || event == Event::Character('U')
-                           || event == Event::Character(' ')) {
-                    if (!steering_context.files.empty() && agent) {
-                        const auto& cur = steering_context.files[agents_visualizer_selected_file];
-                        auto pol = agent->session_context_snapshot().steering_policy;
-                        if (cur.enabled) {
-                            pol.disable_source(cur.label);
-                        } else {
-                            pol.enable_source(cur.label);
-                        }
-                        apply_steering_policy(pol);
-                    }
-                    agents_panel_was_active = true;
+                    apply_steering_policy(pol);
                 }
             }
         }
-        if (agents_panel_was_active) {
+        if (agents_event != AgentsVisualizerEventResult::ignored || agents_popover_dismissed) {
             wake_ui();
+        }
+        if (agents_event != AgentsVisualizerEventResult::ignored) {
             return true;
         }
 
@@ -8550,6 +8519,7 @@ RunResult run(RunOptions opts) {
                 std::lock_guard lock(ui_mutex);
                 closed = remote_activity_panel_state.active;
                 remote_activity_panel_state.active = !closed;
+                mcp_servers_panel_state.active = false;
                 workspace_details_panel_state.active = false;
                 if (!closed) {
                     remote_activity_panel_state.selected = 0;
@@ -8577,6 +8547,25 @@ RunResult run(RunOptions opts) {
         }
         if (workspace_event_handled) {
             wake_ui();
+            return true;
+        }
+
+        bool mcp_servers_event_handled = false;
+        bool mcp_servers_popover_dismissed = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (mcp_servers_panel_state.active) {
+                mcp_servers_event_handled = handle_mcp_servers_panel_event(
+                    mcp_servers_panel_state, event,
+                    core::mcp::McpConnectionManager::get_instance().server_statuses().size(),
+                    mcp_servers_popover_box);
+                mcp_servers_popover_dismissed = !mcp_servers_panel_state.active;
+            }
+        }
+        if (mcp_servers_event_handled || mcp_servers_popover_dismissed) {
+            wake_ui();
+        }
+        if (mcp_servers_event_handled) {
             return true;
         }
 
@@ -10290,9 +10279,8 @@ RunResult run(RunOptions opts) {
         std::size_t                     remote_activity_panel_selected = 0;
         bool                            usage_panel_visible = false;
         WorkspaceDetailsPanelState      workspace_panel_snapshot;
-        bool                            agents_visualizer_visible = false;
-        std::size_t                     agents_visualizer_selected = 0;
-        int                             agents_visualizer_scroll = 0;
+        McpServersPanelState            mcp_servers_panel_snapshot;
+        AgentsVisualizerPanelState      agents_visualizer_snapshot;
         std::size_t                     queued_steering_count = 0;
         std::string                     external_session_status;
         {
@@ -10399,9 +10387,8 @@ RunResult run(RunOptions opts) {
             remote_activity_panel_selected = remote_activity_panel_state.selected;
             usage_panel_visible = usage_details_panel_active;
             workspace_panel_snapshot = workspace_details_panel_state;
-            agents_visualizer_visible = agents_visualizer_panel_active;
-            agents_visualizer_selected = agents_visualizer_selected_file;
-            agents_visualizer_scroll = agents_visualizer_scroll_offset;
+            mcp_servers_panel_snapshot = mcp_servers_panel_state;
+            agents_visualizer_snapshot = agents_visualizer_panel_state;
             queued_steering_count = current_runtime->queued_turn_count();
         }
         auto remote_activity_snapshot = opts.remote_mcp_server_enabled
@@ -10472,11 +10459,15 @@ RunResult run(RunOptions opts) {
                 current_time_str(),
                 thread_tabs,
                 &thread_tab_hitboxes,
-                &agents_status_box,
+                PopoverTrigger{.hitbox = &agents_status_box,
+                               .open = agents_visualizer_snapshot.active},
                 ui_show_spinner.load(std::memory_order_relaxed),
-                animation_tick.load(std::memory_order_relaxed));
+                animation_tick.load(std::memory_order_relaxed),
+                PopoverTrigger{.hitbox = &mcp_servers_status_box,
+                               .open = mcp_servers_panel_snapshot.active});
         } else {
             agents_status_box = {0, -1, 0, -1};
+            mcp_servers_status_box = kEmptyBox;
             thread_tab_hitboxes.clear();
             thread_tab_session_ids.clear();
         }
@@ -10568,12 +10559,6 @@ RunResult run(RunOptions opts) {
                 animation_tick.load(std::memory_order_relaxed),
                 ui_show_spinner.load(std::memory_order_relaxed),
                 std::clamp(Terminal::Size().dimy / 2 - 6, 1, 12));
-        } else if (agents_visualizer_visible) {
-            bottom_el = render_agents_visualizer_panel(
-                steering_context.files,
-                agents_visualizer_selected,
-                agents_visualizer_scroll,
-                &agents_tab_hitboxes);
         } else if (remote_activity_panel_active) {
             bottom_el = render_remote_activity_panel(
                 remote_activity_snapshot,
@@ -11034,7 +11019,6 @@ RunResult run(RunOptions opts) {
             ui_show_footer
             || usage_panel_visible
             || workspace_panel_snapshot.active
-            || agents_visualizer_visible
             || response_in_progress
             || review_activity_active
             || opts.remote_mcp_server_enabled
@@ -11062,23 +11046,63 @@ RunResult run(RunOptions opts) {
         if (ui_show_banner) {
             window_rows.push_back(std::move(banner_el));
         }
-        if (agents_visualizer_visible) {
-            window_rows.push_back(std::move(bottom_el) | flex);
-        } else {
-            window_rows.push_back(std::move(history_el));
-            if (stderr_panel_active) {
-                window_rows.push_back(render_stderr_panel(stderr_panel_lines));
-            }
-            window_rows.push_back(std::move(bottom_el));
+        window_rows.push_back(std::move(history_el));
+        if (stderr_panel_active) {
+            window_rows.push_back(render_stderr_panel(stderr_panel_lines));
         }
+        window_rows.push_back(std::move(bottom_el));
         window_rows.push_back(std::move(status_el));
 
         // The frame takes the graphic value; content that sets no colour of
         // its own keeps the text-strength one (identical on a dark theme).
-        return UiWindow(
+        auto app_window = UiWindow(
             text(std::format(" {} ", kAppVersion)) | color(ColorYellowBright) | ftxui::bold,
             vbox(std::move(window_rows)) | color(ColorYellowBright)
         ) | color(graphic(ColorYellowBright));
+        // Banner labels open popovers that drop down from the label, over the
+        // transcript, instead of replacing the prompt like the footer panels.
+        // At most one is open; the boxes of closed ones stay empty so they
+        // claim no clicks. Sizes come from the previous frame's anchor box.
+        mcp_servers_popover_box = kEmptyBox;
+        agents_visualizer_popover_box = kEmptyBox;
+        const auto rows_below = [&](const Box& anchor) {
+            return Terminal::Size().dimy - std::max(0, anchor.y_max) - 2;
+        };
+        if (mcp_servers_panel_snapshot.active) {
+            // ~6 rows go to the popover's frame, hint and the bottom margin.
+            const int popover_body_lines =
+                std::clamp(rows_below(mcp_servers_status_box) - 6, 3, 22);
+            return overlay_popover_below(
+                std::move(app_window),
+                render_mcp_servers_panel(
+                    core::mcp::McpConnectionManager::get_instance().server_statuses(),
+                    mcp_servers_panel_snapshot.selected,
+                    std::chrono::system_clock::now(),
+                    popover_body_lines),
+                &mcp_servers_status_box,
+                PopoverPlacement{},
+                &mcp_servers_popover_box);
+        }
+        if (agents_visualizer_snapshot.active) {
+            // A document reader: it takes the height under the label, and its
+            // right edge follows the label at the right of the banner.
+            agents_visualizer_page = agents_visualizer_page_lines(
+                steering_context.files.size(), rows_below(agents_status_box));
+            return overlay_popover_below(
+                std::move(app_window),
+                render_agents_visualizer_panel(
+                    steering_context.files,
+                    agents_visualizer_snapshot.selected_file,
+                    agents_visualizer_snapshot.scroll_offset,
+                    &agents_tab_hitboxes,
+                    agents_visualizer_page),
+                &agents_status_box,
+                PopoverPlacement{.preferred_width = 110,
+                                 .min_width = 72,
+                                 .align = PopoverAlign::end},
+                &agents_visualizer_popover_box);
+        }
+        return app_window;
     });
 
     std::jthread animation_thread([&](std::stop_token stop_token) {

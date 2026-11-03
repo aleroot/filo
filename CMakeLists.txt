@@ -199,6 +199,7 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpClientSession.cpp
     src/core/mcp/McpOAuth.cpp
     src/core/mcp/McpConnectionManager.cpp
+    src/core/mcp/McpServerStatus.cpp
     src/core/mcp/McpDynamicFeatureTools.cpp
     src/core/mcp/McpTaskManager.cpp
     src/core/mcp/McpRoots.cpp
@@ -248,6 +249,8 @@ set(FILO_CORE_SOURCES
     src/tui/ReviewCard.cpp
     src/tui/UsageDetailsPanel.cpp
     src/tui/WorkspaceDetailsPanel.cpp
+    src/tui/AnchoredPopover.cpp
+    src/tui/McpServersPanel.cpp
     src/tui/AgentsVisualizerPanel.cpp
     src/tui/SelectionClipboardCopier.cpp
     src/core/budget/TokenLedger.cpp
@@ -849,6 +852,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_token_ledger.cpp
     tests/test_usage_details_panel.cpp
     tests/test_workspace_details_panel.cpp
+    tests/test_mcp_servers_panel.cpp
     tests/test_agents_visualizer_panel.cpp
     tests/test_agent_permissions.cpp
     tests/test_command_policy.cpp

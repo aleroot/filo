@@ -162,7 +162,8 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     const auto clock_line_end = output.find('\n', clock_end);
     const auto context_start = output.find("AGENTS.md, FILO.md");
     const auto context_line_end = output.find('\n', context_start);
-    const auto context_end = context_start + std::string_view("AGENTS.md, FILO.md").size();
+    // The label ends with its popover chevron, right-aligned with the clock.
+    const auto context_end = output.find("▾", context_start) + std::string_view("▾").size();
     REQUIRE(clock_line_end != std::string::npos);
     REQUIRE(context_line_end != std::string::npos);
     REQUIRE(clock_line_end - clock_end == context_line_end - context_end);
@@ -374,7 +375,7 @@ TEST_CASE("thread tabs spin while working and flag unseen finished work",
                                 std::size_t tick) {
         auto panel = render_startup_banner_panel(
             "provider", "model", 0, {}, {}, "12:34:56", tabs,
-            nullptr, nullptr, animate, tick);
+            nullptr, {}, animate, tick);
         auto screen = ftxui::Screen::Create(
             ftxui::Dimension::Fixed(140), ftxui::Dimension::Fit(panel));
         ftxui::Render(screen, panel);

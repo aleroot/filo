@@ -7,6 +7,8 @@
 #include "../config/ConfigSource.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/LLMProvider.hpp"
+#include <chrono>
+#include <ranges>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -66,7 +68,33 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
     const std::string config_dir =
         core::config::ConfigManager::get_instance().get_config_dir();
 
-    for (const auto& srv_config : config.mcp_servers) {
+    // Publish every configured server as connecting before the first
+    // handshake, so a slow server is visible instead of missing.
+    {
+        std::vector<StatusEntry> pending;
+        pending.reserve(config.mcp_servers.size());
+        for (const auto& srv_config : config.mcp_servers) {
+            pending.push_back(StatusEntry{
+                .status = McpServerStatus{
+                    .name = srv_config.name,
+                    .transport = srv_config.transport,
+                    .endpoint = describe_mcp_endpoint(srv_config),
+                    .auth = describe_mcp_auth(srv_config),
+                },
+                .activity = nullptr,
+            });
+        }
+        std::lock_guard status_lock(status_mutex_);
+        statuses_ = std::move(pending);
+    }
+    const auto publish = [this](std::size_t index, auto&& update) {
+        std::lock_guard status_lock(status_mutex_);
+        if (index < statuses_.size()) update(statuses_[index]);
+    };
+
+    for (std::size_t server_index = 0; server_index < config.mcp_servers.size(); ++server_index) {
+        const auto& srv_config = config.mcp_servers[server_index];
+        const auto connect_started = std::chrono::steady_clock::now();
         try {
             McpSamplingCallback sampling_callback;
             if (sampling_bridge_) {
@@ -95,9 +123,10 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
             ServerEntry entry;
             entry.name    = srv_config.name;
             entry.session = session;  // shared ownership
+            auto activity = std::make_shared<McpServerActivity>();
 
             for (const auto& tool_def : tools) {
-                auto tool = std::make_shared<McpDynamicTool>(session, tool_def, srv_config.name);
+                auto tool = std::make_shared<McpDynamicTool>(session, tool_def, srv_config.name, activity);
                 tool_manager.register_tool(tool);
                 entry.tool_names.push_back(tool->get_definition().name);
             }
@@ -136,6 +165,20 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
                 session->supports_resources() ? "on" : "off",
                 session->supports_prompts() ? "on" : "off",
                 session->supports_sampling() ? "on" : "off");
+            publish(server_index, [&](StatusEntry& status_entry) {
+                auto& status = status_entry.status;
+                status.state = McpServerState::connected;
+                status.server_info = session->server_info();
+                status.tools = tools | std::views::transform(&McpToolDef::name)
+                    | std::ranges::to<std::vector<std::string>>();
+                status.resources = session->supports_resources();
+                status.prompts = session->supports_prompts();
+                status.sampling = session->supports_sampling();
+                status.connected_at = std::chrono::system_clock::now();
+                status.connect_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - connect_started);
+                status_entry.activity = activity;
+            });
             servers_.push_back(std::move(entry));
 
         } catch (const std::exception& e) {
@@ -143,10 +186,16 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
             core::logging::warn("[MCP] Could not connect to '{}': {}",
                                 srv_config.name,
                                 msg);
-            if (mcp_server_wants_oauth(srv_config)
-                && (msg.find("401") != std::string::npos
-                    || msg.find("403") != std::string::npos
-                    || msg.find("authentication") != std::string::npos)) {
+            const bool needs_login = mcp_error_needs_login(srv_config, msg);
+            publish(server_index, [&](StatusEntry& status_entry) {
+                status_entry.status.state = McpServerState::failed;
+                status_entry.status.error = msg;
+                status_entry.status.needs_login = needs_login;
+                status_entry.status.connect_duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - connect_started);
+            });
+            if (needs_login) {
                 core::logging::warn(
                     "[MCP] '{}' appears to require OAuth. Run: /mcp login {}",
                     srv_config.name,
@@ -175,6 +224,8 @@ void McpConnectionManager::shutdown_all() noexcept {
     }
     servers_.clear();
     sampling_bridge_.reset();
+    std::lock_guard status_lock(status_mutex_);
+    statuses_.clear();
 }
 
 int McpConnectionManager::connected_count() const noexcept {
@@ -191,6 +242,17 @@ std::vector<std::string> McpConnectionManager::registered_tool_names() const {
         }
     }
     return names;
+}
+
+std::vector<McpServerStatus> McpConnectionManager::server_statuses() const {
+    std::lock_guard status_lock(status_mutex_);
+    std::vector<McpServerStatus> out;
+    out.reserve(statuses_.size());
+    for (const auto& entry : statuses_) {
+        auto& status = out.emplace_back(entry.status);
+        if (entry.activity) status.activity = entry.activity->snapshot();
+    }
+    return out;
 }
 
 } // namespace core::mcp

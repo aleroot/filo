@@ -293,6 +293,7 @@ struct ParsedServerCapabilities {
     bool tools_advertised = false;
     bool has_resources = false;
     bool has_prompts = false;
+    McpServerInfo info;
 };
 
 [[nodiscard]] ParsedServerCapabilities parse_server_capabilities(
@@ -304,6 +305,20 @@ struct ParsedServerCapabilities {
     simdjson::padded_string ps(initialize_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return out;
+
+    std::string_view info_value;
+    if (doc["protocolVersion"].get(info_value) == simdjson::SUCCESS) {
+        out.info.protocol_version = std::string(info_value);
+    }
+    simdjson::dom::object server_info;
+    if (doc["serverInfo"].get(server_info) == simdjson::SUCCESS) {
+        if (server_info["name"].get(info_value) == simdjson::SUCCESS) {
+            out.info.name = std::string(info_value);
+        }
+        if (server_info["version"].get(info_value) == simdjson::SUCCESS) {
+            out.info.version = std::string(info_value);
+        }
+    }
 
     simdjson::dom::object capabilities;
     if (doc["capabilities"].get(capabilities) != simdjson::SUCCESS) return out;
@@ -1089,6 +1104,7 @@ void StdioMcpSession::send_notification(std::string_view method,
 
 void StdioMcpSession::update_server_capabilities(std::string_view initialize_result) {
     const auto parsed = parse_server_capabilities(initialize_result);
+    server_info_ = parsed.info;
     server_supports_tools_.store(parsed.has_tools, std::memory_order_release);
     server_tools_advertised_.store(parsed.tools_advertised, std::memory_order_release);
     server_supports_resources_.store(parsed.has_resources, std::memory_order_release);
@@ -1396,6 +1412,7 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& bo
 
 void HttpMcpSession::update_server_capabilities(std::string_view initialize_result) {
     const auto parsed = parse_server_capabilities(initialize_result);
+    server_info_ = parsed.info;
     server_supports_tools_.store(parsed.has_tools, std::memory_order_release);
     server_tools_advertised_.store(parsed.tools_advertised, std::memory_order_release);
     server_supports_resources_.store(parsed.has_resources, std::memory_order_release);

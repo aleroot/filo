@@ -3,6 +3,7 @@
 #include "../tools/Tool.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "McpClientSession.hpp"
+#include <chrono>
 #include <memory>
 #include <string>
 #include <stdexcept>
@@ -16,9 +17,11 @@ namespace core::mcp {
 // ---------------------------------------------------------------------------
 class McpDynamicTool : public core::tools::Tool {
 public:
-    McpDynamicTool(std::shared_ptr<IMcpClientSession> session, const McpToolDef& tool_def, std::string server_name)
+    McpDynamicTool(std::shared_ptr<IMcpClientSession> session, const McpToolDef& tool_def, std::string server_name,
+                   std::shared_ptr<McpServerActivity> activity = nullptr)
         : session_(std::move(session))
-        , server_name_(std::move(server_name)) {
+        , server_name_(std::move(server_name))
+        , activity_(std::move(activity)) {
         // Build ToolDefinition from the McpToolDef
         def_.name        = tool_def.name;
         def_.title       = tool_def.title.empty() ? tool_def.name : tool_def.title;
@@ -50,6 +53,28 @@ public:
     std::string execute(
         const std::string& json_args,
         const core::context::SessionContext& /*context*/) override {
+        if (!activity_) return call(json_args);
+        const auto started = std::chrono::steady_clock::now();
+        activity_->begin(def_.name);
+        std::string result = call(json_args);
+        // call() folds both transport failures and isError results into an
+        // {"error":"..."} envelope, so its prefix is the failure signal.
+        constexpr std::string_view kErrorPrefix = R"({"error":")";
+        const bool failed = result.starts_with(kErrorPrefix);
+        std::string_view error;
+        if (failed) {
+            error = std::string_view(result).substr(kErrorPrefix.size());
+            if (error.ends_with("\"}")) error.remove_suffix(2);
+        }
+        activity_->finish(
+            def_.name, failed, error,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started));
+        return result;
+    }
+
+private:
+    std::string call(const std::string& json_args) {
         try {
             return session_->call_tool(def_.name, json_args);
         } catch (const std::exception& e) {
@@ -58,10 +83,10 @@ public:
         }
     }
 
-private:
     std::shared_ptr<IMcpClientSession>   session_;
     core::tools::ToolDefinition        def_;
     std::string                          server_name_;
+    std::shared_ptr<McpServerActivity>   activity_;
 };
 
 } // namespace core::mcp
