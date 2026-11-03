@@ -1258,6 +1258,7 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
             .with_memory_prompt(std::move(memory_projection.block))
+            .include_project_context(session_context_.include_project_context)
             .include_project_facts(false)
             .build_plan();
     const bool memory_layer_included = std::ranges::any_of(
@@ -2173,7 +2174,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     && tool.function.name == core::tools::names::kMemory);
         });
         if (tool_is_allowed_for_turn(SubagentOrchestrator::kTaskToolName, turn_callbacks)) {
-            request.tools.push_back(orchestrator_.task_tool_definition());
+            request.tools.push_back(orchestrator_.task_tool_definition(
+                step_session_context.workspace_view().ordered_roots()));
         }
         if (tool_is_allowed_for_turn(core::tools::names::kWriteTodos, turn_callbacks)) {
             request.tools.push_back(core::llm::Tool{
@@ -2825,7 +2827,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 // is preserved by reporting argument failures further down.
                 std::optional<core::tools::schema::ArgumentIssue> argument_issue;
                 if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
-                    resolved_definitions[i] = self->orchestrator_.task_tool_definition().function;
+                    resolved_definitions[i] = self->orchestrator_.task_tool_definition(
+                        self->session_context_snapshot().workspace_view().ordered_roots()).function;
                 } else if (tc.function.name == core::tools::names::kWriteTodos) {
                     resolved_definitions[i] = self->todo_tool_.get_definition();
                 } else if (tc.function.name == core::tools::names::kReadToolResult) {
@@ -2903,7 +2906,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     tc.function.name == SubagentOrchestrator::kTaskToolName
                     && self->orchestrator_.task_is_read_only(
                         tc.function.arguments,
-                        permission_mode);
+                        permission_mode,
+                        self->session_context_snapshot().workspace_view().ordered_roots());
                 approved[i] = hook_decision.approved
                     || read_only_tasks[i]
                     || self->check_permission(tc.function.name, tc.function.arguments);

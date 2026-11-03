@@ -384,6 +384,7 @@ set(FILO_CORE_SOURCES
     src/core/verification/Verification.cpp
     src/core/agent/ToolRecovery.cpp
     src/core/agent/ToolResultStore.cpp
+    src/core/agent/AgentDefinitionRegistry.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/tools/ToolSchema.cpp
     src/core/tools/ArgumentCoercion.cpp
@@ -509,6 +510,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/WebAccessDefaults.cpp
     src/core/tools/WebFetchTool.cpp
     src/core/tools/WebSearchTool.cpp
+    src/core/tools/Frontmatter.cpp
     src/core/tools/SkillRegistry.cpp
     src/core/utils/JsonUtils.cpp
     src/core/utils/JsonValue.cpp
@@ -853,6 +855,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_subagent_orchestrator.cpp
     tests/test_skill_loader.cpp
     tests/test_skill_commands.cpp
+    tests/test_plugin_bundles.cpp
     tests/test_activity_timer.cpp
     tests/test_conversation.cpp
     tests/test_turn_file_changes.cpp
@@ -1117,6 +1120,7 @@ source_group(
         tests/test_command_policy.cpp
         tests/test_subagent_orchestrator.cpp
         tests/test_skill_loader.cpp
+        tests/test_plugin_bundles.cpp
         tests/test_activity_timer.cpp
         tests/test_conversation.cpp
         tests/test_turn_file_changes.cpp

@@ -73,6 +73,7 @@ enum class SkillType {
  * | @c allowed-tools  | no             | @c ""         | Comma-separated tool whitelist (future enforcement) |
  * | @c enabled        | no             | @c true       | Set to @c false to skip this skill at load time     |
  * | @c user-invocable | no             | @c true       | Set to @c false to hide Prompt skills from slash commands |
+ * | @c disable-model-invocation | no   | @c false      | Set to @c true to keep the skill out of the model's catalog |
  *
  * @note @c allowed-tools and @c allowed_tools are both accepted.
  * @note @c user-invocable and @c user_invocable are both accepted.
@@ -103,6 +104,11 @@ struct SkillManifest {
     /// Whether a Prompt skill should be exposed as a user slash command.
     /// Agent activation remains available for Prompt skills even when false.
     bool user_invocable = true;
+
+    /// Whether the model may load this skill on its own (catalog and
+    /// `activate_skill`). @c disable-model-invocation: true clears it, leaving
+    /// the skill reachable only through its slash command.
+    bool model_invocable = true;
 
     /// Resolved absolute path to the directory that contains @c SKILL.md.
     std::filesystem::path skill_dir;
@@ -142,6 +148,11 @@ struct SkillManifest {
     /// registered — a root the user merely granted read access to may contribute
     /// instructions, not executable code.
     bool from_additional_workspace = false;
+
+    /// Root of the plugin bundle this skill ships in (`<plugin>/skills/<name>`),
+    /// empty for a standalone skill. Bundled skills reference sibling content —
+    /// `agents/`, `resources/`, other skills — relative to it.
+    std::filesystem::path plugin_root;
 
     /// True when the skill has no Filo-specific Python entry point and can be
     /// activated as a standard Agent Skill instruction package.

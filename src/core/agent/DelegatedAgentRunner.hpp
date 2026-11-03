@@ -81,6 +81,11 @@ public:
         // Resources such as fan-out slots belong to the invocation, including
         // the time a cancelled provider takes to actually return.
         std::shared_ptr<void> execution_lease = {};
+        /// Fresh-context worker: the parent's project instructions (AGENTS.md
+        /// and friends), skill catalog and memories are left out of its
+        /// prompt, and it neither recalls nor records memories. Files stay
+        /// readable through tools; only what is put in front of it changes.
+        bool isolated_context = false;
     };
 
     struct Result {

@@ -17,6 +17,15 @@ TEST_CASE("uri::percent_decode rejects malformed encodings", "[utils][uri]") {
     REQUIRE_FALSE(core::utils::uri::percent_decode("%ZZ", decoded));
 }
 
+TEST_CASE("uri::form_decode decodes plus and percent and keeps malformed escapes",
+          "[utils][uri]") {
+    using core::utils::uri::form_decode;
+    CHECK(form_decode("a+b%2Bc%3d%41") == "a b+c=A");
+    CHECK(form_decode("100%") == "100%");
+    CHECK(form_decode("%4") == "%4");
+    CHECK(form_decode("%ZZ%+1") == "%ZZ% 1");
+}
+
 TEST_CASE("uri::percent_encode_uri_path escapes reserved bytes and keeps path chars",
           "[utils][uri]") {
     const auto encoded =

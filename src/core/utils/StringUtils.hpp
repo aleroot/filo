@@ -85,6 +85,27 @@ private:
     return std::string(trim_ascii_view(value));
 }
 
+/// @p value without its leading characters from @p chars.
+[[nodiscard]] constexpr std::string_view trim_left_view(std::string_view value,
+                                                        std::string_view chars) noexcept {
+    const auto start = value.find_first_not_of(chars);
+    return start == std::string_view::npos ? std::string_view{} : value.substr(start);
+}
+
+/// @p value without its trailing characters from @p chars.
+[[nodiscard]] constexpr std::string_view trim_right_view(std::string_view value,
+                                                         std::string_view chars) noexcept {
+    const auto end = value.find_last_not_of(chars);
+    return end == std::string_view::npos ? std::string_view{} : value.substr(0, end + 1);
+}
+
+/// @p value without leading and trailing characters from @p chars, for
+/// callers whose notion of white space is narrower than trim_ascii_view's.
+[[nodiscard]] constexpr std::string_view trim_view(std::string_view value,
+                                                   std::string_view chars) noexcept {
+    return trim_right_view(trim_left_view(value, chars), chars);
+}
+
 /// Collapses runs of ASCII whitespace into one space and trims both ends, in
 /// place: the result is never longer than the input.
 inline void collapse_ascii_whitespace(std::string& value) noexcept {

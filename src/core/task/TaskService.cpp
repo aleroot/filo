@@ -512,6 +512,7 @@ std::string TaskService::execute(std::string_view json_args,
         .model_override = request->model.empty() ? std::string_view(item.model) : std::string_view(request->model),
         .max_steps_override = request->max_steps > 0 ? std::optional<int>{request->max_steps}
             : item.max_steps > 0 ? std::optional<int>{item.max_steps} : std::nullopt,
+        .workspace_roots = worker_context->workspace_view().ordered_roots(),
     });
     if (!plan) {
         return error_json(plan.error());
@@ -563,6 +564,7 @@ std::string TaskService::execute(std::string_view json_args,
             : std::function<bool()>{},
         .execution_journal = std::make_shared<core::session::ExecutionJournal>(),
         .execution_lease = gate,
+        .isolated_context = plan->isolated,
     });
     gate->pending_run = run_result.settled;
     const auto evidence = collect_run_evidence(run_result.history, *worker_context);

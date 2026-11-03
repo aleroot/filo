@@ -26,6 +26,12 @@ struct WorkspaceSnapshot {
     /// so it flows to every session without a process-wide instance. Empty by
     /// default, which fails closed.
     FileAccessScope scratch = {};
+
+    /// Read-only directories holding the skill and plugin bundles the session
+    /// loaded (see core::tools::SkillRegistry::package_read_roots). A skill
+    /// that ships in a plugin reads its personas and resources from there, so
+    /// they must be readable wherever the bundle is installed. Never writable.
+    FileAccessScope extensions = {};
 };
 
 class Workspace {
@@ -68,6 +74,11 @@ public:
     [[nodiscard]] bool allows_read(const std::filesystem::path& target_path) const;
     [[nodiscard]] bool allows_write(const std::filesystem::path& target_path) const;
 
+    /// Replaces the read-only extension roots carried by snapshot(). Kept
+    /// apart from initialize() because the roots are derived from the
+    /// workspace roots by skill discovery, which lives above this layer.
+    void set_extension_roots(std::vector<std::filesystem::path> readable_roots);
+
 private:
     Workspace() = default;
 
@@ -75,6 +86,7 @@ private:
     std::vector<std::filesystem::path> additional_;
     bool enforce_{false};
     FileAccessScope scratch_;
+    FileAccessScope extensions_;
     mutable std::mutex remote_source_mutex_;
     SnapshotSource remote_source_;
 };

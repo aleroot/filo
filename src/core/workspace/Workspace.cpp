@@ -28,7 +28,12 @@ WorkspaceSnapshot Workspace::snapshot() const {
         .enforce = enforce_,
         .version = 0,
         .scratch = scratch_,
+        .extensions = extensions_,
     };
+}
+
+void Workspace::set_extension_roots(std::vector<std::filesystem::path> readable_roots) {
+    extensions_ = FileAccessScope(std::move(readable_roots), {});
 }
 
 std::vector<std::filesystem::path> Workspace::ordered_roots() const {

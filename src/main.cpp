@@ -22,6 +22,7 @@
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunStatus.hpp"
 #include "core/policy/PolicyFamily.hpp"
+#include "core/tools/SkillRegistry.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/workspace/FileAccessScope.hpp"
 #include "core/version/Version.hpp"
@@ -537,6 +538,10 @@ int main(int argc, char** argv) {
         work_dir_layout.additional,
         true,
         scratch_scope);
+    // Skill and plugin bundles live outside the project (~/.config/filo/plugins,
+    // a linked plugin checkout). Their files are what a loaded skill tells the
+    // model to read, so they join the read-only scope; see package_read_roots.
+    core::tools::SkillRegistry::grant_package_read_roots(core::workspace::Workspace::get_instance());
 
     if (core::landrun::LandrunSettings::instance().enabled()) {
         const char* home_value = std::getenv("HOME");

@@ -24,6 +24,7 @@
 #include <format>
 #include <random>
 #include <set>
+#include <tuple>
 
 namespace core::llm::protocols {
 
@@ -373,7 +374,7 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
 
         std::string serialized;
         std::string_view phase;
-        (void)item["phase"].get(phase);
+        std::ignore = item["phase"].get(phase);
         append_message_item(serialized, message, phase);
         return serialized;
     }

@@ -5272,6 +5272,7 @@ RunResult run(RunOptions opts) {
         const auto previous = core::workspace::Workspace::get_instance().snapshot();
         core::workspace::Workspace::get_instance().initialize(
             resolved, previous.additional, previous.enforce, previous.scratch);
+        core::tools::SkillRegistry::grant_package_read_roots(core::workspace::Workspace::get_instance());
 
         // set_primary is a no-op when the target equals the current root
         // (e.g. the session was already rebased by a prior call); either way

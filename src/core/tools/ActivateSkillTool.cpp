@@ -4,6 +4,7 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/PathUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
@@ -46,14 +47,6 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
     return content;
 }
 
-[[nodiscard]] bool safe_relative_resource(const fs::path& path) {
-    if (path.empty() || path.is_absolute()) return false;
-    for (const auto& part : path) {
-        if (part == "..") return false;
-    }
-    return true;
-}
-
 [[nodiscard]] std::string build_input_schema(
     const std::vector<fs::path>& workspace_roots) {
     const auto skills = SkillRegistry::discover_instruction_skills(workspace_roots);
@@ -88,7 +81,9 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
                 writer.kv_str("type", "string").comma()
                       .kv_str("description",
                               "Optional relative path to a listed skill resource to read, "
-                              "for example references/REFERENCE.md or scripts/check.py.");
+                              "for example references/REFERENCE.md or scripts/check.py. "
+                              "For a skill bundled in a plugin it may also reach the plugin "
+                              "root, for example ../../agents/reviewer.md.");
             }
         }
         writer.comma().key("required");
@@ -116,8 +111,7 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
             << kMaxSkillContentBytes
             << " bytes.]";
     }
-    out << "\n\nSkill directory: " << skill.skill_dir.string() << "\n";
-    out << "Relative paths in this skill are relative to the skill directory.\n";
+    out << "\n\n" << SkillRegistry::invocation_context(skill);
 
     const auto resources = SkillRegistry::list_relative_resources(skill);
     if (!resources.empty()) {
@@ -206,7 +200,7 @@ std::string ActivateSkillTool::execute(
 
         if (wants_resource) {
             const fs::path relative(resource_path_raw);
-            if (!safe_relative_resource(relative)) {
+            if (relative.empty() || relative.is_absolute()) {
                 return "{\"error\":\"resource_path must be a safe relative path inside the skill directory.\"}";
             }
 
@@ -217,16 +211,24 @@ std::string ActivateSkillTool::execute(
                     "{{\"error\":\"Skill resource not found or outside skill directory: {}\"}}",
                     core::utils::escape_json_string(resource_path_raw));
             }
-            const fs::path base = fs::weakly_canonical(skill->skill_dir, ec);
-            if (ec) {
-                return "{\"error\":\"Skill directory is unavailable.\"}";
-            }
-            const auto checked_relative = fs::relative(target, base, ec);
-            if (ec || !safe_relative_resource(checked_relative)
+            // A resource may live in the skill directory or, for a skill
+            // bundled in a plugin, anywhere in that plugin (`../../agents/x.md`).
+            // Containment is checked on the resolved path, so `..` and symlinks
+            // cannot step outside either.
+            const auto contained_in = [&](const fs::path& base) {
+                return !base.empty()
+                    && core::utils::path::relative_within(target, core::utils::path::normalized(base));
+            };
+            if (!(contained_in(skill->skill_dir) || contained_in(skill->plugin_root))
                 || !fs::is_regular_file(target, ec)) {
                 return std::format(
                     "{{\"error\":\"Skill resource not found or outside skill directory: {}\"}}",
                     core::utils::escape_json_string(resource_path_raw));
+            }
+            // A plugin root can be a project directory, so the bundle may hold
+            // steering this session withholds; it stays withheld here too.
+            if (auto steering_error = detail::check_steering_access(target, context)) {
+                return std::move(*steering_error);
             }
 
             bool truncated = false;

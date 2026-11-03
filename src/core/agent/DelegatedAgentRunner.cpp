@@ -101,6 +101,18 @@ struct RunState {
 DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     Result result;
 
+    // The worker is one delegation level below whoever spawned it; the
+    // orchestrator refuses further nesting at kMaxDelegationDepth.
+    ++request.session_context.delegation_depth;
+    if (request.isolated_context) {
+        request.session_context.include_project_context = false;
+        request.session_context.memory_policy = core::memory::MemoryThreadPolicy{
+            .use_memories = false,
+            .generate_memories = false,
+            .curate_skills = false,
+        };
+    }
+
     auto agent = std::make_shared<core::agent::Agent>(
         request.provider,
         request.tool_manager,

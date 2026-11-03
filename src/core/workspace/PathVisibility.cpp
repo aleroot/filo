@@ -132,6 +132,8 @@ public:
         if (SessionWorkspace::is_subpath(project_root, normalized_root)) return true;
     }
 
+    if (workspace.extensions().allows_read(normalized_root)) return true;
+
     const auto& scratch = workspace.scratch();
     if (!scratch.allows_read(normalized_root)) return false;
 

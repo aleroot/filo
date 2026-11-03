@@ -1,5 +1,7 @@
 #include "JsonUtils.hpp"
 #include "JsonWriter.hpp"
+#include "Hex.hpp"
+#include "Utf8.hpp"
 #include <simdjson.h>
 #include <algorithm>   // std::find_if
 #include <array>
@@ -260,18 +262,11 @@ inline constexpr auto kStringStopTable = [] noexcept {
     return t;
 }();
 
-[[nodiscard]] int hex_value(char c) noexcept {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 [[nodiscard]] bool read_hex4(const char* p, const char* end, std::uint32_t& out) noexcept {
     if (end - p < 4) return false;
     out = 0;
     for (int i = 0; i < 4; ++i) {
-        const int digit = hex_value(p[i]);
+        const int digit = hex_digit_value(static_cast<unsigned char>(p[i]));
         if (digit < 0) return false;
         out = (out << 4) | static_cast<std::uint32_t>(digit);
     }
@@ -309,26 +304,7 @@ inline constexpr auto kStringStopTable = [] noexcept {
     } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
         return 0;
     }
-    if (code_point < 0x80) {
-        out[0] = static_cast<char>(code_point);
-        return 1;
-    }
-    if (code_point < 0x800) {
-        out[0] = static_cast<char>(0xC0 | (code_point >> 6));
-        out[1] = static_cast<char>(0x80 | (code_point & 0x3F));
-        return 2;
-    }
-    if (code_point < 0x10000) {
-        out[0] = static_cast<char>(0xE0 | (code_point >> 12));
-        out[1] = static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
-        out[2] = static_cast<char>(0x80 | (code_point & 0x3F));
-        return 3;
-    }
-    out[0] = static_cast<char>(0xF0 | (code_point >> 18));
-    out[1] = static_cast<char>(0x80 | ((code_point >> 12) & 0x3F));
-    out[2] = static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
-    out[3] = static_cast<char>(0x80 | (code_point & 0x3F));
-    return 4;
+    return utf8::encode(code_point, out);
 }
 
 /// p is on the opening quote; on success it is left just past the closing one.

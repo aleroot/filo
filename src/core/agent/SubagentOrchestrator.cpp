@@ -1,5 +1,6 @@
 #include "SubagentOrchestrator.hpp"
 
+#include "AgentDefinitionRegistry.hpp"
 #include "AgentMode.hpp"
 #include "DelegatedAgentRunner.hpp"
 #include "DelegationBudget.hpp"
@@ -20,6 +21,7 @@
 #include <cctype>
 #include <chrono>
 #include <format>
+#include <iterator>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -133,13 +135,8 @@ SubagentOrchestrator::SubagentOrchestrator(
     : tool_manager_(tool_manager)
     , session_stats_registry_(std::move(session_stats_registry))
     , workspace_leases_(std::move(workspace_leases))
-    , profiles_(make_default_profiles())
-    , app_config_(app_config) {
-    if (app_config != nullptr) {
-        std::lock_guard lock(profiles_mutex_);
-        apply_config_overrides_unlocked(*app_config);
-    }
-}
+    , profiles_(compose_profiles({}, app_config))
+    , app_config_(app_config) {}
 
 std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_profiles() {
     return {
@@ -188,12 +185,13 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
     };
 }
 
-core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
+core::llm::Tool SubagentOrchestrator::task_tool_definition(
+    const std::vector<std::filesystem::path>& workspace_roots) const {
     core::llm::Tool tool;
     tool.type = "function";
     tool.function.name = std::string(kTaskToolName);
     tool.function.title = std::string(core::tools::names::kTaskTitle);
-    tool.function.description = build_task_description();
+    tool.function.description = build_task_description(workspace_roots);
     tool.function.parameters = {
         {
             .name = "description",
@@ -281,6 +279,13 @@ std::string SubagentOrchestrator::execute_task(
         return render_error_json("Missing required 'subagent_type' for task.");
     }
 
+    if (context.session_context.delegation_depth >= kMaxDelegationDepth) {
+        return render_error_json(std::format(
+            "Delegation depth limit reached ({} nested subagent levels). Complete this work "
+            "directly instead of delegating it further.",
+            kMaxDelegationDepth));
+    }
+
     auto plan = build_execution_plan(ExecutionRequest{
         .worker = subagent_type,
         .worker_label = "subagent_type",
@@ -290,6 +295,7 @@ std::string SubagentOrchestrator::execute_task(
         .inherited_model = context.active_model,
         .prefer_inherited_provider = true,
         .max_steps_override = *max_steps,
+        .workspace_roots = context.session_context.workspace_view().ordered_roots(),
     });
     if (!plan) {
         return render_error_json(plan.error());
@@ -399,6 +405,7 @@ std::string SubagentOrchestrator::execute_task(
         .effort = context.effort,
         .execution_journal = context.execution_journal,
         .execution_lease = read_only_slot,
+        .isolated_context = plan->isolated,
     });
     session->pending_run = result.settled;
     session->max_steps = plan->max_steps;
@@ -432,39 +439,95 @@ void SubagentOrchestrator::reload_profiles(const core::config::AppConfig& app_co
     app_config_ = &app_config;
     {
         std::lock_guard lock(profiles_mutex_);
-        profiles_ = make_default_profiles();
-        apply_config_overrides_unlocked(app_config);
+        profiles_ = compose_profiles({}, &app_config);
     }
     clear_sessions();
 }
 
-std::optional<SubagentOrchestrator::Profile> SubagentOrchestrator::find_profile(
-    std::string_view name) const {
-    const std::string normalized = normalize_agent_name(name);
+SubagentOrchestrator::Profile SubagentOrchestrator::profile_from(const AgentDefinition& definition) {
+    Profile profile{
+        .name = definition.name,
+        .description = definition.description,
+        .prompt = definition.prompt,
+        .provider_override = definition.provider,
+        .model_override = definition.model,
+        .response_format = std::nullopt,
+        .allowed_tools = {},
+        .use_allow_list = definition.tools.has_value(),
+        .allow_task_tool = definition.allow_task_tool,
+        .max_steps = sanitize_max_steps(definition.max_steps.value_or(16), 16),
+        .enabled = true,
+        .isolated = definition.isolated,
+        .read_only_tools = definition.read_only,
+    };
+    if (definition.tools.has_value()) {
+        profile.allowed_tools.insert(definition.tools->begin(), definition.tools->end());
+    }
+    return profile;
+}
+
+std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::compose_profiles(
+    std::span<const AgentDefinition> definitions,
+    const core::config::AppConfig* app_config) {
+    auto profiles = make_default_profiles();
+    // Agent files sit between the built-ins and the user's configuration, so
+    // `subagents.<name>` can still pin a provider, model or budget for a
+    // plugin's persona. They never replace a built-in: a third-party plugin
+    // must not be able to redefine what `general` or `explore` means.
+    std::vector<Profile> from_files;
+    for (const auto& definition : definitions) {
+        if (std::ranges::contains(profiles, definition.name, &Profile::name)
+            || definition.name == core::tools::read::kReaderProfile) {
+            core::logging::warn("Agent definition '{}' ({}) uses a reserved profile name; skipped",
+                                definition.name, definition.source.string());
+            continue;
+        }
+        from_files.push_back(profile_from(definition));
+    }
+    std::ranges::move(from_files, std::back_inserter(profiles));
+    if (app_config != nullptr) {
+        apply_config_overrides(profiles, *app_config);
+    }
+    return profiles;
+}
+
+std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::effective_profiles(
+    const std::vector<std::filesystem::path>& workspace_roots) const {
+    const auto definitions = AgentDefinitionRegistry::discover(workspace_roots);
+    if (!definitions.empty()) return compose_profiles(definitions, app_config_);
     std::lock_guard lock(profiles_mutex_);
-    for (const auto& profile : profiles_) {
+    return profiles_;
+}
+
+std::optional<SubagentOrchestrator::Profile> SubagentOrchestrator::find_profile(
+    std::string_view name,
+    const std::vector<std::filesystem::path>& workspace_roots) const {
+    const std::string normalized = normalize_agent_name(name);
+    for (auto& profile : effective_profiles(workspace_roots)) {
         if (profile.name == normalized) {
-            return profile;
+            return std::move(profile);
         }
     }
     return std::nullopt;
 }
 
-std::string SubagentOrchestrator::available_worker_names() const {
-    std::lock_guard lock(profiles_mutex_);
-    if (profiles_.empty()) return "none";
+std::string SubagentOrchestrator::available_worker_names(
+    const std::vector<std::filesystem::path>& workspace_roots) const {
+    const auto profiles = effective_profiles(workspace_roots);
+    if (profiles.empty()) return "none";
 
     std::string names;
-    for (std::size_t i = 0; i < profiles_.size(); ++i) {
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
         if (i > 0) names += ", ";
-        names += profiles_[i].name;
+        names += profiles[i].name;
     }
     return names;
 }
 
 bool SubagentOrchestrator::task_is_read_only(
     std::string_view json_args,
-    std::string_view parent_mode) const {
+    std::string_view parent_mode,
+    const std::vector<std::filesystem::path>& workspace_roots) const {
     simdjson::dom::parser parser;
     simdjson::padded_string padded{std::string(json_args)};
     simdjson::dom::object object;
@@ -472,7 +535,7 @@ bool SubagentOrchestrator::task_is_read_only(
 
     std::string_view worker;
     if (object["subagent_type"].get(worker) != simdjson::SUCCESS) return false;
-    const auto profile = find_profile(worker);
+    const auto profile = find_profile(worker, workspace_roots);
     if (!profile || profile->allow_task_tool) return false;
 
     const auto tools = build_tools_for_profile(*profile, parent_mode);
@@ -483,13 +546,15 @@ bool SubagentOrchestrator::task_is_read_only(
 
 std::expected<SubagentOrchestrator::ExecutionPlan, std::string>
 SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) const {
-    const std::optional<Profile> profile = find_profile(request.worker.empty() ? "general" : request.worker);
+    const std::optional<Profile> profile = find_profile(
+        request.worker.empty() ? "general" : request.worker,
+        request.workspace_roots);
     if (!profile) {
         return std::unexpected(std::format(
             "Unknown {} '{}'. Available workers: {}.",
             request.worker_label.empty() ? "worker" : request.worker_label,
             request.worker.empty() ? "general" : std::string(request.worker),
-            available_worker_names()));
+            available_worker_names(request.workspace_roots)));
     }
 
     const core::config::AppConfig& config = app_config_ != nullptr
@@ -571,10 +636,12 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
         .allow_task_tool = profile->allow_task_tool,
         .read_only = read_only,
         .max_steps = max_steps,
+        .isolated = profile->isolated,
     };
 }
 
-void SubagentOrchestrator::apply_config_overrides_unlocked(
+void SubagentOrchestrator::apply_config_overrides(
+    std::vector<Profile>& profiles,
     const core::config::AppConfig& app_config) {
     for (const auto& [raw_name, config_profile] : app_config.subagents) {
         const std::string name = normalize_agent_name(raw_name);
@@ -594,12 +661,12 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
         }
 
         auto it = std::find_if(
-            profiles_.begin(),
-            profiles_.end(),
+            profiles.begin(),
+            profiles.end(),
             [&](const Profile& profile) { return profile.name == name; });
 
-        if (it == profiles_.end()) {
-            profiles_.push_back(Profile{
+        if (it == profiles.end()) {
+            profiles.push_back(Profile{
                 .name = name,
                 .description = std::format("Custom subagent profile '{}'.", name),
                 .prompt = std::format(
@@ -617,7 +684,7 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
                 .max_steps = 8,
                 .enabled = true,
             });
-            it = std::prev(profiles_.end());
+            it = std::prev(profiles.end());
         }
 
         if (!config_profile.description.empty()) it->description = config_profile.description;
@@ -647,19 +714,22 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
         if (config_profile.enabled.has_value()) {
             it->enabled = *config_profile.enabled;
         }
+        if (config_profile.isolated.has_value()) {
+            it->isolated = *config_profile.isolated;
+        }
+        if (config_profile.read_only.has_value()) {
+            it->read_only_tools = *config_profile.read_only;
+        }
     }
 
-    std::erase_if(profiles_, [](const Profile& profile) {
+    std::erase_if(profiles, [](const Profile& profile) {
         return !profile.enabled;
     });
 }
 
-std::string SubagentOrchestrator::build_task_description() const {
-    std::vector<Profile> profiles_snapshot;
-    {
-        std::lock_guard lock(profiles_mutex_);
-        profiles_snapshot = profiles_;
-    }
+std::string SubagentOrchestrator::build_task_description(
+    const std::vector<std::filesystem::path>& workspace_roots) const {
+    const std::vector<Profile> profiles_snapshot = effective_profiles(workspace_roots);
 
     std::string description =
         "Delegates work to a specialized background subagent. "
@@ -678,12 +748,15 @@ std::string SubagentOrchestrator::build_task_description() const {
                 ? "inherit parent"
                 : std::string_view(profile.model_override);
             description += std::format(
-                "- {}: {} [provider: {}; model: {}; model steps: {}]\\n",
+                "- {}: {} [provider: {}; model: {}; model steps: {}{}{}{}]\\n",
                 profile.name,
                 profile.description,
                 provider,
                 model,
-                profile.max_steps);
+                profile.max_steps,
+                profile.read_only_tools ? "; read-only tools" : "",
+                profile.allow_task_tool ? "; may delegate to subagents" : "",
+                profile.isolated ? "; fresh context without project instructions or memory" : "");
         }
     }
 
@@ -771,6 +844,11 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
     if (profile.use_allow_list) {
         std::erase_if(tools, [&](const core::llm::Tool& tool) {
             return !profile.allowed_tools.contains(tool.function.name);
+        });
+    }
+    if (profile.read_only_tools) {
+        std::erase_if(tools, [](const core::llm::Tool& tool) {
+            return !tool.function.annotations.read_only_hint;
         });
     }
 

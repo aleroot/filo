@@ -35,6 +35,11 @@ namespace core::utils::ascii {
         || ch == '\r' || ch == '\f' || ch == '\v';
 }
 
+/// Space or horizontal tab: white space within a line, as C's isblank.
+[[nodiscard]] constexpr bool is_blank(unsigned char ch) noexcept {
+    return ch == ' ' || ch == '\t';
+}
+
 [[nodiscard]] inline bool iequals(std::string_view lhs, std::string_view rhs) noexcept {
     return lhs.size() == rhs.size()
         && std::ranges::equal(

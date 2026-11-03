@@ -3,6 +3,7 @@
 #include "CommandExecutor.hpp"
 #include "SkillTurnResolver.hpp"
 #include "../tools/SkillManifest.hpp"
+#include "../tools/SkillRegistry.hpp"
 #include <string>
 #include <string_view>
 
@@ -105,7 +106,11 @@ public:
         ctx.clear_input_fn();
 
         const std::string args   = detail::extract_trailing_args(ctx.text);
-        const std::string prompt = detail::expand_skill_arguments(manifest_.body, args);
+        // The body alone does not say where the skill lives, so its relative
+        // references (scripts/, a plugin's agents/ and resources/) would be
+        // unresolvable; activate_skill reports the same location.
+        const std::string prompt = core::tools::SkillRegistry::with_invocation_context(
+            detail::expand_skill_arguments(manifest_.body, args), manifest_);
 
         if (prompt.empty()) {
             ctx.append_history_fn(

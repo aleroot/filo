@@ -9,12 +9,14 @@
 #include <atomic>
 #include <cstddef>
 #include <expected>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <semaphore>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -44,10 +46,16 @@ class MemorySystem;
 
 namespace core::agent {
 
+struct AgentDefinition;
+
 class SubagentOrchestrator {
 public:
     static constexpr std::string_view kTaskToolName = "task";
     static constexpr std::ptrdiff_t kMaxParallelReadOnlySubagents = 4;
+    /// Subagent levels below the top-level agent. A worker at this depth is
+    /// refused the task tool, which bounds profiles that may delegate
+    /// (allow_task_tool) from recursing without end.
+    static constexpr int kMaxDelegationDepth = 3;
 
     struct RunContext {
         std::string active_provider_name = {};
@@ -82,6 +90,10 @@ public:
         std::string_view provider_override = {};
         std::string_view model_override = {};
         std::optional<int> max_steps_override = std::nullopt;
+        /// Workspace whose agent definition files (agents/*.md) are offered
+        /// as profiles, i.e. the session's ordered roots; empty = only the
+        /// user's own definitions.
+        std::vector<std::filesystem::path> workspace_roots = {};
     };
 
     struct ExecutionPlan {
@@ -96,6 +108,9 @@ public:
         bool allow_task_tool = false;
         bool read_only = false;
         int max_steps = 0;
+        /// Run without the parent's project instructions, skill catalog and
+        /// memories (see DelegatedAgentRunner::Request::isolated_context).
+        bool isolated = false;
 
         [[nodiscard]] std::vector<std::string> allowed_tool_names() const;
     };
@@ -106,13 +121,18 @@ public:
         std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {},
         std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases = {});
 
-    [[nodiscard]] core::llm::Tool task_tool_definition() const;
+    /// The `task` tool, listing the profiles the session with
+    /// @p workspace_roots can run (see ExecutionRequest::workspace_roots).
+    [[nodiscard]] core::llm::Tool task_tool_definition(
+        const std::vector<std::filesystem::path>& workspace_roots = {}) const;
     [[nodiscard]] std::expected<ExecutionPlan, std::string> build_execution_plan(
         const ExecutionRequest& request) const;
-    [[nodiscard]] std::string available_worker_names() const;
+    [[nodiscard]] std::string available_worker_names(
+        const std::vector<std::filesystem::path>& workspace_roots = {}) const;
     [[nodiscard]] bool task_is_read_only(
         std::string_view json_args,
-        std::string_view parent_mode) const;
+        std::string_view parent_mode,
+        const std::vector<std::filesystem::path>& workspace_roots = {}) const;
 
     [[nodiscard]] std::string execute_task(
         std::string_view json_args,
@@ -135,6 +155,9 @@ private:
         bool allow_task_tool = false;
         int max_steps = 8;
         bool enabled = true;
+        bool isolated = false;
+        /// Only tools whose annotations declare them read-only.
+        bool read_only_tools = false;
     };
 
     struct TaskSession {
@@ -150,11 +173,26 @@ private:
         int max_steps = 0;
     };
 
-    [[nodiscard]] std::optional<Profile> find_profile(std::string_view name) const;
-    [[nodiscard]] std::string build_task_description() const;
+    /// Built-in and configured profiles plus the workspace's agent definition
+    /// files. Precedence: built-ins < agent files < `subagents.<name>` config;
+    /// an agent file never replaces a built-in profile.
+    [[nodiscard]] std::vector<Profile> effective_profiles(
+        const std::vector<std::filesystem::path>& workspace_roots) const;
+    [[nodiscard]] std::optional<Profile> find_profile(
+        std::string_view name,
+        const std::vector<std::filesystem::path>& workspace_roots = {}) const;
+    [[nodiscard]] std::string build_task_description(
+        const std::vector<std::filesystem::path>& workspace_roots) const;
     [[nodiscard]] std::string create_task_id();
     [[nodiscard]] static std::vector<Profile> make_default_profiles();
-    void apply_config_overrides_unlocked(const core::config::AppConfig& app_config);
+    /// Built-ins, then @p definitions that do not reuse a reserved name, then
+    /// @p app_config's `subagents.<name>` overrides on top of both.
+    [[nodiscard]] static std::vector<Profile> compose_profiles(
+        std::span<const AgentDefinition> definitions,
+        const core::config::AppConfig* app_config);
+    [[nodiscard]] static Profile profile_from(const AgentDefinition& definition);
+    static void apply_config_overrides(std::vector<Profile>& profiles,
+                                       const core::config::AppConfig& app_config);
     [[nodiscard]] std::shared_ptr<TaskSession> get_or_create_session(
         const std::string& description,
         const Profile& profile,

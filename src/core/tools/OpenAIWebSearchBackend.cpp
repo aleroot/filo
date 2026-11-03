@@ -10,6 +10,7 @@
 
 #include <cpr/cpr.h>
 #include <simdjson.h>
+#include <tuple>
 
 #include <algorithm>
 #include <cstdint>
@@ -481,7 +482,7 @@ std::expected<SearchResponse, std::string> parse_openai_web_search_response(
         simdjson::dom::element doc;
         if (parser.parse(padded).get(doc) != simdjson::SUCCESS) continue;
         std::string_view type;
-        (void)doc["type"].get(type);
+        std::ignore = doc["type"].get(type);
         if (type == "response.completed") return decode(parsed.data);
         if (type == "response.failed" || type == "response.incomplete" || type == "error") {
             const auto message = read_error_message(doc);

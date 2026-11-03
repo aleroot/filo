@@ -5,6 +5,7 @@
 #include "core/tools/SkillRegistry.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
+#include "TestEnvironment.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -33,26 +34,7 @@ static void write_file(const fs::path& p, std::string_view content) {
     f << content;
 }
 
-struct ScopedEnvVar {
-    std::string name;
-    std::optional<std::string> old_value;
-
-    ScopedEnvVar(std::string env_name, std::string value)
-        : name(std::move(env_name)) {
-        if (const char* existing = std::getenv(name.c_str())) {
-            old_value = std::string(existing);
-        }
-        ::setenv(name.c_str(), value.c_str(), 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (old_value.has_value()) {
-            ::setenv(name.c_str(), old_value->c_str(), 1);
-        } else {
-            ::unsetenv(name.c_str());
-        }
-    }
-};
+using test_support::ScopedEnvVar;
 
 // ---------------------------------------------------------------------------
 // parse_manifest — valid inputs

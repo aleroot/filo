@@ -46,6 +46,12 @@ struct SessionContext {
     std::shared_ptr<const core::workspace::PathVisibility> path_visibility;
     core::memory::MemoryThreadPolicy memory_policy;
     SteeringPolicy steering_policy;
+    /// False for a fresh-context (isolated) subagent: its prompt carries no
+    /// project steering or skill catalog. Steering *policy* is unaffected, so
+    /// nothing becomes unreadable.
+    bool include_project_context = true;
+    /// Subagent nesting level: 0 for a top-level session, +1 per delegation.
+    int delegation_depth = 0;
 
     [[nodiscard]] std::string_view root_session() const noexcept {
         return root_session_id.empty() ? std::string_view(session_id)

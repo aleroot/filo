@@ -11,13 +11,19 @@ namespace core::commands {
 
 int SkillCommandLoader::load_from_directory(const fs::path& root,
                                             CommandExecutor& executor) {
+    return load_from_root(core::tools::SkillSearchRoot{.path = root}, executor);
+}
+
+int SkillCommandLoader::load_from_root(const core::tools::SkillSearchRoot& search_root,
+                                       CommandExecutor& executor) {
+    const fs::path& root = search_root.path;
     if (!fs::exists(root) || !fs::is_directory(root)) return 0;
 
     int count = 0;
     for (const auto& entry : fs::directory_iterator(root)) {
         if (!entry.is_directory()) continue;
 
-        auto maybe = core::tools::SkillRegistry::parse_manifest(entry.path());
+        auto maybe = core::tools::SkillRegistry::parse_manifest_in(search_root, entry.path());
         if (!maybe) continue;
 
         const auto& m = *maybe;
@@ -50,8 +56,8 @@ int SkillCommandLoader::discover_and_register(
     // then the user's directories, then the primary — so prompt skills and the
     // Agent Skills catalog can never disagree about who wins a name collision.
     // register_command() replaces on collision, hence the last root scanned wins.
-    for (const auto& root : core::tools::SkillRegistry::default_search_paths(workspace_roots)) {
-        total += load_from_directory(root, executor);
+    for (const auto& root : core::tools::SkillRegistry::default_search_roots(workspace_roots)) {
+        total += load_from_root(root, executor);
     }
     if (total > 0) {
         core::logging::info("SkillCommandLoader: {} prompt skill(s) loaded", total);

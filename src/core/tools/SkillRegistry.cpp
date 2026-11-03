@@ -1,15 +1,16 @@
 #include "SkillRegistry.hpp"
+#include "Frontmatter.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include "../logging/Logger.hpp"
-#include "../utils/AsciiUtils.hpp"
+#include "../utils/PathUtils.hpp"
+#include "../workspace/Workspace.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <filesystem>
 #include <format>
-#include <fstream>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -25,191 +26,7 @@ namespace core::tools {
 
 namespace {
 
-[[nodiscard]] std::string trim(std::string_view sv) {
-    const auto start = sv.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) return {};
-    const auto end = sv.find_last_not_of(" \t\r\n");
-    return std::string(sv.substr(start, end - start + 1));
-}
-
-[[nodiscard]] std::string unquote(std::string value) {
-    value = trim(value);
-    if (value.size() >= 2
-        && ((value.front() == '"' && value.back() == '"')
-            || (value.front() == '\'' && value.back() == '\''))) {
-        return value.substr(1, value.size() - 2);
-    }
-    return value;
-}
-
-[[nodiscard]] std::string strip_inline_comment(std::string_view value) {
-    bool in_single = false;
-    bool in_double = false;
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        const char ch = value[i];
-        if (ch == '\'' && !in_double) {
-            in_single = !in_single;
-            continue;
-        }
-        if (ch == '"' && !in_single) {
-            in_double = !in_double;
-            continue;
-        }
-        if (ch == '#' && !in_single && !in_double
-            && (i == 0 || value[i - 1] == ' ' || value[i - 1] == '\t')) {
-            return trim(value.substr(0, i));
-        }
-    }
-    return trim(value);
-}
-
-[[nodiscard]] std::vector<std::string> split_tool_list(std::string_view sv) {
-    std::vector<std::string> result;
-    const bool comma_separated = sv.find(',') != std::string_view::npos;
-    std::size_t start = 0;
-    while (start < sv.size()) {
-        const auto end = comma_separated
-            ? sv.find(',', start)
-            : sv.find_first_of(" \t\r\n", start);
-        const auto token_end = end == std::string_view::npos ? sv.size() : end;
-        const auto token = trim(sv.substr(start, token_end - start));
-        if (!token.empty()) result.push_back(token);
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-        while (!comma_separated && start < sv.size()
-               && (sv[start] == ' ' || sv[start] == '\t' || sv[start] == '\r' || sv[start] == '\n')) {
-            ++start;
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] bool boolean_enabled(std::string value) {
-    value = trim(value);
-    std::ranges::transform(value, value.begin(), core::utils::ascii::to_lower);
-    return value != "false" && value != "0" && value != "no";
-}
-
-[[nodiscard]] std::optional<std::string> read_text_file(const fs::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return std::nullopt;
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    return buffer.str();
-}
-
-[[nodiscard]] std::vector<std::string> split_lines(std::string_view text) {
-    std::vector<std::string> lines;
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        const auto end = text.find('\n', start);
-        auto line = end == std::string_view::npos
-            ? text.substr(start)
-            : text.substr(start, end - start);
-        if (!line.empty() && line.back() == '\r') {
-            line.remove_suffix(1);
-        }
-        lines.emplace_back(line);
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-    }
-    return lines;
-}
-
-struct ParsedFrontmatter {
-    std::unordered_map<std::string, std::string> fields;
-    std::string body;
-};
-
-[[nodiscard]] std::optional<ParsedFrontmatter>
-parse_frontmatter(std::string_view content, const fs::path& manifest_path) {
-    const auto lines = split_lines(content);
-    std::size_t open = 0;
-    while (open < lines.size() && trim(lines[open]).empty()) {
-        ++open;
-    }
-    if (open >= lines.size() || trim(lines[open]) != "---") {
-        core::logging::warn("SkillRegistry: no frontmatter delimiter in '{}'",
-                            manifest_path.string());
-        return std::nullopt;
-    }
-
-    std::size_t close = open + 1;
-    while (close < lines.size() && trim(lines[close]) != "---") {
-        ++close;
-    }
-    if (close >= lines.size()) {
-        core::logging::warn("SkillRegistry: missing closing frontmatter delimiter in '{}'",
-                            manifest_path.string());
-        return std::nullopt;
-    }
-
-    ParsedFrontmatter parsed;
-    for (std::size_t i = open + 1; i < close; ++i) {
-        const std::string line = trim(lines[i]);
-        if (line.empty() || line.front() == '#') continue;
-
-        const auto colon = line.find(':');
-        if (colon == std::string::npos) continue;
-
-        const std::string key = trim(std::string_view(line).substr(0, colon));
-        std::string value = strip_inline_comment(std::string_view(line).substr(colon + 1));
-
-        if ((value == "|" || value == ">") && i + 1 < close) {
-            std::ostringstream block;
-            std::size_t base_indent = 0;
-            for (std::size_t probe = i + 1; probe < close; ++probe) {
-                if (trim(lines[probe]).empty()) continue;
-                base_indent = lines[probe].find_first_not_of(" \t");
-                break;
-            }
-            while (i + 1 < close) {
-                const auto& next = lines[i + 1];
-                const std::size_t indent = next.find_first_not_of(" \t") == std::string::npos
-                    ? next.size()
-                    : next.find_first_not_of(" \t");
-                if (!trim(next).empty() && (base_indent == 0 || indent < base_indent)) break;
-                std::string_view piece(next);
-                if (piece.size() >= base_indent) piece.remove_prefix(base_indent);
-                block << piece << '\n';
-                ++i;
-            }
-            value = block.str();
-            if (value.ends_with('\n')) value.pop_back();
-        }
-
-        if (!key.empty()) {
-            parsed.fields[key] = unquote(std::move(value));
-        }
-    }
-
-    std::ostringstream body;
-    bool first_body_line = true;
-    for (std::size_t i = close + 1; i < lines.size(); ++i) {
-        if (first_body_line && trim(lines[i]).empty()) {
-            first_body_line = false;
-            continue;
-        }
-        first_body_line = false;
-        body << lines[i];
-        if (i + 1 < lines.size()) body << '\n';
-    }
-    parsed.body = body.str();
-    const auto last_nonws = parsed.body.find_last_not_of(" \t\r\n");
-    if (last_nonws == std::string::npos) {
-        parsed.body.clear();
-    } else {
-        parsed.body.resize(last_nonws + 1);
-    }
-    return parsed;
-}
-
-[[nodiscard]] std::optional<std::string>
-field(const ParsedFrontmatter& parsed, std::string_view key) {
-    const auto it = parsed.fields.find(std::string(key));
-    if (it == parsed.fields.end()) return std::nullopt;
-    return it->second;
-}
+namespace path = core::utils::path;
 
 [[nodiscard]] bool is_resource_root(std::string_view name) {
     return name == "scripts" || name == "references" || name == "assets";
@@ -241,7 +58,8 @@ constexpr std::span<const DirLabel> kNativeProjectDirs{kProjectDirs.data() + 2, 
 
 [[nodiscard]] SkillSearchRoot user_skill_root(const fs::path& home,
                                              std::string_view relative_dir,
-                                             std::string_view label) {
+                                             std::string_view label,
+                                             bool filo_native = false) {
     return SkillSearchRoot{
         .path = home / fs::path(relative_dir) / "skills",
         .scope = SkillScope::User,
@@ -250,22 +68,117 @@ constexpr std::span<const DirLabel> kNativeProjectDirs{kProjectDirs.data() + 2, 
         // permits_tool_skills(), which short-circuits on SkillScope::User.
         .origin = SkillWorkspaceOrigin::Primary,
         .workspace_root = {},
+        .plugin_root = {},
+        .filo_native = filo_native,
     };
+}
+
+/// $HOME for the user-level roots, or empty when they must not be scanned:
+/// landrun does not grant the sandboxed shell the user's home directories.
+[[nodiscard]] fs::path user_home() {
+    if (core::landrun::LandrunSettings::instance().enabled()) return {};
+    return path::home_directory();
+}
+
+/// `<root>/.filo/plugins` of workspace root number @p index; 0 is the primary.
+[[nodiscard]] SkillSearchRoot project_plugin_dir(const fs::path& workspace_root, std::size_t index) {
+    const bool primary = index == 0;
+    return SkillSearchRoot{
+        .path = workspace_root / ".filo" / "plugins",
+        .scope = SkillScope::Project,
+        .label = primary ? std::string("project-plugin") : std::format("ws{}-project-plugin", index),
+        .origin = primary ? SkillWorkspaceOrigin::Primary : SkillWorkspaceOrigin::Additional,
+        .workspace_root = workspace_root,
+        .plugin_root = {},
+        .filo_native = false,
+    };
+}
+
+/// `~/.config/filo/plugins`.
+[[nodiscard]] SkillSearchRoot user_plugin_dir(const fs::path& home) {
+    return SkillSearchRoot{
+        .path = home / ".config" / "filo" / "plugins",
+        .scope = SkillScope::User,
+        .label = "user-plugin",
+        .origin = SkillWorkspaceOrigin::Primary,
+        .workspace_root = {},
+        .plugin_root = {},
+        .filo_native = false,
+    };
+}
+
+/// One skills root per plugin bundle under @p install_dir, ordered by
+/// directory name so precedence between two plugins is deterministic. A
+/// subdirectory counts as a bundle when it has a plugin manifest or a
+/// `skills`/`agents` directory; hidden entries are ignored.
+[[nodiscard]] std::vector<SkillSearchRoot> plugin_skill_roots(const SkillSearchRoot& install_dir) {
+    std::vector<SkillSearchRoot> out;
+    std::error_code ec;
+    if (!fs::is_directory(install_dir.path, ec)) return out;
+
+    std::vector<fs::path> bundles;
+    for (const auto& entry : fs::directory_iterator(install_dir.path, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec)) continue;
+        const auto& dir = entry.path();
+        if (dir.filename().string().starts_with('.')) continue;
+        if (!SkillRegistry::is_plugin_root(dir)
+            && !fs::is_directory(dir / "skills", ec)
+            && !fs::is_directory(dir / "agents", ec)) {
+            continue;
+        }
+        bundles.push_back(dir);
+    }
+    std::ranges::sort(bundles);
+
+    for (const auto& dir : bundles) {
+        auto root = install_dir;
+        root.plugin_root = path::normalized(dir);
+        root.path = root.plugin_root / "skills";
+        root.label = std::format("{}:{}", install_dir.label, dir.filename().string());
+        out.push_back(std::move(root));
+    }
+    return out;
+}
+
+/// A plugin root must never widen read access to the home directory or above
+/// it, whatever manifest happens to sit there.
+[[nodiscard]] bool acceptable_plugin_root(const fs::path& candidate) {
+    if (candidate.empty() || candidate == candidate.root_path()) return false;
+    const auto home = path::home_directory();
+    return home.empty() || !path::relative_within(path::normalized(home), candidate);
+}
+
+void append_unique(std::vector<fs::path>& out, const fs::path& path) {
+    if (!path.empty() && std::ranges::find(out, path) == out.end()) out.push_back(path);
 }
 
 } // namespace
 
 std::vector<SkillSearchRoot>
+SkillRegistry::plugin_install_dirs(const std::vector<fs::path>& workspace_roots) {
+    std::vector<SkillSearchRoot> dirs;
+    for (std::size_t i = workspace_roots.size(); i-- > 1;) {
+        if (!workspace_roots[i].empty()) dirs.push_back(project_plugin_dir(workspace_roots[i], i));
+    }
+    if (const auto home = user_home(); !home.empty()) dirs.push_back(user_plugin_dir(home));
+    if (!workspace_roots.empty() && !workspace_roots.front().empty()) {
+        dirs.push_back(project_plugin_dir(workspace_roots.front(), 0));
+    }
+    return dirs;
+}
+
+std::vector<SkillSearchRoot>
 SkillRegistry::default_search_roots(const std::vector<fs::path>& workspace_roots) {
     std::vector<SkillSearchRoot> roots;
 
-    const bool include_user_roots = !core::landrun::LandrunSettings::instance().enabled();
-    fs::path home_path;
-    if (include_user_roots) {
-        if (const char* home = std::getenv("HOME"); home && *home) {
-            home_path = fs::path(home);
-        }
-    }
+    const fs::path home_path = user_home();
+
+    // Each level's installed plugin bundles rank just below that level's own
+    // native skills, in the order plugin_install_dirs() lists them.
+    auto append_plugins = [&](const SkillSearchRoot& install_dir) {
+        std::ranges::move(plugin_skill_roots(install_dir), std::back_inserter(roots));
+    };
 
     // An empty workspace root is skipped rather than scanned as a relative path:
     // `fs::is_directory(".filo/skills")` would silently resolve against the
@@ -285,6 +198,8 @@ SkillRegistry::default_search_roots(const std::vector<fs::path>& workspace_roots
                 .label = std::format("{}{}", label_prefix, label),
                 .origin = origin,
                 .workspace_root = workspace_root,
+                .plugin_root = {},
+                .filo_native = dir == ".filo",
             });
         }
     };
@@ -296,6 +211,7 @@ SkillRegistry::default_search_roots(const std::vector<fs::path>& workspace_roots
     // first `-w` after the primary beats the second, exactly as steering's
     // fallback chain prefers the nearer root.
     for (std::size_t i = workspace_roots.size(); i-- > 1;) {
+        if (!workspace_roots[i].empty()) append_plugins(project_plugin_dir(workspace_roots[i], i));
         append_project_dirs(workspace_roots[i],
                             SkillWorkspaceOrigin::Additional,
                             std::format("ws{}-", i),
@@ -315,9 +231,11 @@ SkillRegistry::default_search_roots(const std::vector<fs::path>& workspace_roots
     append_project_dirs(primary, SkillWorkspaceOrigin::Primary, {}, kCompatProjectDirs);
 
     if (!home_path.empty()) {
-        roots.push_back(user_skill_root(home_path, ".config/filo", "user-filo"));
+        append_plugins(user_plugin_dir(home_path));
+        roots.push_back(user_skill_root(home_path, ".config/filo", "user-filo", true));
     }
 
+    if (!primary.empty()) append_plugins(project_plugin_dir(primary, 0));
     append_project_dirs(primary, SkillWorkspaceOrigin::Primary, {}, kNativeProjectDirs);
     return roots;
 }
@@ -341,18 +259,27 @@ SkillRegistry::split_tool_skill_roots(const std::vector<fs::path>& workspace_roo
     return split;
 }
 
+bool SkillRegistry::is_plugin_root(const fs::path& dir) {
+    std::error_code ec;
+    return fs::is_regular_file(dir / "plugin.json", ec)
+        || fs::is_regular_file(dir / ".claude-plugin" / "plugin.json", ec)
+        || fs::is_regular_file(dir / ".codex-plugin" / "plugin.json", ec);
+}
+
+std::optional<fs::path> SkillRegistry::detect_plugin_root(const fs::path& skill_dir) {
+    const auto skills_dir = path::normalized(skill_dir).parent_path();
+    if (skills_dir.filename() != "skills") return std::nullopt;
+    const auto candidate = skills_dir.parent_path();
+    if (!acceptable_plugin_root(candidate) || !is_plugin_root(candidate)) return std::nullopt;
+    return candidate;
+}
+
 std::optional<SkillManifest>
 SkillRegistry::parse_manifest(const fs::path& skill_dir) {
     const fs::path manifest_path = skill_dir / "SKILL.md";
     if (!fs::exists(manifest_path)) return std::nullopt;
 
-    const auto content = read_text_file(manifest_path);
-    if (!content.has_value()) {
-        core::logging::warn("SkillRegistry: cannot open '{}'", manifest_path.string());
-        return std::nullopt;
-    }
-
-    const auto parsed = parse_frontmatter(*content, manifest_path);
+    const auto parsed = frontmatter::parse_file(manifest_path);
     if (!parsed.has_value()) return std::nullopt;
 
     SkillManifest manifest;
@@ -362,34 +289,32 @@ SkillRegistry::parse_manifest(const fs::path& skill_dir) {
         ? fs::weakly_canonical(manifest_path)
         : manifest_path;
 
-    if (const auto value = field(*parsed, "name")) manifest.name = *value;
-    if (const auto value = field(*parsed, "description")) manifest.description = *value;
-    if (const auto value = field(*parsed, "entry_point")) manifest.entry_point = *value;
-    if (const auto value = field(*parsed, "entry-point")) manifest.entry_point = *value;
-    if (const auto value = field(*parsed, "enabled")) manifest.enabled = boolean_enabled(*value);
-    if (const auto value = field(*parsed, "user_invocable")) {
-        manifest.user_invocable = boolean_enabled(*value);
-    } else if (const auto value2 = field(*parsed, "user-invocable")) {
-        manifest.user_invocable = boolean_enabled(*value2);
+    const frontmatter::FieldReader fields(*parsed, manifest_path, "Skill");
+    if (auto value = fields.text({"name"})) manifest.name = std::move(*value);
+    if (auto value = fields.text({"description"})) manifest.description = std::move(*value);
+    if (auto value = fields.text({"entry_point", "entry-point"})) {
+        manifest.entry_point = std::move(*value);
     }
-    if (const auto value = field(*parsed, "model")) manifest.model_hint = *value;
-    if (const auto value = field(*parsed, "license")) manifest.license = *value;
-    if (const auto value = field(*parsed, "compatibility")) manifest.compatibility = *value;
+    manifest.enabled = fields.flag({"enabled"}).value_or(manifest.enabled);
+    manifest.user_invocable =
+        fields.flag({"user_invocable", "user-invocable"}).value_or(manifest.user_invocable);
+    manifest.model_invocable =
+        !fields.flag({"disable-model-invocation", "disable_model_invocation"}).value_or(false);
+    if (auto value = fields.text({"model"})) manifest.model_hint = std::move(*value);
+    if (auto value = fields.text({"license"})) manifest.license = std::move(*value);
+    if (auto value = fields.text({"compatibility"})) manifest.compatibility = std::move(*value);
 
     bool explicit_type = false;
-    if (const auto value = field(*parsed, "type")) {
-        auto type = trim(*value);
-        std::ranges::transform(type, type.begin(), core::utils::ascii::to_lower);
+    if (const auto value = fields.text({"type"})) {
+        const auto type = core::utils::str::to_lower_ascii_copy(*value);
         manifest.type = type == "prompt" || type == "instruction" || type == "agent"
             ? SkillType::Prompt
             : SkillType::Tool;
         explicit_type = true;
     }
 
-    if (const auto value = field(*parsed, "allowed-tools")) {
-        manifest.allowed_tools = split_tool_list(*value);
-    } else if (const auto value2 = field(*parsed, "allowed_tools")) {
-        manifest.allowed_tools = split_tool_list(*value2);
+    if (auto value = fields.list({"allowed-tools", "allowed_tools"})) {
+        manifest.allowed_tools = std::move(*value);
     }
 
     if (manifest.name.empty()) {
@@ -415,6 +340,20 @@ SkillRegistry::parse_manifest(const fs::path& skill_dir) {
     if (manifest.type == SkillType::Prompt) {
         manifest.body = parsed->body;
     }
+    manifest.plugin_root = detect_plugin_root(manifest.skill_dir).value_or(fs::path{});
+    return manifest;
+}
+
+std::optional<SkillManifest>
+SkillRegistry::parse_manifest_in(const SkillSearchRoot& root, const fs::path& skill_dir) {
+    auto manifest = parse_manifest(skill_dir);
+    if (!manifest.has_value()) return manifest;
+    // Provenance travels with the manifest so consumers can tell a secondary
+    // workspace's skill from the primary's without re-deriving which root it
+    // came from.
+    manifest->workspace_root = root.workspace_root;
+    manifest->from_additional_workspace = root.origin == SkillWorkspaceOrigin::Additional;
+    if (!root.plugin_root.empty()) manifest->plugin_root = root.plugin_root;
     return manifest;
 }
 
@@ -431,15 +370,8 @@ SkillRegistry::discover_all(const std::vector<fs::path>& workspace_roots) {
             if (ec) break;
             if (!entry.is_directory(ec)) continue;
 
-            auto manifest = parse_manifest(entry.path());
+            auto manifest = parse_manifest_in(root, entry.path());
             if (!manifest.has_value() || !manifest->enabled) continue;
-
-            // Provenance travels with the manifest so consumers can tell a
-            // secondary workspace's skill from the primary's without re-deriving
-            // which root it came from.
-            manifest->workspace_root = root.workspace_root;
-            manifest->from_additional_workspace =
-                root.origin == SkillWorkspaceOrigin::Additional;
 
             if (auto it = by_name.find(manifest->name); it != by_name.end()) {
                 ordered[it->second] = std::move(*manifest);
@@ -453,11 +385,82 @@ SkillRegistry::discover_all(const std::vector<fs::path>& workspace_roots) {
     return ordered;
 }
 
+std::vector<fs::path>
+SkillRegistry::plugin_roots(const std::vector<fs::path>& workspace_roots) {
+    std::vector<fs::path> roots;
+    for (const auto& install_dir : plugin_install_dirs(workspace_roots)) {
+        for (const auto& bundle : plugin_skill_roots(install_dir)) {
+            append_unique(roots, bundle.plugin_root);
+        }
+    }
+    for (const auto& skill : discover_all(workspace_roots)) {
+        append_unique(roots, skill.plugin_root);
+    }
+    return roots;
+}
+
+std::vector<fs::path>
+SkillRegistry::package_read_roots(const std::vector<fs::path>& workspace_roots) {
+    std::vector<fs::path> roots;
+    if (core::landrun::LandrunSettings::instance().enabled()) return roots;
+
+    std::error_code ec;
+    for (const auto& install_dir : plugin_install_dirs(workspace_roots)) {
+        if (fs::is_directory(install_dir.path, ec)) {
+            append_unique(roots, path::normalized(install_dir.path));
+        }
+    }
+    for (const auto& root : default_search_roots(workspace_roots)) {
+        if (fs::is_directory(root.path, ec)) append_unique(roots, path::normalized(root.path));
+        append_unique(roots, root.plugin_root);
+    }
+    for (const auto& skill : discover_all(workspace_roots)) {
+        append_unique(roots, skill.skill_dir);
+        append_unique(roots, skill.plugin_root);
+    }
+
+    // A root inside another root grants nothing more; drop it so the list
+    // (also shown to MCP clients) names each bundle once.
+    const auto nested = [&](const fs::path& candidate) {
+        return std::ranges::any_of(roots, [&](const fs::path& other) {
+            return other != candidate && path::relative_within(candidate, other).has_value();
+        });
+    };
+    std::vector<fs::path> outermost;
+    for (const auto& root : roots) {
+        if (!nested(root)) outermost.push_back(root);
+    }
+    return outermost;
+}
+
+void SkillRegistry::grant_package_read_roots(core::workspace::Workspace& workspace) {
+    workspace.set_extension_roots(package_read_roots(workspace.ordered_roots()));
+}
+
+std::string SkillRegistry::with_invocation_context(std::string prompt, const SkillManifest& skill) {
+    if (prompt.empty() || skill.skill_dir.empty()) return prompt;
+    return prompt + "\n\n" + invocation_context(skill);
+}
+
+std::string SkillRegistry::invocation_context(const SkillManifest& skill) {
+    std::string out = "Skill directory: " + skill.skill_dir.string() + "\n";
+    if (skill.plugin_root.empty()) {
+        out += "Relative paths in this skill are relative to the skill directory.\n";
+        return out;
+    }
+    out += "Plugin root: " + skill.plugin_root.string() + "\n";
+    out += "Relative paths in this skill are relative to the skill directory; paths that are "
+           "not there (for example agents/, resources/ or skills/<name>/) resolve against the "
+           "plugin root. Read bundled files from these absolute locations, never from "
+           "similarly named files in the project.\n";
+    return out;
+}
+
 std::vector<SkillManifest>
 SkillRegistry::discover_instruction_skills(const std::vector<fs::path>& workspace_roots) {
     auto skills = discover_all(workspace_roots);
     std::erase_if(skills, [](const SkillManifest& skill) {
-        return !skill.is_agent_instruction_skill();
+        return !skill.is_agent_instruction_skill() || !skill.model_invocable;
     });
     std::ranges::sort(skills, {}, &SkillManifest::name);
     return skills;

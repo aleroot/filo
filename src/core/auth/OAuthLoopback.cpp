@@ -1,12 +1,12 @@
 #include "OAuthLoopback.hpp"
 
 #include "core/utils/StringUtils.hpp"
+#include "core/utils/UriUtils.hpp"
 
 #include <httplib.h>
 
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -49,30 +49,6 @@ namespace {
         if (suffix == allowed) return true;
     }
     return false;
-}
-
-[[nodiscard]] std::string url_decode_component(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        const char c = value[i];
-        if (c == '+') {
-            out.push_back(' ');
-            continue;
-        }
-        if (c == '%' && i + 2 < value.size()) {
-            const auto hex = value.substr(i + 1, 2);
-            char* end = nullptr;
-            const long byte = std::strtol(std::string(hex).c_str(), &end, 16);
-            if (end && *end == '\0') {
-                out.push_back(static_cast<char>(byte));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(c);
-    }
-    return out;
 }
 
 } // namespace
@@ -288,9 +264,9 @@ OAuthManualAuthInput parse_oauth_manual_auth_input(std::string_view raw_input) {
         const auto piece = query.substr(
             pos, amp == std::string_view::npos ? std::string_view::npos : amp - pos);
         const auto eq = piece.find('=');
-        const auto key = url_decode_component(
+        const auto key = core::utils::uri::form_decode(
             eq == std::string_view::npos ? piece : piece.substr(0, eq));
-        const auto value = url_decode_component(
+        const auto value = core::utils::uri::form_decode(
             eq == std::string_view::npos ? std::string_view{} : piece.substr(eq + 1));
         if (key == "code") parsed.code = value;
         else if (key == "state") parsed.state = value;

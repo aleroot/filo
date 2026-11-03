@@ -149,7 +149,8 @@ public:
         }
         const auto resolved_target = resolve_path(target_path);
         return is_within_project_roots(resolved_target)
-            || snapshot_.scratch.allows_read(resolved_target);
+            || snapshot_.scratch.allows_read(resolved_target)
+            || snapshot_.extensions.allows_read(resolved_target);
     }
 
     /**
@@ -177,7 +178,8 @@ public:
             return true;
         }
         return is_within_project_roots(canonical)
-            || snapshot_.scratch.allows_read_normalized(canonical);
+            || snapshot_.scratch.allows_read_normalized(canonical)
+            || snapshot_.extensions.allows_read_normalized(canonical);
     }
 
     [[nodiscard]] bool allows_canonical_write(const std::filesystem::path& canonical) const {
@@ -203,6 +205,10 @@ public:
 
     [[nodiscard]] const FileAccessScope& scratch() const noexcept {
         return snapshot_.scratch;
+    }
+    /// Read-only skill and plugin bundle roots; see WorkspaceSnapshot::extensions.
+    [[nodiscard]] const FileAccessScope& extensions() const noexcept {
+        return snapshot_.extensions;
     }
 
     // Extends an enforced workspace with existing absolute files or
@@ -348,6 +354,7 @@ public:
         // probe taken later under that same root. Lexical normalization keeps
         // roots and probes on the same footing.
         snapshot.scratch.normalize();
+        snapshot.extensions.normalize();
 
         return snapshot;
     }

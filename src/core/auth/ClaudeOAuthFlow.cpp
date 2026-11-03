@@ -1,5 +1,6 @@
 #include "ClaudeOAuthFlow.hpp"
 #include "AuthBrowserLauncher.hpp"
+#include "OAuthLoopback.hpp"
 #include "OAuthErrors.hpp"
 #include "OAuthPkce.hpp"
 #include "core/utils/JsonUtils.hpp"
@@ -189,83 +190,6 @@ std::string append_rate_limit_headers(const cpr::Response& r) {
     append_header("anthropic-ratelimit-unified-requests-limit");
 
     return extra;
-}
-
-int hex_value(unsigned char ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return 10 + (ch - 'a');
-    if (ch >= 'A' && ch <= 'F') return 10 + (ch - 'A');
-    return -1;
-}
-
-std::string url_decode(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        const unsigned char ch = static_cast<unsigned char>(in[i]);
-        if (ch == '+' ) {
-            out.push_back(' ');
-            continue;
-        }
-        if (ch == '%' && i + 2 < in.size()) {
-            const int hi = hex_value(static_cast<unsigned char>(in[i + 1]));
-            const int lo = hex_value(static_cast<unsigned char>(in[i + 2]));
-            if (hi >= 0 && lo >= 0) {
-                out.push_back(static_cast<char>((hi << 4) | lo));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(static_cast<char>(ch));
-    }
-    return out;
-}
-
-struct ManualAuthInput {
-    std::string code;
-    std::optional<std::string> state;
-};
-
-ManualAuthInput parse_manual_auth_input(std::string_view raw_input) {
-    const std::string input = core::utils::str::trim_ascii_copy(raw_input);
-    if (input.empty()) {
-        throw std::runtime_error("No authorization code provided");
-    }
-
-    const bool looks_like_url =
-        input.rfind("http://", 0) == 0 || input.rfind("https://", 0) == 0;
-    if (!looks_like_url) {
-        return {.code = input, .state = std::nullopt};
-    }
-
-    const std::size_t qmark = input.find('?');
-    if (qmark == std::string::npos || qmark + 1 >= input.size()) {
-        throw std::runtime_error("Callback URL does not contain query parameters");
-    }
-
-    ManualAuthInput parsed{};
-    std::size_t pos = qmark + 1;
-    while (pos < input.size()) {
-        const std::size_t amp = input.find('&', pos);
-        const std::size_t end = (amp == std::string::npos) ? input.size() : amp;
-        const std::string_view pair = std::string_view(input).substr(pos, end - pos);
-        const std::size_t eq = pair.find('=');
-
-        const std::string key = url_decode(eq == std::string::npos ? pair : pair.substr(0, eq));
-        const std::string value =
-            (eq == std::string::npos) ? std::string() : url_decode(pair.substr(eq + 1));
-
-        if (key == "code") parsed.code = value;
-        else if (key == "state") parsed.state = value;
-
-        if (amp == std::string::npos) break;
-        pos = amp + 1;
-    }
-
-    if (parsed.code.empty()) {
-        throw std::runtime_error("Callback URL did not include an authorization code");
-    }
-    return parsed;
 }
 
 int pick_free_port(int port_start, int port_end) {
@@ -546,7 +470,7 @@ OAuthToken ClaudeOAuthFlow::login() {
             " Complete login manually, then paste the full callback URL or just the code.");
         const std::string pasted =
             ui_->prompt_secret("Paste callback URL or authorization code:");
-        const ManualAuthInput manual = parse_manual_auth_input(pasted);
+        const OAuthManualAuthInput manual = parse_oauth_manual_auth_input(pasted);
 
         if (manual.state.has_value() && *manual.state != state) {
             throw std::runtime_error("OAuth state mismatch in manual callback URL");

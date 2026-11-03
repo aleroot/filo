@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CommandExecutor.hpp"
+#include "../tools/SkillRegistry.hpp"
 #include <filesystem>
 #include <vector>
 
@@ -106,6 +107,11 @@ public:
      */
     static int load_from_directory(const std::filesystem::path& root,
                                    CommandExecutor& executor);
+
+    /// @ref load_from_directory for a search root, whose provenance (plugin
+    /// root, workspace) is recorded on every manifest it yields.
+    static int load_from_root(const core::tools::SkillSearchRoot& root,
+                              CommandExecutor& executor);
 };
 
 } // namespace core::commands

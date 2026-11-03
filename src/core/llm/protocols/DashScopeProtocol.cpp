@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <simdjson.h>
+#include <tuple>
 
 namespace core::llm::protocols {
 
@@ -714,7 +715,7 @@ ParseResult DashScopeResponsesProtocol::parse_event(std::string_view raw) {
     simdjson::dom::element doc;
     if (parser.parse(json).get(doc) != simdjson::SUCCESS) return {};
     std::string_view type = envelope.event;
-    if (type.empty()) (void)doc["type"].get(type);
+    if (type.empty()) std::ignore = doc["type"].get(type);
     simdjson::dom::object bare_error;
     if (type.empty() && doc["error"].get(bare_error) == simdjson::SUCCESS) type = "error";
     if (type == "error" || type == "response.failed" || type == "response.incomplete") {
@@ -735,7 +736,7 @@ ParseResult DashScopeResponsesProtocol::parse_event(std::string_view raw) {
         }
         if (type == "response.incomplete") {
             std::string_view reason;
-            (void)doc["response"]["incomplete_details"]["reason"].get(reason);
+            std::ignore = doc["response"]["incomplete_details"]["reason"].get(reason);
             if (reason == "max_output_tokens" || reason == "length") {
                 result.done = true;
                 result.stop_reason = "max_tokens";

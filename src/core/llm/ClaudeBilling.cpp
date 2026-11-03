@@ -1,6 +1,7 @@
 #include "ClaudeBilling.hpp"
 
 #include "../utils/Crypto.hpp"
+#include "../utils/Utf8.hpp"
 
 #include <simdjson.h>
 
@@ -25,24 +26,6 @@ constexpr std::array<std::string_view, 14> kBodyFieldOrder{
     "model", "messages", "system", "tools", "tool_choice", "metadata", "max_tokens",
     "temperature", "thinking", "context_management", "output_config", "diagnostics",
     "stream", "speed"};
-
-void append_utf8(std::string& out, char32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
 
 /// UTF-16 code units of @p text, up to @p limit of them. Malformed bytes
 /// decode to U+FFFD, as a JavaScript TextDecoder would.
@@ -259,7 +242,7 @@ std::string version_suffix(std::string_view first_user_text, std::string_view ve
         }
         const char16_t unit = units[position];
         // A lone surrogate is encoded as U+FFFD when the string becomes UTF-8.
-        append_utf8(material, unit >= 0xD800 && unit <= 0xDFFF ? U'\uFFFD' : static_cast<char32_t>(unit));
+        core::utils::utf8::append(material, unit >= 0xD800 && unit <= 0xDFFF ? U'\uFFFD' : static_cast<char32_t>(unit));
     }
     material += version;
     return core::utils::crypto::sha256_hex(material).substr(0, 3);

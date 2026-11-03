@@ -13,6 +13,7 @@
 #include "core/tools/SkillManifest.hpp"
 #include "core/tools/SkillRegistry.hpp"
 #include "TestSessionContext.hpp"
+#include "TestEnvironment.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -46,26 +47,7 @@ static void write_file(const fs::path& p, std::string_view content) {
     f << content;
 }
 
-struct ScopedEnvVar {
-    std::string name;
-    std::optional<std::string> old_value;
-
-    ScopedEnvVar(std::string env_name, const std::string& value)
-        : name(std::move(env_name)) {
-        if (const char* existing = std::getenv(name.c_str())) {
-            old_value = std::string(existing);
-        }
-        ::setenv(name.c_str(), value.c_str(), 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (old_value.has_value()) {
-            ::setenv(name.c_str(), old_value->c_str(), 1);
-        } else {
-            ::unsetenv(name.c_str());
-        }
-    }
-};
+using test_support::ScopedEnvVar;
 
 struct ScopedCurrentPath {
     fs::path old_path;
@@ -935,7 +917,7 @@ TEST_CASE("SkillCommandLoader: project-local skill overrides global by last-regi
     ctx.text = "/summarise";
     ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
     REQUIRE(executor.try_execute("/summarise", ctx));
-    CHECK(sent_prompt == "Project body.");
+    CHECK(sent_prompt.starts_with("Project body.\n\nSkill directory: "));
 
     fs::remove_all(global_root);
     fs::remove_all(project_root);
@@ -1074,7 +1056,7 @@ User Filo body.
         ctx.text = "/review";
         ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
         REQUIRE(executor.try_execute("/review", ctx));
-        CHECK(sent_prompt == "User Filo body.");
+        CHECK(sent_prompt.starts_with("User Filo body.\n\nSkill directory: "));
     }
 
     fs::remove_all(sandbox);
@@ -1641,11 +1623,11 @@ Additional exclusive body.
     ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
 
     REQUIRE(executor.try_execute("/review", ctx));
-    CHECK(sent_prompt == "Primary review body.");
+    CHECK(sent_prompt.starts_with("Primary review body.\n\nSkill directory: "));
 
     sent_prompt.clear();
     REQUIRE(executor.try_execute("/extra-only", ctx));
-    CHECK(sent_prompt == "Additional exclusive body.");
+    CHECK(sent_prompt.starts_with("Additional exclusive body.\n\nSkill directory: "));
 
     fs::remove_all(sandbox);
 }

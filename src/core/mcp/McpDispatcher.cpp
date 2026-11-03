@@ -533,34 +533,17 @@ struct PromptTemplate {
     const auto workspace_roots =
         core::workspace::Workspace::get_instance().ordered_roots();
 
-    for (const auto& root : core::tools::SkillRegistry::default_search_paths(workspace_roots)) {
-        if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
-            continue;
-        }
-
-        for (const auto& entry : std::filesystem::directory_iterator(root)) {
-            if (!entry.is_directory()) continue;
-
-            auto manifest = core::tools::SkillRegistry::parse_manifest(entry.path());
-            if (!manifest.has_value()) continue;
-            if (!manifest->enabled || manifest->type != core::tools::SkillType::Prompt) {
-                continue;
-            }
-
-            PromptTemplate prompt{
-                .name = manifest->name,
-                .description = manifest->description,
-                .body = manifest->body,
-                .accepts_arguments = manifest->body.find("$ARGUMENTS") != std::string::npos,
-            };
-
-            const auto existing = std::ranges::find(prompts, prompt.name, &PromptTemplate::name);
-            if (existing != prompts.end()) {
-                *existing = std::move(prompt);
-            } else {
-                prompts.push_back(std::move(prompt));
-            }
-        }
+    // discover_all resolves name collisions in scan order.
+    for (const auto& manifest : core::tools::SkillRegistry::discover_all(workspace_roots)) {
+        if (manifest.type != core::tools::SkillType::Prompt) continue;
+        // Same location footer as the TUI slash command, so a client's model
+        // can resolve the skill's relative references.
+        prompts.push_back(PromptTemplate{
+            .name = manifest.name,
+            .description = manifest.description,
+            .body = core::tools::SkillRegistry::with_invocation_context(manifest.body, manifest),
+            .accepts_arguments = manifest.body.find("$ARGUMENTS") != std::string::npos,
+        });
     }
 
     std::ranges::sort(prompts, {}, &PromptTemplate::name);
@@ -993,6 +976,12 @@ struct ParsedPromptGetRequest {
                     const bool writable = scratch.allows_write(scratch_root);
                     dynamic_instructions += "- " + scratch_root.string()
                         + (writable ? " (read/write)\n" : " (read-only)\n");
+                }
+            }
+            if (const auto& extensions = workspace.extensions(); !extensions.empty()) {
+                dynamic_instructions += "\nSKILL AND PLUGIN DIRECTORIES (read-only):\n";
+                for (const auto& extension_root : extensions.readable_roots()) {
+                    dynamic_instructions += "- " + extension_root.string() + "\n";
                 }
             }
             dynamic_instructions += "\nUse filesystem tools for strict path-bounded operations. "

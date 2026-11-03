@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OAuthLoopback.hpp"
 #include "OAuthToken.hpp"
 #include <cstdint>
 #include <optional>
@@ -9,10 +10,7 @@
 
 namespace core::auth {
 
-struct GoogleManualAuthInput {
-    std::string code;
-    std::optional<std::string> state;
-};
+using GoogleManualAuthInput = OAuthManualAuthInput;
 
 /**
  * @brief Side-effect-free Google OAuth primitives shared by the Google flows.

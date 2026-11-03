@@ -210,6 +210,11 @@ struct SubagentConfig {
     std::optional<bool> allow_task_tool = {};
     std::optional<bool> enabled = {};
     std::optional<int>  max_steps = {};
+    /// Run the worker without the parent's project instructions (AGENTS.md
+    /// and friends), skill catalog and memories; see SubagentOrchestrator.
+    std::optional<bool> isolated = {};
+    /// Only tools whose annotations declare them read-only.
+    std::optional<bool> read_only = {};
 };
 
 struct ToolPolicyConfig {

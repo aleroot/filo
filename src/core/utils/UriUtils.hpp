@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AsciiUtils.hpp"
+#include "Hex.hpp"
 
 #include <charconv>
 #include <optional>
@@ -36,6 +37,32 @@ namespace core::utils::uri {
         i += 2;
     }
     return true;
+}
+
+/// Decodes one application/x-www-form-urlencoded component: `+` is a space
+/// and `%XX` a byte. A `%` not followed by two hex digits is kept as is, so a
+/// pasted value is never rejected.
+[[nodiscard]] inline std::string form_decode(std::string_view encoded) {
+    std::string out;
+    out.reserve(encoded.size());
+    for (std::size_t i = 0; i < encoded.size(); ++i) {
+        const char ch = encoded[i];
+        if (ch == '+') {
+            out.push_back(' ');
+            continue;
+        }
+        if (ch == '%' && i + 2 < encoded.size()) {
+            const int hi = hex_digit_value(static_cast<unsigned char>(encoded[i + 1]));
+            const int lo = hex_digit_value(static_cast<unsigned char>(encoded[i + 2]));
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(ch);
+    }
+    return out;
 }
 
 [[nodiscard]] inline std::string percent_encode_uri_path(std::string_view raw) {

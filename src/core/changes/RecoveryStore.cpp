@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <chrono>
 #include <format>
+#include <tuple>
 
 #include <simdjson.h>
 #include <algorithm>
@@ -297,8 +298,8 @@ std::expected<RecoveryManifest, std::string> RecoveryStore::load(const fs::path&
     const auto parsed_phase = parse_phase(phase);
     if (!parsed_phase) return std::unexpected("Invalid recovery phase.");
     result.phase = *parsed_phase;
-    (void)doc["partial"].get(result.partial);
-    (void)doc["ambiguous_ownership"].get(result.ambiguous_ownership);
+    std::ignore = doc["partial"].get(result.partial);
+    std::ignore = doc["ambiguous_ownership"].get(result.ambiguous_ownership);
     std::error_code marker_error;
     result.ambiguous_ownership |= fs::exists(directory_ / "ambiguous", marker_error) || bool(marker_error);
     simdjson::dom::array uncaptured;
@@ -308,7 +309,7 @@ std::expected<RecoveryManifest, std::string> RecoveryStore::load(const fs::path&
             return std::unexpected("Invalid uncaptured recovery path.");
         result.uncaptured.emplace(path);
     }
-    (void)doc["inventory_complete"].get(result.inventory_complete);
+    std::ignore = doc["inventory_complete"].get(result.inventory_complete);
     simdjson::dom::array roots;
     if (!doc["roots"].get(roots)) for (auto root : roots) {
         std::string_view path;
@@ -328,8 +329,8 @@ std::expected<RecoveryManifest, std::string> RecoveryStore::load(const fs::path&
             return std::unexpected("Invalid recovery file entry.");
         entry.before = {std::string(before), static_cast<unsigned>(mode)};
         entry.after = {std::string(after), static_cast<unsigned>(after_mode)};
-        (void)file["stamp"].get(entry.before_stamp);  // Optional: older manifests have none.
-        (void)file["after_stamp"].get(entry.after_stamp);
+        std::ignore = file["stamp"].get(entry.before_stamp);  // Optional: older manifests have none.
+        std::ignore = file["after_stamp"].get(entry.after_stamp);
         if (!result.entries.emplace(fs::path(path), std::move(entry)).second)
             return std::unexpected("Duplicate recovery path.");
     }

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <fstream>
 #include <filesystem>
+#include <tuple>
 #include "core/llm/KimiModelTraits.hpp"
 #include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/routing/PolicyLoader.hpp"
@@ -546,6 +547,8 @@ SubagentConfig merge_subagent(const SubagentConfig& base, const SubagentConfig& 
     if (overlay.allow_task_tool.has_value()) merged.allow_task_tool = overlay.allow_task_tool;
     if (overlay.enabled.has_value()) merged.enabled = overlay.enabled;
     if (overlay.max_steps.has_value()) merged.max_steps = overlay.max_steps;
+    if (overlay.isolated.has_value()) merged.isolated = overlay.isolated;
+    if (overlay.read_only.has_value()) merged.read_only = overlay.read_only;
     return merged;
 }
 
@@ -961,6 +964,12 @@ SubagentConfig parse_subagent(simdjson::dom::object subagent_obj, SubagentConfig
     if (!subagent_obj["enabled"].get(bool_value)) {
         subagent.enabled = bool_value;
     }
+    if (!subagent_obj["isolated"].get(bool_value)) {
+        subagent.isolated = bool_value;
+    }
+    if (!subagent_obj["read_only"].get(bool_value)) {
+        subagent.read_only = bool_value;
+    }
 
     int64_t max_steps = 0;
     if (!subagent_obj["max_steps"].get(max_steps)) {
@@ -1327,7 +1336,7 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed,
         if (mcp_arr.size() == 0) parsed.mcp_servers.clear();
         for (simdjson::dom::element srv : mcp_arr) {
             std::string_view name;
-            (void)srv["name"].get(name);
+            std::ignore = srv["name"].get(name);
             auto existing = defaults ? std::ranges::find(parsed.mcp_servers, name, &McpServerConfig::name)
                                      : parsed.mcp_servers.end();
             McpServerConfig server = existing == parsed.mcp_servers.end() ? McpServerConfig{} : *existing;
