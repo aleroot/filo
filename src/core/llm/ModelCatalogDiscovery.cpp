@@ -396,6 +396,10 @@ void discover_and_register_models_in_background(
 }
 
 ModelCatalogDiscoveryService& ModelCatalogDiscoveryService::instance() {
+    // The worker can still publish and log a result while its jthread is
+    // joining at shutdown. Construct these dependencies first so they outlive it.
+    (void)ModelCatalogAvailability::instance();
+    (void)core::logging::Logger::get_instance();
     static ModelCatalogDiscoveryService service;
     return service;
 }
