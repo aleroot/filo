@@ -246,6 +246,17 @@ int HttpLLMProvider::max_context_size() const noexcept {
     return core::llm::get_max_context_size(model);
 }
 
+std::optional<int> HttpLLMProvider::auto_compaction_limit(std::string_view model) const noexcept {
+    try {
+        const auto info = provider_model_info(normalize_metadata_model(model, protocol_.get()));
+        if (info && info->auto_compact_token_limit)
+            return *info->auto_compact_token_limit;
+    } catch (...) {
+        // Catalog lookup is advisory; preserve the configured fallback.
+    }
+    return std::nullopt;
+}
+
 std::optional<ModelInfo> HttpLLMProvider::get_model_info() const {
     const std::string model =
         normalize_metadata_model(default_model_, protocol_.get());
@@ -542,6 +553,7 @@ ProviderCapabilities HttpLLMProvider::capabilities() const {
         .supports_tool_calls = true,
         .is_local = is_ollama && looks_like_loopback_base_url(base_url_),
         .supports_parallel_requests = true,
+        .supports_mid_turn_compaction = protocol_ && protocol_->supports_mid_turn_compaction(),
     };
 }
 
@@ -635,7 +647,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             && reasoning_profile.has_value()
             && (reasoning_profile->complete
                 || reasoning_profile->catalog_default_effort
-                       .has_value())) {
+                       .has_value()
+                || reasoning_profile->summary_supported.has_value()
+                || reasoning_profile->default_summary.has_value())) {
             effective_request.catalog_reasoning = reasoning_profile;
         }
         if (metadata_info.has_value()

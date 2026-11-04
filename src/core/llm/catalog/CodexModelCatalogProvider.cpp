@@ -62,7 +62,8 @@ namespace {
 
 [[nodiscard]] ModelInfo decode_codex_model(
     const catalog::JsonObjectView& model,
-    std::string_view provider_name) {
+    std::string_view provider_name,
+    bool codex_controls) {
     ModelInfo info;
     if (!model.string("slug", info.canonical_id)) {
         (void)model.string("id", info.canonical_id);
@@ -96,6 +97,17 @@ namespace {
     info.max_reasoning_tokens = model.first_integer(
         {"max_reasoning_tokens", "reasoning_max_tokens"});
     info.reasoning = catalog::compatible_reasoning_profile(model);
+    if (codex_controls) {
+        if (model.boolean("use_responses_lite")) info.wire_protocol = "responses_lite";
+        info.reasoning.summary_supported = model.optional_boolean("supports_reasoning_summary_parameter");
+        std::string summary;
+        if (model.string("default_reasoning_summary", summary)) {
+            info.reasoning.default_summary = std::move(summary);
+        }
+        if (const auto limit = model.integer("auto_compact_token_limit"); limit > 0) {
+            info.auto_compact_token_limit = limit;
+        }
+    }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);
     }
@@ -124,9 +136,11 @@ std::string CodexModelCatalogProvider::model_list_path(
         + std::string(core::auth::codex_cli::client_version());
 }
 
-ModelCatalogResult catalog::parse_codex_style_model_catalog(
+namespace {
+ModelCatalogResult parse_models(
     std::string_view body,
-    std::string_view provider_name) {
+    std::string_view provider_name,
+    bool codex_controls) {
     simdjson::dom::parser parser;
     simdjson::dom::element document;
     ModelCatalogResult result =
@@ -143,17 +157,23 @@ ModelCatalogResult catalog::parse_codex_style_model_catalog(
         simdjson::dom::object object;
         if (element.get(object) != simdjson::SUCCESS) continue;
         ModelInfo info = decode_codex_model(
-            catalog::JsonObjectView(object), provider_name);
+            catalog::JsonObjectView(object), provider_name, codex_controls);
         if (!info.canonical_id.empty()) {
             result.models.push_back(std::move(info));
         }
     }
     return result;
 }
+} // namespace
+
+ModelCatalogResult catalog::parse_codex_style_model_catalog(
+    std::string_view body, std::string_view provider_name) {
+    return parse_models(body, provider_name, false);
+}
 
 ModelCatalogResult CodexModelCatalogProvider::parse_models_response(
     std::string_view body) const {
-    return catalog::parse_codex_style_model_catalog(body, provider_name_);
+    return parse_models(body, provider_name_, true);
 }
 
 } // namespace core::llm

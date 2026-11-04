@@ -616,6 +616,7 @@ public:
     [[nodiscard]] virtual bool supports_websocket_transport() const noexcept {
         return false;
     }
+    [[nodiscard]] virtual bool supports_mid_turn_compaction() const noexcept { return false; }
 
     [[nodiscard]] virtual std::string build_websocket_url(
         [[maybe_unused]] std::string_view base_url,

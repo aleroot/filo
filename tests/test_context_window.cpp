@@ -11,12 +11,16 @@ class FixedContextProvider final : public core::llm::LLMProvider {
 public:
     int max_context_tokens = 0;
     std::string last_model;
+    std::optional<int> compact_limit;
 
     void stream_response(const core::llm::ChatRequest&,
                          std::function<void(const core::llm::StreamChunk&)>) override {}
 
     [[nodiscard]] int max_context_size() const noexcept override {
         return max_context_tokens;
+    }
+    [[nodiscard]] std::optional<int> auto_compaction_limit(std::string_view) const noexcept override {
+        return compact_limit;
     }
 
     [[nodiscard]] std::string get_last_model() const override {
@@ -32,6 +36,19 @@ core::llm::Message message_with_chars(std::size_t chars) {
 }
 
 } // namespace
+
+TEST_CASE("Context compaction respects a provider catalog limit", "[context][window]") {
+    auto provider = std::make_shared<FixedContextProvider>();
+    provider->max_context_tokens = 100000;
+    provider->compact_limit = 20000;
+    const auto decision = core::context::ContextWindowTracker::compaction_decision(
+        {message_with_chars(80000)}, provider, "model", {});
+    CHECK(decision.effective_token_threshold == 20000);
+    CHECK(decision.should_compact);
+    const auto disabled = core::context::ContextWindowTracker::compaction_decision(
+        {message_with_chars(80000)}, provider, "model", {.configured_token_threshold = 0});
+    CHECK_FALSE(disabled.should_compact);
+}
 
 TEST_CASE("ContextWindowTracker estimates live history snapshots", "[context][window]") {
     std::vector<core::llm::Message> history{

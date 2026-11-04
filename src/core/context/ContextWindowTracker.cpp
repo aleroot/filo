@@ -111,8 +111,13 @@ CompactionDecision ContextWindowTracker::compaction_decision(
     const int32_t max_context_tokens =
         resolve_max_context_tokens(provider, model);
     const std::size_t estimated_context_tokens = context_tokens(history, provider);
-    const int effective_threshold =
+    int effective_threshold =
         effective_compaction_threshold(policy, max_context_tokens);
+    if (effective_threshold > 0 && provider) {
+        if (const auto limit = provider->auto_compaction_limit(model); limit && *limit > 0) {
+            effective_threshold = std::min(effective_threshold, *limit);
+        }
+    }
 
     return CompactionDecision{
         .should_compact = effective_threshold > 0

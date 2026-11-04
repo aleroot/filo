@@ -6,6 +6,7 @@
 #include "core/llm/Models.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/Tool.hpp"
 #include "TestSessionContext.hpp"
 #include <atomic>
 #include <filesystem>
@@ -44,6 +45,18 @@ public:
     }
 };
 
+class CompactLoopTool final : public core::tools::Tool {
+public:
+    core::tools::ToolDefinition get_definition() const override {
+        return {.name = "test_compaction_loop", .title = "Compaction test",
+                .description = "Returns a large result.", .parameters = {},
+                .annotations = {.read_only_hint = true}};
+    }
+    std::string execute(const std::string&, const core::context::SessionContext&) override {
+        return std::string(4000, 'x');
+    }
+};
+
 struct TempDir {
     std::filesystem::path path;
     explicit TempDir(std::filesystem::path p) : path(std::move(p)) {
@@ -62,6 +75,43 @@ bool is_compaction_request(const core::llm::ChatRequest& request) {
 }
 
 } // namespace
+
+TEST_CASE("Agent compacts after tool results before continuing a turn", "[agent][session][compaction]") {
+    auto provider = std::make_shared<MockProvider>();
+    provider->caps.supports_mid_turn_compaction = true;
+    auto& tools = core::tools::ToolManager::get_instance();
+    tools.register_tool(std::make_shared<CompactLoopTool>());
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context());
+    agent->set_auto_compact_threshold(200);
+    std::atomic<int> normal_requests{0};
+    std::atomic<bool> compacted{false};
+    std::atomic<bool> continued_after_compaction{false};
+    provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
+        if (is_compaction_request(req)) {
+            compacted.store(true);
+            callback(core::llm::StreamChunk::make_content("Checkpoint for continuing."));
+        } else if (normal_requests.fetch_add(1) == 0) {
+            core::llm::ToolCall call;
+            call.id = "call_compact";
+            call.function.name = "test_compaction_loop";
+            call.function.arguments = "{}";
+            callback(core::llm::StreamChunk::make_tools({call}));
+        } else {
+            continued_after_compaction.store(compacted.load());
+            agent->set_auto_compact_threshold(0);
+            callback(core::llm::StreamChunk::make_content("Done."));
+        }
+        callback(core::llm::StreamChunk::make_final());
+    };
+    std::promise<void> done;
+    auto future = done.get_future();
+    agent->send_message("Use the tool.", [](const std::string&) {},
+                        [](const std::string&, const std::string&) {}, [&] { done.set_value(); });
+    REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(compacted.load());
+    CHECK(continued_after_compaction.load());
+}
 
 TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][session]") {
     auto provider = std::make_shared<MockProvider>();

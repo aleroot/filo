@@ -287,6 +287,8 @@ struct ModelInfo {
     /// send (Codex: `default_verbosity` when `support_verbosity`). Empty means
     /// omit the field. Provider-scoped like wire_protocol.
     std::string default_verbosity = {};
+    /// Provider-advertised automatic compaction threshold, when supplied.
+    std::optional<int32_t> auto_compact_token_limit = {};
     
     // ------------------------------------------------------------------------
     // Metadata

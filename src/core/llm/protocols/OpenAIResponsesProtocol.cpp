@@ -61,12 +61,12 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
     return url + "/responses";
 }
 
-void append_tool_schema(
+void append_tool_array(
     std::string& payload,
     const std::vector<Tool>& tools,
     std::span<const std::string_view> hosted_tool_types = {},
     std::optional<core::tools::schema::StrictDialect> strict_dialect = std::nullopt) {
-    payload += R"(,"tools":[)";
+    payload += '[';
     bool first = true;
     for (const std::string_view type : hosted_tool_types) {
         if (!first) payload += ',';
@@ -98,6 +98,15 @@ void append_tool_schema(
         payload += "}";
     }
     payload += "]";
+}
+
+void append_tool_schema(
+    std::string& payload,
+    const std::vector<Tool>& tools,
+    std::span<const std::string_view> hosted_tool_types = {},
+    std::optional<core::tools::schema::StrictDialect> strict_dialect = std::nullopt) {
+    payload += R"(,"tools":)";
+    append_tool_array(payload, tools, hosted_tool_types, strict_dialect);
 }
 
 [[nodiscard]] std::string collect_instructions(const ChatRequest& req) {
@@ -168,7 +177,8 @@ void append_message_item(std::string& payload,
 
 void append_function_call_item(std::string& payload,
                                const ToolCall& call,
-                               std::size_t fallback_idx) {
+                               std::size_t fallback_idx,
+                               bool namespaced = false) {
     const std::string call_id = !call.id.empty()
         ? call.id
         : "call_" + std::to_string(fallback_idx);
@@ -180,6 +190,7 @@ void append_function_call_item(std::string& payload,
     payload += core::utils::escape_json_string(call_id);
     payload += R"(","name":")";
     payload += core::utils::escape_json_string(call.function.name);
+    if (namespaced) payload += R"(","namespace":"functions)";
     payload += R"(","arguments":")";
     payload += core::utils::escape_json_string(arguments);
     payload += R"("})";
@@ -202,7 +213,7 @@ void append_function_call_output_item(std::string& payload,
 // reasoning. Only replay them when they still describe the current history:
 // tool normalization or a history edit must not resurrect stale output.
 [[nodiscard]] std::optional<std::vector<std::string>> native_response_items(
-    const Message& message) {
+    const Message& message, bool namespaced) {
     std::vector<std::string> items;
     std::string text;
     std::size_t tool_index = 0;
@@ -232,7 +243,7 @@ void append_function_call_output_item(std::string& payload,
             // Argument coercion may update a call after generation. Preserve
             // its surrounding message phases while replaying the current call.
             std::string serialized;
-            append_function_call_item(serialized, call, tool_index);
+            append_function_call_item(serialized, call, tool_index, namespaced);
             items.push_back(std::move(serialized));
             continue;
         } else if (type != "reasoning") {
@@ -246,7 +257,8 @@ void append_function_call_output_item(std::string& payload,
 
 [[nodiscard]] std::vector<std::string> build_input_items(
     const std::vector<Message>& messages,
-    bool include_system_messages = false) {
+    bool include_system_messages = false,
+    bool namespaced = false) {
     std::vector<std::string> items;
     std::size_t fallback_idx = 0;
 
@@ -254,7 +266,7 @@ void append_function_call_output_item(std::string& payload,
         if (msg.role == "system" && !include_system_messages) continue;
 
         if (msg.role == "assistant") {
-            if (auto native = native_response_items(msg)) {
+            if (auto native = native_response_items(msg, namespaced)) {
                 items.insert(items.end(), native->begin(), native->end());
                 continue;
             }
@@ -285,7 +297,7 @@ void append_function_call_output_item(std::string& payload,
             for (const auto& tc : msg.tool_calls) {
                 if (tc.function.name.empty()) continue;
                 std::string item;
-                append_function_call_item(item, tc, ++fallback_idx);
+                append_function_call_item(item, tc, ++fallback_idx, namespaced);
                 items.push_back(std::move(item));
             }
         }
@@ -294,19 +306,36 @@ void append_function_call_output_item(std::string& payload,
     return items;
 }
 
+[[nodiscard]] bool responses_lite(const ChatRequest& request) {
+    return request.catalog_wire_protocol == "responses_lite";
+}
+
+[[nodiscard]] std::string lite_tools_item(const ChatRequest& request) {
+    if (request.tools.empty()) return {};
+    std::string item = R"({"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","description":"","tools":)";
+    append_tool_array(item, request.tools, {},
+        configured_strict_tool_dialect(ToolSchemaWire::OpenAI, request.model));
+    item += "}]}";
+    return item;
+}
+
 // The ChatGPT backend rejects `instructions`. The official client sends the
 // same stable prompt as a developer message at the front of `input`.
 [[nodiscard]] std::vector<std::string> codex_input_items(const ChatRequest& request) {
-    auto items = build_input_items(request.messages);
+    auto items = build_input_items(request.messages, false, responses_lite(request));
     const std::string instructions = collect_instructions(request);
-    if (instructions.empty()) return items;
-
-    Message developer;
-    developer.role = "developer";
-    developer.content = instructions;
-    std::string item;
-    append_message_item(item, developer);
-    items.insert(items.begin(), std::move(item));
+    if (!instructions.empty()) {
+        Message developer;
+        developer.role = "developer";
+        developer.content = instructions;
+        std::string item;
+        append_message_item(item, developer);
+        items.insert(items.begin(), std::move(item));
+    }
+    if (responses_lite(request)) {
+        if (auto tools = lite_tools_item(request); !tools.empty())
+            items.insert(items.begin(), std::move(tools));
+    }
     return items;
 }
 
@@ -355,7 +384,9 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         }
 
         std::string serialized;
-        append_function_call_item(serialized, call, 0);
+        std::string_view ns;
+        append_function_call_item(serialized, call, 0,
+            item["namespace"].get(ns) == simdjson::SUCCESS && ns == "functions");
         return serialized;
     }
 
@@ -935,10 +966,10 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     }
     if (options.include_reasoning_summary
         || options.reasoning_effort_override.has_value()
+        || options.tools_in_input
         || reasoning.supports_effort()) {
-        // Public OpenAI/Grok/DashScope send effort only. Codex opts into
-        // `summary: auto` via SerializationOptions because the ChatGPT
-        // backend 400s when that field is missing.
+        // Public OpenAI/Grok/DashScope send effort only. Codex defaults to
+        // `summary: auto` unless its catalog specifies otherwise.
         std::string effort = options.reasoning_effort_override.has_value()
             ? std::string(*options.reasoning_effort_override)
             : reasoning.supports_effort()
@@ -959,7 +990,7 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
                 if (std::ranges::find(levels, effort) == levels.end()) effort.clear();
             }
         }
-        if (!effort.empty() || options.include_reasoning_summary) {
+        if (!effort.empty() || options.include_reasoning_summary || options.tools_in_input) {
             payload += R"(,"reasoning":{)";
             bool first = true;
             if (!effort.empty()) {
@@ -970,7 +1001,14 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
             }
             if (options.include_reasoning_summary) {
                 if (!first) payload += ',';
-                payload += R"("summary":"auto")";
+                payload += R"("summary":")";
+                payload += core::utils::escape_json_string(options.reasoning_summary);
+                payload += '"';
+                first = false;
+            }
+            if (options.tools_in_input) {
+                if (!first) payload += ',';
+                payload += R"("context":"all_turns")";
             }
             payload += '}';
         }
@@ -980,9 +1018,9 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
 
     const bool has_tools = !req.tools.empty() || !options.hosted_tool_types.empty();
     payload += R"(,"tool_choice":"auto","parallel_tool_calls":)";
-    payload += has_tools ? "true" : "false";
+    payload += has_tools && !options.tools_in_input ? "true" : "false";
 
-    if (has_tools) {
+    if (has_tools && !options.tools_in_input) {
         append_tool_schema(
             payload,
             req.tools,
@@ -1115,11 +1153,20 @@ CodexResponsesProtocol::model_catalog(std::string_view provider_name) const {
 std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     const ChatRequest& request,
     const std::vector<std::string>& input_items,
-    std::optional<std::string_view> previous_response_id_override) const {
+    std::optional<std::string_view> previous_response_id_override,
+    bool websocket) const {
     SerializationOptions options;
-    options.include_reasoning_summary = true;
+    const auto* reasoning = request.catalog_reasoning ? &*request.catalog_reasoning : nullptr;
+    options.include_reasoning_summary = !reasoning || reasoning->summary_supported.value_or(true);
+    if (reasoning && reasoning->default_summary) {
+        const auto& summary = *reasoning->default_summary;
+        if (summary == "none") options.include_reasoning_summary = false;
+        else if (summary == "auto" || summary == "concise" || summary == "detailed")
+            options.reasoning_summary = summary;
+    }
     options.include_catalog_verbosity = true;
     options.include_sampling_controls = false;
+    options.tools_in_input = responses_lite(request);
     std::string payload = serialize_with_input_items(
         request, input_items, previous_response_id_override, options);
     const std::string thread_id = request.session_id.empty()
@@ -1134,6 +1181,9 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     metadata += core::utils::escape_json_string(thread_id);
     metadata += R"(","x-codex-window-id":")";
     metadata += core::utils::escape_json_string(window_id);
+    if (websocket && responses_lite(request)) {
+        metadata += R"(","ws_request_header_x_openai_internal_codex_responses_lite":"true)";
+    }
     metadata += R"("})";
     append_member_before_object_end(payload, metadata);
     return payload;
@@ -1163,6 +1213,8 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = std::string(core::auth::codex_cli::kOriginator);
     headers["version"] = std::string(core::auth::codex_cli::kClientVersion);
+    if (responses_lite(request)) headers["x-openai-internal-codex-responses-lite"] = "true";
+    else headers.erase("x-openai-internal-codex-responses-lite");
     // Current Codex sends the hyphenated names. Filo has always sent the
     // underscore form as well, so it stays.
     headers["session_id"] = thread_id;
@@ -1245,6 +1297,10 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     // Compare request controls and stable instructions without copying the
     // complete conversation just to discard it for the signature.
     std::vector<std::string> signature_input;
+    if (responses_lite(request)) {
+        if (auto tools = lite_tools_item(request); !tools.empty())
+            signature_input.push_back(std::move(tools));
+    }
     if (const auto instructions = collect_instructions(request); !instructions.empty()) {
         Message developer{.role = "developer", .content = instructions};
         std::string item;
@@ -1254,7 +1310,7 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     const std::string request_signature = serialize_codex_with_input_items(
         request,
         signature_input,
-        std::string_view{});
+        std::string_view{}, true);
 
     std::string incremental_previous_response_id;
     std::vector<std::string> incremental_input_items;
@@ -1291,8 +1347,8 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     const bool use_incremental = !incremental_previous_response_id.empty();
     std::string payload = use_incremental
         ? serialize_codex_with_input_items(
-            request, incremental_input_items, std::string_view{incremental_previous_response_id})
-        : serialize_codex_with_input_items(request, full_input_items);
+            request, incremental_input_items, std::string_view{incremental_previous_response_id}, true)
+        : serialize_codex_with_input_items(request, full_input_items, std::nullopt, true);
 
     if (prewarm) {
         append_member_before_object_end(payload, R"("generate":false)");
@@ -1416,6 +1472,7 @@ std::string CodexResponsesProtocol::websocket_connection_key(
     for (std::string_view name : {
              std::string_view{"Authorization"},
              std::string_view{"chatgpt-account-id"},
+             std::string_view{"x-openai-internal-codex-responses-lite"},
              std::string_view{"OpenAI-Beta"}}) {
         if (auto value = transport::find_header(headers, name);
             value.has_value() && !value->empty()) {

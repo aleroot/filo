@@ -94,6 +94,8 @@ struct ModelReasoningProfile {
     bool complete = false;
     std::optional<std::string> catalog_default_effort;
     std::vector<std::string> supported_efforts;
+    std::optional<bool> summary_supported;
+    std::optional<std::string> default_summary;
 };
 
 } // namespace core::llm

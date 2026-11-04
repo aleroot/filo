@@ -25,6 +25,7 @@ struct ProviderCapabilities {
     bool supports_tool_calls = true;
     bool is_local = false;
     bool supports_parallel_requests = false;
+    bool supports_mid_turn_compaction = false;
 };
 
 struct ProviderMetadata {
@@ -143,6 +144,10 @@ public:
      *        HTTP-based providers should override this based on the model's specs.
      */
     [[nodiscard]] virtual int max_context_size() const noexcept { return 0; }
+
+    /// Optional provider catalog limit for automatic compaction of this model.
+    [[nodiscard]] virtual std::optional<int> auto_compaction_limit(
+        [[maybe_unused]] std::string_view model) const noexcept { return std::nullopt; }
 
     /**
      * @brief Return the token usage from the most recent completed request.

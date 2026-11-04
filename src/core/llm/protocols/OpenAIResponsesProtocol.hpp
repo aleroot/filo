@@ -96,11 +96,13 @@ protected:
         bool include_store = true;
         bool include_prompt_cache_key = true;
         bool include_response_include = true;
-        // Codex requires `reasoning.summary`; public OpenAI, Grok, and DashScope omit it.
+        // Codex defaults to a summary, subject to its model catalog.
         bool include_reasoning_summary = false;
+        std::string reasoning_summary = "auto";
         // Codex sends its catalog's `default_verbosity` as `text.verbosity`.
         bool include_catalog_verbosity = false;
         bool include_sampling_controls = true;
+        bool tools_in_input = false;
         std::optional<std::string_view> reasoning_effort_override;
         std::span<const std::string_view> hosted_tool_types;
     };
@@ -201,6 +203,7 @@ public:
     void observe_response_headers(const cpr::Header& headers,
                                   const ChatRequest& request) override;
     [[nodiscard]] bool supports_websocket_transport() const noexcept override { return true; }
+    [[nodiscard]] bool supports_mid_turn_compaction() const noexcept override { return true; }
     [[nodiscard]] std::string build_websocket_url(std::string_view base_url,
                                                   std::string_view model) const override;
     void prepare_websocket_headers(cpr::Header& headers,
@@ -268,7 +271,8 @@ private:
     [[nodiscard]] std::string serialize_codex_with_input_items(
         const ChatRequest& request,
         const std::vector<std::string>& input_items,
-        std::optional<std::string_view> previous_response_id_override = std::nullopt) const;
+        std::optional<std::string_view> previous_response_id_override = std::nullopt,
+        bool websocket = false) const;
     [[nodiscard]] std::string serialize_websocket_prewarm_request(
         const ChatRequest& request) const;
     [[nodiscard]] std::string serialize_websocket_request_impl(

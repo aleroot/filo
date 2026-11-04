@@ -585,7 +585,8 @@ private:
     // status_log_callback receives out-of-band lifecycle status (compaction
     // progress). It must be distinct from the streaming assistant chunk
     // callback so status text never lands in the assistant response body.
-    void check_auto_compact(std::function<void(const std::string&)> status_log_callback);
+    bool check_auto_compact(std::function<void(const std::string&)> status_log_callback,
+                            std::function<void(bool)> finished_callback = {});
     void run_memory_background_review(
         core::llm::protocols::RateLimitInfo rate_limit,
         std::function<void(const std::string&)> status_log_callback);

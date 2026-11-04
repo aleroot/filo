@@ -3547,6 +3547,21 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 self->run_efficiency_rotation_if_needed(
                     turn_callbacks.min_context_utilization_for_rotation);
             }
+            if (turn_state->provider && turn_state->provider->capabilities().supports_mid_turn_compaction
+                && self->check_auto_compact(
+                    turn_callbacks.on_status_log,
+                    [self, text_callback, tool_callback, done_callback,
+                     turn_callbacks, turn_state](bool compacted) {
+                        if (!self->is_turn_current(turn_state) || self->is_stop_requested()) {
+                            done_callback();
+                            return;
+                        }
+                        if (compacted) turn_state->prompt_plan.reset();
+                        self->step(text_callback, tool_callback, done_callback,
+                                   turn_callbacks, turn_state);
+                    })) {
+                return;
+            }
             self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
             } catch (const std::exception& e) {
                 core::logging::error("Agent tool loop crashed: {}", e.what());
@@ -3956,13 +3971,8 @@ void Agent::apply_tool_recovery_outcome(const core::llm::ToolCall& call,
     }
 }
 
-void Agent::check_auto_compact(std::function<void(const std::string&)> status_log_callback) {
-    // Only check compaction when turn is complete (not in the middle of multi-step execution)
-    // This is called from:
-    // 1. After assistant text response (no tool calls) - OK to check
-    // 2. After tool execution before next step - NOT OK, let the loop continue
-    // The caller must ensure we're at a natural conversation boundary.
-    
+bool Agent::check_auto_compact(std::function<void(const std::string&)> status_log_callback,
+                               std::function<void(bool)> finished_callback) {
     int threshold = 0;
     HistoryCompactionPlan plan;
     std::shared_ptr<core::llm::LLMProvider> provider;
@@ -3972,7 +3982,7 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
     core::context::CompactionDecision compaction;
     {
         std::lock_guard lock(history_mutex_);
-        if (compaction_in_progress_) return;
+        if (compaction_in_progress_) return false;
         threshold = auto_compact_threshold_;
         const bool use_model_aware_default_threshold =
             auto_compact_uses_model_window_default_;
@@ -3999,9 +4009,9 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
     }
 
     // Auto-compact disabled
-    if (threshold <= 0) return;
+    if (threshold <= 0) return false;
 
-    if (!compaction.should_compact) return;
+    if (!compaction.should_compact) return false;
 
     launch_compaction_transaction(
         std::move(plan),
@@ -4010,7 +4020,8 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
         std::move(provider),
         std::move(model),
         HistoryCompactionReason::Auto,
-        std::move(status_log_callback));
+        std::move(status_log_callback), {}, std::move(finished_callback));
+    return true;
 }
 
 void Agent::update_session_context(std::function<void(core::context::SessionContext&)> modifier) {

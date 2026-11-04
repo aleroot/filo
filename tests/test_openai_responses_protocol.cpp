@@ -78,7 +78,7 @@ TEST_CASE("OpenAIResponsesProtocol omits reasoning.summary on the public API",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning")"));
 }
 
-TEST_CASE("CodexResponsesProtocol always sends reasoning.summary",
+TEST_CASE("CodexResponsesProtocol honors catalog reasoning summaries",
           "[openai][responses][codex][serializer][reasoning]") {
     CodexResponsesProtocol protocol;
     ChatRequest req;
@@ -88,6 +88,55 @@ TEST_CASE("CodexResponsesProtocol always sends reasoning.summary",
     const std::string payload = protocol.serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"summary":"auto"})"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("effort")"));
+    req.catalog_reasoning.emplace();
+    req.catalog_reasoning->summary_supported = false;
+    CHECK_THAT(protocol.serialize(req), !Catch::Matchers::ContainsSubstring(R"("summary")"));
+    req.catalog_reasoning->summary_supported = true;
+    req.catalog_reasoning->default_summary = "detailed";
+    CHECK_THAT(protocol.serialize(req), Catch::Matchers::ContainsSubstring(R"("summary":"detailed")"));
+    req.catalog_reasoning->default_summary = "none";
+    CHECK_THAT(protocol.serialize(req), !Catch::Matchers::ContainsSubstring(R"("summary")"));
+}
+
+TEST_CASE("Codex Responses Lite carries tools in input and advertises its wire mode",
+          "[openai][responses][codex][serializer]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "test-model";
+    req.catalog_wire_protocol = "responses_lite";
+    req.messages.push_back(Message{.role = "user", .content = "Hello"});
+    req.tools.push_back(Tool{.function = {.name = "lookup", .description = "Look up data"}});
+    const auto payload = protocol.serialize(req);
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(simdjson::padded_string(payload)).get(doc) == simdjson::SUCCESS);
+    simdjson::dom::array input;
+    REQUIRE(doc["input"].get(input) == simdjson::SUCCESS);
+    REQUIRE(input.size() == 2);
+    auto first = *input.begin();
+    CHECK(std::string_view(first["type"]) == "additional_tools");
+    CHECK(std::string_view(first["tools"].at(0)["name"]) == "functions");
+    CHECK(std::string_view(first["tools"].at(0)["tools"].at(0)["name"]) == "lookup");
+    CHECK(doc["tools"].error() == simdjson::NO_SUCH_FIELD);
+    CHECK(std::string_view(doc["reasoning"]["context"]) == "all_turns");
+    cpr::Header headers;
+    protocol.prepare_headers(headers, req, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-openai-internal-codex-responses-lite") == "true");
+    req.transport_turn_id = "turn";
+    const auto ws_payload = protocol.serialize_websocket_request(req);
+    CHECK_THAT(ws_payload, Catch::Matchers::ContainsSubstring(
+        R"("ws_request_header_x_openai_internal_codex_responses_lite":"true")"));
+    simdjson::dom::element ws_doc;
+    REQUIRE(parser.parse(simdjson::padded_string(ws_payload)).get(ws_doc) == simdjson::SUCCESS);
+    ToolCall call;
+    call.id = "call_1";
+    call.function.name = "lookup";
+    call.function.arguments = "{}";
+    req.messages.push_back(Message{.role = "assistant", .tool_calls = {call}});
+    req.messages.push_back(Message{.role = "tool", .content = "result", .tool_call_id = "call_1"});
+    const auto replay = protocol.serialize(req);
+    REQUIRE_THAT(replay, Catch::Matchers::ContainsSubstring(
+        R"("name":"lookup","namespace":"functions","arguments":"{}")"));
 }
 
 TEST_CASE("CodexResponsesProtocol matches Codex stream idle and retry budgets",

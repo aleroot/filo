@@ -417,6 +417,10 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
           "max_context_window": 400000,
           "max_output_tokens": 100000,
           "max_reasoning_tokens": 25000,
+          "supports_reasoning_summary_parameter": false,
+          "default_reasoning_summary": "detailed",
+          "auto_compact_token_limit": 120000,
+          "use_responses_lite": true,
           "experimental_supported_tools": ["apply_patch"]
         },
         {
@@ -455,6 +459,10 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(codex.context_window == 272000);
     CHECK(codex.max_output_tokens == 100000);
     CHECK(codex.max_reasoning_tokens == 25000);
+    CHECK(codex.reasoning.summary_supported == false);
+    CHECK(codex.reasoning.default_summary == "detailed");
+    CHECK(codex.auto_compact_token_limit == 120000);
+    CHECK(codex.wire_protocol == "responses_lite");
     CHECK(codex.tier == ModelTier::Reasoning);
     CHECK(codex.supports(ModelCapability::FunctionCalling));
     CHECK(codex.supports(ModelCapability::ParallelToolCalls));

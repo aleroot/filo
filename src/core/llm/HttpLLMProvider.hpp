@@ -122,6 +122,7 @@ public:
      *        Recognizes common models and their context window sizes.
      */
     [[nodiscard]] int max_context_size() const noexcept override;
+    [[nodiscard]] std::optional<int> auto_compaction_limit(std::string_view model) const noexcept override;
 
     /**
      * @brief Get API-first model information with registry fallback.
