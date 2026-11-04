@@ -1929,12 +1929,23 @@ RunResult run(RunOptions opts) {
 
     // ── Helper lambdas ───────────────────────────────────────────────────────
 
+    // Prompt history is scoped to the visible thread: Up prefers what this
+    // thread sent, then the rest of its workspace, then everything else.
+    auto prompt_history_scope = [&]() {
+        return core::history::PromptHistoryScope{
+            .session_id = session_id,
+            .workspace = agent->workspace_snapshot().primary().string(),
+        };
+    };
+
     auto navigate_history_prev = [&]() -> bool {
-        return prompt_history.navigate_prev(input_text, input_cursor_position);
+        return prompt_history.navigate_prev(
+            prompt_history_scope(), input_text, input_cursor_position);
     };
 
     auto navigate_history_next = [&]() -> bool {
-        return prompt_history.navigate_next(input_text, input_cursor_position);
+        return prompt_history.navigate_next(
+            prompt_history_scope(), input_text, input_cursor_position);
     };
 
     auto clear_screen = [&]() {
@@ -2001,6 +2012,7 @@ RunResult run(RunOptions opts) {
         next_lease->commit();
         current_runtime->set_lease(session_leases.retain(session_id));
         sync_runtime_metadata();
+        prompt_history.rename_session(previous_session_id, session_id);
         if (!thread_runtimes.rekey(previous_session_id, session_id)) {
             core::logging::warn(
                 "Could not rekey cleared thread runtime {} to {}.",
@@ -2627,7 +2639,6 @@ RunResult run(RunOptions opts) {
         command_picker.clear();
         mention_picker.clear();
         session_reference_picker.clear();
-        prompt_history.abandon_navigation();
         double_escape_state = {};
         quit_confirm_key.clear();
         quit_confirm_deadline = std::chrono::steady_clock::time_point::min();
@@ -3129,6 +3140,7 @@ RunResult run(RunOptions opts) {
         direct_shell_state->move_session_state(old_session_id, new_session_id);
         current_runtime->set_lease(session_leases.retain(new_session_id));
         sync_runtime_metadata();
+        prompt_history.rename_session(old_session_id, new_session_id);
         if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
             return std::unexpected("Failed to rekey the branch runtime.");
         }
@@ -3154,7 +3166,7 @@ RunResult run(RunOptions opts) {
         [runtime, runtime_agent, session_store, session_stats_registry, direct_shell_state,
          &thread_runtimes, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &wake_ui, &goal_manager,
+         &wake_ui, &goal_manager, &prompt_history,
          &session_leases](const core::session::SessionEfficiencyDecision& decision) {
             // Rotation rewrites session identity and selected presentation
             // state. Defer it while this runtime is hidden; the next visible
@@ -3286,6 +3298,7 @@ RunResult run(RunOptions opts) {
                 metadata.created_at = new_created_at;
                 metadata.file_path = session_store->compute_path(new_segment).string();
             });
+            prompt_history.rename_session(old_session_id, new_session_id);
             if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
                 core::logging::warn(
                     "Could not rekey rotated thread runtime {} to {}.",
@@ -6245,6 +6258,7 @@ RunResult run(RunOptions opts) {
         if (!thread_runtimes.erase(target)) {
             return "The thread became active while it was being closed.";
         }
+        prompt_history.forget_session(target);
 
         prompt_cache_watch.forget(target);
         auto dismissed_overlay = thread_modals.erase_session(target);
@@ -7851,7 +7865,7 @@ RunResult run(RunOptions opts) {
         if (input_text.empty()) return;
         std::string text = input_text;
         input_text.clear();
-        prompt_history.save(text);
+        prompt_history.save(prompt_history_scope(), text);
 
         // /remote takes no arguments; tolerate trailing whitespace/arguments
         // so it behaves like every other picker-advertised command.
@@ -9979,7 +9993,7 @@ RunResult run(RunOptions opts) {
             mention_picker.selected = 0;
 
             if (!input_text.empty()) {
-                prompt_history.save(input_text);
+                prompt_history.save(prompt_history_scope(), input_text);
                 input_text.clear();
                 input_cursor_position = 0;
                 append_history("\n↶  Draft cleared. Press Up to restore it.\n");

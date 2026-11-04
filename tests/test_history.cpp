@@ -2,6 +2,7 @@
 #include "core/history/PromptHistoryStore.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -214,68 +215,275 @@ TEST_CASE("PersistentPromptHistory navigation", "[history]") {
     int cursor = 12;
     
     // Navigate previous (should show third prompt)
-    CHECK(history.navigate_prev(input, cursor) == true);
+    CHECK(history.navigate_prev({}, input, cursor) == true);
     CHECK(input == "third prompt");
     CHECK(cursor == 12);  // Cursor at end
     
     // Navigate previous again (should show second prompt)
-    CHECK(history.navigate_prev(input, cursor) == true);
+    CHECK(history.navigate_prev({}, input, cursor) == true);
     CHECK(input == "second prompt");
     
     // Navigate previous again (should show first prompt)
-    CHECK(history.navigate_prev(input, cursor) == true);
+    CHECK(history.navigate_prev({}, input, cursor) == true);
     CHECK(input == "first prompt");
     
     // At oldest entry - should stay at first
-    CHECK(history.navigate_prev(input, cursor) == true);
+    CHECK(history.navigate_prev({}, input, cursor) == true);
     CHECK(input == "first prompt");
     
     // Navigate next (should show second prompt)
-    CHECK(history.navigate_next(input, cursor) == true);
+    CHECK(history.navigate_next({}, input, cursor) == true);
     CHECK(input == "second prompt");
     
     // Navigate next (should show third prompt)
-    CHECK(history.navigate_next(input, cursor) == true);
+    CHECK(history.navigate_next({}, input, cursor) == true);
     CHECK(input == "third prompt");
     
     // Navigate next (should restore original input)
-    CHECK(history.navigate_next(input, cursor) == true);
+    CHECK(history.navigate_next({}, input, cursor) == true);
     CHECK(input == "current typing");
     
     // At current input - navigate_next should return false
-    CHECK(history.navigate_next(input, cursor) == false);
+    CHECK(history.navigate_next({}, input, cursor) == false);
     
     std::filesystem::remove(temp_path);
 }
 
-TEST_CASE("PersistentPromptHistory abandon_navigation does not leak saved input",
-          "[history]") {
-    auto temp_path = std::filesystem::temp_directory_path()
-        / "filo_test_history_abandon.json";
-    std::filesystem::remove(temp_path);
+namespace {
 
-    auto store = std::make_shared<PromptHistoryStore>(temp_path);
-    REQUIRE(store->load());
-    store->add("first prompt");
-    store->add("second prompt");
+struct TempHistoryFile {
+    std::filesystem::path path;
 
+    explicit TempHistoryFile(std::string_view name)
+        : path(std::filesystem::temp_directory_path()
+               / std::format("{}_{}.json", name, ::getpid())) {
+        cleanup();
+    }
+    ~TempHistoryFile() { cleanup(); }
+
+    void cleanup() const {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(core::utils::lock_path_for(path), ec);
+    }
+};
+
+const PromptHistoryScope kThreadA{.session_id = "session-a", .workspace = "/work/app"};
+const PromptHistoryScope kThreadB{.session_id = "session-b", .workspace = "/work/app"};
+const PromptHistoryScope kOtherProject{.session_id = "session-c", .workspace = "/work/lib"};
+
+} // namespace
+
+TEST_CASE("PersistentPromptHistory prefers the composer's own thread",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_scoped");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
     PersistentPromptHistory history(store);
-    std::string input = "thread A draft";
-    int cursor = static_cast<int>(input.size());
 
-    REQUIRE(history.navigate_prev(input, cursor));
-    CHECK(input == "second prompt");
+    history.save(kThreadA, "a1");
+    history.save(kOtherProject, "lib1");
+    history.save(kThreadB, "b1");
+    history.save(kThreadA, "a2");
+    history.save(kThreadB, "b2");
 
-    history.abandon_navigation();
-    CHECK(history.navigate_next(input, cursor) == false);
-    CHECK(input == "second prompt");
+    std::string input;
+    int cursor = 0;
+    std::vector<std::string> seen;
+    while (history.navigate_prev(kThreadA, input, cursor)
+           && (seen.empty() || seen.back() != input)) {
+        seen.push_back(input);
+    }
+    // Own thread newest first, then the same workspace, then everything else.
+    CHECK(seen == std::vector<std::string>{"a2", "a1", "b2", "b1", "lib1"});
 
-    REQUIRE(history.navigate_prev(input, cursor));
-    CHECK(input == "second prompt");
-    REQUIRE(history.navigate_next(input, cursor));
-    CHECK(input == "second prompt");
+    input.clear();
+    REQUIRE(history.navigate_prev(kThreadB, input, cursor));
+    CHECK(input == "b2");
+}
 
-    std::filesystem::remove(temp_path);
+TEST_CASE("PersistentPromptHistory deduplicates across tiers", "[history][threads]") {
+    TempHistoryFile file("filo_test_history_dedupe");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+
+    history.save(kThreadA, "run the tests");
+    history.save(kThreadB, "run the tests");
+    history.save(kThreadB, "other");
+
+    std::string input;
+    int cursor = 0;
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "run the tests");
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "other");
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "other");  // oldest reached; no duplicate shown
+}
+
+TEST_CASE("PersistentPromptHistory browses each thread independently",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_independent");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+    history.save(kThreadA, "a1");
+    history.save(kThreadB, "b1");
+
+    // Thread A starts browsing with a draft, then the user switches tabs.
+    std::string a_input = "A draft";
+    int a_cursor = 0;
+    REQUIRE(history.navigate_prev(kThreadA, a_input, a_cursor));
+    CHECK(a_input == "a1");
+
+    // Thread B's composer is untouched by A's browse.
+    std::string b_input = "B draft";
+    int b_cursor = 0;
+    CHECK_FALSE(history.navigate_next(kThreadB, b_input, b_cursor));
+    CHECK(b_input == "B draft");
+    REQUIRE(history.navigate_prev(kThreadB, b_input, b_cursor));
+    CHECK(b_input == "b1");
+    REQUIRE(history.navigate_next(kThreadB, b_input, b_cursor));
+    CHECK(b_input == "B draft");
+
+    // Back on A: Down still restores A's own draft.
+    REQUIRE(history.navigate_next(kThreadA, a_input, a_cursor));
+    CHECK(a_input == "A draft");
+    CHECK(a_cursor == static_cast<int>(a_input.size()));
+}
+
+TEST_CASE("PersistentPromptHistory forgets a closed thread's browse",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_forget");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+    history.save(kThreadA, "a1");
+
+    std::string input = "draft";
+    int cursor = 0;
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "a1");
+
+    history.forget_session(kThreadA.session_id);
+    CHECK_FALSE(history.navigate_next(kThreadA, input, cursor));
+    CHECK(input == "a1");
+    CHECK(history.size() == 1);  // Entries outlive the thread.
+}
+
+TEST_CASE("PersistentPromptHistory never overwrites an edited recall",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_edit");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+    history.save(kThreadA, "first");
+    history.save(kThreadA, "second");
+
+    std::string input = "draft";
+    int cursor = 0;
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "second");
+    input += " edited";
+
+    // Down must not discard the edit.
+    CHECK_FALSE(history.navigate_next(kThreadA, input, cursor));
+    CHECK(input == "second edited");
+
+    // Up starts over and keeps the edit as the draft to come back to.
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "second");
+    REQUIRE(history.navigate_next(kThreadA, input, cursor));
+    CHECK(input == "second edited");
+}
+
+TEST_CASE("PersistentPromptHistory skips an entry equal to the draft",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_same_draft");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+    history.save(kThreadA, "older");
+    history.save(kThreadA, "stashed draft");
+
+    std::string input = "stashed draft";
+    int cursor = 0;
+    REQUIRE(history.navigate_prev(kThreadA, input, cursor));
+    CHECK(input == "older");
+}
+
+TEST_CASE("PersistentPromptHistory follows a thread across session id changes",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_rename");
+    auto store = std::make_shared<PromptHistoryStore>(file.path);
+    PersistentPromptHistory history(store);
+    history.save(kThreadA, "before rotation");
+    history.save(kThreadB, "from b");
+
+    const PromptHistoryScope rotated{.session_id = "session-a2", .workspace = "/work/app"};
+    history.rename_session(kThreadA.session_id, rotated.session_id);
+
+    std::string input;
+    int cursor = 0;
+    REQUIRE(history.navigate_prev(rotated, input, cursor));
+    CHECK(input == "before rotation");
+
+    // The relabel is persisted for the next process.
+    PromptHistoryStore reloaded(file.path);
+    REQUIRE(reloaded.load());
+    REQUIRE(reloaded.records().size() == 2);
+    CHECK(reloaded.records()[0].session_id == "session-a2");
+    CHECK(reloaded.records()[1].session_id == "session-b");
+}
+
+TEST_CASE("PromptHistoryStore persists entry scope and reads legacy files",
+          "[history][threads]") {
+    TempHistoryFile file("filo_test_history_scope_roundtrip");
+    {
+        PromptHistoryStore store(file.path);
+        REQUIRE(store.append_and_save(PromptHistoryEntry{
+            .text = "scoped \"quoted\"",
+            .session_id = "s1",
+            .workspace = "/w",
+        }));
+        REQUIRE(store.append_and_save("unscoped"));
+    }
+    {
+        PromptHistoryStore store(file.path);
+        REQUIRE(store.load());
+        REQUIRE(store.records().size() == 2);
+        CHECK(store.records()[0] == PromptHistoryEntry{
+            .text = "scoped \"quoted\"", .session_id = "s1", .workspace = "/w"});
+        CHECK(store.records()[1] == PromptHistoryEntry{.text = "unscoped"});
+    }
+
+    // Version 1 (and an older build rewriting version 2 without `meta`).
+    {
+        std::ofstream out(file.path);
+        out << R"({"version":1,"entries":["old one","old two"]})";
+    }
+    {
+        PromptHistoryStore store(file.path);
+        REQUIRE(store.load());
+        CHECK(store.entries() == std::vector<std::string>{"old one", "old two"});
+        CHECK(store.records()[0].session_id.empty());
+    }
+
+    // A `meta` array that no longer lines up with `entries` is ignored.
+    {
+        std::ofstream out(file.path);
+        out << R"({"version":2,"entries":["x","y"],"meta":[{"session":"s"}]})";
+    }
+    {
+        PromptHistoryStore store(file.path);
+        REQUIRE(store.load());
+        REQUIRE(store.records().size() == 2);
+        CHECK(store.records()[0].session_id.empty());
+    }
+}
+
+TEST_CASE("PromptHistoryStore keeps a repeat sent from another thread",
+          "[history][threads]") {
+    PromptHistoryStore store(std::filesystem::path("/dev/null"));
+    store.add(PromptHistoryEntry{.text = "yes", .session_id = "a"});
+    store.add(PromptHistoryEntry{.text = "yes", .session_id = "a"});
+    store.add(PromptHistoryEntry{.text = "yes", .session_id = "b"});
+    CHECK(store.size() == 2);
 }
 
 TEST_CASE("PersistentPromptHistory empty history navigation", "[history]") {
@@ -289,8 +497,8 @@ TEST_CASE("PersistentPromptHistory empty history navigation", "[history]") {
     int cursor = 0;
     
     // Navigation on empty history should return false
-    CHECK(history.navigate_prev(input, cursor) == false);
-    CHECK(history.navigate_next(input, cursor) == false);
+    CHECK(history.navigate_prev({}, input, cursor) == false);
+    CHECK(history.navigate_next({}, input, cursor) == false);
     CHECK(input == "test");  // Input unchanged
     
     std::filesystem::remove(temp_path);
@@ -304,7 +512,7 @@ TEST_CASE("PersistentPromptHistory save persists to disk", "[history]") {
         auto store = std::make_shared<PromptHistoryStore>(temp_path);
         PersistentPromptHistory history(store);
         
-        history.save("persisted prompt");
+        history.save({}, "persisted prompt");
     }
     
     {
@@ -327,8 +535,8 @@ TEST_CASE("PersistentPromptHistory merges entries written by concurrent instance
     PersistentPromptHistory first(first_store);
     PersistentPromptHistory second(second_store);
 
-    first.save("from first instance");
-    second.save("from second instance");
+    first.save({}, "from first instance");
+    second.save({}, "from second instance");
 
     PromptHistoryStore loaded(temp_path);
     REQUIRE(loaded.load());

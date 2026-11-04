@@ -61,7 +61,7 @@ std::string describe_mcp_auth(const core::config::McpServerConfig& config) {
                                                 config.env.size() == 1 ? "" : "s");
     }
     const auto names = config.headers | std::views::keys;
-    if (std::ranges::contains(names, "authorization", core::utils::str::to_lower_ascii_copy)) {
+    if (std::ranges::contains(names, std::string("authorization"), core::utils::str::to_lower_ascii_copy)) {
         return "Authorization header";
     }
     if (mcp_server_wants_oauth(config)) return "OAuth";

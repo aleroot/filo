@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iterator>
 #include <system_error>
+#include <unordered_set>
 
 namespace core::history {
 
@@ -103,7 +104,11 @@ bool PromptHistoryStore::save_unlocked(std::string* error) const {
 }
 
 bool PromptHistoryStore::append_and_save(std::string_view text, std::string* error) {
-    if (text.empty()) return true;
+    return append_and_save(PromptHistoryEntry{.text = std::string(text)}, error);
+}
+
+bool PromptHistoryStore::append_and_save(PromptHistoryEntry entry, std::string* error) {
+    if (entry.text.empty()) return true;
     std::string lock_error;
     auto file_lock = core::utils::InterprocessFileLock::acquire(
         core::utils::lock_path_for(history_file_), &lock_error);
@@ -112,8 +117,30 @@ bool PromptHistoryStore::append_and_save(std::string_view text, std::string* err
         return false;
     }
     if (!load_unlocked(error)) return false;
-    add(text);
+    add(std::move(entry));
     return save_unlocked(error);
+}
+
+bool PromptHistoryStore::rename_session_and_save(std::string_view from,
+                                                 std::string_view to,
+                                                 std::string* error) {
+    if (from.empty() || from == to) return true;
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
+    if (!load_unlocked(error)) return false;
+    bool changed = false;
+    for (auto& entry : entries_) {
+        if (entry.session_id == from) {
+            entry.session_id = std::string(to);
+            changed = true;
+        }
+    }
+    return !changed || save_unlocked(error);
 }
 
 bool PromptHistoryStore::clear_and_save(std::string* error) {
@@ -149,24 +176,41 @@ bool PromptHistoryStore::remove_at_and_save(std::size_t index, std::string* erro
 }
 
 void PromptHistoryStore::add(std::string_view text) {
-    // Ignore empty strings.
-    if (text.empty()) {
+    add(PromptHistoryEntry{.text = std::string(text)});
+}
+
+void PromptHistoryStore::add(PromptHistoryEntry entry) {
+    if (entry.text.empty()) {
         return;
     }
 
-    // Collapse consecutive duplicates.
-    if (!entries_.empty() && entries_.back() == text) {
+    // Collapse a repeat of the newest entry from the same session. A repeat
+    // from another thread is kept: that thread's own history needs it.
+    if (!entries_.empty()
+        && entries_.back().text == entry.text
+        && entries_.back().session_id == entry.session_id) {
         return;
     }
 
-    entries_.push_back(std::string(text));
+    entries_.push_back(std::move(entry));
     enforce_size_limit();
+}
+
+std::vector<std::string> PromptHistoryStore::entries() const {
+    std::vector<std::string> result;
+    result.reserve(entries_.size());
+    for (const auto& entry : entries_) {
+        result.push_back(entry.text);
+    }
+    return result;
 }
 
 std::vector<std::string> PromptHistoryStore::entries_newest_first() const {
     std::vector<std::string> result;
     result.reserve(entries_.size());
-    result.insert(result.end(), entries_.rbegin(), entries_.rend());
+    for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
+        result.push_back(it->text);
+    }
     return result;
 }
 
@@ -188,17 +232,42 @@ void PromptHistoryStore::enforce_size_limit() {
 // JSON Serialization
 // -----------------------------------------------------------------------------
 
-std::string PromptHistoryStore::to_json(const std::vector<std::string>& entries) {
+std::string PromptHistoryStore::to_json(const std::vector<PromptHistoryEntry>& entries) {
     std::string out;
-    out.reserve(1024 + entries.size() * 64);
+    out.reserve(1024 + entries.size() * 128);
 
-    out += "{\"version\":1,\"entries\":";
-    core::utils::append_string_array(out, entries);
-    out += '}';
+    out += "{\"version\":2,\"entries\":[";
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) out += ',';
+        out += '"';
+        core::utils::append_escaped(out, entries[i].text);
+        out += '"';
+    }
+    out += "],\"meta\":[";
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) out += ',';
+        out += '{';
+        bool first = true;
+        const auto field = [&](std::string_view name, std::string_view value) {
+            if (value.empty()) return;
+            if (!first) out += ',';
+            first = false;
+            out += '"';
+            out += name;
+            out += "\":\"";
+            core::utils::append_escaped(out, value);
+            out += '"';
+        };
+        field("session", entries[i].session_id);
+        field("workspace", entries[i].workspace);
+        out += '}';
+    }
+    out += "]}";
     return out;
 }
 
-std::optional<std::vector<std::string>> PromptHistoryStore::from_json(std::string_view json) {
+std::optional<std::vector<PromptHistoryEntry>> PromptHistoryStore::from_json(
+    std::string_view json) {
     try {
         simdjson::dom::parser parser;
         simdjson::dom::element doc;
@@ -206,24 +275,44 @@ std::optional<std::vector<std::string>> PromptHistoryStore::from_json(std::strin
             return std::nullopt;
         }
 
-        std::vector<std::string> result;
-
+        // `entries` under an object, or a plain array (legacy format).
         simdjson::dom::array entries_arr;
-        if (doc["entries"].get(entries_arr) == simdjson::SUCCESS) {
-            for (simdjson::dom::element entry_el : entries_arr) {
-                std::string_view sv;
-                if (entry_el.get(sv) == simdjson::SUCCESS) {
-                    result.emplace_back(sv);
-                }
+        if (doc["entries"].get(entries_arr) != simdjson::SUCCESS
+            && doc.get(entries_arr) != simdjson::SUCCESS) {
+            return std::vector<PromptHistoryEntry>{};
+        }
+
+        // Keep `meta` aligned with `entries`: skipped non-string entries drop
+        // their meta slot too.
+        std::vector<PromptHistoryEntry> result;
+        std::vector<std::size_t> source_index;
+        std::size_t position = 0;
+        for (simdjson::dom::element entry_el : entries_arr) {
+            std::string_view sv;
+            if (entry_el.get(sv) == simdjson::SUCCESS) {
+                result.push_back(PromptHistoryEntry{.text = std::string(sv)});
+                source_index.push_back(position);
             }
-        } else {
-            // Fallback: try parsing as a plain array (legacy or simple format).
-            if (doc.get(entries_arr) == simdjson::SUCCESS) {
-                for (simdjson::dom::element entry_el : entries_arr) {
-                    std::string_view sv;
-                    if (entry_el.get(sv) == simdjson::SUCCESS) {
-                        result.emplace_back(sv);
-                    }
+            ++position;
+        }
+
+        simdjson::dom::array meta_arr;
+        if (doc.is_object()
+            && doc["meta"].get(meta_arr) == simdjson::SUCCESS
+            && meta_arr.size() == position) {
+            std::vector<simdjson::dom::element> meta;
+            meta.reserve(position);
+            for (simdjson::dom::element item : meta_arr) {
+                meta.push_back(item);
+            }
+            for (std::size_t i = 0; i < result.size(); ++i) {
+                const auto& item = meta[source_index[i]];
+                std::string_view value;
+                if (item["session"].get(value) == simdjson::SUCCESS) {
+                    result[i].session_id = std::string(value);
+                }
+                if (item["workspace"].get(value) == simdjson::SUCCESS) {
+                    result[i].workspace = std::string(value);
                 }
             }
         }
@@ -245,78 +334,163 @@ PersistentPromptHistory::PersistentPromptHistory(std::shared_ptr<PromptHistorySt
     }
 }
 
-bool PersistentPromptHistory::navigate_prev(std::string& input, int& cursor) {
-    if (!store_ || store_->empty()) {
+std::vector<std::string> PersistentPromptHistory::candidates_for(
+    const PromptHistoryScope& scope, std::string_view draft) const {
+    std::vector<std::string> tiers[3];
+    std::unordered_set<std::string_view> seen;
+    if (!draft.empty()) {
+        seen.insert(draft);  // Up must visibly change the composer.
+    }
+    const auto& records = store_->records();
+    // First pass claims each text for its strongest tier; the newest
+    // occurrence within that tier decides its position.
+    for (int tier = 0; tier < 3; ++tier) {
+        for (auto it = records.rbegin(); it != records.rend(); ++it) {
+            const bool own = !scope.session_id.empty()
+                && it->session_id == scope.session_id;
+            const bool project = !own && !scope.workspace.empty()
+                && it->workspace == scope.workspace;
+            const int entry_tier = own ? 0 : (project ? 1 : 2);
+            if (entry_tier != tier || !seen.insert(it->text).second) {
+                continue;
+            }
+            tiers[tier].push_back(it->text);
+        }
+    }
+    std::vector<std::string> result = std::move(tiers[0]);
+    for (int tier = 1; tier < 3; ++tier) {
+        std::ranges::move(tiers[tier], std::back_inserter(result));
+    }
+    return result;
+}
+
+void PersistentPromptHistory::apply_pending_changes() {
+    std::vector<std::pair<std::string, std::string>> renames;
+    std::vector<std::string> forgets;
+    {
+        std::lock_guard lock(pending_mutex_);
+        renames.swap(pending_renames_);
+        forgets.swap(pending_forgets_);
+    }
+    for (auto& [from, to] : renames) {
+        if (store_) {
+            static_cast<void>(store_->rename_session_and_save(from, to, nullptr));
+        }
+        if (auto node = navigation_.extract(from); !node.empty()) {
+            navigation_.insert_or_assign(to, std::move(node.mapped()));
+        }
+    }
+    for (const auto& session_id : forgets) {
+        navigation_.erase(session_id);
+    }
+}
+
+bool PersistentPromptHistory::navigate_prev(const PromptHistoryScope& scope,
+                                            std::string& input, int& cursor) {
+    if (!store_) {
         return false;
     }
+    apply_pending_changes();
 
-    const auto entries = store_->entries_newest_first();
-    if (entries.empty()) {
-        return false;
+    auto& nav = navigation_[scope.session_id];
+    if (nav.index >= 0 && input != nav.shown) {
+        nav = {};  // Edited since recalled: the edit is the new draft.
     }
 
-    if (idx_ == -1) {
-        saved_input_ = input;
-        idx_ = 0;  // Start at most recent entry.
-    } else if (idx_ < static_cast<int>(entries.size()) - 1) {
-        ++idx_;
+    if (nav.index < 0) {
+        auto candidates = candidates_for(scope, input);
+        if (candidates.empty()) {
+            navigation_.erase(scope.session_id);
+            return false;
+        }
+        nav.candidates = std::move(candidates);
+        nav.draft = input;
+        nav.index = 0;
+    } else if (nav.index + 1 < static_cast<int>(nav.candidates.size())) {
+        ++nav.index;
     } else {
-        return true;  // Already at oldest entry.
+        return true;  // Already at the oldest entry.
     }
 
-    input  = entries[static_cast<std::size_t>(idx_)];
+    nav.shown = nav.candidates[static_cast<std::size_t>(nav.index)];
+    input = nav.shown;
     cursor = static_cast<int>(input.size());
     return true;
 }
 
-bool PersistentPromptHistory::navigate_next(std::string& input, int& cursor) {
-    if (idx_ == -1) {
+bool PersistentPromptHistory::navigate_next(const PromptHistoryScope& scope,
+                                            std::string& input, int& cursor) {
+    apply_pending_changes();
+
+    const auto it = navigation_.find(scope.session_id);
+    if (it == navigation_.end()) {
+        return false;
+    }
+    auto& nav = it->second;
+    if (nav.index < 0 || input != nav.shown) {
+        navigation_.erase(it);  // Never overwrite text the user edited.
         return false;
     }
 
-    const auto entries = store_->entries_newest_first();
-
-    if (idx_ > 0) {
-        --idx_;
-        input = entries[static_cast<std::size_t>(idx_)];
+    if (nav.index > 0) {
+        --nav.index;
+        nav.shown = nav.candidates[static_cast<std::size_t>(nav.index)];
+        input = nav.shown;
     } else {
-        idx_ = -1;
-        input = saved_input_;
+        input = std::move(nav.draft);
+        navigation_.erase(it);
     }
     cursor = static_cast<int>(input.size());
     return true;
 }
 
-void PersistentPromptHistory::save(std::string_view text) {
+void PersistentPromptHistory::save(const PromptHistoryScope& scope, std::string_view text) {
     if (!store_) {
         return;
     }
+    apply_pending_changes();
+    navigation_.erase(scope.session_id);
 
-    // Reset navigation state.
-    idx_ = -1;
-    saved_input_.clear();
+    static_cast<void>(store_->append_and_save(  // Best effort.
+        PromptHistoryEntry{
+            .text = std::string(text),
+            .session_id = scope.session_id,
+            .workspace = scope.workspace,
+        },
+        nullptr));
+}
 
-    static_cast<void>(store_->append_and_save(text, nullptr));  // Best effort.
+void PersistentPromptHistory::rename_session(std::string from, std::string to) {
+    if (from.empty() || from == to) {
+        return;
+    }
+    std::lock_guard lock(pending_mutex_);
+    pending_renames_.emplace_back(std::move(from), std::move(to));
+}
+
+void PersistentPromptHistory::forget_session(std::string session_id) {
+    if (session_id.empty()) {
+        return;
+    }
+    std::lock_guard lock(pending_mutex_);
+    pending_forgets_.push_back(std::move(session_id));
 }
 
 void PersistentPromptHistory::reload() {
     if (store_) {
         static_cast<void>(store_->load(nullptr));
     }
-    abandon_navigation();
-}
-
-void PersistentPromptHistory::abandon_navigation() {
-    idx_ = -1;
-    saved_input_.clear();
+    apply_pending_changes();
 }
 
 void PersistentPromptHistory::clear() {
     if (store_) {
         static_cast<void>(store_->clear_and_save(nullptr));
     }
-    idx_ = -1;
-    saved_input_.clear();
+    navigation_.clear();
+    std::lock_guard lock(pending_mutex_);
+    pending_renames_.clear();
+    pending_forgets_.clear();
 }
 
 std::size_t PersistentPromptHistory::size() const noexcept {
