@@ -42,7 +42,6 @@ public:
     void finish();
     void mark_ambiguous();
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return store_.directory(); }
-    [[nodiscard]] bool partial() const;
     /// The pre-image held for `path`, when this turn can give its bytes back:
     /// a caller may then drop its own copy. An entry whose object is missing
     /// is never vouched for, whichever way it came to be recorded.

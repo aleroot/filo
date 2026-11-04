@@ -357,7 +357,7 @@ TEST_CASE("A summary that fell short of the truth says so", "[tui][turn_file_cha
     answer.turn_changes.unscoped_mutations = true;
 
     const auto text = render_text({answer});
-    CHECK_THAT(text, ContainsSubstring("too many files to detail fully"));
+    CHECK_THAT(text, ContainsSubstring("some changes may not be listed (more files than a turn tracks)"));
     CHECK_THAT(text, ContainsSubstring(
         "files created by shell, scripts or MCP tools are not listed"));
 }
@@ -367,7 +367,7 @@ TEST_CASE("A complete summary claims nothing it cannot back", "[tui][turn_file_c
     answer.turn_changes.files = sample_changes();
 
     const auto text = render_text({answer});
-    CHECK(text.find("too many files") == std::string::npos);
+    CHECK(text.find("may not be listed") == std::string::npos);
     CHECK(text.find("are not listed") == std::string::npos);
 }
 
@@ -846,7 +846,7 @@ TEST_CASE("A comparison names the changes its patch leaves out",
         REQUIRE(comparison.has_value());
         CHECK(comparison->undiffed == 0);
         CHECK(comparison_omissions(*comparison)
-              == "The comparison is not the whole turn: too many files to detail fully; "
+              == "The comparison is not the whole turn: some changes may not be listed (more files than a turn tracks); "
                  "files created by shell, scripts or MCP tools are not listed.");
     }
     SECTION("a complete turn has nothing to report") {
@@ -976,6 +976,6 @@ TEST_CASE("A revert repeats what its summary could not cover",
 
     changes.partial_enumeration = true;
     CHECK_THAT(revert_omissions(changes),
-               ContainsSubstring("too many files to detail fully"));
+               ContainsSubstring("some changes may not be listed (more files than a turn tracks)"));
 }
 

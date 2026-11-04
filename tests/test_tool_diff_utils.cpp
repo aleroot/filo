@@ -413,19 +413,221 @@ TEST_CASE("Myers tool diff matches shortest edit distance for repeated lines",
     }
 }
 
-TEST_CASE("tool diff omits pathological comparisons within a fixed work budget",
+namespace {
+
+/// A document of prose the way Markdown stores it: one paragraph per line, so
+/// lines run to hundreds of bytes, with blank lines and table rows between.
+std::vector<std::string> prose_document(std::uint32_t seed, std::size_t lines) {
+    static constexpr std::string_view kWords[] = {
+        "the", "robot", "parcel", "delivery", "status", "event", "request", "every",
+        "seconds", "webhook", "signing", "section", "migration", "plan", "phase", "Vger"};
+    std::uint32_t state = seed;
+    const auto next = [&state] {
+        state = state * 1664525u + 1013904223u;
+        return state >> 8;
+    };
+    std::vector<std::string> document;
+    for (std::size_t i = 0; i < lines; ++i) {
+        if (next() % 10 < 3) {
+            document.emplace_back();
+            continue;
+        }
+        std::string line = next() % 5 == 0 ? "| " : "";
+        const std::size_t words = 12 + next() % 40;
+        for (std::size_t w = 0; w < words; ++w) {
+            line += kWords[next() % std::size(kWords)];
+            line += ' ';
+        }
+        line += std::format("{}.", next());
+        document.push_back(std::move(line));
+    }
+    return document;
+}
+
+/// A rewrite of `document` that touches it throughout, like a pass over a
+/// whole proposal: some paragraphs reworded, some new, some dropped.
+std::vector<std::string> rework(const std::vector<std::string>& document, std::uint32_t seed) {
+    std::uint32_t state = seed;
+    const auto next = [&state] {
+        state = state * 22695477u + 1u;
+        return state >> 8;
+    };
+    const auto fresh = prose_document(seed ^ 0x9E3779B9u, document.size());
+    std::vector<std::string> result;
+    for (std::size_t i = 0; i < document.size(); ++i) {
+        const auto roll = next() % 100;
+        if (roll < 35) {
+            result.push_back(fresh[i]);  // Reworded.
+        } else if (roll < 40) {
+            continue;  // Dropped.
+        } else {
+            result.push_back(document[i]);
+        }
+        if (next() % 100 < 18) {
+            result.push_back(fresh[(i * 7) % fresh.size()] + " (new)");
+        }
+    }
+    return result;
+}
+
+void check_diff_is_exact(std::string_view before, std::string_view after,
+                         const core::tools::detail::DiffOutcome& outcome) {
+    REQUIRE(outcome.has_diff());
+    REQUIRE(outcome.counts.has_value());
+    const auto applied = apply_unified_diff(before, *outcome.diff);
+    REQUIRE(applied.has_value());
+    CHECK(*applied == after);
+    CHECK(count_changes(*outcome.diff).added == outcome.counts->first);
+    CHECK(count_changes(*outcome.diff).deleted == outcome.counts->second);
+}
+
+} // namespace
+
+TEST_CASE("a long-line document reworked throughout is diffed exactly",
           "[tools][diff][limits]") {
+    // The shape that used to come back "too large to diff": a ~60 KB Markdown
+    // file, well inside every size bound, with paragraphs reworded all over
+    // it. The work a search needs depends on how many lines moved, not on how
+    // wide they are.
+    const auto old_lines = prose_document(7, 480);
+    const auto new_lines = rework(old_lines, 11);
+    const std::string before = join_lines(old_lines);
+    const std::string after = join_lines(new_lines);
+    REQUIRE(before.size() < core::tools::detail::kMaxToolDiffInputBytes / 4);
+
+    const auto outcome = core::tools::detail::build_unified_diff_detailed(
+        "proposal.md", before, after);
+    check_diff_is_exact(before, after, outcome);
+    CHECK(outcome.minimal);
+    CHECK(outcome.counts->first + outcome.counts->second
+          == reference_edit_distance(old_lines, new_lines));
+    // A real rewrite, not a trivial one.
+    CHECK(outcome.counts->first + outcome.counts->second > 300);
+}
+
+TEST_CASE("lines with no counterpart are diffed without searching",
+          "[tools][diff][limits]") {
+    // Every line replaced: the shortest script is the whole file out and the
+    // whole file in, and a line that occurs on one side only is known to be an
+    // edit before any search starts.
     std::string before;
     std::string after;
-    for (std::size_t i = 0; i < 2'000; ++i) {
+    for (std::size_t i = 0; i < 20'000; ++i) {
         before += std::format("old-{}\n", i);
         after += std::format("new-{}\n", i);
     }
+    core::tools::detail::WorkBudget none(0);
+    const auto counted = core::tools::detail::count_line_edits(
+        core::tools::detail::hash_text_lines(before),
+        core::tools::detail::hash_text_lines(after), none);
+    REQUIRE(counted.has_value());
+    CHECK(counted->first == 20'000);
+    CHECK(counted->second == 20'000);
 
-    CHECK(before.size() + after.size()
-          < core::tools::detail::kMaxToolDiffInputBytes);
-    CHECK_FALSE(core::tools::detail::build_unified_diff(
-        "adversarial.txt", before, after));
+    const auto outcome = core::tools::detail::build_unified_diff_detailed(
+        "rewritten.txt", before, after);
+    check_diff_is_exact(before, after, outcome);
+    CHECK(outcome.minimal);
+}
+
+TEST_CASE("a change past the exact search is still diffed, anchored on unique lines",
+          "[tools][diff][limits]") {
+    // Unique lines shuffled far apart: far beyond what a shortest-script search
+    // may spend, yet every line pins itself, so the anchored alignment keeps
+    // the longest run both orders agree on.
+    constexpr std::size_t kLines = 12'000;
+    std::vector<std::size_t> order(kLines);
+    for (std::size_t i = 0; i < kLines; ++i) {
+        order[i] = i;
+    }
+    std::uint32_t state = 0xBADC0DEu;
+    for (std::size_t i = kLines - 1; i > 0; --i) {
+        state = state * 1664525u + 1013904223u;
+        std::swap(order[i], order[(state >> 8) % (i + 1)]);
+    }
+    std::string before;
+    std::string after;
+    for (std::size_t i = 0; i < kLines; ++i) {
+        before += std::format("unique line {}\n", i);
+        after += std::format("unique line {}\n", order[i]);
+    }
+
+    const auto outcome = core::tools::detail::build_unified_diff_detailed(
+        "shuffled.txt", before, after);
+    check_diff_is_exact(before, after, outcome);
+    CHECK_FALSE(outcome.minimal);
+    // Not a whole-file rewrite: the anchors kept what could be kept.
+    CHECK(outcome.counts->second < kLines);
+
+    // A count has no diff to be checked against, so it reports only what a
+    // shortest script would; this one is past the exact search.
+    core::tools::detail::WorkBudget budget(core::tools::detail::kMaxMyersWorkUnits);
+    CHECK_FALSE(core::tools::detail::count_line_edits(
+        core::tools::detail::hash_text_lines(before),
+        core::tools::detail::hash_text_lines(after), budget).has_value());
+    CHECK(budget.exhausted());
+
+    // The same holds for a diff whose text does not fit: without the text, a
+    // longer script's numbers are not reported.
+    std::string wide_before;
+    std::string wide_after;
+    for (std::size_t i = 0; i < kLines; ++i) {
+        wide_before += std::format("unique line {} {}\n", i, std::string(12, '.'));
+        wide_after += std::format("unique line {} {}\n", order[i], std::string(12, '.'));
+    }
+    REQUIRE(wide_before.size() <= core::tools::detail::kMaxToolDiffInputBytes);
+    REQUIRE(wide_before.size() > core::tools::detail::kMaxToolDiffOutputBytes / 2);
+    const auto unaffordable = core::tools::detail::build_unified_diff_detailed(
+        "shuffled.txt", wide_before, wide_after);
+    CHECK_FALSE(unaffordable.has_diff());
+    CHECK_FALSE(unaffordable.minimal);
+    CHECK_FALSE(unaffordable.counts.has_value());
+}
+
+TEST_CASE("anchored diffs of repetitive text still apply exactly",
+          "[tools][diff][limits][property]") {
+    // Few distinct lines, so few anchors, in files large enough that the exact
+    // search gives up: whatever the fallback keeps, the diff must apply and
+    // agree with its own counts.
+    for (std::uint32_t sample = 0; sample < 6; ++sample) {
+        std::uint32_t state = 0x5EED0000u + sample;
+        const auto next = [&state] {
+            state = state * 1664525u + 1013904223u;
+            return state >> 8;
+        };
+        std::vector<std::string> old_lines;
+        std::vector<std::string> new_lines;
+        for (std::size_t i = 0; i < 6'000; ++i) {
+            old_lines.push_back(std::format("v{}", next() % (8 + sample * 40)));
+            new_lines.push_back(next() % 3 == 0 ? std::format("v{}", next() % (8 + sample * 40))
+                                                : old_lines.back());
+        }
+        if (sample % 2 == 1) {
+            new_lines.push_back("unique tail");
+            old_lines.insert(old_lines.begin(), "unique head");
+        }
+        const std::string before = join_lines(old_lines);
+        const std::string after = join_lines(new_lines);
+        const auto outcome = core::tools::detail::build_unified_diff_detailed(
+            "repetitive.txt", before, after);
+        check_diff_is_exact(before, after, outcome);
+    }
+}
+
+TEST_CASE("each side of a diff is bounded on its own", "[tools][diff][limits]") {
+    // Two sides that each fit: the file is diffable, as every caller that
+    // retains a file of this size expects.
+    std::string before;
+    while (before.size() < core::tools::detail::kMaxToolDiffInputBytes * 3 / 4) {
+        before += std::format("line {} of a large but ordinary file\n", before.size());
+    }
+    std::string after = before;
+    after.insert(after.find('\n', after.size() / 2) + 1, "an inserted line\n");
+    REQUIRE(before.size() + after.size() > core::tools::detail::kMaxToolDiffInputBytes);
+    const auto outcome = core::tools::detail::build_unified_diff_detailed("large.txt", before, after);
+    check_diff_is_exact(before, after, outcome);
+    CHECK(outcome.counts->first == 1);
+    CHECK(outcome.counts->second == 0);
 }
 
 TEST_CASE("tool diff rejects oversized unchanged inputs before comparing them",
@@ -527,10 +729,18 @@ TEST_CASE("count_line_edits counts what a unified diff would", "[tools][diff]") 
     CHECK(count_changes(*diff).added == counted->first);
     CHECK(count_changes(*diff).deleted == counted->second);
 
-    // A count the budget cannot prove is not reported as one, and the budget
-    // says it was the reason.
+    // Equal ends and lines one side lacks need no search, so even no
+    // allowance counts them exactly.
+    core::tools::detail::WorkBudget nothing(0);
+    CHECK(count_line_edits(hash_text_lines(before), hash_text_lines(after), nothing)
+          == counted);
+
+    // A count the budget cannot establish is not reported as one, and the
+    // budget says it was the reason: every line here is kept somewhere, only
+    // in another order, so aligning them takes a search.
     core::tools::detail::WorkBudget tight(4);
-    CHECK_FALSE(count_line_edits(hash_text_lines(before), hash_text_lines(after), tight)
+    CHECK_FALSE(count_line_edits(hash_text_lines("a\nb\nc\nd\n"),
+                                 hash_text_lines("b\na\nd\nc\n"), tight)
                     .has_value());
     CHECK(tight.exhausted());
 }
@@ -542,8 +752,9 @@ TEST_CASE("one work budget is shared by every count it is asked for",
     using core::tools::detail::WorkBudget;
 
     WorkBudget budget(core::tools::detail::kMaxMyersWorkUnits);
-    const auto before = hash_text_lines("a\nb\nc\n");
-    const auto after = hash_text_lines("a\nB\nc\n");
+    // Reordered lines, which only a search can align.
+    const auto before = hash_text_lines("a\nb\nc\nd\n");
+    const auto after = hash_text_lines("b\na\nd\nc\n");
     REQUIRE(count_line_edits(before, after, budget).has_value());
     // Spent in place: what is left is what the next count may use, so one
     // turn's allowance covers all of its files rather than each of them.
@@ -582,18 +793,6 @@ TEST_CASE("a diff that cannot be shown still reports what the search proved",
                     .has_diff());
     const std::string oversized(core::tools::detail::kMaxToolDiffInputBytes + 1, 'x');
     CHECK_FALSE(build_unified_diff_detailed("f.txt", oversized, "y").counts.has_value());
-
-    // The search gave up on the shape of the change, so no numbers are invented
-    // for it either.
-    std::string many_before;
-    std::string many_after;
-    for (std::size_t i = 0; i < 2'000; ++i) {
-        many_before += std::format("old-{}\n", i);
-        many_after += std::format("new-{}\n", i);
-    }
-    const auto hopeless = build_unified_diff_detailed("f.txt", many_before, many_after);
-    CHECK_FALSE(hopeless.has_diff());
-    CHECK_FALSE(hopeless.counts.has_value());
 
     // The search finished and the change is known; only its text did not fit.
     // The numbers survive the text being dropped, which is what lets a summary

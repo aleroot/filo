@@ -1343,7 +1343,7 @@ TEST_CASE("Private recovery state does not consume the workspace file budget", "
     const auto file = dir.path / "source";
     put(file, "before");
     TurnChangeTracker::Limits limits;
-    limits.max_files_per_directory = 1;
+    limits.max_workspace_files = 1;
     TurnChangeTracker tracker(dir.path, limits);
     tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(checkpoint, dir.path));
     edit(tracker, MutationScope{.unbounded = true, .tool = "script"}, [&] { put(file, "after"); });

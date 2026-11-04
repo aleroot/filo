@@ -4,8 +4,11 @@
 #include <cstdint>
 #include <format>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace core::tools::detail {
@@ -29,28 +32,429 @@ std::size_t line_count_for_unified_hunk(std::string_view text) noexcept {
         + (text.back() == '\n' ? 0 : 1);
 }
 
-struct Frontier {
-    std::int32_t distance = 0;
-    std::vector<std::int32_t> furthest_x;
-    std::vector<EditKind>     direction;
+/// A line kept by both sides: its index in the old text and in the new one.
+struct Match {
+    std::uint32_t old_line = 0;
+    std::uint32_t new_line = 0;
+};
 
-    [[nodiscard]] std::int32_t x_at(std::int32_t diagonal) const noexcept {
-        const std::int32_t offset = diagonal + distance;
-        if (offset < 0 || offset % 2 != 0) {
-            return -1;
-        }
-        const auto index = static_cast<std::size_t>(offset / 2);
-        return index < furthest_x.size() ? furthest_x[index] : -1;
+/// Lines reduced to symbols: equal lines share one, different lines never do.
+/// Comparing two lines is then one integer comparison however long the lines
+/// are, which is what lets a search be bounded by the shape of a change rather
+/// than by the width of the text it moves.
+using Symbols = std::span<const std::uint32_t>;
+
+/// How two symbol sequences line up. `matches` increase strictly on both
+/// sides; every line not in them is a deletion or an insertion.
+struct Alignment {
+    std::vector<Match> matches;
+    /// The alignment keeps as many lines as any could, i.e. its edit script is
+    /// a shortest one. False when the exact search ran past its bound and the
+    /// anchored alignment took over.
+    bool minimal = true;
+};
+
+/// Myers' shortest edit script between `a` and `b`, appended to `out` as the
+/// matches it keeps, offset by `a_base` and `b_base`. False, with `out`
+/// untouched, when `budget` runs out first: a frontier slot and a comparison
+/// each cost one unit.
+///
+/// Row `d` of the frontier holds diagonal `-d + 2j` in slot `j`, and all rows
+/// share one buffer: the walk back reads every row once, and the bound on the
+/// work is also the bound on the memory.
+bool shortest_alignment(Symbols a, Symbols b,
+                        std::uint32_t a_base, std::uint32_t b_base,
+                        WorkBudget& budget, std::vector<Match>& out) {
+    const auto n = static_cast<std::int32_t>(a.size());
+    const auto m = static_cast<std::int32_t>(b.size());
+    if (n == 0 || m == 0) {
+        return true;
     }
 
-    [[nodiscard]] EditKind direction_at(std::int32_t diagonal) const noexcept {
-        const std::int32_t offset = diagonal + distance;
-        if (offset < 0 || offset % 2 != 0) {
-            return EditKind::Keep;
+    std::vector<std::int32_t> frontier;
+    std::vector<std::size_t> row_start;
+    // Where the previous row reached on the diagonals either side of slot `j`
+    // of row `d`, and which of the two steps the slot takes. The walk back
+    // decides it again from the same row, so the step is never stored.
+    struct Step {
+        std::int32_t x = -1;
+        bool insert = false;
+    };
+    const auto step_into = [&](std::int32_t d, std::int32_t j) -> Step {
+        const std::size_t previous = row_start[static_cast<std::size_t>(d) - 1];
+        const std::int32_t diagonal = -d + 2 * j;
+        const std::int32_t insert_x = j < d ? frontier[previous + static_cast<std::size_t>(j)] : -1;
+        const std::int32_t delete_x = j > 0 ? frontier[previous + static_cast<std::size_t>(j) - 1] : -1;
+        const bool can_insert = insert_x >= 0 && insert_x - (diagonal + 1) < m;
+        const bool can_delete = delete_x >= 0 && delete_x < n;
+        if (!can_insert && !can_delete) {
+            return {};
         }
-        const auto index = static_cast<std::size_t>(offset / 2);
-        return index < direction.size() ? direction[index] : EditKind::Keep;
+        if (can_insert && (!can_delete || delete_x < insert_x)) {
+            return {.x = insert_x, .insert = true};
+        }
+        return {.x = delete_x + 1, .insert = false};
+    };
+
+    std::int32_t found = -1;
+    for (std::int32_t d = 0; d <= n + m && found < 0; ++d) {
+        const std::size_t start = frontier.size();
+        row_start.push_back(start);
+        frontier.resize(start + static_cast<std::size_t>(d) + 1, -1);
+        for (std::int32_t j = 0; j <= d; ++j) {
+            if (!budget.spend()) {
+                return false;
+            }
+            std::int32_t x = 0;
+            if (d != 0) {
+                const Step step = step_into(d, j);
+                if (step.x < 0) {
+                    continue;  // Unreachable diagonal; the slot stays -1.
+                }
+                x = step.x;
+            }
+            const std::int32_t diagonal = -d + 2 * j;
+            std::int32_t y = x - diagonal;
+            while (x < n && y < m) {
+                if (!budget.spend()) {
+                    return false;
+                }
+                if (a[static_cast<std::size_t>(x)] != b[static_cast<std::size_t>(y)]) {
+                    break;
+                }
+                ++x;
+                ++y;
+            }
+            frontier[start + static_cast<std::size_t>(j)] = x;
+            if (x == n && y == m) {
+                found = d;
+                break;
+            }
+        }
     }
+    if (found < 0) {
+        return false;  // d == n + m always arrives; this is a backstop.
+    }
+
+    const std::size_t first = out.size();
+    std::int32_t x = n;
+    std::int32_t y = m;
+    for (std::int32_t d = found; d > 0; --d) {
+        const std::int32_t diagonal = x - y;
+        const Step step = step_into(d, (diagonal + d) / 2);
+        // The diagonal run that followed the step is what this row kept.
+        while (x > step.x) {
+            --x;
+            --y;
+            out.push_back({a_base + static_cast<std::uint32_t>(x),
+                           b_base + static_cast<std::uint32_t>(y)});
+        }
+        if (step.insert) {
+            --y;
+        } else {
+            --x;
+        }
+    }
+    while (x > 0 && y > 0) {
+        --x;
+        --y;
+        out.push_back({a_base + static_cast<std::uint32_t>(x),
+                       b_base + static_cast<std::uint32_t>(y)});
+    }
+    std::reverse(out.begin() + static_cast<std::ptrdiff_t>(first), out.end());
+    return true;
+}
+
+/// Lines that pin a stretch of a change in place: those that occur exactly
+/// once on each side, kept in the longest order both sides agree on. This is
+/// patience diff's anchoring; it needs no search, so it scales with the length
+/// of the stretch rather than with the size of the change.
+class Anchoring {
+public:
+    Anchoring(Symbols a, Symbols b, std::size_t symbols)
+        : a_(a), b_(b), seen_(symbols) {}
+
+    [[nodiscard]] std::vector<Match> unique_in_order(std::uint32_t a0, std::uint32_t a1,
+                                                     std::uint32_t b0, std::uint32_t b1) {
+        for (std::uint32_t i = a0; i < a1; ++i) {
+            Seen& entry = touch(a_[i]);
+            ++entry.in_a;
+            entry.a_line = i;
+        }
+        for (std::uint32_t j = b0; j < b1; ++j) {
+            Seen& entry = touch(b_[j]);
+            ++entry.in_b;
+            entry.b_line = j;
+        }
+        std::vector<Match> candidates;
+        for (std::uint32_t i = a0; i < a1; ++i) {
+            const Seen& entry = seen_[a_[i]];
+            if (entry.in_a == 1 && entry.in_b == 1) {
+                candidates.push_back({entry.a_line, entry.b_line});
+            }
+        }
+        for (const std::uint32_t symbol : touched_) {
+            seen_[symbol] = {};
+        }
+        touched_.clear();
+        return longest_increasing(candidates);
+    }
+
+private:
+    struct Seen {
+        std::uint32_t in_a = 0;
+        std::uint32_t in_b = 0;
+        std::uint32_t a_line = 0;
+        std::uint32_t b_line = 0;
+    };
+
+    Seen& touch(std::uint32_t symbol) {
+        Seen& entry = seen_[symbol];
+        if (entry.in_a == 0 && entry.in_b == 0) {
+            touched_.push_back(symbol);
+        }
+        return entry;
+    }
+
+    /// The longest run of `candidates`, already ordered by old line, whose new
+    /// lines also increase: patience sorting, O(k log k).
+    [[nodiscard]] static std::vector<Match> longest_increasing(const std::vector<Match>& candidates) {
+        std::vector<std::size_t> tails;  // Index of the smallest tail of each length.
+        std::vector<std::size_t> previous(candidates.size(), SIZE_MAX);
+        for (std::size_t i = 0; i < candidates.size(); ++i) {
+            const auto position = std::ranges::lower_bound(
+                tails, candidates[i].new_line, {},
+                [&](std::size_t index) { return candidates[index].new_line; });
+            if (position != tails.begin()) {
+                previous[i] = *(position - 1);
+            }
+            if (position == tails.end()) {
+                tails.push_back(i);
+            } else {
+                *position = i;
+            }
+        }
+        std::vector<Match> run;
+        run.reserve(tails.size());
+        for (std::size_t i = tails.empty() ? SIZE_MAX : tails.back(); i != SIZE_MAX; i = previous[i]) {
+            run.push_back(candidates[i]);
+        }
+        std::ranges::reverse(run);
+        return run;
+    }
+
+    Symbols a_;
+    Symbols b_;
+    std::vector<Seen> seen_;
+    std::vector<std::uint32_t> touched_;
+};
+
+/// How deep the anchored alignment splits a stretch before it stops looking
+/// for anchors inside it. Each level costs one pass over what is left, so the
+/// depth bounds the work; real files are pinned within a few levels.
+constexpr int kMaxAnchorDepth = 32;
+/// Search one unpinned stretch may spend per line it holds. Linear in its
+/// size, so one stretch cannot spend what the others need, and generous enough
+/// that an ordinary edit between two anchors is still aligned exactly.
+constexpr std::size_t kStretchWorkPerLine = 64;
+
+/// The alignment used when the exact search runs past its bound. Anchors pin
+/// the change in place; the stretches between them are searched exactly when
+/// that is affordable, and otherwise shown rewritten whole. The result is
+/// always a correct edit script, only not necessarily a shortest one.
+///
+/// Anchoring is not charged to `budget`: it is a pass over each stretch per
+/// level, and the levels are bounded, so its cost is bounded by the input the
+/// caller already bounds. Only the searches spend `budget`, and running out of
+/// it only leaves the remaining stretches rewritten — this path cannot fail.
+class AnchoredAlignment {
+public:
+    AnchoredAlignment(Symbols a, Symbols b, std::size_t symbols, WorkBudget& budget)
+        : a_(a), b_(b), anchoring_(a, b, symbols), budget_(budget) {}
+
+    [[nodiscard]] std::vector<Match> run() && {
+        align(0, static_cast<std::uint32_t>(a_.size()),
+              0, static_cast<std::uint32_t>(b_.size()), 0);
+        return std::move(matches_);
+    }
+
+private:
+    void align(std::uint32_t a0, std::uint32_t a1,
+               std::uint32_t b0, std::uint32_t b1, int depth) {
+        while (a0 < a1 && b0 < b1 && a_[a0] == b_[b0]) {
+            matches_.push_back({a0++, b0++});
+        }
+        std::uint32_t kept_tail = 0;
+        while (a0 < a1 && b0 < b1 && a_[a1 - 1] == b_[b1 - 1]) {
+            --a1;
+            --b1;
+            ++kept_tail;
+        }
+        if (a0 < a1 && b0 < b1) {
+            const auto anchors = depth < kMaxAnchorDepth
+                ? anchoring_.unique_in_order(a0, a1, b0, b1)
+                : std::vector<Match>{};
+            if (!anchors.empty()) {
+                std::uint32_t next_a = a0;
+                std::uint32_t next_b = b0;
+                for (const Match& anchor : anchors) {
+                    align(next_a, anchor.old_line, next_b, anchor.new_line, depth + 1);
+                    matches_.push_back(anchor);
+                    next_a = anchor.old_line + 1;
+                    next_b = anchor.new_line + 1;
+                }
+                align(next_a, a1, next_b, b1, depth + 1);
+            } else {
+                // Nothing pins this stretch. Search it exactly if it is cheap
+                // enough; otherwise it stays a rewrite, which is still a
+                // correct description of what changed between its anchors.
+                const std::size_t lines = std::size_t{a1 - a0} + (b1 - b0);
+                const std::size_t allowance =
+                    std::min(budget_.remaining(), lines * kStretchWorkPerLine);
+                WorkBudget stretch(allowance);
+                (void)shortest_alignment(a_.subspan(a0, a1 - a0), b_.subspan(b0, b1 - b0),
+                                         a0, b0, stretch, matches_);
+                budget_.charge(allowance - stretch.remaining());
+            }
+        }
+        for (std::uint32_t k = 0; k < kept_tail; ++k) {
+            matches_.push_back({a1 + k, b1 + k});
+        }
+    }
+
+    Symbols a_;
+    Symbols b_;
+    Anchoring anchoring_;
+    WorkBudget& budget_;
+    std::vector<Match> matches_;
+};
+
+/// How many lines `a` and `b` share at their start and, of what is left, at
+/// their end.
+std::pair<std::size_t, std::size_t> common_ends(Symbols a, Symbols b) noexcept {
+    std::size_t prefix = 0;
+    while (prefix < a.size() && prefix < b.size() && a[prefix] == b[prefix]) {
+        ++prefix;
+    }
+    std::size_t suffix = 0;
+    while (suffix < a.size() - prefix && suffix < b.size() - prefix
+           && a[a.size() - 1 - suffix] == b[b.size() - 1 - suffix]) {
+        ++suffix;
+    }
+    return {prefix, suffix};
+}
+
+/// Lines `a` and `b` keep in common, within `budget`. Symbols are below
+/// `symbols`.
+///
+/// Exact steps shrink the problem before any search, and cost no budget: they
+/// are linear in the input, which every caller already bounds. Equal ends are
+/// kept outright. A line that does not occur on the other side can never be
+/// kept, so it is set aside; that leaves the longest common subsequence
+/// unchanged, and often exposes more equal ends, which are kept too. Then the
+/// shortest edit script of what remains gets half the allowance, and past that
+/// the anchored alignment takes the rest, marking `budget` exhausted: the
+/// result is then correct but possibly longer than it must be.
+Alignment align_symbols(Symbols a, Symbols b, std::size_t symbols,
+                                       WorkBudget& budget) {
+    Alignment result;
+    const auto [prefix, suffix] = common_ends(a, b);
+    const auto old_middle = a.subspan(prefix, a.size() - prefix - suffix);
+    const auto new_middle = b.subspan(prefix, b.size() - prefix - suffix);
+
+    // What may still be kept of each middle, and where each line of it sits in
+    // its text.
+    std::vector<std::uint32_t> old_kept;
+    std::vector<std::uint32_t> old_at;
+    std::vector<std::uint32_t> new_kept;
+    std::vector<std::uint32_t> new_at;
+    if (!old_middle.empty() && !new_middle.empty()) {
+        std::vector<std::uint8_t> sides(symbols, 0);
+        constexpr std::uint8_t kInOld = 1;
+        constexpr std::uint8_t kInNew = 2;
+        for (const auto symbol : old_middle) {
+            sides[symbol] |= kInOld;
+        }
+        for (const auto symbol : new_middle) {
+            sides[symbol] |= kInNew;
+        }
+        for (std::size_t i = 0; i < old_middle.size(); ++i) {
+            if (sides[old_middle[i]] & kInNew) {
+                old_kept.push_back(old_middle[i]);
+                old_at.push_back(static_cast<std::uint32_t>(prefix + i));
+            }
+        }
+        for (std::size_t j = 0; j < new_middle.size(); ++j) {
+            if (sides[new_middle[j]] & kInOld) {
+                new_kept.push_back(new_middle[j]);
+                new_at.push_back(static_cast<std::uint32_t>(prefix + j));
+            }
+        }
+    }
+
+    std::vector<Match> kept;
+    const auto [kept_prefix, kept_suffix] = common_ends(old_kept, new_kept);
+    for (std::size_t i = 0; i < kept_prefix; ++i) {
+        kept.push_back({static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(i)});
+    }
+    const auto old_search = Symbols(old_kept).subspan(
+        kept_prefix, old_kept.size() - kept_prefix - kept_suffix);
+    const auto new_search = Symbols(new_kept).subspan(
+        kept_prefix, new_kept.size() - kept_prefix - kept_suffix);
+    const std::size_t exact_allowance = budget.remaining() / 2;
+    WorkBudget exact(exact_allowance);
+    const bool shortest = shortest_alignment(
+        old_search, new_search, static_cast<std::uint32_t>(kept_prefix),
+        static_cast<std::uint32_t>(kept_prefix), exact, kept);
+    budget.charge(exact_allowance - exact.remaining());
+    if (shortest) {
+        for (std::size_t k = kept_suffix; k > 0; --k) {
+            kept.push_back({static_cast<std::uint32_t>(old_kept.size() - k),
+                            static_cast<std::uint32_t>(new_kept.size() - k)});
+        }
+    } else {
+        result.minimal = false;
+        budget.mark_exhausted();
+        kept = AnchoredAlignment(old_kept, new_kept, symbols, budget).run();
+    }
+
+    result.matches.reserve(prefix + kept.size() + suffix);
+    for (std::size_t i = 0; i < prefix; ++i) {
+        result.matches.push_back({static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(i)});
+    }
+    for (const Match& match : kept) {
+        result.matches.push_back({old_at[match.old_line], new_at[match.new_line]});
+    }
+    for (std::size_t k = suffix; k > 0; --k) {
+        result.matches.push_back({static_cast<std::uint32_t>(a.size() - k),
+                                  static_cast<std::uint32_t>(b.size() - k)});
+    }
+    return result;
+}
+
+/// Additions and deletions an alignment implies: every line it does not keep.
+std::pair<std::size_t, std::size_t> alignment_counts(const Alignment& alignment,
+                                                     std::size_t old_size,
+                                                     std::size_t new_size) noexcept {
+    const std::size_t kept = alignment.matches.size();
+    return {new_size - kept, old_size - kept};
+}
+
+/// Dense symbols for a sequence of keys, numbered in the order first met
+/// across both sides, so two runs over equal inputs align identically.
+template <typename Key, typename Hash = std::hash<Key>>
+class SymbolTable {
+public:
+    explicit SymbolTable(std::size_t expected) { ids_.reserve(expected); }
+
+    std::uint32_t operator()(const Key& key) {
+        return ids_.try_emplace(key, static_cast<std::uint32_t>(ids_.size())).first->second;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return ids_.size(); }
+
+private:
+    std::unordered_map<Key, std::uint32_t, Hash> ids_;
 };
 
 } // namespace
@@ -130,253 +534,28 @@ std::optional<std::pair<std::size_t, std::size_t>> count_line_edits(
     std::span<const std::uint64_t> after,
     WorkBudget& budget)
 {
-    // Equal ends carry no edit. Trimming them leaves the search the span that
-    // actually moved, which is where a turn's edits sit in a file it otherwise
-    // kept.
-    std::size_t prefix = 0;
-    while (prefix < before.size() && prefix < after.size()
-           && before[prefix] == after[prefix]) {
-        ++prefix;
+    // The same alignment a diff of the same lines runs, on the same symbols:
+    // equal hashes are equal lines, so the count is the diff's count. With no
+    // diff to show for it, only a shortest script's count is reported.
+    SymbolTable<std::uint64_t> table(before.size() + after.size());
+    std::vector<std::uint32_t> old_symbols;
+    std::vector<std::uint32_t> new_symbols;
+    old_symbols.reserve(before.size());
+    new_symbols.reserve(after.size());
+    for (const auto hash : before) {
+        old_symbols.push_back(table(hash));
     }
-    std::size_t suffix = 0;
-    while (suffix < before.size() - prefix && suffix < after.size() - prefix
-           && before[before.size() - 1 - suffix] == after[after.size() - 1 - suffix]) {
-        ++suffix;
+    for (const auto hash : after) {
+        new_symbols.push_back(table(hash));
     }
-    const auto old_lines = before.subspan(prefix, before.size() - prefix - suffix);
-    const auto new_lines = after.subspan(prefix, after.size() - prefix - suffix);
-    const auto old_size = static_cast<std::int32_t>(old_lines.size());
-    const auto new_size = static_cast<std::int32_t>(new_lines.size());
-
-    // Myers' frontier, one row per edit distance: row `d` holds diagonal
-    // `-d + 2j` in slot `j`. A row only reads the row before it, so two rows
-    // suffice however far the search runs.
-    std::vector<std::int32_t> previous;
-    std::vector<std::int32_t> current;
-    for (std::int32_t distance = 0; distance <= old_size + new_size; ++distance) {
-        current.assign(static_cast<std::size_t>(distance) + 1, -1);
-        for (std::int32_t j = 0; j <= distance; ++j) {
-            if (!budget.spend()) {
-                return std::nullopt;
-            }
-            const std::int32_t diagonal = -distance + 2 * j;
-            std::int32_t x = 0;
-            if (distance != 0) {
-                // Diagonal + 1 of the previous row is this slot; diagonal - 1
-                // is the one before it.
-                const std::int32_t insert_x =
-                    static_cast<std::size_t>(j) < previous.size() ? previous[static_cast<std::size_t>(j)] : -1;
-                const std::int32_t delete_x = j > 0 ? previous[static_cast<std::size_t>(j) - 1] : -1;
-                const bool can_insert =
-                    insert_x >= 0 && insert_x - (diagonal + 1) < new_size;
-                const bool can_delete = delete_x >= 0 && delete_x < old_size;
-                if (!can_insert && !can_delete) {
-                    continue;  // Unreachable diagonal; the slot stays -1.
-                }
-                x = can_insert && (!can_delete || delete_x < insert_x)
-                    ? insert_x
-                    : delete_x + 1;
-            }
-            std::int32_t y = x - diagonal;
-            while (x < old_size && y < new_size) {
-                if (!budget.spend()) {
-                    return std::nullopt;
-                }
-                if (old_lines[static_cast<std::size_t>(x)]
-                    != new_lines[static_cast<std::size_t>(y)]) {
-                    break;
-                }
-                ++x;
-                ++y;
-            }
-            current[static_cast<std::size_t>(j)] = x;
-            if (x == old_size && y == new_size) {
-                // distance is additions plus deletions; the size difference
-                // is additions minus deletions.
-                const auto edits = static_cast<std::ptrdiff_t>(distance);
-                const auto delta = static_cast<std::ptrdiff_t>(new_size) - old_size;
-                return std::pair<std::size_t, std::size_t>{
-                    static_cast<std::size_t>((edits + delta) / 2),
-                    static_cast<std::size_t>((edits - delta) / 2),
-                };
-            }
-        }
-        previous.swap(current);
+    const auto alignment = align_symbols(old_symbols, new_symbols, table.size(), budget);
+    if (!alignment.minimal) {
+        return std::nullopt;
     }
-    return std::nullopt;  // distance == old + new always arrives; this is a backstop.
+    return alignment_counts(alignment, before.size(), after.size());
 }
 
 namespace {
-
-std::optional<std::vector<Edit>> shortest_edit_script(
-    std::span<const DiffLine> old_lines,
-    std::span<const DiffLine> new_lines,
-    WorkBudget& budget)
-{
-    const auto old_size = static_cast<std::int32_t>(old_lines.size());
-    const auto new_size = static_cast<std::int32_t>(new_lines.size());
-
-    std::vector<Edit> edits;
-    if (old_size == 0) {
-        edits.reserve(new_lines.size());
-        for (std::int32_t i = 0; i < new_size; ++i) {
-            edits.push_back({EditKind::Insert, static_cast<std::uint32_t>(i)});
-        }
-        return edits;
-    }
-    if (new_size == 0) {
-        edits.reserve(old_lines.size());
-        for (std::int32_t i = 0; i < old_size; ++i) {
-            edits.push_back({EditKind::Delete, static_cast<std::uint32_t>(i)});
-        }
-        return edits;
-    }
-
-    std::vector<Frontier> trace;
-    trace.reserve(128);
-    std::int32_t found_distance = -1;
-
-    for (std::int32_t distance = 0;
-         distance <= old_size + new_size;
-         ++distance) {
-        Frontier current;
-        current.distance = distance;
-        current.furthest_x.reserve(static_cast<std::size_t>(distance) + 1);
-        current.direction.reserve(static_cast<std::size_t>(distance) + 1);
-
-        const Frontier* previous = trace.empty() ? nullptr : &trace.back();
-        for (std::int32_t diagonal = -distance;
-             diagonal <= distance;
-             diagonal += 2) {
-            if (!budget.spend()) {
-                return std::nullopt;
-            }
-
-            std::int32_t x = 0;
-            EditKind direction = EditKind::Keep;
-            if (distance != 0) {
-                const std::int32_t insert_x = previous->x_at(diagonal + 1);
-                const std::int32_t delete_x = previous->x_at(diagonal - 1);
-                const bool can_insert = insert_x >= 0
-                    && insert_x - (diagonal + 1) < new_size;
-                const bool can_delete = delete_x >= 0 && delete_x < old_size;
-
-                if (!can_insert && !can_delete) {
-                    current.furthest_x.push_back(-1);
-                    current.direction.push_back(EditKind::Keep);
-                    continue;
-                }
-
-                if (can_insert && (!can_delete || delete_x < insert_x)) {
-                    x = insert_x;
-                    direction = EditKind::Insert;
-                } else {
-                    x = delete_x + 1;
-                    direction = EditKind::Delete;
-                }
-            }
-
-            std::int32_t y = x - diagonal;
-            while (x < old_size && y < new_size) {
-                const DiffLine& old_line = old_lines[static_cast<std::size_t>(x)];
-                const DiffLine& new_line = new_lines[static_cast<std::size_t>(y)];
-                const std::size_t comparison_cost =
-                    std::min(old_line.text.size(), new_line.text.size()) + 1;
-                if (!budget.spend(comparison_cost)) {
-                    return std::nullopt;
-                }
-                if (!lines_equal(old_line, new_line)) {
-                    break;
-                }
-                ++x;
-                ++y;
-            }
-
-            current.furthest_x.push_back(x);
-            current.direction.push_back(direction);
-            if (x == old_size && y == new_size) {
-                found_distance = distance;
-                break;
-            }
-        }
-
-        trace.push_back(std::move(current));
-        if (found_distance >= 0) {
-            break;
-        }
-    }
-
-    if (found_distance < 0) {
-        return std::nullopt;
-    }
-
-    edits.reserve(static_cast<std::size_t>(found_distance)
-                  + old_lines.size() + new_lines.size());
-    std::int32_t x = old_size;
-    std::int32_t y = new_size;
-    for (std::int32_t distance = found_distance; distance > 0; --distance) {
-        const Frontier& current = trace[static_cast<std::size_t>(distance)];
-        const Frontier& previous = trace[static_cast<std::size_t>(distance - 1)];
-        const std::int32_t diagonal = x - y;
-        const EditKind direction = current.direction_at(diagonal);
-
-        if (direction == EditKind::Insert) {
-            const std::int32_t previous_x = previous.x_at(diagonal + 1);
-            if (previous_x < 0) {
-                return std::nullopt;
-            }
-            const std::int32_t previous_y = previous_x - (diagonal + 1);
-            while (x > previous_x && y > previous_y + 1) {
-                --x;
-                --y;
-                edits.push_back({EditKind::Keep, static_cast<std::uint32_t>(x)});
-            }
-            if (x != previous_x || y != previous_y + 1 || previous_y < 0) {
-                return std::nullopt;
-            }
-            --y;
-            edits.push_back({EditKind::Insert, static_cast<std::uint32_t>(y)});
-        } else if (direction == EditKind::Delete) {
-            const std::int32_t previous_x = previous.x_at(diagonal - 1);
-            if (previous_x < 0) {
-                return std::nullopt;
-            }
-            const std::int32_t previous_y = previous_x - (diagonal - 1);
-            while (x > previous_x + 1 && y > previous_y) {
-                --x;
-                --y;
-                edits.push_back({EditKind::Keep, static_cast<std::uint32_t>(x)});
-            }
-            if (x != previous_x + 1 || y != previous_y || previous_x < 0) {
-                return std::nullopt;
-            }
-            --x;
-            edits.push_back({EditKind::Delete, static_cast<std::uint32_t>(x)});
-        } else {
-            return std::nullopt;
-        }
-    }
-
-    while (x > 0 && y > 0) {
-        --x;
-        --y;
-        if (!lines_equal(old_lines[static_cast<std::size_t>(x)],
-                         new_lines[static_cast<std::size_t>(y)])) {
-            return std::nullopt;
-        }
-        edits.push_back({EditKind::Keep, static_cast<std::uint32_t>(x)});
-    }
-    while (x > 0) {
-        --x;
-        edits.push_back({EditKind::Delete, static_cast<std::uint32_t>(x)});
-    }
-    while (y > 0) {
-        --y;
-        edits.push_back({EditKind::Insert, static_cast<std::uint32_t>(y)});
-    }
-    std::ranges::reverse(edits);
-    return edits;
-}
 
 struct HunkRange {
     std::size_t begin = 0;
@@ -423,15 +602,30 @@ const DiffLine& line_for_edit(const Edit& edit,
         : old_lines[edit.line];
 }
 
-/// Additions and deletions one edit script carries: what a diff of it would
-/// count, known as soon as the search finishes and before any text is written.
-std::pair<std::size_t, std::size_t> count_edits(std::span<const Edit> edits) noexcept {
-    std::pair<std::size_t, std::size_t> counts{};
-    for (const Edit& edit : edits) {
-        counts.first += edit.kind == EditKind::Insert ? 1 : 0;
-        counts.second += edit.kind == EditKind::Delete ? 1 : 0;
+/// The edit script an alignment describes. Between two kept lines, the old
+/// lines go first and the new ones follow, as a unified diff prints them.
+std::vector<Edit> edits_from(const Alignment& alignment,
+                             std::size_t old_size, std::size_t new_size) {
+    std::vector<Edit> edits;
+    edits.reserve(old_size + new_size - alignment.matches.size());
+    std::uint32_t old_line = 0;
+    std::uint32_t new_line = 0;
+    const auto flush = [&](std::size_t old_end, std::size_t new_end) {
+        for (; old_line < old_end; ++old_line) {
+            edits.push_back({EditKind::Delete, old_line});
+        }
+        for (; new_line < new_end; ++new_line) {
+            edits.push_back({EditKind::Insert, new_line});
+        }
+    };
+    for (const Match& match : alignment.matches) {
+        flush(match.old_line, match.new_line);
+        edits.push_back({EditKind::Keep, old_line});
+        ++old_line;
+        ++new_line;
     }
-    return counts;
+    flush(old_size, new_size);
+    return edits;
 }
 
 DiffOutcome build_diff_outcome(
@@ -439,8 +633,10 @@ DiffOutcome build_diff_outcome(
     std::string_view old_content,
     std::string_view new_content)
 {
+    // Each side is bounded on its own, as every caller bounds what it keeps of
+    // one file: a file that may be retained for a diff may also be diffed.
     if (old_content.size() > kMaxToolDiffInputBytes
-        || new_content.size() > kMaxToolDiffInputBytes - old_content.size()
+        || new_content.size() > kMaxToolDiffInputBytes
         || file_path.size() > (kMaxToolDiffOutputBytes - 64) / 2) {
         return {};
     }
@@ -454,56 +650,28 @@ DiffOutcome build_diff_outcome(
 
     const auto old_lines = split_diff_lines(old_content);
     const auto new_lines = split_diff_lines(new_content);
-    std::size_t prefix = 0;
-    while (prefix < old_lines.size()
-           && prefix < new_lines.size()
-           && lines_equal(old_lines[prefix], new_lines[prefix])) {
-        ++prefix;
+    // A line's identity is its bytes and its terminator, which is exactly what
+    // lines_equal compares: the view is widened over the '\n' that follows a
+    // terminated line, so "a" and "a\n" are different symbols.
+    const auto identity = [](const DiffLine& line) {
+        return std::string_view(line.text.data(), line.text.size() + (line.terminated ? 1 : 0));
+    };
+    SymbolTable<std::string_view> table(old_lines.size() + new_lines.size());
+    std::vector<std::uint32_t> old_symbols;
+    std::vector<std::uint32_t> new_symbols;
+    old_symbols.reserve(old_lines.size());
+    new_symbols.reserve(new_lines.size());
+    for (const DiffLine& line : old_lines) {
+        old_symbols.push_back(table(identity(line)));
+    }
+    for (const DiffLine& line : new_lines) {
+        new_symbols.push_back(table(identity(line)));
     }
 
-    std::size_t suffix = 0;
-    while (suffix < old_lines.size() - prefix
-           && suffix < new_lines.size() - prefix
-           && lines_equal(old_lines[old_lines.size() - suffix - 1],
-                          new_lines[new_lines.size() - suffix - 1])) {
-        ++suffix;
-    }
-
-    const auto old_middle = std::span{old_lines}.subspan(
-        prefix, old_lines.size() - prefix - suffix);
-    const auto new_middle = std::span{new_lines}.subspan(
-        prefix, new_lines.size() - prefix - suffix);
     WorkBudget budget(kMaxMyersWorkUnits);
-    auto middle_script = shortest_edit_script(old_middle, new_middle, budget);
-    if (!middle_script) {
-        // Either the search ran out of work or the frontier did not add up on
-        // the way back. Neither establishes anything about the change, so
-        // nothing is claimed: no text, and no numbers either.
-        return {};
-    }
-
-    std::vector<Edit> edits;
-    edits.reserve(prefix + middle_script->size() + suffix);
-    for (std::size_t i = 0; i < prefix; ++i) {
-        edits.push_back({EditKind::Keep, static_cast<std::uint32_t>(i)});
-    }
-    for (const Edit& edit : *middle_script) {
-        edits.push_back({
-            edit.kind,
-            static_cast<std::uint32_t>(prefix + edit.line),
-        });
-    }
-    for (std::size_t i = 0; i < suffix; ++i) {
-        edits.push_back({
-            EditKind::Keep,
-            static_cast<std::uint32_t>(old_lines.size() - suffix + i),
-        });
-    }
-
-    // What the search proved, kept whether or not its text turns out to be
-    // affordable: a summary can then report the size of a change it cannot
-    // show instead of falling back to a second search for the same numbers.
-    const auto counts = count_edits(edits);
+    const auto alignment = align_symbols(old_symbols, new_symbols, table.size(), budget);
+    const std::vector<Edit> edits = edits_from(alignment, old_lines.size(), new_lines.size());
+    const auto counts = alignment_counts(alignment, old_lines.size(), new_lines.size());
 
     std::vector<HunkRange> hunks;
     for (std::size_t i = 0; i < edits.size(); ++i) {
@@ -547,10 +715,15 @@ DiffOutcome build_diff_outcome(
 
     std::string diff;
     diff.reserve(std::min<std::size_t>(kMaxToolDiffOutputBytes, 1024));
-    // The change is measured; only its text is unaffordable. Handing back the
-    // numbers without it is what lets a summary say how big a change it cannot
-    // show.
-    const auto counts_only = [&] { return DiffOutcome{.counts = counts}; };
+    // Only the text is unaffordable. Numbers handed back without it are what
+    // let a summary say how big a change it cannot show, so they must stand
+    // on their own: a shortest script's, or none.
+    const auto counts_only = [&] {
+        if (!alignment.minimal) {
+            return DiffOutcome{.minimal = false};
+        }
+        return DiffOutcome{.counts = counts};
+    };
     if (!append_bounded(diff, "--- a/")
         || !append_bounded(diff, file_path)
         || !append_bounded(diff, "\n+++ b/")
@@ -598,7 +771,7 @@ DiffOutcome build_diff_outcome(
         }
     }
 
-    return DiffOutcome{.diff = std::move(diff), .counts = counts};
+    return DiffOutcome{.diff = std::move(diff), .counts = counts, .minimal = alignment.minimal};
 }
 
 } // namespace

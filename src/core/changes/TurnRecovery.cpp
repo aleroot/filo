@@ -26,11 +26,6 @@ TurnRecovery::TurnRecovery(fs::path directory, fs::path workspace, Clock clock)
     if (clock) clock_ = std::move(clock);
 }
 
-bool TurnRecovery::partial() const {
-    std::lock_guard lock(mutex_);
-    return manifest_.partial;
-}
-
 std::optional<RecoveryImage> TurnRecovery::captured(const fs::path& path) const {
     std::lock_guard lock(mutex_);
     auto it = manifest_.entries.find(path);
@@ -254,11 +249,13 @@ std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
         if (core::tools::detail::is_text_like_for_diff(*original) &&
             core::tools::detail::is_text_like_for_diff(current->bytes)) {
             auto diff = core::tools::detail::build_unified_diff_detailed(change.path, *original, current->bytes);
-            if (diff.has_diff() && diff.diff->size() <= diff_budget) {
+            if (diff.counts) { change.added = diff.counts->first; change.deleted = diff.counts->second; }
+            if (!diff.has_diff()) change.content = FileChangeContent::TooLarge;
+            else if (diff.diff->size() > diff_budget) change.content = FileChangeContent::BudgetSpent;
+            else {
                 change.diff = std::move(*diff.diff);
                 diff_budget -= change.diff.size();
-                if (diff.counts) { change.added = diff.counts->first; change.deleted = diff.counts->second; }
-            } else change.content = FileChangeContent::TooLarge;
+            }
         } else change.content = FileChangeContent::Binary;
         changes.files.push_back(std::move(change));
     }

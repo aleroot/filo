@@ -409,6 +409,35 @@ TEST_CASE("A file an unscoped tool creates is discovered by the native inventory
     CHECK_FALSE(summary.complete());
 }
 
+TEST_CASE("A workspace of a few thousand files is inventoried whole", "[changes][inventory]") {
+    // More files than one directory scope enumerates: a real repository is
+    // routinely past that, and every shell command used to flag its summary.
+    TempDir dir;
+    constexpr std::size_t kFiles = TurnChangeTracker::kMaxFilesPerDirectory + 500;
+    for (std::size_t i = 0; i < kFiles; ++i) {
+        put(dir.path / std::format("d{}", i % 20) / std::format("f{}.txt", i), "x\n");
+    }
+    TurnChangeTracker tracker(dir.path);
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"},
+         [&] { put(dir.path / "d3" / "generated.txt", "y\n"); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files.front().path == "d3/generated.txt");
+    CHECK(summary.files.front().kind == FileChangeKind::Added);
+    CHECK_FALSE(summary.partial_enumeration);
+}
+
+TEST_CASE("A workspace past the inventory says its file list may be short", "[changes][inventory]") {
+    TempDir dir;
+    for (int i = 0; i < 4; ++i) put(dir.path / std::format("f{}.txt", i), "x\n");
+    TurnChangeTracker tracker(dir.path, {.max_workspace_files = 2});
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"},
+         [&] { put(dir.path / "generated.txt", "y\n"); });
+
+    CHECK(tracker.changes().partial_enumeration);
+}
+
 TEST_CASE("A turn of scoped edits calls itself complete", "[changes]") {
     TempDir dir;
     const auto file = dir.path / "a.txt";
@@ -458,7 +487,7 @@ TEST_CASE("The diff budget bounds a summary without dropping files from it", "[c
     CHECK(diff_bytes <= 300);
     CHECK(detailed > 0);
     CHECK(detailed < kFiles);
-    CHECK(summary.partial_enumeration);
+    CHECK_FALSE(summary.partial_enumeration);  // Detail is missing, no file is.
     CHECK(std::ranges::any_of(summary.files, [](const FileChange& change) {
         return change.content == FileChangeContent::BudgetSpent;
     }));
@@ -487,7 +516,7 @@ TEST_CASE("Content past the retention budget is still reported as a change", "[c
     CHECK(summary.files[1].path == "big2.txt");
     CHECK(summary.files[1].content == FileChangeContent::BudgetSpent);
     CHECK(summary.files[1].diff.empty());
-    CHECK(summary.partial_enumeration);
+    CHECK_FALSE(summary.partial_enumeration);  // Detail is missing, no file is.
 }
 
 TEST_CASE("The fidelity flags survive a session save and load", "[changes][session]") {
@@ -528,7 +557,7 @@ TEST_CASE("A file whose content was not retained is still counted", "[changes]")
 
     const auto summary = tracker.changes();
     REQUIRE(summary.files.size() == 2);
-    CHECK(summary.partial_enumeration);
+    CHECK_FALSE(summary.partial_enumeration);  // Detail is missing, no file is.
 
     const auto& gone = summary.files[0];
     CHECK(gone.path == "gone.txt");
@@ -660,7 +689,7 @@ TEST_CASE("A turn that cannot keep bytes still counts them", "[changes]") {
     CHECK(std::ranges::all_of(summary.files, [](const FileChange& change) {
         return change.added == 1 && change.deleted == 1;
     }));
-    CHECK(summary.partial_enumeration);
+    CHECK_FALSE(summary.partial_enumeration);  // Detail is missing, no file is.
 }
 
 TEST_CASE("Line hashes have an allowance of their own", "[changes]") {
@@ -730,11 +759,10 @@ TEST_CASE("Counts survive a diff the turn cannot afford", "[changes]") {
     CHECK(summary.files[0].diff.empty());
     CHECK(summary.files[0].added == 1);
     CHECK(summary.files[0].deleted == 1);
-    CHECK(summary.partial_enumeration);
+    CHECK_FALSE(summary.partial_enumeration);  // Detail is missing, no file is.
 }
 
-TEST_CASE("A change too reshaped to diff is still counted from its lines",
-          "[changes]") {
+TEST_CASE("A change rewritten throughout is still diffed", "[changes]") {
     TempDir dir;
     const auto file = dir.path / "a.txt";
     std::string before;
@@ -756,36 +784,56 @@ TEST_CASE("A change too reshaped to diff is still counted from its lines",
     const auto summary = tracker.changes();
     REQUIRE(summary.files.size() == 1);
     CHECK(summary.files[0].kind == FileChangeKind::Modified);
-    CHECK(summary.files[0].diff.empty());
-    // A diff charges a comparison by the byte and gives up on this; a count
-    // charges it by the line and does not. 500 lines rewritten, 10 appended.
-    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
+    // Lines compare as symbols, so how wide they are does not decide whether
+    // a change this spread out can be shown. 500 lines rewritten, 10 appended.
+    CHECK(summary.files[0].content == FileChangeContent::Text);
+    CHECK_FALSE(summary.files[0].diff.empty());
     CHECK(summary.files[0].added == 510);
     CHECK(summary.files[0].deleted == 500);
+    CHECK_FALSE(summary.partial_enumeration);
 }
 
-TEST_CASE("A spent counting allowance leaves changes listed but uncounted",
+TEST_CASE("A spent counting allowance leaves only searched-for changes uncounted",
           "[changes]") {
     TempDir dir;
-    const auto big = dir.path / "big.cpp";
+    const auto edited = dir.path / "edited.cpp";
+    const auto reordered = dir.path / "reordered.cpp";
     const auto content = oversized_content();
-    put(big, content);
+    std::string numbered;
+    while (numbered.size() <= core::tools::detail::kMaxToolDiffInputBytes) {
+        numbered += std::format("line {:08} of a file past the diff cap\n", numbered.size());
+    }
+    put(edited, content);
+    put(reordered, numbered);
     TurnChangeTracker tracker(dir.path, {.max_count_work = 0});
 
-    edit(tracker, scope_of({big}), [&] {
-        auto edited = content;
-        edited[edited.size() / 2] = 'y';
-        put(big, edited);
+    edit(tracker, scope_of({edited, reordered}), [&] {
+        auto changed = content;
+        changed[changed.size() / 2] = 'y';
+        put(edited, changed);
+        // Two lines trade places: every line is still there, so only a search
+        // can say which ones moved.
+        const auto first = numbered.find('\n') + 1;
+        const auto second = numbered.find('\n', first) + 1;
+        put(reordered, numbered.substr(first, second - first) + numbered.substr(0, first)
+                           + numbered.substr(second));
     });
 
     const auto summary = tracker.changes();
-    REQUIRE(summary.files.size() == 1);
-    CHECK(summary.files[0].kind == FileChangeKind::Modified);
-    // The file is still there with the reason it has no detail; only the
-    // numbers are missing, and a line count was never a guess.
-    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
-    CHECK(summary.files[0].added == 0);
-    CHECK(summary.files[0].deleted == 0);
+    REQUIRE(summary.files.size() == 2);
+    for (const auto& change : summary.files) {
+        CHECK(change.kind == FileChangeKind::Modified);
+        CHECK(change.content == FileChangeContent::TooLarge);
+    }
+    // One line rewritten in place is found without searching, so no
+    // allowance is needed to count it exactly.
+    CHECK(summary.files[0].added == 1);
+    CHECK(summary.files[0].deleted == 1);
+    // The reorder needed the search the turn had no allowance for. The file
+    // is still listed with its reason; only the numbers are missing, and a
+    // line count is never a guess.
+    CHECK(summary.files[1].added == 0);
+    CHECK(summary.files[1].deleted == 0);
 }
 
 TEST_CASE("An oversized file is counted even though it cannot be diffed", "[changes]") {

@@ -19,12 +19,13 @@ inline constexpr std::size_t kMaxToolDiffOutputBytes = 512 * 1024;
 /// Seed of every FNV-1a hash Filo keeps: content fingerprints, file stamps and
 /// the per-line hashes a change too large to diff is still counted from.
 inline constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
-/// Work one bounded Myers search may spend. A frontier slot costs one unit, and
-/// a line comparison costs what comparing that line costs: its length for a
-/// diff, one unit for a hash. The same change can therefore be past a diff's
-/// bound and well inside a count's, which is why a diff that gave up is not a
-/// count that would. Detail is optional; giving it up always beats hanging a
-/// turn for it, and measured the cap costs milliseconds.
+/// Work one diff or count may spend aligning two texts. Lines are compared as
+/// symbols, so a frontier slot and a line comparison each cost one unit
+/// whatever the lines hold: the bound follows the shape of a change, never the
+/// width of its lines. Half of it goes to the shortest edit script; past that
+/// an anchored alignment takes the rest and still yields a correct, if longer,
+/// script. Detail is optional; giving it up always beats hanging a turn for
+/// it, and measured the cap costs milliseconds.
 inline constexpr std::size_t kMaxMyersWorkUnits = 4'000'000;
 
 [[nodiscard]] inline bool is_text_like_for_diff(std::string_view value) noexcept {
@@ -157,6 +158,10 @@ public:
         return true;
     }
 
+    /// Records that a search this budget bounded was cut short, for a caller
+    /// that ran it on an allowance carved out of this one.
+    void mark_exhausted() noexcept { exhausted_ = true; }
+
     [[nodiscard]] constexpr bool exhausted() const noexcept { return exhausted_; }
     [[nodiscard]] constexpr std::size_t remaining() const noexcept { return remaining_; }
 
@@ -172,25 +177,33 @@ private:
 };
 
 /// The additions and deletions between two line-hash sequences: exactly what
-/// a unified diff of the same lines would count, without building one. No
-/// value when `budget` runs out first — a count it cannot prove is not
-/// reported as one.
+/// a unified diff of the same lines would count, without building one — the
+/// two run the same alignment. No value when `budget` cannot pay for a
+/// shortest script: with no diff to check them against, the numbers of a
+/// longer one would be a guess, and a count is never a guess.
 [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> count_line_edits(
     std::span<const std::uint64_t> before,
     std::span<const std::uint64_t> after,
     WorkBudget& budget);
 
-/// What one bounded diff attempt established. `counts` is what the search
+/// What one bounded diff attempt established. `counts` is what the alignment
 /// proved rather than what the text says, so a caller that cannot afford the
 /// diff still keeps the numbers — the reason a summary can report the size of
-/// a change it cannot show. Absent counts mean the search never finished: the
-/// inputs were not worth searching, or the change is beyond the work bound.
+/// a change it cannot show. Absent counts mean the inputs were not worth
+/// diffing (unchanged, not text, a side over `kMaxToolDiffInputBytes`), or the
+/// text did not fit and the script was not a shortest one: numbers without a
+/// diff to check them against are reported only when they are exact.
 struct DiffOutcome {
-    /// The unified diff, absent when the change could not be shown.
+    /// The unified diff, absent when the change could not be shown: nothing
+    /// was aligned, or the text would exceed `kMaxToolDiffOutputBytes`.
     std::optional<std::string> diff;
-    /// Additions and deletions, whenever the search completed. Always present
-    /// with `diff`.
+    /// Additions and deletions. Always present with `diff`, and always what
+    /// `diff` itself counts; without it, present only when `minimal`.
     std::optional<std::pair<std::size_t, std::size_t>> counts;
+    /// The script is a shortest one. False when the change was too reshaped
+    /// for the exact search and the anchored alignment described it: the diff
+    /// still applies exactly, it may only show more lines than it must.
+    bool minimal = true;
 
     [[nodiscard]] bool has_diff() const noexcept { return diff.has_value(); }
 };
@@ -201,9 +214,13 @@ struct DiffOutcome {
     std::string_view new_content);
 
 /// Builds a bounded, line-based unified diff. Returns no value when either
-/// input is unsuitable for a text diff or the bounded Myers search exceeds its
-/// work limit. In particular, a failed diff is never replaced with a
-/// whole-file remove/add hunk.
+/// input is unsuitable for a text diff or the diff text would exceed its size
+/// limit; the work it does is bounded either way. A change too reshaped for a
+/// shortest script is anchored on the lines it left unique rather than
+/// dropped (`DiffOutcome::minimal` is then false). A stretch is shown as
+/// rewritten whole only when its sides share no line, which is then the
+/// shortest script, or when no line in it is unique to both sides and it is
+/// too reshaped to search.
 [[nodiscard]] inline std::optional<std::string> build_unified_diff(
     std::string_view file_path,
     std::string_view old_content,

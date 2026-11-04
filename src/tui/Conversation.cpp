@@ -2829,7 +2829,7 @@ namespace {
     if (changes.ambiguous_ownership)
         caveats.emplace_back("concurrent work may be included; automatic revert is unavailable");
     if (changes.partial_enumeration) {
-        caveats.emplace_back("too many files to detail fully");
+        caveats.emplace_back("some changes may not be listed (more files than a turn tracks)");
     }
     if (changes.unscoped_mutations) {
         if (changes.workspace_observed) {

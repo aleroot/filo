@@ -52,9 +52,11 @@ struct TurnChanges {
     /// review comments, finds it again. Empty on older saved conversations.
     std::string id;
     std::vector<FileChange> files;
-    /// A directory in scope held more files than one turn enumerates, or the
-    /// turn ran out of diff budget. Files may be missing from `files`, and
-    /// those that are listed may carry no `diff`.
+    /// The file list itself may be short: a directory or workspace in scope
+    /// held more files than one turn enumerates, or a path could not be
+    /// observed. Detail a listed file lacks (no diff because of a budget or its
+    /// size) is not a gap in the list; its `content` says so on its own.
+    /// Summaries saved before this distinction may set it for either reason.
     bool partial_enumeration = false;
     /// A tool ran whose writes cannot be enumerated up front (shell, Python,
     /// MCP, subagents). Paths the turn already knew about were reconciled

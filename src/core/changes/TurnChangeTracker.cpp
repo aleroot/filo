@@ -28,6 +28,8 @@ using core::tools::detail::kMaxToolDiffInputBytes;
 /// What one retained line hash costs, so both the allowance and the check that
 /// spends it agree on the price.
 constexpr std::size_t kBytesPerLineHash = sizeof(std::uint64_t);
+// Every file an inventory lists can have its original captured.
+static_assert(TurnChangeTracker::kMaxWorkspaceFiles == TurnRecovery::kMaxFiles);
 
 /// Additions and deletions of one change, when they could be established.
 using Counts = std::optional<std::pair<std::size_t, std::size_t>>;
@@ -203,9 +205,8 @@ TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in
                 snapshot.line_hashes = std::move(scan->line_hashes);
             }
         }
-        // Only a spent turn budget is a gap in the summary; an oversized file
-        // describes itself.
-        partial_enumeration_ |= !oversized;
+        // The file is still listed and still detected as changed: its content
+        // label says what detail it lacks, so the file list stays complete.
         return snapshot;
     }
 
@@ -457,7 +458,7 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
         checkpoint_current_unlocked();
         return;
     }
-    auto inventory = workspace_inventory(workspace_roots_, limits_.max_files_per_directory,
+    auto inventory = workspace_inventory(workspace_roots_, limits_.max_workspace_files,
         [&](const auto& path) { return observable_unlocked(path, true); });
     partial_enumeration_ |= !inventory.complete;
     if (when == Observation::Before) {
@@ -670,11 +671,10 @@ FileChange TurnChangeTracker::describe(FileChangeKind kind,
     auto outcome = core::tools::detail::build_unified_diff_detailed(
         change.path, before.text, after.text);
     if (!outcome.has_diff()) {
-        // Beyond what one diff may search or emit. The search may still have
-        // measured the change before its text proved unaffordable. Where it did
-        // not, the hashes both sides kept are searched on the report's own
-        // allowance — and that search charges a line what the diff charges a
-        // byte, so a change too reshaped to diff is often still cheap to count.
+        // Beyond what one diff may align or emit. Where the alignment finished
+        // and only the text was unaffordable, its numbers came back anyway.
+        // Where it did not, the hashes both sides kept are aligned on the
+        // report's own allowance, which may still have room for it.
         return undiffed(FileChangeContent::TooLarge,
                         outcome.counts ? outcome.counts : hashed_counts());
     }
@@ -696,11 +696,11 @@ FileChange TurnChangeTracker::describe(FileChangeKind kind,
 TurnChanges TurnChangeTracker::changes() const {
     std::lock_guard lock(mutex_);
     TurnChanges result;
-    if (recovery_) {
-        result.recovery_path = recovery_->directory().string();
-        result.partial_enumeration = recovery_->partial();
-    }
-    result.partial_enumeration |= partial_enumeration_;
+    // Only what bounded the file list makes it partial. A recovery checkpoint
+    // that could not capture every original limits revert, which refuses
+    // those files by name; it does not hide a change from this list.
+    if (recovery_) result.recovery_path = recovery_->directory().string();
+    result.partial_enumeration = partial_enumeration_;
     result.unscoped_mutations = unscoped_mutations_;
     result.ambiguous_ownership = observation_owner_->ambiguous();
     result.workspace_observed = workspace_observed_;
@@ -736,12 +736,8 @@ TurnChanges TurnChangeTracker::changes() const {
         result.files.push_back(describe(kind, key, key, budget));
     }
 
+    // Detail given up at report time is carried by each file's content label.
     std::ranges::sort(result.files, {}, &FileChange::path);
-    // Detail given up at report time is a gap in the summary, not in a file.
-    result.partial_enumeration |= std::ranges::any_of(
-        result.files, [](const FileChange& change) {
-            return change.content == FileChangeContent::BudgetSpent;
-        });
     return result;
 }
 

@@ -66,6 +66,11 @@ public:
     /// Only the first `kMaxFilesPerDirectory` files of a directory in a scope
     /// are enumerated.
     static constexpr std::size_t kMaxFilesPerDirectory = 1000;
+    /// Files the workspace inventory around an unscoped tool lists. Sized to
+    /// what the turn's recovery checkpoint can capture, so a repository of a
+    /// few thousand files is covered whole rather than flagged on every shell
+    /// command; past this the summary says its file list may be incomplete.
+    static constexpr std::size_t kMaxWorkspaceFiles = 4096;
     /// File content one turn retains for diffing, across every file it saw.
     /// Past this a file is still listed and still detected as changed, only
     /// its detail is given up.
@@ -96,10 +101,13 @@ public:
     /// incomplete. Past this the list is short, and the summary still says so.
     static constexpr std::size_t kMaxUnscopedToolNames = 8;
 
-    /// Resource bounds for one turn's summary. Exhausting any of them degrades
-    /// detail and marks the summary partial; it never drops a file silently.
+    /// Resource bounds for one turn's summary. Exhausting a file limit marks
+    /// the summary's file list partial; exhausting a byte or work limit only
+    /// degrades the detail of the files it hit, which say so themselves. No
+    /// limit drops a file silently.
     struct Limits {
         std::size_t max_files_per_directory = kMaxFilesPerDirectory;
+        std::size_t max_workspace_files = kMaxWorkspaceFiles;
         std::size_t max_tracked_bytes = kMaxTrackedBytesPerTurn;
         std::size_t max_diff_bytes = kMaxDiffBytesPerTurn;
         std::size_t max_hashed_bytes = kMaxHashedBytesPerTurn;
