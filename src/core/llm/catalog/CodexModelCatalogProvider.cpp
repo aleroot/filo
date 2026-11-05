@@ -72,7 +72,7 @@ namespace {
 [[nodiscard]] std::optional<UltraEffortProfile> codex_ultra_profile(
     const catalog::JsonObjectView& model,
     const ModelReasoningProfile& reasoning) {
-    if (std::ranges::find(reasoning.supported_efforts, "ultra")
+    if (std::ranges::find(reasoning.supported_efforts, std::string("ultra"))
         == reasoning.supported_efforts.end()) {
         return std::nullopt;
     }

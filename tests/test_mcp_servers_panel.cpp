@@ -362,3 +362,21 @@ TEST_CASE("Startup banner draws the MCP server count as a popover trigger",
         }
     }
 }
+
+TEST_CASE("Startup banner drops the MCP disclosure when no server is configured",
+          "[tui][banner][mcp_panel]") {
+    ftxui::Box mcp_box = tui::kEmptyBox;
+    auto banner = tui::render_startup_banner_panel(
+        "provider", "model", 0, {}, {}, "12:00:00",
+        {}, nullptr, {}, false, 0,
+        tui::PopoverTrigger{.hitbox = &mcp_box, .open = false});
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(120),
+                                        ftxui::Dimension::Fit(banner));
+    ftxui::Render(screen, banner);
+    const std::string output = strip_sgr(screen.ToString());
+    CHECK_THAT(output, !ContainsSubstring("MCP servers"));
+    CHECK_THAT(output, !ContainsSubstring("▾"));
+    CHECK_THAT(output, ContainsSubstring("provider: provider"));
+    CHECK_THAT(output, ContainsSubstring("model: model"));
+    CHECK(mcp_box.x_max < mcp_box.x_min);
+}

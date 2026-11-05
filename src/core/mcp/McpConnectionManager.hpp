@@ -10,6 +10,7 @@
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <cstddef>
 
 namespace core::llm {
 class LLMProvider;
@@ -51,6 +52,8 @@ public:
 
     // Returns the number of successfully connected MCP servers.
     [[nodiscard]] int connected_count() const noexcept;
+
+    [[nodiscard]] std::size_t configured_count() const noexcept;
 
     // Returns registered MCP tool names (for diagnostics / /help display).
     [[nodiscard]] std::vector<std::string> registered_tool_names() const;

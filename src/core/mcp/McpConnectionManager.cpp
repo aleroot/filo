@@ -233,6 +233,11 @@ int McpConnectionManager::connected_count() const noexcept {
     return static_cast<int>(servers_.size());
 }
 
+std::size_t McpConnectionManager::configured_count() const noexcept {
+    std::lock_guard lock(status_mutex_);
+    return statuses_.size();
+}
+
 std::vector<std::string> McpConnectionManager::registered_tool_names() const {
     std::lock_guard lock(mutex_);
     std::vector<std::string> names;

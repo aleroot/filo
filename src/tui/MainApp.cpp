@@ -929,7 +929,8 @@ RunResult run(RunOptions opts) {
         std::string summary = format_runtime_status_summary(
             core::llm::provider_display_name(active_provider_name),
             active_model_name,
-            core::mcp::McpConnectionManager::get_instance().connected_count());
+            static_cast<int>(
+                core::mcp::McpConnectionManager::get_instance().configured_count()));
         if (!context_sources_label.empty()) {
             summary += "  —  ";
             summary += context_sources_label;
@@ -10289,6 +10290,8 @@ RunResult run(RunOptions opts) {
         AgentsVisualizerPanelState      agents_visualizer_snapshot;
         std::size_t                     queued_steering_count = 0;
         std::string                     external_session_status;
+        const int mcp_server_count = static_cast<int>(
+            core::mcp::McpConnectionManager::get_instance().configured_count());
         {
             std::lock_guard lock(ui_mutex);
             if (conversation_search_state.active) {
@@ -10394,6 +10397,10 @@ RunResult run(RunOptions opts) {
             usage_panel_visible = usage_details_panel_active;
             workspace_panel_snapshot = workspace_details_panel_state;
             mcp_servers_panel_snapshot = mcp_servers_panel_state;
+            if (mcp_server_count == 0) {
+                mcp_servers_panel_state.active = false;
+                mcp_servers_panel_snapshot.active = false;
+            }
             agents_visualizer_snapshot = agents_visualizer_panel_state;
             queued_steering_count = current_runtime->queued_turn_count();
         }
@@ -10459,7 +10466,7 @@ RunResult run(RunOptions opts) {
             banner_el = render_startup_banner_panel(
                 core::llm::provider_display_name(active_provider_name),
                 active_model_name.empty() ? "<provider default>" : active_model_name,
-                core::mcp::McpConnectionManager::get_instance().connected_count(),
+                mcp_server_count,
                 context_sources_label,
                 provider_setup_hint(active_provider_name),
                 current_time_str(),

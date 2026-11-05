@@ -683,15 +683,29 @@ Element render_thread_tab(const ThreadTab& tab, bool animate, std::size_t tick) 
 
 // The summary is rendered as two parts so the MCP count can be clicked.
 std::string format_runtime_status_prefix(std::string_view provider_name,
-                                         std::string_view model_name) {
+                                         std::string_view model_name,
+                                         bool has_more) {
     return std::format(
-        "provider: {}  —  model: {}  —  ",
+        "provider: {}  —  model: {}{}",
         provider_name,
-        model_name.empty() ? "<provider default>" : model_name);
+        model_name.empty() ? "<provider default>" : model_name,
+        has_more ? "  —  " : "");
 }
 
 std::string format_mcp_status_label(int mcp_server_count) {
     return std::format("MCP servers: {}", mcp_server_count);
+}
+
+Elements split_status_words(const std::string& prefix) {
+    Elements words;
+    std::size_t start = 0;
+    while (start < prefix.size()) {
+        const auto end = prefix.find(' ', start);
+        const auto token_end = end == std::string::npos ? prefix.size() : end + 1;
+        words.push_back(text(prefix.substr(start, token_end - start)));
+        start = token_end;
+    }
+    return words;
 }
 
 /// Summary whose MCP label is the trigger of the MCP servers popover. `wrap`
@@ -701,20 +715,20 @@ Element render_runtime_status_summary(std::string_view provider_name,
                                       int mcp_server_count,
                                       const PopoverTrigger& mcp_servers_trigger,
                                       bool wrap) {
-    const std::string prefix = format_runtime_status_prefix(provider_name, model_name);
+    const bool has_mcp = mcp_server_count > 0;
+    const std::string prefix = format_runtime_status_prefix(provider_name, model_name, has_mcp);
+    if (!has_mcp) {
+        if (!wrap) {
+            return text(prefix) | color(ColorText);
+        }
+        return flexbox(split_status_words(prefix)) | color(ColorText) | xflex;
+    }
     auto mcp_label = render_popover_trigger(format_mcp_status_label(mcp_server_count),
                                             mcp_servers_trigger);
     if (!wrap) {
         return hbox({text(prefix), std::move(mcp_label)}) | color(ColorText);
     }
-    Elements words;
-    std::size_t start = 0;
-    while (start < prefix.size()) {
-        const auto end = prefix.find(' ', start);
-        const auto token_end = end == std::string::npos ? prefix.size() : end + 1;
-        words.push_back(text(prefix.substr(start, token_end - start)));
-        start = token_end;
-    }
+    Elements words = split_status_words(prefix);
     words.push_back(std::move(mcp_label));
     return flexbox(std::move(words)) | color(ColorText) | xflex;
 }
@@ -746,8 +760,12 @@ std::string format_security_status_label(bool sandbox_active, bool network_polic
 std::string format_runtime_status_summary(std::string_view provider_name,
                                           std::string_view model_name,
                                           int mcp_server_count) {
-    return format_runtime_status_prefix(provider_name, model_name)
-        + format_mcp_status_label(mcp_server_count);
+    const std::string prefix =
+        format_runtime_status_prefix(provider_name, model_name, mcp_server_count > 0);
+    if (mcp_server_count <= 0) {
+        return prefix;
+    }
+    return prefix + format_mcp_status_label(mcp_server_count);
 }
 
 std::string format_model_status_badge(std::string_view provider_name,

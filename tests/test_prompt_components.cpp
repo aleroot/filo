@@ -151,7 +151,7 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("Filo AI Agent"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("provider: local-qwen"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("model: qwen2.5-coder-7b-instruct-q4_k_m"));
-    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MCP servers: 0"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("MCP servers"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("AGENTS.md, FILO.md"));
     // The live clock sits in the top-right corner of the banner.
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("12:34:56"));
@@ -252,7 +252,7 @@ TEST_CASE("runtime status summary has one compact canonical format",
     CHECK(format_runtime_status_summary("openai", "gpt-5", 2)
           == "provider: openai  —  model: gpt-5  —  MCP servers: 2");
     CHECK(format_runtime_status_summary("openai", "", 0)
-          == "provider: openai  —  model: <provider default>  —  MCP servers: 0");
+          == "provider: openai  —  model: <provider default>");
 }
 
 TEST_CASE("model status badge includes effort only when non-default",
