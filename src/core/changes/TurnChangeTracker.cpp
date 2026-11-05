@@ -144,11 +144,13 @@ std::size_t TurnChangeTracker::remaining_bytes_unlocked(Claim claim) const {
     // A single file may overshoot the bound: the check reserves one copy while
     // a path seen for the first time is retained twice, as baseline and as
     // current. Saturating keeps that from wrapping into an endless budget.
-    return std::sub_sat(usable_share(limits_.max_tracked_bytes, claim), tracked_bytes_);
+    const auto limit = usable_share(limits_.max_tracked_bytes, claim);
+    return limit - std::min(limit, tracked_bytes_);
 }
 
 std::size_t TurnChangeTracker::remaining_hash_bytes_unlocked(Claim claim) const {
-    return std::sub_sat(usable_share(limits_.max_hashed_bytes, claim), hashed_bytes_);
+    const auto limit = usable_share(limits_.max_hashed_bytes, claim);
+    return limit - std::min(limit, hashed_bytes_);
 }
 
 TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& path,

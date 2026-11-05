@@ -61,7 +61,7 @@ void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canoni
             store_.save(manifest_);
             manifest_saved_ = true;
         }
-        auto original = store_.store_original(path, std::sub_sat(max_bytes, bytes_));
+        auto original = store_.store_original(path, max_bytes - std::min(max_bytes, bytes_));
         if (!original) {
             manifest_.uncaptured.insert(path);
             manifest_.partial = true;
