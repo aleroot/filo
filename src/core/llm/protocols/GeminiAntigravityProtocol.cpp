@@ -23,7 +23,7 @@ constexpr int kClaudeMaxOutputTokens = 128000;
 constexpr int kGeminiMaxOutputTokens = 65536;
 
 // Per-wire-id constants snapshotted from `v1internal:fetchAvailableModels` as
-// served to the 2.27.0 hub client (2026-10-28). `model_enum` is telemetry-only
+// served to the 2.27.0 hub client (2026-10-28), unchanged for 2.29.0 (2026-11-05). `model_enum` is telemetry-only
 // (the backend does not require it) but the real client never omits it for the
 // ids it lists, so neither does Filo; an id absent from this snapshot simply
 // sends no label. `max_output_tokens` is the fixed `generationConfig.
@@ -34,7 +34,7 @@ struct WireProfileEntry {
 };
 
 constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
-    // Gemini 4 Argon — the frontier tier of the 2.27.0 client.
+    // Gemini 4 Argon — the frontier tier of the 2.27.0/2.29.0 client.
     {"gemini-4-argon-low", {"MODEL_PLACEHOLDER_M419", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-medium", {"MODEL_PLACEHOLDER_M418", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-high", {"MODEL_PLACEHOLDER_M417", kGeminiMaxOutputTokens}},
