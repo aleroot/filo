@@ -1727,7 +1727,8 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         result.stream_error_message = message;
         result.retryable_stream_error = !stream_retry_vetoed_
             && (code == "server_error" || code == "internal_server_error"
-                || code == "server_is_overloaded" || code == "rate_limit_exceeded"
+                || code == "server_is_overloaded" || code == "policy_capacity_unavailable"
+                || code == "rate_limit_exceeded"
                 || code == "rate_limit_error" || code == "timeout"
                 || code == "request_timeout" || code == "temporarily_unavailable"
                 || code == "previous_response_not_found"

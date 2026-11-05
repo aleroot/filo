@@ -1387,7 +1387,7 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     REQUIRE(chatgpt != nullptr);
     CHECK(dynamic_cast<CodexModelCatalogProvider*>(chatgpt.get()) != nullptr);
     CHECK(chatgpt->provider_name() == "openai");
-    CHECK(chatgpt->model_list_path() == "/models?client_version=0.164.0");
+    CHECK(chatgpt->model_list_path() == "/models?client_version=0.166.0");
 
     core::llm::protocols::OpenAIResponsesProtocol public_openai;
     CHECK(public_openai.model_catalog("openai") == nullptr);

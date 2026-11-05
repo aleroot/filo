@@ -372,8 +372,8 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("session_id") == "thread-123");
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
-    REQUIRE(headers.at("version") == "0.164.0");
-    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.164.0");
+    REQUIRE(headers.at("version") == "0.166.0");
+    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.166.0");
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
@@ -1168,7 +1168,7 @@ TEST_CASE("Responses require completion and classify transient stream failures",
         R"({"type":"response.created","response":{"id":"resp_start"}})");
     CHECK(started.stream_started);
     for (const auto code : {"server_error", "rate_limit_exceeded", "previous_response_not_found",
-                             "websocket_connection_limit_reached"}) {
+                             "websocket_connection_limit_reached", "policy_capacity_unavailable"}) {
         const auto result = protocol.parse_event(std::string{
             R"({"type":"response.failed","headers":{"Retry-After":"1.2"},"response":{"error":{"code":")"}
             + code + R"(","message":"try again"}}})");
