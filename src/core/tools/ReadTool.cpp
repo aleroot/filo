@@ -1,6 +1,8 @@
 #include "ReadTool.hpp"
 #include "ToolNames.hpp"
+#include "read/ImageFile.hpp"
 #include "read/SerializedPathRecovery.hpp"
+#include "ToolArgumentUtils.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <algorithm>
@@ -50,12 +52,24 @@ std::optional<read::Options> recovered_read(const std::string& args, const read:
                         recovered->paths.front());
     return recovered;
 }
+/// A single local image is returned as an image, whatever view was asked
+/// for: no text view of its bytes would help. Anything that does not resolve
+/// falls through, so the text path reports the error it always has.
+std::optional<std::string> read_image(const read::Options& options,
+                                      const core::context::SessionContext& context) {
+    if (options.paths.size() != 1 || !options.cell.empty()) return std::nullopt;
+    const auto& path = options.paths.front();
+    if (path.contains("://") || !read::has_image_extension(path)) return std::nullopt;
+    std::filesystem::path resolved;
+    if (detail::check_workspace_access(path, path, context, &resolved, names::kRead)) return std::nullopt;
+    return read::read_image_file(path, resolved);
+}
 }
 ToolDefinition ReadTool::get_definition() const {
     return {
         .name = std::string(names::kRead),
         .title = "Read",
-        .description = "Read files, notebooks, HTTP(S), result://. Text defaults stay exact (1 MiB). Use auto for directories/compact views; question answers via a reader model with validated citations. Recover evidence with exact, line ranges and select.",
+        .description = "Read files, notebooks, images (PNG/JPEG/GIF/WebP, attached as image input), HTTP(S), result://. Text defaults stay exact (1 MiB). Use auto for directories/compact views; question answers via a reader model with validated citations. Recover evidence with exact, line ranges and select.",
         .input_schema = R"({"type":"object","properties":{"path":{"description":"A non-empty local path, HTTP(S) URL, or result:// reference.","oneOf":[{"type":"string","minLength":1,"maxLength":1024},{"type":"array","items":{"type":"string","minLength":1,"maxLength":1024},"minItems":1,"maxItems":8}]},"view":{"type":"string","enum":["exact","auto","outline"]},"question":{"type":"string","maxLength":8192},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":10000},"select":{"type":"object","minProperties":1,"maxProperties":1,"properties":{"cell":{"type":"string"}},"additionalProperties":false},"expected_digest":{"type":"string"}},"required":["path"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint = true,
@@ -74,6 +88,7 @@ std::string ReadTool::execute(const std::string& args, const ToolInvocationConte
         parsed = std::move(*recovered);
     const auto& options = *parsed;
     if (invocation.cancellation_requested && invocation.cancellation_requested()) return error_json("Read cancelled.");
+    if (auto image = read_image(options, invocation.session_context)) return std::move(*image);
     if (uses_legacy_text_path(options))
         return read::read_text_file(options, invocation.session_context);
 

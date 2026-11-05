@@ -546,6 +546,17 @@ public:
     }
 
     /**
+     * @brief Where this wire format can carry media returned by a tool.
+     *
+     * Applied by `HttpLLMProvider` before `prepare_request()`, so protocol
+     * media policies see the media wherever it ends up. Most chat formats
+     * accept images only in user messages, hence the default.
+     */
+    [[nodiscard]] virtual ToolResultMediaPlacement tool_result_media() const noexcept {
+        return ToolResultMediaPlacement::follow_up_user;
+    }
+
+    /**
      * @brief Prepare local media inputs before JSON serialization.
      *
      * Called after auth resolution and `prepare_request()`, before

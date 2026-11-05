@@ -81,6 +81,7 @@ namespace {
             req.model = std::string(default_model);
         }
         req.auth_properties = auth.properties;
+        fit_tool_result_media(req, prepared.protocol->tool_result_media());
         prepared.protocol->prepare_request(req);
         prepared.protocol->prepare_media_uploads(req, base_url, auth, requester);
         prepared.protocol->prepare_context(req, base_url, auth,

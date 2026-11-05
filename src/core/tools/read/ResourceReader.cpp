@@ -2,6 +2,7 @@
 #include "PathDiagnostics.hpp"
 #include "../ToolArgumentUtils.hpp"
 #include "../ToolPolicy.hpp"
+#include "../../utils/ImageHeader.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <fstream>
 #include <algorithm>
@@ -166,8 +167,11 @@ std::expected<Resource, std::string> ResourceReader::read(
     else if (!options.cell.empty())
         return std::unexpected("select.cell applies only to notebooks.");
     if (!decoded) return decoded;
-    if (decoded->text.find('\0') != std::string::npos)
+    if (decoded->text.find('\0') != std::string::npos) {
+        if (decoded->kind == "text" && core::utils::image::sniff(decoded->text))
+            return std::unexpected("Image file: read it on its own (a single path) to view it.");
         return std::unexpected("Binary resource has no supported text decoder.");
+    }
     decoded->digest = source_digest;
     if (!options.expected_digest.empty() && options.expected_digest != decoded->digest)
         return std::unexpected("Resource changed since the referenced read. Read it again before using old locations.");

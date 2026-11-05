@@ -405,6 +405,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/InterprocessFile.cpp
     src/core/utils/FileStamp.cpp
     src/core/utils/FileSystemUtils.cpp
+    src/core/utils/ImageHeader.cpp
     src/core/utils/ProcessUtils.cpp
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
@@ -464,6 +465,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/read/ReadTypes.cpp
     src/core/tools/read/SerializedPathRecovery.cpp
     src/core/tools/read/PathDiagnostics.cpp
+    src/core/tools/read/ImageFile.cpp
     src/core/tools/read/TextFileReader.cpp
     src/core/tools/read/ResourceReader.cpp
     src/core/tools/read/NotebookReader.cpp
@@ -763,6 +765,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_tools.cpp
     tests/test_python_namespaces.cpp
     tests/test_tool_diff_utils.cpp
+    tests/test_read_image.cpp
     tests/test_read_resources.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
@@ -1052,6 +1055,7 @@ source_group(
     FILES
         tests/test_tools.cpp
         tests/test_python_namespaces.cpp
+        tests/test_read_image.cpp
         tests/test_read_resources.cpp
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp

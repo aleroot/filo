@@ -52,6 +52,10 @@ struct Resource {
     std::vector<Section> sections = {};
 };
 
+/// The `{"error":...}` result for a path `read` cannot return.
+[[nodiscard]] std::string format_read_error(std::string_view requested_path,
+                                            std::string_view resolved_path,
+                                            std::string_view reason);
 [[nodiscard]] std::string read_text_file(const Options& options, const core::context::SessionContext& context);
 /// Read at most @p bytes. The caller chooses @p bytes (file size when known);
 /// this does not probe the stream length. @p spare reserves room for text the

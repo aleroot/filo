@@ -237,6 +237,30 @@ std::string AnthropicSerializer::serialize(
         payload += ']';
     }
 
+    // One image block, or a text placeholder when the media cannot be sent.
+    const auto append_media_block = [&](const ContentPart& part) {
+        const auto encoded = encode_image_part(part);
+        const auto media_type = encoded.has_value() && !encoded->is_url_reference()
+            ? anthropic_image_media_type(encoded->mime_type)
+            : std::nullopt;
+        if (options.image_urls && encoded && encoded->is_url_reference()) {
+            payload += R"({"type":"image","source":{"type":"url","url":")";
+            payload += core::utils::escape_json_string(encoded->url);
+            payload += R"("}})";
+        } else if (media_type.has_value()) {
+            payload += R"({"type":"image","source":{"type":"base64","media_type":")";
+            payload += core::utils::escape_json_string(*media_type);
+            payload += R"(","data":")";
+            payload += core::utils::escape_json_string(encoded->base64_data);
+            payload += R"("}})";
+        } else {
+            payload += R"({"type":"text","text":")";
+            payload += core::utils::escape_json_string(
+                unavailable_media_attachment_text(part.type, media_reference(part)));
+            payload += R"("})";
+        }
+    };
+
     // Messages — system messages are skipped (handled above as top-level field).
     payload += R"(,"messages":[)";
     bool first_msg = true;
@@ -265,9 +289,29 @@ std::string AnthropicSerializer::serialize(
                 first_result = false;
                 payload += R"({"type":"tool_result","tool_use_id":")";
                 payload += core::utils::escape_json_string(result.tool_call_id);
-                payload += R"(","content":")";
-                payload += core::utils::escape_json_string(result.content);
-                payload += "\"}";
+                if (result.content_parts.empty()) {
+                    payload += R"(","content":")";
+                    payload += core::utils::escape_json_string(result.content);
+                    payload += "\"}";
+                } else {
+                    // Media a tool returned (an image `read` opened) rides in
+                    // the result block, after the result's own text.
+                    payload += R"(","content":[)";
+                    bool first_block = true;
+                    // Anthropic rejects an empty text block.
+                    if (!result.content.empty()) {
+                        payload += R"({"type":"text","text":")";
+                        payload += core::utils::escape_json_string(result.content);
+                        payload += R"("})";
+                        first_block = false;
+                    }
+                    for (const auto& part : result.content_parts) {
+                        if (part.type == ContentPartType::Text) continue;
+                        if (!std::exchange(first_block, false)) payload += ',';
+                        append_media_block(part);
+                    }
+                    payload += "]}";
+                }
                 ++message_index;
             }
             --message_index;
@@ -341,26 +385,7 @@ std::string AnthropicSerializer::serialize(
                         continue;
                     }
 
-                    const auto encoded = encode_image_part(part);
-                    const auto media_type = encoded.has_value() && !encoded->is_url_reference()
-                        ? anthropic_image_media_type(encoded->mime_type)
-                        : std::nullopt;
-                    if (options.image_urls && encoded && encoded->is_url_reference()) {
-                        payload += R"({"type":"image","source":{"type":"url","url":")";
-                        payload += core::utils::escape_json_string(encoded->url);
-                        payload += R"("}})";
-                    } else if (media_type.has_value()) {
-                        payload += R"({"type":"image","source":{"type":"base64","media_type":")";
-                        payload += core::utils::escape_json_string(*media_type);
-                        payload += R"(","data":")";
-                        payload += core::utils::escape_json_string(encoded->base64_data);
-                        payload += R"("}})";
-                    } else {
-                        payload += R"({"type":"text","text":")";
-                        payload += core::utils::escape_json_string(
-                            unavailable_media_attachment_text(part.type, media_reference(part)));
-                        payload += R"("})";
-                    }
+                    append_media_block(part);
                 }
                 payload += "]}";
             } else {

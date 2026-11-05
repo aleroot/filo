@@ -2,6 +2,8 @@
 
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <format>
 #include <optional>
 #include <ranges>
 #include <unordered_map>
@@ -798,6 +800,111 @@ inline void degrade_historical_image_inputs(ChatRequest& req) {
 
 inline void degrade_historical_video_inputs(ChatRequest& req) {
     degrade_historical_media_inputs(req, {.images = false, .videos = true});
+}
+
+/// Where a wire format can carry media a tool returned (an image `read`
+/// opened). Filo stores it on the `tool` message itself.
+enum class ToolResultMediaPlacement {
+    /// The tool-result block itself accepts media (Anthropic Messages).
+    native,
+    /// Tool messages are text-only, but a user message may follow them: the
+    /// media moves into one synthetic user message after the run of results.
+    follow_up_user,
+    /// Neither: a user message may not follow a tool message (Mistral). The
+    /// tool result keeps its text description only.
+    omit,
+};
+
+/// Tool-result images one request carries, newest first. Every read image
+/// stays in history, so without a bound a long session outgrows the request
+/// limits (Anthropic: 32 MB body, 2000 px per side above 20 images; Gemini:
+/// 20 MB inline) and every later turn fails. The bytes are raw file bytes:
+/// base64 adds a third, which still leaves room for the conversation.
+inline constexpr std::size_t kMaxToolResultImages = 20;
+inline constexpr std::uintmax_t kMaxToolResultImageBytes = 10 * 1024 * 1024;
+
+/// Detaches the oldest tool-result media once the newest exceed the budget
+/// above; each detached result says how to view the file again. An image is
+/// evicted only by newer ones, so while the files keep their size, once out
+/// it stays out and the rewritten prefix is stable across later requests.
+inline void bound_tool_result_media(ChatRequest& req) {
+    std::size_t kept = 0;
+    std::uintmax_t bytes = 0;
+    bool full = false;
+    for (auto& message : std::views::reverse(req.messages)) {
+        if (message.role != "tool") continue;
+        auto media = std::ranges::stable_partition(message.content_parts, [](const ContentPart& part) {
+            return !is_media_part(part.type);
+        });
+        if (media.empty()) continue;
+        for (const auto& part : media) {
+            // A file that vanished costs nothing: the serializer sends a note.
+            std::error_code ec;
+            const std::uintmax_t size = part.path.empty() ? part.url.size() : std::filesystem::file_size(part.path, ec);
+            const auto cost = ec ? 0 : size;
+            full = full || kept == kMaxToolResultImages || bytes + cost > kMaxToolResultImageBytes;
+            if (full) break;
+            ++kept;
+            bytes += cost;
+        }
+        if (!full) continue;
+        for (const auto& part : media) {
+            message.content += std::format(
+                "\n[The {} of this result was detached: newer tool images fill the request. "
+                "Read {} again to view it.]",
+                media_kind(part.type), media_reference(part));
+        }
+        message.content_parts.erase(media.begin(), media.end());
+    }
+}
+
+/// Rewrites media on `tool` messages for a wire format that cannot carry it
+/// there. Deterministic in the history, so every request of a conversation
+/// rewrites the same prefix the same way and prompt caches still match.
+inline void place_tool_result_media(ChatRequest& req, ToolResultMediaPlacement placement) {
+    if (placement == ToolResultMediaPlacement::native) return;
+    const auto tool_media = [](const Message& msg) {
+        return msg.role == "tool" && std::ranges::any_of(msg.content_parts, [](const ContentPart& part) {
+            return is_media_part(part.type);
+        });
+    };
+    if (std::ranges::none_of(req.messages, tool_media)) return;
+
+    std::vector<Message> messages;
+    messages.reserve(req.messages.size() + 4);
+    for (std::size_t i = 0; i < req.messages.size(); ++i) {
+        if (req.messages[i].role != "tool") {
+            messages.push_back(std::move(req.messages[i]));
+            continue;
+        }
+        Message follow_up{.role = "user", .synthetic = true};
+        for (; i < req.messages.size() && req.messages[i].role == "tool"; ++i) {
+            auto& result = req.messages[i];
+            if (tool_media(result)) {
+                for (auto& part : result.content_parts) {
+                    if (placement != ToolResultMediaPlacement::follow_up_user || !is_media_part(part.type)) continue;
+                    follow_up.content_parts.push_back(ContentPart::make_text(std::format(
+                        "[The {} returned by tool call {} ({}): {}]",
+                        media_kind(part.type), result.tool_call_id, result.name, media_reference(part))));
+                    follow_up.content_parts.push_back(std::move(part));
+                }
+                degrade_message_to_text_only(result);
+            }
+            messages.push_back(std::move(result));
+        }
+        --i;
+        if (!follow_up.content_parts.empty()) messages.push_back(std::move(follow_up));
+    }
+    req.messages = std::move(messages);
+}
+
+/// The single entry point a provider calls: bounds the tool-result media of
+/// a request, then places it where `placement` says the wire format can
+/// carry it. A format that omits it skips the bound, whose notes would
+/// promise a view the model never had.
+inline void fit_tool_result_media(ChatRequest& req, ToolResultMediaPlacement placement) {
+    if (placement != ToolResultMediaPlacement::omit) bound_tool_result_media(req);
+    place_tool_result_media(req, placement);
 }
 
 [[nodiscard]] inline std::size_t count_image_inputs(const ChatRequest& req) noexcept {

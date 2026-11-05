@@ -121,6 +121,10 @@ public:
     std::unique_ptr<ApiProtocolBase> clone() const override;
     void reset_state() override;
     bool accepts_legacy_continuation() const noexcept override { return false; }
+    /// A `tool_result` block may hold image blocks.
+    ToolResultMediaPlacement tool_result_media() const noexcept override {
+        return ToolResultMediaPlacement::native;
+    }
 protected:
     virtual AnthropicReasoningEmitter reasoning_emitter() const;
     virtual bool preserves_native_assistant_content() const noexcept { return true; }

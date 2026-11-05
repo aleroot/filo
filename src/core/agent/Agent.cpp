@@ -102,6 +102,21 @@ private:
         + core::utils::escape_json_string(result) + "\"}";
 }
 
+// The image a built-in `read` opened, as an input attached to its result.
+// Only the built-in tool may name a local file to send: its result is the
+// one this process wrote, never a remote server's.
+[[nodiscard]] std::optional<core::llm::ContentPart> read_image_input(
+    std::string_view tool_name, std::string_view result) {
+    if (!core::tools::names::is_read_tool(tool_name)
+        || core::utils::json::string_field(result, "kind") != "image") {
+        return std::nullopt;
+    }
+    auto path = core::utils::json::string_field(result, "path");
+    auto mime = core::utils::json::string_field(result, "mime_type");
+    if (path.empty() || !mime.starts_with("image/")) return std::nullopt;
+    return core::llm::ContentPart::make_image(std::move(path), std::move(mime));
+}
+
 void sanitize_tool_arguments(core::llm::Message& message) {
     if (message.role != "assistant") return;
     for (auto& call : message.tool_calls) {
@@ -3238,6 +3253,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         if (running_call->interrupted.load(std::memory_order_acquire)) {
                             result = annotate_user_interrupt(std::move(result));
                         }
+                        // Taken from the raw result: history compaction may
+                        // rewrite the envelope that names the image.
+                        auto image_input = read_image_input(tc.function.name, result);
                         {
                             std::lock_guard lock(self->history_mutex_);
                             if (self->execution_journal_)
@@ -3326,6 +3344,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             .tool_call_id = tc.id,
                             .tool_calls   = {}
                         };
+                        if (image_input) message.content_parts.push_back(std::move(*image_input));
                         // A hook is a shell command Filo did not scope, and it
                         // runs detached: it can rewrite what the tool just
                         // wrote, or create files no scope names. The turn says

@@ -19,6 +19,10 @@ public:
                              int context_window = kMiniMaxContextWindow);
     std::string model_id(std::string_view model) const override;
     void prepare_request(ChatRequest& req) override;
+    /// Images go through the MiniMax user-message image policy.
+    ToolResultMediaPlacement tool_result_media() const noexcept override {
+        return ToolResultMediaPlacement::follow_up_user;
+    }
     std::string serialize(const ChatRequest& req) const override;
     void prepare_context(ChatRequest& req, std::string_view base_url,
                          const core::auth::AuthInfo& auth,

@@ -37,6 +37,11 @@ public:
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name() const noexcept override { return "mistral"; }
+    /// Mistral rejects a user message right after a tool message
+    /// ("Unexpected role 'user' after role 'tool'").
+    [[nodiscard]] ToolResultMediaPlacement tool_result_media() const noexcept override {
+        return ToolResultMediaPlacement::omit;
+    }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
     [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()

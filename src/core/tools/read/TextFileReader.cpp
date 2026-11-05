@@ -1,4 +1,5 @@
 #include "ReadTypes.hpp"
+#include "ImageFile.hpp"
 #include "PathDiagnostics.hpp"
 #include "../ToolArgumentUtils.hpp"
 #include "../ToolNames.hpp"
@@ -29,18 +30,6 @@ namespace {
         case std::filesystem::file_type::unknown:    return "unknown";
     }
     return "unknown";
-}
-
-[[nodiscard]] std::string format_read_error(
-    std::string_view requested_path,
-    std::string_view resolved_path,
-    std::string_view reason)
-{
-    return std::format(
-        "{{\"error\":\"Cannot read path '{}': {} (resolved: '{}')\"}}",
-        core::utils::escape_json_string(requested_path),
-        core::utils::escape_json_string(reason),
-        core::utils::escape_json_string(resolved_path));
 }
 
 // Stream a line window without ever holding a skipped line. getline() would
@@ -135,6 +124,18 @@ namespace {
 } // namespace
 
 namespace core::tools::read {
+std::string format_read_error(
+    std::string_view requested_path,
+    std::string_view resolved_path,
+    std::string_view reason)
+{
+    return std::format(
+        "{{\"error\":\"Cannot read path '{}': {} (resolved: '{}')\"}}",
+        core::utils::escape_json_string(requested_path),
+        core::utils::escape_json_string(reason),
+        core::utils::escape_json_string(resolved_path));
+}
+
 std::string read_text_file(const Options& options, const core::context::SessionContext& context) {
     const auto& file_path = options.paths.front();
     const int64_t offset_line = options.offset_line;
@@ -222,6 +223,8 @@ std::string read_text_file(const Options& options, const core::context::SessionC
     // times the file's own size, and help no one read it.
     constexpr std::size_t kBinarySniffBytes = 8000;
     if (std::memchr(content.data(), '\0', std::min(content.size(), kBinarySniffBytes)) != nullptr) {
+        // An image without an image extension is still an image.
+        if (auto image = read_image_file(path_str, resolved_path)) return std::move(*image);
         return format_read_error(path_str, resolved_path_string,
                                  "binary file (contains NUL bytes); inspect it with "
                                  "run_terminal_command, e.g. `file` or `xxd | head`");

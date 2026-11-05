@@ -96,6 +96,10 @@ class ZaiCodingProtocol final : public AnthropicProtocol {
 public:
     ZaiCodingProtocol() = default;
     bool accepts_legacy_continuation() const noexcept override { return true; }
+    /// Images in a Messages `tool_result` are not documented for Z.ai.
+    ToolResultMediaPlacement tool_result_media() const noexcept override {
+        return ToolResultMediaPlacement::follow_up_user;
+    }
 
     void prepare_request(ChatRequest& req) override;
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;

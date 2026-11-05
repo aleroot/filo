@@ -2,6 +2,7 @@
 
 #include "core/llm/MiniMaxModelTraits.hpp"
 #include "core/utils/Base64.hpp"
+#include "core/utils/ImageHeader.hpp"
 #include "core/utils/StringUtils.hpp"
 
 #include <algorithm>
@@ -108,11 +109,8 @@ struct Attachment {
 
 // The image signatures of the WHATWG MIME Sniffing Standard, section 6.1.
 std::string_view minimax_image_mime(std::string_view bytes) noexcept {
-    if (bytes.starts_with("\xFF\xD8\xFF")) return "image/jpeg";
-    if (bytes.starts_with("\x89PNG\r\n\x1A\n")) return "image/png";
-    if (bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a")) return "image/gif";
-    if (bytes.size() >= 12 && bytes.starts_with("RIFF") && bytes.substr(8, 4) == "WEBP") return "image/webp";
-    return {};
+    const auto header = core::utils::image::sniff(bytes);
+    return header ? core::utils::image::vision_mime_type(header->format) : std::string_view{};
 }
 
 void prepare_minimax_images(ChatRequest& request) {
