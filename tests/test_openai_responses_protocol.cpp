@@ -1314,6 +1314,73 @@ TEST_CASE("Codex request controls honor the endpoint catalog and omit unsupporte
     CHECK_FALSE(protocol.parse_event("data: [DONE]").done);
 }
 
+TEST_CASE("Codex ultra follows the catalog's level and proactive delegation",
+          "[openai][responses][codex][catalog][ultra]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.effort = "ultra";
+    request.messages = {{.role = "user", .content = "Refactor the parser."}};
+    request.catalog_reasoning = ModelReasoningProfile{
+        .effort = ReasoningCapability::Effort | ReasoningCapability::XHighEffort
+            | ReasoningCapability::MaxEffort | ReasoningCapability::UltraEffort,
+        .complete = true,
+        .catalog_default_effort = "medium",
+        .supported_efforts = {"low", "medium", "high", "xhigh", "max", "ultra"},
+        .ultra = UltraEffortProfile{.effort = "xhigh", .proactive_delegation = true},
+    };
+    Tool task;
+    task.function.name = "task";
+    request.tools = {task};
+
+    const auto prepared = [&](ChatRequest req) {
+        protocol.prepare_request(req);
+        return protocol.serialize(req);
+    };
+
+    SECTION("the catalog's ultra level wins over max") {
+        CHECK_THAT(prepared(request), Catch::Matchers::ContainsSubstring(R"("effort":"xhigh")"));
+        request.catalog_reasoning->ultra->effort = "unoffered";
+        CHECK_THAT(prepared(request), Catch::Matchers::ContainsSubstring(R"("effort":"max")"));
+        request.catalog_reasoning->ultra.reset();
+        CHECK_THAT(prepared(request), Catch::Matchers::ContainsSubstring(R"("effort":"max")"));
+    }
+
+    SECTION("a tuned model is told to delegate with the tools it has") {
+        const auto payload = prepared(request);
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("do so with `task`"));
+    }
+
+    SECTION("the delegation layer is the plan's dynamic tail") {
+        request.prompt_plan.append({.kind = core::context::ContextLayerKind::RuntimeInstructions,
+                                    .stability = core::context::PromptStability::Stable,
+                                    .name = "runtime",
+                                    .content = "You are Filo."});
+        ChatRequest req = request;
+        protocol.prepare_request(req);
+        REQUIRE(req.prompt_plan.layers().size() == 2);
+        CHECK(req.prompt_plan.layers().back().name == "delegation_mode");
+        CHECK(req.prompt_plan.layers().back().stability
+              == core::context::PromptStability::Dynamic);
+    }
+
+    SECTION("no delegation text without ultra, a tuned model, or a delegation tool") {
+        auto other = request;
+        other.effort = "max";
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        other = request;
+        other.catalog_reasoning->ultra->proactive_delegation = false;
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        other = request;
+        other.tools.clear();
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        other = request;
+        other.catalog_reasoning->ultra.reset();
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+    }
+}
+
 TEST_CASE("Codex sends the catalog verbosity alongside any structured-output format",
           "[openai][responses][codex][catalog][verbosity]") {
     ChatRequest request;

@@ -672,6 +672,9 @@ RunDiagnostics run_for_test(const RunOptions& options,
     if (!runtime.model_name.empty()) {
         agent->set_active_model(runtime.model_name);
     }
+    if (options.startup_effort.has_value()) {
+        agent->set_effort_level(*options.startup_effort);
+    }
 
     const auto trust_resolution =
         core::cli::resolve_trust_flags(options.yolo, options.trusted_tools);

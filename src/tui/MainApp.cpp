@@ -750,7 +750,7 @@ RunResult run(RunOptions opts) {
     std::string active_router_policy = router_engine->active_policy();
     std::string active_provider_name;
     std::string active_model_name;
-    std::string session_effort_value; // empty => auto/provider default
+    std::string session_effort_value = opts.startup_effort.value_or(std::string{}); // empty => auto/provider default
 
     std::optional<ModelSelectionSnapshot> previous_model_selection;
 
@@ -4514,32 +4514,24 @@ RunResult run(RunOptions opts) {
             return "Usage: /effort auto|off|low|medium|high|xhigh|max|ultra";
         }
 
-        std::string normalized;
-        normalized.reserve(trimmed.size());
-        for (const char ch : trimmed) {
-            if (ch == '-' || ch == '_' || std::isspace(static_cast<unsigned char>(ch))) continue;
-            normalized.push_back(static_cast<char>(
-                std::tolower(static_cast<unsigned char>(ch))));
+        const auto parsed = core::llm::parse_effort_selection(trimmed);
+        if (!parsed) {
+            return std::format("Unknown effort level. Use one of: {}.",
+                               core::llm::kSelectableEffortLevels);
         }
+        const std::string& normalized = *parsed;
 
-        if (normalized == "auto" || normalized == "unset"
-            || normalized == "default") {
+        if (normalized.empty()) {
             session_effort_value.clear();
             agent->set_effort_level(session_effort_value);
             return "Set effort to auto (model catalog default).";
         }
 
-        if (normalized == "off" || normalized == "none" || normalized == "disabled") {
+        if (normalized == "none") {
             session_effort_value = "none";
             agent->set_effort_level(session_effort_value);
             return "Set effort to off where supported; models with forced reasoning "
                    "use their minimum available effort.";
-        }
-
-        if (normalized != "low" && normalized != "medium"
-            && normalized != "high" && normalized != "xhigh"
-            && normalized != "max" && normalized != "ultra") {
-            return "Unknown effort level. Use one of: auto, low, medium, high, xhigh, max, ultra.";
         }
 
         session_effort_value = normalized;

@@ -2530,3 +2530,48 @@ TEST_CASE("Codex catalog retains authoritative reasoning defaults and exact leve
     CHECK(result.models[1].reasoning.complete);
     CHECK_FALSE(result.models[1].reasoning.effort.supports_effort());
 }
+
+TEST_CASE("Codex catalog describes what ultra means for each model",
+          "[llm][model-catalog][openai][codex][ultra]") {
+    CodexModelCatalogProvider catalog;
+    const auto result = catalog.parse_models_response(R"({"models":[
+        {"slug":"tuned","supported_reasoning_levels":[{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],
+         "multi_agent_version":"v2","multi_agent_reasoning_effort":"xhigh",
+         "model_messages":{"multi_agent":{"role":{"root":"You are /root"},"mode":null}}},
+        {"slug":"v1","supported_reasoning_levels":[{"effort":"high"},{"effort":"ultra"}],"multi_agent_version":"v1"},
+        {"slug":"suppressed","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}],
+         "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"proactive":""}}}},
+        {"slug":"custom-hint","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}],
+         "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"hint_text":"Spawn agents."}}}},
+        {"slug":"no-ultra","supported_reasoning_levels":[{"effort":"max"}],"multi_agent_version":"v2"}
+    ]})");
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 5);
+
+    const auto& tuned = result.models[0].reasoning.ultra;
+    REQUIRE(tuned);
+    CHECK(tuned->effort == "xhigh");
+    CHECK(tuned->proactive_delegation);
+
+    const auto& v1 = result.models[1].reasoning.ultra;
+    REQUIRE(v1);
+    CHECK_FALSE(v1->effort);
+    CHECK_FALSE(v1->proactive_delegation);
+
+    REQUIRE(result.models[2].reasoning.ultra);
+    CHECK_FALSE(result.models[2].reasoning.ultra->proactive_delegation);
+    REQUIRE(result.models[3].reasoning.ultra);
+    CHECK(result.models[3].reasoning.ultra->proactive_delegation);
+    CHECK_FALSE(result.models[4].reasoning.ultra);
+
+    auto& registry = ModelRegistry::instance();
+    ModelInfo info = result.models[0];
+    info.canonical_id = "ultra-round-trip-model";
+    registry.register_model(std::move(info));
+    REQUIRE(registry.load_from_json(registry.export_to_json()) > 0);
+    const auto round_tripped = registry.lookup("ultra-round-trip-model");
+    REQUIRE(round_tripped);
+    REQUIRE(round_tripped->reasoning.ultra);
+    CHECK(round_tripped->reasoning.ultra->effort == "xhigh");
+    CHECK(round_tripped->reasoning.ultra->proactive_delegation);
+}

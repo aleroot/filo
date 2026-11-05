@@ -9,6 +9,8 @@
 
 #include <simdjson.h>
 
+#include <algorithm>
+#include <optional>
 #include <utility>
 
 namespace core::llm {
@@ -60,6 +62,42 @@ namespace {
     return capabilities;
 }
 
+// Mirrors codex-rs: `ultra` drives the model at `multi_agent_reasoning_effort`
+// (ModelInfo::resolve_reasoning_effort) and switches a `multi_agent_version:
+// v2` model to the proactive multi-agent mode (effective_multi_agent_mode).
+// A catalog `model_messages.multi_agent.mode` can replace that mode text
+// (`hint_text` for every mode, else `proactive`); an empty replacement
+// suppresses it. Replacement text is Codex-specific (it names Codex's tools),
+// so Filo keeps only the decision and sends its own words.
+[[nodiscard]] std::optional<UltraEffortProfile> codex_ultra_profile(
+    const catalog::JsonObjectView& model,
+    const ModelReasoningProfile& reasoning) {
+    if (std::ranges::find(reasoning.supported_efforts, "ultra")
+        == reasoning.supported_efforts.end()) {
+        return std::nullopt;
+    }
+    UltraEffortProfile ultra;
+    std::string effort;
+    if (model.string("multi_agent_reasoning_effort", effort) && !effort.empty()) {
+        ultra.effort = core::utils::str::to_lower_ascii_copy(effort);
+    }
+    std::string version;
+    ultra.proactive_delegation = model.string("multi_agent_version", version)
+        && core::utils::str::to_lower_ascii_copy(version) == "v2";
+    simdjson::dom::object mode;
+    if (ultra.proactive_delegation
+        && model.raw().at_pointer("/model_messages/multi_agent/mode").get(mode)
+               == simdjson::SUCCESS) {
+        const catalog::JsonObjectView mode_view(mode);
+        std::string text;
+        if ((mode_view.string("hint_text", text) || mode_view.string("proactive", text))
+            && text.empty()) {
+            ultra.proactive_delegation = false;
+        }
+    }
+    return ultra;
+}
+
 [[nodiscard]] ModelInfo decode_codex_model(
     const catalog::JsonObjectView& model,
     std::string_view provider_name,
@@ -107,6 +145,7 @@ namespace {
         if (const auto limit = model.integer("auto_compact_token_limit"); limit > 0) {
             info.auto_compact_token_limit = limit;
         }
+        info.reasoning.ultra = codex_ultra_profile(model, info.reasoning);
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

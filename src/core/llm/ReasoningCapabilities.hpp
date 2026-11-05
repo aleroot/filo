@@ -82,6 +82,23 @@ private:
 }
 
 /**
+ * What a provider's catalog says `ultra` means for one model.
+ *
+ * `ultra` is Filo's selection, never a wire value: each protocol resolves it
+ * to one of its own levels and may pair it with a behaviour. Catalogs only
+ * describe the model; the protocol that serves it decides how to apply this,
+ * so a provider without a catalog description keeps its own fixed mapping.
+ */
+struct UltraEffortProfile {
+    /// Level the provider drives the model at under `ultra`. Unset (or not
+    /// offered) leaves the choice to the protocol's fallback rule.
+    std::optional<std::string> effort;
+    /// The model is tuned to delegate work to subagents on its own initiative
+    /// under `ultra`, rather than only when the user asks for it.
+    bool proactive_delegation = false;
+};
+
+/**
  * Provider-advertised reasoning controls for a model.
  *
  * Keeping this separate from the broad Reasoning capability lets protocols
@@ -96,6 +113,8 @@ struct ModelReasoningProfile {
     std::vector<std::string> supported_efforts;
     std::optional<bool> summary_supported;
     std::optional<std::string> default_summary;
+    /// Set only when the catalog offers `ultra` and describes it.
+    std::optional<UltraEffortProfile> ultra;
 };
 
 } // namespace core::llm

@@ -11,6 +11,7 @@
 #include "../../logging/Logger.hpp"
 #include "../../tools/StrictToolSchema.hpp"
 #include "../../tools/ToolSchema.hpp"
+#include "../../tools/ToolNames.hpp"
 #include "../StrictToolPolicy.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
@@ -308,6 +309,68 @@ void append_function_call_output_item(std::string& payload,
 
 [[nodiscard]] bool responses_lite(const ChatRequest& request) {
     return request.catalog_wire_protocol == "responses_lite";
+}
+
+// ── `ultra` ────────────────────────────────────────────────────────────────
+// `ultra` is a client-side selection the API rejects ("Invalid value:
+// 'ultra'"). With a catalog that describes it, Filo follows Codex: drive the
+// model at the catalog's ultra level and, for a model tuned for it, switch to
+// proactive delegation. Without one, normalize_openai_reasoning_effort's
+// max → xhigh → high ladder applies.
+
+[[nodiscard]] std::string_view requested_reasoning_effort(const ChatRequest& request) {
+    if (!request.effort.empty()) return request.effort;
+    if (request.catalog_reasoning && request.catalog_reasoning->catalog_default_effort) {
+        return *request.catalog_reasoning->catalog_default_effort;
+    }
+    return {};
+}
+
+/// codex-rs ModelInfo::resolve_reasoning_effort: the catalog's ultra level
+/// when offered, else `max`, else the strongest offered non-ultra level.
+[[nodiscard]] std::optional<std::string> catalog_ultra_effort(
+    const ModelReasoningProfile& catalog) {
+    const auto& levels = catalog.supported_efforts;
+    const auto offered = [&](std::string_view level) {
+        return level != "ultra" && std::ranges::find(levels, level) != levels.end();
+    };
+    if (catalog.ultra && catalog.ultra->effort && offered(*catalog.ultra->effort)) {
+        return *catalog.ultra->effort;
+    }
+    if (offered("max")) return std::string("max");
+    for (auto it = levels.rbegin(); it != levels.rend(); ++it) {
+        if (*it != "ultra") return *it;
+    }
+    return std::nullopt;
+}
+
+/// Filo's wording of Codex's proactive multi-agent mode message, naming the
+/// delegation tools this request actually carries. Empty when ultra is not
+/// selected, the model is not tuned for it, or no delegation tool is offered.
+[[nodiscard]] std::string proactive_delegation_instructions(const ChatRequest& request) {
+    if (requested_reasoning_effort(request) != "ultra") return {};
+    const auto& catalog = request.catalog_reasoning;
+    if (!catalog || !catalog->ultra || !catalog->ultra->proactive_delegation) return {};
+
+    std::string tools;
+    for (const auto& tool : request.tools) {
+        if (!core::tools::names::is_subagent_tool(tool.function.name)) continue;
+        if (!tools.empty()) tools += " or ";
+        tools += '`';
+        tools += tool.function.name;
+        tools += '`';
+    }
+    if (tools.empty()) return {};
+
+    return std::format(
+        "\n\n[Delegation Mode]\n"
+        "Proactive delegation is active (reasoning effort: ultra). Any earlier instruction "
+        "to delegate only when the user explicitly asks no longer applies. User requests "
+        "override this.\n"
+        "Whenever handing a self-contained piece of work to another agent could save time "
+        "or improve quality, do so with {} — whether you are the primary agent or a "
+        "subagent. Issue independent delegations together so they run in parallel.\n",
+        tools);
 }
 
 [[nodiscard]] std::string lite_tools_item(const ChatRequest& request) {
@@ -885,6 +948,24 @@ void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
                && !session.previous_response_id.empty()) {
         req.previous_response_id = session.previous_response_id;
     }
+
+    // A Dynamic tail layer keeps the stable prefix cacheable when the user
+    // toggles ultra mid-session.
+    if (auto delegation = proactive_delegation_instructions(req); !delegation.empty()) {
+        if (!req.prompt_plan.empty()) {
+            req.prompt_plan.append(core::context::ContextLayer{
+                .kind = core::context::ContextLayerKind::RuntimeInstructions,
+                .stability = core::context::PromptStability::Dynamic,
+                .name = "delegation_mode",
+                .content = std::move(delegation),
+            });
+        } else {
+            Message system;
+            system.role = "system";
+            system.content = std::move(delegation);
+            req.messages.push_back(std::move(system));
+        }
+    }
 }
 
 void OpenAIResponsesProtocol::reset_state() {
@@ -977,12 +1058,12 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
                 : std::string{};
         if (!options.reasoning_effort_override && catalog && !catalog->supported_efforts.empty()) {
             const auto& levels = catalog->supported_efforts;
-            // The Codex catalog lists `ultra`, but it is a client-side
-            // selection the API rejects; normalization resolved it above.
-            if (requested_effort != "ultra"
-                && std::ranges::find(levels, requested_effort) != levels.end()) {
+            if (requested_effort == "ultra") {
+                if (auto ultra = catalog_ultra_effort(*catalog)) effort = std::move(*ultra);
+            } else if (std::ranges::find(levels, requested_effort) != levels.end()) {
                 effort = requested_effort;
-            } else if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
+            }
+            if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
                 // An authoritative catalog may expose only a subset of the
                 // usual low/medium/high ladder. Its default is always safer
                 // than sending a level the deployment does not accept.

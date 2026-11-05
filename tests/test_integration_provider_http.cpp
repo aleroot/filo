@@ -1483,6 +1483,75 @@ TEST_CASE("HttpLLMProvider - Codex Responses transport headers are scoped to Cod
     CHECK(regular_installation_id.empty());
 }
 
+TEST_CASE("Codex ultra reaches the wire as the catalog's level plus proactive delegation",
+          "[integration][openai][responses][codex][ultra]") {
+    httplib::Server server;
+    std::mutex mutex;
+    std::vector<std::string> bodies;
+
+    server.Get("/backend-api/codex/models", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(
+            R"({"models":[{"slug":"gpt-ultra-wire","visibility":"list",
+                "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},
+                    {"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],
+                "default_reasoning_level":"medium","multi_agent_version":"v2",
+                "multi_agent_reasoning_effort":"xhigh"}]})",
+            "application/json");
+    });
+    server.Post("/backend-api/codex/responses", [&](const httplib::Request& req,
+                                                    httplib::Response& res) {
+        {
+            std::scoped_lock lock(mutex);
+            bodies.push_back(req.body);
+        }
+        res.set_content(
+            "event: response.completed\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ultra\","
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/backend-api/codex", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "gpt-ultra-wire",
+        std::make_unique<CodexResponsesProtocol>(),
+        core::config::ApiType::OpenAI,
+        "openai-ultra-wire");
+
+    ChatRequest req;
+    req.model = "gpt-ultra-wire";
+    req.session_id = "session-ultra";
+    req.transport_turn_id = "session-ultra:1";
+    req.effort = "ultra";
+    req.messages.push_back(Message{.role = "user", .content = "Refactor the parser."});
+    Tool task;
+    task.function.name = "task";
+    req.tools = {task};
+
+    auto done = std::make_shared<std::promise<void>>();
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    auto future = done->get_future();
+    provider->stream_response(req, [done, completed](const StreamChunk& chunk) {
+        if (chunk.is_final && !completed->exchange(true)) done->set_value();
+    });
+    REQUIRE(future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    std::scoped_lock lock(mutex);
+    REQUIRE(bodies.size() == 1);
+    CHECK_THAT(bodies[0], Catch::Matchers::ContainsSubstring(R"("effort":"xhigh")"));
+    CHECK_THAT(bodies[0], Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+    CHECK_THAT(bodies[0], !Catch::Matchers::ContainsSubstring(R"("effort":"ultra")"));
+}
+
 TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
           "[integration][http][claude][fable51]") {
     httplib::Server server;

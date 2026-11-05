@@ -70,6 +70,9 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
             baseline.reasoning.catalog_default_effort =
                 discovered.reasoning.catalog_default_effort;
         }
+        if (discovered.reasoning.ultra.has_value()) {
+            baseline.reasoning.ultra = discovered.reasoning.ultra;
+        }
     }
 
     // Wire constraints are curated per model: provider catalogs do not

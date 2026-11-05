@@ -21,6 +21,7 @@
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunStatus.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 #include "core/policy/PolicyFamily.hpp"
 #include "core/tools/SkillRegistry.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -98,6 +99,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> work_dirs;
     std::vector<std::string> trusted_tools;
     std::string startup_model;
+    std::string startup_effort;
     std::string sandbox_mode = "off";
     std::vector<std::string> policy_options;
     std::optional<std::string> requested_sandbox_mode;
@@ -192,6 +194,19 @@ int main(int argc, char** argv) {
         startup_model,
         "Model for this process only: MODEL, PROVIDER, or PROVIDER/MODEL. "
         "Does not change saved defaults.");
+    auto* effort_opt = app.add_option(
+        "--effort",
+        startup_effort,
+        std::format(
+            "Reasoning effort for this process only: {}. Models without a level use "
+            "the nearest one they offer; ultra follows the provider's own ultra mode "
+            "where it has one. Same as /effort; does not change saved defaults.",
+            core::llm::kSelectableEffortLevels))
+        ->check([](const std::string& value) -> std::string {
+            if (core::llm::parse_effort_selection(value)) return {};
+            return std::format("unknown effort level '{}' (use one of: {})",
+                               value, core::llm::kSelectableEffortLevels);
+        });
     auto* sandbox_opt = app.add_option(
         "--sandbox",
         requested_sandbox_mode,
@@ -747,6 +762,9 @@ int main(int argc, char** argv) {
         if (model_opt->count() > 0) {
             opts.startup_model = startup_model;
         }
+        if (effort_opt->count() > 0) {
+            opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
+        }
         if (resume_opt->count() > 0) {
             opts.resume_session = resume_session;
         }
@@ -804,6 +822,9 @@ int main(int argc, char** argv) {
         run_opts.policies = std::move(policies);
         if (model_opt->count() > 0) {
             run_opts.startup_model = startup_model;
+        }
+        if (effort_opt->count() > 0) {
+            run_opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
         }
         const auto run_result = tui::run(run_opts);
 

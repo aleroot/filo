@@ -25,6 +25,8 @@ struct RunOptions {
     bool yolo = false;
     std::vector<std::string> trusted_tools;
     std::optional<std::string> startup_model;
+    /// Parsed --effort selection ("" = auto, "none" = off); unset keeps the default.
+    std::optional<std::string> startup_effort;
     core::context::SteeringPolicy steering_policy;
 
     // When present and empty, resume the most recent session.

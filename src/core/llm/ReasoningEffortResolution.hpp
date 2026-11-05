@@ -2,6 +2,7 @@
 
 #include "ReasoningCapabilities.hpp"
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -31,5 +32,14 @@ struct ReasoningEffortResolution {
 /// True for the effort spellings that ask for no reasoning ("off", "none",
 /// "disabled"), ignoring case and surrounding whitespace.
 [[nodiscard]] bool is_reasoning_off_effort(std::string_view effort);
+
+/// The effort levels a user can select, strongest last (`auto` and `off` aside).
+inline constexpr std::string_view kSelectableEffortLevels =
+    "auto, off, low, medium, high, xhigh, max, ultra";
+
+/// Parse a user's effort selection (`/effort`, `--effort`) into the value an
+/// Agent carries: "" for auto (provider/catalog default), "none" for off,
+/// else the level. Case, spaces, '-' and '_' are ignored. nullopt = unknown.
+[[nodiscard]] std::optional<std::string> parse_effort_selection(std::string_view requested);
 
 } // namespace core::llm

@@ -650,7 +650,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 || reasoning_profile->catalog_default_effort
                        .has_value()
                 || reasoning_profile->summary_supported.has_value()
-                || reasoning_profile->default_summary.has_value())) {
+                || reasoning_profile->default_summary.has_value()
+                || reasoning_profile->ultra.has_value())) {
             effective_request.catalog_reasoning = reasoning_profile;
         }
         if (metadata_info.has_value()

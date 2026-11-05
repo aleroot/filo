@@ -27,6 +27,9 @@ struct RunOptions {
     /// Optional process-scoped model selector. Accepted forms are MODEL,
     /// PROVIDER, or PROVIDER/MODEL. This never changes saved defaults.
     std::optional<std::string> startup_model;
+    /// Parsed --effort selection ("" = auto, "none" = off), applied as if the
+    /// user ran /effort before the first turn. Unset keeps the default.
+    std::optional<std::string> startup_effort;
     /// Explicit process sandbox mode; supplied by the application composition root.
     core::landrun::LandrunMode landrun_mode{core::landrun::LandrunMode::off};
     core::landrun::LandrunPolicyEnvironment landrun_environment;

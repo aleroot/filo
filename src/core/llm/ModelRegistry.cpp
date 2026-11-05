@@ -2152,6 +2152,16 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
                     }
                 }
             }
+            simdjson::dom::object ultra_obj;
+            if (reasoning["ultra"].get(ultra_obj) == simdjson::SUCCESS) {
+                UltraEffortProfile ultra;
+                std::string ultra_effort;
+                if (get_json_string(ultra_obj, "effort", ultra_effort)) {
+                    ultra.effort = std::move(ultra_effort);
+                }
+                get_json_bool(ultra_obj, "proactive_delegation", ultra.proactive_delegation);
+                info.reasoning.ultra = std::move(ultra);
+            }
         }
 
         simdjson::dom::object wire_obj;
@@ -2301,6 +2311,16 @@ std::string ModelRegistry::export_to_json() const {
                             if (i > 0) writer.comma();
                             writer.str(info.reasoning.supported_efforts[i]);
                         }
+                    }
+                    if (info.reasoning.ultra) {
+                        writer.comma().key("ultra");
+                        auto ultra = writer.object();
+                        if (info.reasoning.ultra->effort) {
+                            writer.kv_str("effort", *info.reasoning.ultra->effort).comma();
+                        }
+                        writer.kv_bool(
+                            "proactive_delegation",
+                            info.reasoning.ultra->proactive_delegation);
                     }
                 }
                 writer.comma();

@@ -192,3 +192,16 @@ TEST_CASE("effective reasoning effort is resolved from model capabilities",
     CHECK(ultra_to_high.effective == "high");
     CHECK(ultra_to_high.kind == Kind::UnsupportedFallback);
 }
+
+TEST_CASE("Effort selections parse the same for /effort and --effort", "[llm][effort][cli]") {
+    CHECK(parse_effort_selection("ultra") == "ultra");
+    CHECK(parse_effort_selection(" X-High ") == "xhigh");
+    CHECK(parse_effort_selection("x_high") == "xhigh");
+    CHECK(parse_effort_selection("MAX") == "max");
+    CHECK(parse_effort_selection("auto") == "");
+    CHECK(parse_effort_selection("default") == "");
+    CHECK(parse_effort_selection("off") == "none");
+    CHECK(parse_effort_selection("disabled") == "none");
+    CHECK_FALSE(parse_effort_selection("extreme"));
+    CHECK_FALSE(parse_effort_selection("   "));
+}
