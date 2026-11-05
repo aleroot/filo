@@ -996,7 +996,7 @@ if(FILO_BUILD_INTEGRATION_TESTS)
 endif()
 
 add_test(NAME filo_version COMMAND filo --version)
-if(UNIX)
+if(UNIX AND FILO_BUILD_INTEGRATION_TESTS)
     find_program(FILO_TEST_PYTHON NAMES python3)
     if(FILO_TEST_PYTHON)
         add_test(NAME network_policy_cli_integration
@@ -1027,8 +1027,13 @@ endforeach()
 
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 include(Catch)
+if(NOT FILO_BUILD_INTEGRATION_TESTS)
+    set(FILO_UNIT_TEST_SPEC TEST_SPEC "~[integration]")
+endif()
 catch_discover_tests(filo_tests
     DISCOVERY_MODE PRE_TEST
+    ${FILO_UNIT_TEST_SPEC}
+    ADD_TAGS_AS_LABELS
     PROPERTIES TIMEOUT 60
 )
 

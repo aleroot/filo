@@ -47,4 +47,4 @@ jobs:
         run: cmake --build --preset linux-debug -j"$(nproc)"
 
       - name: Test
-        run: ctest --preset linux-debug --output-on-failure --parallel 4
+        run: ctest --preset linux-debug --output-on-failure --parallel 4 -LE integration
