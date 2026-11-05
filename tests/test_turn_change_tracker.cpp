@@ -438,6 +438,24 @@ TEST_CASE("A workspace past the inventory says its file list may be short", "[ch
     CHECK(tracker.changes().partial_enumeration);
 }
 
+TEST_CASE("A workspace inventory cannot spend the allowance a named file is diffed from",
+          "[changes][inventory]") {
+    TempDir dir;
+    const std::string body = std::string(99, 'x') + "\n";
+    for (int i = 0; i < 20; ++i) put(dir.path / "bulk" / std::format("f{:02}.txt", i), body);
+    const auto file = dir.path / "zz.txt";  // Inventoried last: what the bulk leaves.
+    const std::string tail = std::string(150, 'z') + "\n";
+    put(file, "one\ntwo\n" + tail);
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 1024});
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [] {});
+    edit(tracker, scope_of({file}), [&] { put(file, "one\nthree\n" + tail); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].content == FileChangeContent::Text);
+    CHECK_THAT(summary.files[0].diff, ContainsSubstring("+three"));
+}
+
 TEST_CASE("A turn of scoped edits calls itself complete", "[changes]") {
     TempDir dir;
     const auto file = dir.path / "a.txt";

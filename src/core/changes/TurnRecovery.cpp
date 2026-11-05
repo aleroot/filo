@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 #include <ranges>
 #include <stdexcept>
 
@@ -36,11 +37,12 @@ std::optional<RecoveryImage> TurnRecovery::captured(const fs::path& path) const 
 
 void TurnRecovery::before(std::span<const fs::path> paths) {
     std::lock_guard lock(mutex_);
-    capture_unlocked(paths, false);
+    capture_unlocked(paths, false, kMaxFiles, kMaxBytes);
     if (!paths.empty()) store_.save(manifest_); // Retry an earlier failed commit, too.
 }
 
-void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canonical) {
+void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canonical,
+                                    std::size_t max_files, std::size_t max_bytes) {
     // Taken before any read, so a stamp is trusted only if the file had
     // settled before its bytes were looked at.
     const auto observed = clock_();
@@ -48,7 +50,7 @@ void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canoni
     for (const auto& requested : paths) {
         const auto path = canonical ? requested : normalized(requested);
         if (manifest_.entries.contains(path) || manifest_.uncaptured.contains(path)) continue;
-        if (manifest_.entries.size() + manifest_.uncaptured.size() >= kMaxFiles) {
+        if (manifest_.entries.size() + manifest_.uncaptured.size() >= max_files) {
             manifest_.partial = true;
             continue;
         }
@@ -59,7 +61,7 @@ void TurnRecovery::capture_unlocked(std::span<const fs::path> paths, bool canoni
             store_.save(manifest_);
             manifest_saved_ = true;
         }
-        auto original = store_.store_original(path, kMaxBytes - bytes_);
+        auto original = store_.store_original(path, std::sub_sat(max_bytes, bytes_));
         if (!original) {
             manifest_.uncaptured.insert(path);
             manifest_.partial = true;
@@ -164,7 +166,7 @@ void TurnRecovery::record_absent_unlocked(std::span<const fs::path> paths) {
 void TurnRecovery::before_workspace(std::span<const fs::path> paths,
                                    std::span<const fs::path> roots, bool complete) {
     std::lock_guard lock(mutex_);
-    capture_unlocked(paths, true);  // An inventory lists canonical paths.
+    capture_unlocked(paths, true, kMaxWorkspaceFiles, kMaxWorkspaceBytes);  // Canonical paths.
     manifest_.roots.assign(roots.begin(), roots.end());
     manifest_.inventory_complete = complete;
     manifest_.partial |= !complete;
@@ -217,7 +219,7 @@ std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
             return std::unexpected("Interrupted work still has a possibly live process group; stop it before recovery.");
     }
     if (!manifest_.roots.empty()) {
-        auto inventory = workspace_inventory(manifest_.roots, kMaxFiles, [&](const auto& path) {
+        auto inventory = workspace_inventory(manifest_.roots, kMaxWorkspaceFiles, [&](const auto& path) {
             return can_observe(path) && (!observable || observable(path));
         });
         manifest_.partial |= !inventory.complete;

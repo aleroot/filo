@@ -175,6 +175,40 @@ docs/**/draft?.md
         core::workspace::AgentIgnorePathKind::File));
 }
 
+TEST_CASE("ignore patterns honour bracket expressions as git does",
+          "[agentignore][regression]") {
+    TempDir tmp{"filo_agentignore_brackets"};
+    ScopedWorkspace workspace{tmp.path()};
+    write_text(tmp.path() / ".gitignore", R"(*[Bb]uild*/
+log[0-9].txt
+note[!a].md
+[]x]tra
+open[bracket
+)");
+    for (const auto* directory : {"build", "Build", "build-llama", "cmake-build-debug"}) {
+        write_text(tmp.path() / directory / "out.o", "x");
+    }
+    write_text(tmp.path() / "src" / "ContextBuilder.cpp", "x");
+
+    const auto matcher = core::workspace::AgentIgnoreMatcher::load_for_roots(
+        {tmp.path()}, {".gitignore"});
+    const auto file = core::workspace::AgentIgnorePathKind::File;
+    for (const auto* directory : {"build", "Build", "build-llama", "cmake-build-debug"}) {
+        CAPTURE(directory);
+        CHECK(matcher.can_prune_directory(tmp.path() / directory));
+        CHECK(matcher.is_ignored(tmp.path() / directory / "out.o", file));
+    }
+    CHECK_FALSE(matcher.can_prune_directory(tmp.path() / "src"));
+    CHECK_FALSE(matcher.is_ignored(tmp.path() / "src" / "ContextBuilder.cpp", file));
+    CHECK(matcher.is_ignored(tmp.path() / "log7.txt", file));
+    CHECK_FALSE(matcher.is_ignored(tmp.path() / "logx.txt", file));
+    CHECK(matcher.is_ignored(tmp.path() / "noteb.md", file));
+    CHECK_FALSE(matcher.is_ignored(tmp.path() / "notea.md", file));
+    CHECK(matcher.is_ignored(tmp.path() / "]tra", file));
+    CHECK(matcher.is_ignored(tmp.path() / "xtra", file));
+    CHECK(matcher.is_ignored(tmp.path() / "open[bracket", file));
+}
+
 TEST_CASE("absent .agentignore leaves standard workspace access unchanged",
           "[agentignore][regression]") {
     TempDir tmp{"filo_agentignore_absent"};

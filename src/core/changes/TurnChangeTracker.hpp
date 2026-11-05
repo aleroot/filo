@@ -67,10 +67,11 @@ public:
     /// are enumerated.
     static constexpr std::size_t kMaxFilesPerDirectory = 1000;
     /// Files the workspace inventory around an unscoped tool lists. Sized to
-    /// what the turn's recovery checkpoint can capture, so a repository of a
-    /// few thousand files is covered whole rather than flagged on every shell
-    /// command; past this the summary says its file list may be incomplete.
-    static constexpr std::size_t kMaxWorkspaceFiles = 4096;
+    /// the share of the turn's recovery checkpoint an inventory may fill, so a
+    /// repository of a few thousand files is covered whole rather than flagged
+    /// on every shell command, and the files tools name still have room past
+    /// it; past this the summary says its file list may be incomplete.
+    static constexpr std::size_t kMaxWorkspaceFiles = 3072;
     /// File content one turn retains for diffing, across every file it saw.
     /// Past this a file is still listed and still detected as changed, only
     /// its detail is given up.
@@ -219,6 +220,12 @@ private:
 
     using Key = std::string;  // canonical absolute path
 
+    /// Whose read spends the turn's allowances. An inventory reads files only
+    /// in case an unscoped tool changes them, so it may spend no more than
+    /// half of each: the rest stays for the files tools name, which a large
+    /// workspace must not leave without a diff.
+    enum class Claim { Named, Inventory };
+
     /// What re-reading a path releases: the copy of it the turn already holds,
     /// which the new read may spend in its place. Text and hashes are separate
     /// because they are charged to separate allowances. No default member
@@ -275,26 +282,35 @@ private:
     /// `reclaimable` is content already held for this path that the caller is
     /// about to release, so it is available to the new read.
     [[nodiscard]] Snapshot read_unlocked(const std::filesystem::path& path,
-                                        const Reclaimable& reclaimable);
+                                        const Reclaimable& reclaimable,
+                                        Claim claim = Claim::Named);
     /// Completes `snapshot`, the stamp and mode of a regular file, from `size`
     /// bytes of its content in `in`, within the same allowances as a read.
     [[nodiscard]] Snapshot content_unlocked(std::istream& in, std::uint64_t size,
                                            Snapshot snapshot,
-                                           const Reclaimable& reclaimable);
-    /// A file as an inventory finds it: `Stored` when recovery holds its bytes.
-    [[nodiscard]] Snapshot found_unlocked(const std::filesystem::path& path);
+                                           const Reclaimable& reclaimable,
+                                           Claim claim = Claim::Named);
+    /// A file as the turn first finds it: `Stored` when recovery holds its
+    /// bytes, which are then read back only if the file changes.
+    [[nodiscard]] Snapshot found_unlocked(const std::filesystem::path& path, Claim claim);
     /// Reads a `Stored` baseline back from recovery: its file changed.
     void load_baseline_unlocked(Snapshot& baseline, const Key& key);
     /// Content held for `key` that a re-read would release.
     [[nodiscard]] Reclaimable reclaimable_for_unlocked(const Key& key) const;
-    /// Text the turn may still retain. Saturates at zero.
-    [[nodiscard]] std::size_t remaining_bytes_unlocked() const;
-    /// Line hashes the turn may still retain. Saturates at zero.
-    [[nodiscard]] std::size_t remaining_hash_bytes_unlocked() const;
+    /// What of an allowance of `limit` a claim may fill.
+    [[nodiscard]] static std::size_t usable_share(std::size_t limit, Claim claim) noexcept;
+    /// Text the turn may still retain for `claim`. Saturates at zero.
+    [[nodiscard]] std::size_t remaining_bytes_unlocked(Claim claim) const;
+    /// Line hashes the turn may still retain for `claim`. Saturates at zero.
+    [[nodiscard]] std::size_t remaining_hash_bytes_unlocked(Claim claim) const;
     /// Adds one snapshot's share of both allowances to the turn's tally.
     void charge_unlocked(const Snapshot& snapshot) noexcept;
     /// Gives it back, for content a newer read supersedes.
     void release_unlocked(const Snapshot& snapshot) noexcept;
+    /// Starts tracking `key`, first met holding `baseline`, which is charged.
+    void track_unlocked(const Key& key, Snapshot baseline);
+    /// Stops tracking `key` and gives back what was held for it.
+    void forget_unlocked(const Key& key) noexcept;
     /// Replaces a path's current state, releasing the content it supersedes.
     void store_current_unlocked(const Key& key, Snapshot snapshot);
     [[nodiscard]] Key key_for(const std::filesystem::path& path) const;
@@ -348,6 +364,9 @@ private:
     bool inventory_complete_ = false;
     ObservationFilter observation_filter_;
     void observe_workspace_unlocked(Observation when);
+    /// Whether `key` still holds what the turn first found there, as far as
+    /// the turn has looked: never seen, or seen unchanged with the same stamp.
+    [[nodiscard]] bool unchanged_unlocked(const Key& key) const;
     [[nodiscard]] bool observable_unlocked(const std::filesystem::path& path, bool canonical) const;
     void checkpoint_current_unlocked(std::span<const std::filesystem::path> created = {});
 };

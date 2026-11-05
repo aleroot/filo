@@ -1354,6 +1354,34 @@ TEST_CASE("Private recovery state does not consume the workspace file budget", "
     CHECK_FALSE(changes.partial_enumeration);
 }
 
+TEST_CASE("A workspace past the inventory's share leaves a named file its diff and its revert",
+          "[changes][recovery][inventory]") {
+    core::changes::WorkspaceMutationGate mutations;
+    TempDir dir, storage;
+    // More files than the whole checkpoint holds, all sorting before the one
+    // the agent edits: an untracked build tree its ignore rules missed.
+    for (std::size_t i = 0; i < core::changes::TurnRecovery::kMaxFiles; ++i) {
+        put(dir.path / "build-tree" / std::format("f{:04}.txt", i), "x\n");
+    }
+    const auto file = dir.path / "zz" / "edited.cpp";
+    put(file, "one\ntwo\n");
+    TurnChangeTracker::Limits limits;
+    limits.max_workspace_files = 2 * core::changes::TurnRecovery::kMaxFiles;  // Lists every file.
+    TurnChangeTracker tracker(dir.path, limits);
+    tracker.set_recovery(std::make_shared<core::changes::TurnRecovery>(storage.path / "turn", dir.path));
+    edit(tracker, MutationScope{.unbounded = true, .tool = "run_terminal_command"}, [] {});
+    edit(tracker, scope_of({file}), [&] { put(file, "one\nthree\n"); });
+    tracker.settle();
+    tracker.finish_recovery();
+
+    const auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK(changes.files[0].content == FileChangeContent::Text);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("+three"));
+    CHECK(revert_turn(changes, dir.path, mutations).reverted());
+    CHECK(read(file) == "one\ntwo\n");
+}
+
 TEST_CASE("Interruption reconciliation fences every recorded workspace", "[changes][recovery][concurrency]") {
     TempDir dir, other, storage;
     const auto file = other.path / "source";

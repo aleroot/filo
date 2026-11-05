@@ -26,6 +26,12 @@ public:
     static constexpr std::size_t kMaxFileBytes = RecoveryStore::kMaxFileBytes;
     static constexpr std::size_t kMaxBytes = 64 * 1024 * 1024;
     static constexpr std::size_t kMaxFiles = RecoveryStore::kMaxFiles;
+    /// What a workspace inventory may fill of the files and bytes above. The
+    /// rest is held for the files tools name, so a large workspace (or one
+    /// whose ignore rules miss a build tree) cannot leave the files the agent
+    /// edits without a pre-image.
+    static constexpr std::size_t kMaxWorkspaceFiles = kMaxFiles / 4 * 3;
+    static constexpr std::size_t kMaxWorkspaceBytes = kMaxBytes / 4 * 3;
     static constexpr std::size_t kRetainedTurns = RecoveryStore::kRetainedTurns;
 
     /// When a file is looked at. A stamp is trusted only for a file that had
@@ -67,7 +73,8 @@ private:
         WorkspaceMutationGate& mutations,
         const std::function<bool(const std::filesystem::path&)>& observable);
     /// `canonical`: the paths are already normalized, as an inventory's are.
-    void capture_unlocked(std::span<const std::filesystem::path> paths, bool canonical);
+    void capture_unlocked(std::span<const std::filesystem::path> paths, bool canonical,
+                          std::size_t max_files, std::size_t max_bytes);
     /// Takes over the previous turn's entry for a file that has not changed
     /// since: its image is shared instead of being read and stored again.
     [[nodiscard]] bool adopt_unchanged_unlocked(const std::filesystem::path& path);

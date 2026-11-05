@@ -112,6 +112,48 @@ bool unescape_leading_marker(std::string& line) {
     return rule;
 }
 
+/// The bracket expression opening at `pattern[open]`, read as git reads one:
+/// `!` or `^` negates, a leading `]` is literal, `a-z` is a range and `\`
+/// escapes. Returns where the pattern continues and whether `ch` is in the
+/// set, or nullopt when the bracket never closes and so is a literal '['.
+[[nodiscard]] std::optional<std::pair<std::size_t, bool>> match_bracket(
+    std::string_view pattern, std::size_t open, char ch) {
+    std::size_t i = open + 1;
+    const bool negated = i < pattern.size() && (pattern[i] == '!' || pattern[i] == '^');
+    if (negated) ++i;
+    const auto escaped = [&](std::size_t& at) {
+        if (pattern[at] == '\\' && at + 1 < pattern.size()) ++at;
+        return static_cast<unsigned char>(pattern[at++]);
+    };
+    const auto c = static_cast<unsigned char>(ch);
+    bool matched = false;
+    for (bool first = true; i < pattern.size() && (first || pattern[i] != ']'); first = false) {
+        const auto low = escaped(i);
+        auto high = low;
+        if (i + 1 < pattern.size() && pattern[i] == '-' && pattern[i + 1] != ']') {
+            ++i;
+            high = escaped(i);
+        }
+        matched |= low <= c && c <= high;
+    }
+    if (i >= pattern.size()) return std::nullopt;
+    return std::pair{i + 1, matched != negated};
+}
+
+/// Where the pattern continues if its element at `p` matches `ch`.
+[[nodiscard]] std::optional<std::size_t> match_one(std::string_view pattern,
+                                                   std::size_t p, char ch) {
+    if (p >= pattern.size()) return std::nullopt;
+    if (pattern[p] == '?') return p + 1;
+    if (pattern[p] == '[') {
+        if (const auto bracket = match_bracket(pattern, p, ch)) {
+            return bracket->second ? std::optional(bracket->first) : std::nullopt;
+        }
+    }
+    if (pattern[p] == '\\' && p + 1 < pattern.size()) ++p;
+    return pattern[p] == ch ? std::optional(p + 1) : std::nullopt;
+}
+
 [[nodiscard]] bool wildcard_match_segment(std::string_view pattern,
                                           std::string_view value) {
     std::size_t p = 0;
@@ -120,20 +162,15 @@ bool unescape_leading_marker(std::string& line) {
     std::size_t star_value = 0;
 
     while (v < value.size()) {
-        if (p < pattern.size() && pattern[p] == '\\' && p + 1 < pattern.size()) {
-            ++p;
-        }
-
-        if (p < pattern.size()
-            && (pattern[p] == '?' || pattern[p] == value[v])) {
-            ++p;
-            ++v;
-            continue;
-        }
-
         if (p < pattern.size() && pattern[p] == '*') {
             star = p++;
             star_value = v;
+            continue;
+        }
+
+        if (const auto next = match_one(pattern, p, value[v])) {
+            p = *next;
+            ++v;
             continue;
         }
 
@@ -146,17 +183,10 @@ bool unescape_leading_marker(std::string& line) {
         return false;
     }
 
-    while (p < pattern.size()) {
-        if (pattern[p] == '*') {
-            ++p;
-            continue;
-        }
-        if (pattern[p] == '\\' && p + 1 < pattern.size()) {
-            ++p;
-        }
-        return false;
+    while (p < pattern.size() && pattern[p] == '*') {
+        ++p;
     }
-    return true;
+    return p == pattern.size();
 }
 
 /// Segments of a path, viewing the string they were split from.

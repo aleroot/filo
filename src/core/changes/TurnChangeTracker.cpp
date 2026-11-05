@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <fstream>
 #include <iterator>
+#include <numeric>
 #include <ranges>
 #include <set>
 #include <sstream>
@@ -29,7 +30,7 @@ using core::tools::detail::kMaxToolDiffInputBytes;
 /// spends it agree on the price.
 constexpr std::size_t kBytesPerLineHash = sizeof(std::uint64_t);
 // Every file an inventory lists can have its original captured.
-static_assert(TurnChangeTracker::kMaxWorkspaceFiles == TurnRecovery::kMaxFiles);
+static_assert(TurnChangeTracker::kMaxWorkspaceFiles == TurnRecovery::kMaxWorkspaceFiles);
 
 /// Additions and deletions of one change, when they could be established.
 using Counts = std::optional<std::pair<std::size_t, std::size_t>>;
@@ -135,23 +136,24 @@ TurnChangeTracker::Stat TurnChangeTracker::stat_of(const fs::path& path) {
             .stamp = stamp.identity, .mode = stamp.mode & 0777};
 }
 
-std::size_t TurnChangeTracker::remaining_bytes_unlocked() const {
+std::size_t TurnChangeTracker::usable_share(std::size_t limit, Claim claim) noexcept {
+    return claim == Claim::Inventory ? limit / 2 : limit;
+}
+
+std::size_t TurnChangeTracker::remaining_bytes_unlocked(Claim claim) const {
     // A single file may overshoot the bound: the check reserves one copy while
     // a path seen for the first time is retained twice, as baseline and as
     // current. Saturating keeps that from wrapping into an endless budget.
-    return tracked_bytes_ < limits_.max_tracked_bytes
-        ? limits_.max_tracked_bytes - tracked_bytes_
-        : 0;
+    return std::sub_sat(usable_share(limits_.max_tracked_bytes, claim), tracked_bytes_);
 }
 
-std::size_t TurnChangeTracker::remaining_hash_bytes_unlocked() const {
-    return hashed_bytes_ < limits_.max_hashed_bytes
-        ? limits_.max_hashed_bytes - hashed_bytes_
-        : 0;
+std::size_t TurnChangeTracker::remaining_hash_bytes_unlocked(Claim claim) const {
+    return std::sub_sat(usable_share(limits_.max_hashed_bytes, claim), hashed_bytes_);
 }
 
 TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& path,
-                                                            const Reclaimable& reclaimable) {
+                                                            const Reclaimable& reclaimable,
+                                                            Claim claim) {
     const auto stat = stat_of(path);
     if (!stat.exists) {
         return {};
@@ -165,15 +167,16 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
     }
 
     std::ifstream in(path, std::ios::binary);
-    return content_unlocked(in, stat.size, std::move(snapshot), reclaimable);
+    return content_unlocked(in, stat.size, std::move(snapshot), reclaimable, claim);
 }
 
 TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in,
                                                                std::uint64_t size,
                                                                Snapshot snapshot,
-                                                               const Reclaimable& reclaimable) {
+                                                               const Reclaimable& reclaimable,
+                                                               Claim claim) {
     const bool oversized = size > kMaxToolDiffInputBytes;
-    if (oversized || size > remaining_bytes_unlocked() + reclaimable.text) {
+    if (oversized || size > remaining_bytes_unlocked(claim) + reclaimable.text) {
         // The bytes are not kept, so this change cannot be diffed: one file is
         // beyond any diff Filo shows, or the turn has retained all it may. One
         // bounded look still says how many lines the file held and whether it
@@ -201,7 +204,7 @@ TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in
             // once its bytes are gone, so a turn that has spent its text budget
             // is exactly the turn that still needs them.
             if (scan->line_hashes.size() * kBytesPerLineHash
-                <= remaining_hash_bytes_unlocked() + reclaimable.hashes) {
+                <= remaining_hash_bytes_unlocked(claim) + reclaimable.hashes) {
                 snapshot.line_hashes = std::move(scan->line_hashes);
             }
         }
@@ -225,13 +228,13 @@ TurnChangeTracker::Snapshot TurnChangeTracker::content_unlocked(std::istream& in
             .stamp = snapshot.stamp, .mode = snapshot.mode};
 }
 
-TurnChangeTracker::Snapshot TurnChangeTracker::found_unlocked(const fs::path& path) {
+TurnChangeTracker::Snapshot TurnChangeTracker::found_unlocked(const fs::path& path, Claim claim) {
     if (recovery_ && recovery_->captured(path)) {
         if (const auto stat = stat_of(path); stat.regular && stat.stamp != 0) {
             return {.state = Snapshot::State::Stored, .stamp = stat.stamp, .mode = stat.mode};
         }
     }
-    return read_unlocked(path, {});
+    return read_unlocked(path, {}, claim);
 }
 
 void TurnChangeTracker::load_baseline_unlocked(Snapshot& baseline, const Key& key) {
@@ -330,6 +333,19 @@ void TurnChangeTracker::charge_unlocked(const Snapshot& snapshot) noexcept {
 void TurnChangeTracker::release_unlocked(const Snapshot& snapshot) noexcept {
     tracked_bytes_ -= snapshot.text.size();
     hashed_bytes_ -= hash_bytes(snapshot);
+}
+
+void TurnChangeTracker::track_unlocked(const Key& key, Snapshot baseline) {
+    charge_unlocked(baseline);
+    files_.try_emplace(key, Tracked{.baseline = std::move(baseline)});
+}
+
+void TurnChangeTracker::forget_unlocked(const Key& key) noexcept {
+    if (const auto known = files_.find(key); known != files_.end()) {
+        release_unlocked(known->second.baseline);
+        release_unlocked(known->second.current);
+        files_.erase(known);
+    }
 }
 
 void TurnChangeTracker::store_current_unlocked(const Key& key, Snapshot snapshot) {
@@ -432,6 +448,18 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
             }
         }
         for (const auto& key : expansion.keys) {
+            if (when == Observation::Before && unchanged_unlocked(key)) {
+                // Before a write, a path the turn has not seen change is still
+                // its own pre-image. It is found again for the tool that names
+                // it: recovery has just captured it, so its bytes are read back
+                // only if the write changes it, and a file an inventory could
+                // not afford to hold gets the allowance kept for named files.
+                forget_unlocked(key);
+                Snapshot found = found_unlocked(key, Claim::Named);
+                track_unlocked(key, found);
+                store_current_unlocked(key, std::move(found));
+                continue;
+            }
             Snapshot snapshot = read_unlocked(key, reclaimable_for_unlocked(key));
             if (!files_.contains(key)) {
                 // A path met for the first time after the mutation was not seen
@@ -439,9 +467,7 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
                 // reports it as the change it is, and lets a move pair it with
                 // the origin it came from. Before the mutation, what is on disk
                 // is the pre-image.
-                Snapshot baseline = when == Observation::After ? Snapshot{} : snapshot;
-                charge_unlocked(baseline);
-                files_.try_emplace(key, Tracked{.baseline = std::move(baseline)});
+                track_unlocked(key, when == Observation::After ? Snapshot{} : snapshot);
             }
             store_current_unlocked(key, std::move(snapshot));
         }
@@ -449,6 +475,13 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
     for (const auto& [source, destination] : scope.moves) {
         record_move_unlocked(key_for(source), key_for(destination));
     }
+}
+
+bool TurnChangeTracker::unchanged_unlocked(const Key& key) const {
+    const auto known = files_.find(key);
+    if (known == files_.end()) return true;  // Not seen yet, so not seen to change.
+    const auto& [baseline, current] = known->second;
+    return baseline.same_content_as(current) && stat_of(key).stamp == current.stamp;
 }
 
 void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
@@ -473,10 +506,9 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
         const Key key = path.generic_string();  // Canonical already.
         if (files_.contains(key)) continue;
         if (when == Observation::After && !inventory_complete_) continue;
-        Snapshot current = when == Observation::Before ? found_unlocked(path) : read_unlocked(path, {});
-        Snapshot original = when == Observation::Before ? current : Snapshot{};
-        charge_unlocked(original);
-        files_.try_emplace(key, Tracked{.baseline = std::move(original)});
+        Snapshot current = when == Observation::Before ? found_unlocked(path, Claim::Inventory)
+                                                        : read_unlocked(path, {});
+        track_unlocked(key, when == Observation::Before ? current : Snapshot{});
         store_current_unlocked(key, std::move(current));
         if (when == Observation::After) created.push_back(path);
     }
