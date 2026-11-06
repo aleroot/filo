@@ -75,8 +75,9 @@ public:
      * Python's main one can cut such a call short. So the code runs on its own
      * thread, and if it has not unwound within @p grace after the interrupt,
      * this returns an interrupted result and leaves it to finish there.
-     * Later calls wait for it (each wait is itself cancellable), and code
-     * whose call was cancelled before it started never runs.
+     * While that abandoned code still holds the interpreter, later calls
+     * fail at once instead of queueing behind it for as long as it stays
+     * blocked, and code whose call was cancelled before it started never runs.
      */
     PythonExecResult execute(const std::string& code,
                              std::string_view scope,
@@ -146,6 +147,11 @@ private:
     // call can restore out of order and leave a dead capture buffer installed
     // as sys.stdout/sys.stderr forever. Always taken before the GIL.
     std::mutex                              execution_mutex_;
+
+    // The run last left behind by an interrupt that it outlived; while it is
+    // unfinished, cancellable calls are refused rather than queued.
+    std::mutex                              abandoned_mutex_;
+    std::shared_ptr<Run>                    abandoned_;
 
     // Guard for lazy initialization thread-safety
     std::mutex init_mutex_;

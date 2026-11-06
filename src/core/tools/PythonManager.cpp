@@ -242,6 +242,17 @@ PythonExecResult PythonManager::execute(const std::string& code,
     if (cancellation_requested()) {
         return interrupted_result("Interrupted by the user before the code started.");
     }
+    {
+        std::lock_guard lock(abandoned_mutex_);
+        if (abandoned_ && !abandoned_->finished()) {
+            return {.success = false,
+                    .error = "Not run: an earlier interrupted python call is still blocked in a "
+                             "call that cannot be cut short (a subprocess wait, a socket or pipe "
+                             "read) and holds the interpreter. It is released when that call "
+                             "returns; end whatever it waits for, or use another tool meanwhile."};
+        }
+        abandoned_.reset();
+    }
 
     // The code runs on its own thread so that this one can always answer the
     // interrupt, even while the code is stuck in a C call. Detached and
@@ -251,8 +262,11 @@ PythonExecResult PythonManager::execute(const std::string& code,
         const core::utils::DetachedWorkTracker::Guard detached_guard{
             core::utils::DetachedWorkTracker::instance()};
         PythonExecResult result;
+        // Held until the run is published as done, so whoever gets the
+        // interpreter next never sees this run as still blocked.
+        std::unique_lock exec_lock(execution_mutex_, std::defer_lock);
         try {
-            std::lock_guard<std::mutex> exec_lock(execution_mutex_);
+            exec_lock.lock();
             result = run->cancelled.load(std::memory_order_acquire)
                 ? interrupted_result("Interrupted by the user before the code started.")
                 : execute_locked(code, scope, run.get());
@@ -278,10 +292,13 @@ PythonExecResult PythonManager::execute(const std::string& code,
         interrupt(run);
         lock.lock();
         if (!run->settled.wait_for(lock, grace, [&] { return run->done; })) {
+            lock.unlock();
+            std::lock_guard abandoned_lock(abandoned_mutex_);
+            abandoned_ = run;
             return interrupted_result(
                 "Interrupted by the user. The code is blocked in a call that cannot be cut "
                 "short, so it keeps running in the background until that call returns; "
-                "later python calls wait for it.");
+                "later python calls are refused until then.");
         }
         break;
     }

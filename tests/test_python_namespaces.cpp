@@ -233,7 +233,7 @@ TEST_CASE("Cancelling a python call interrupts running code and keeps its namesp
     CHECK_THAT(run(tool, context, "print(spins > 0)"), ContainsSubstring("True"));
 }
 
-TEST_CASE("A python call blocked in C returns after the grace and later calls wait for it",
+TEST_CASE("A python call blocked in C returns after the grace and is not queued behind",
           "[python][interrupt]") {
     auto& manager = core::tools::PythonManager::get_instance();
     const auto scope = unique_session("interrupt-blocked");
@@ -253,11 +253,23 @@ TEST_CASE("A python call blocked in C returns after the grace and later calls wa
     CHECK_FALSE(result.success);
     CHECK_THAT(result.error, ContainsSubstring("keeps running in the background"));
     CHECK(elapsed < std::chrono::milliseconds(900));
-    // The next call waits for the sleep to return; the pending interrupt then
-    // stops the code before its last line.
-    const auto after = manager.execute("print('finished' in globals())", scope);
+    // While it is still blocked, a cancellable call is refused at once rather
+    // than queued for as long as the blocked call takes.
+    const auto refused_at = std::chrono::steady_clock::now();
+    const auto refused = manager.execute(
+        "refused_ran = True", scope, [] { return false; });
+    CHECK(std::chrono::steady_clock::now() - refused_at < std::chrono::milliseconds(100));
+    CHECK_FALSE(refused.success);
+    CHECK_THAT(refused.error, ContainsSubstring("still blocked"));
+    // The next uncancellable call waits for the sleep to return; the pending
+    // interrupt then stops the code before its last line.
+    const auto after = manager.execute("print('finished' in globals(), 'refused_ran' in globals())", scope);
     CHECK(after.success);
-    CHECK_THAT(after.output, ContainsSubstring("False"));
+    CHECK_THAT(after.output, ContainsSubstring("False False"));
+    // Once it has returned, cancellable calls run again.
+    const auto again = manager.execute("print('again')", scope, [] { return false; });
+    CHECK(again.success);
+    CHECK_THAT(again.output, ContainsSubstring("again"));
 }
 
 TEST_CASE("A python call cancelled before it starts never runs", "[python][interrupt]") {

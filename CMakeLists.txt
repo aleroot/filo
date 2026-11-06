@@ -825,6 +825,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mcp_server.cpp
     tests/test_remote_activity.cpp
     tests/test_mcp_tasks.cpp
+    tests/test_mcp_connection_manager.cpp
     tests/test_oauth.cpp
     tests/test_crypto.cpp
     tests/test_logger.cpp
@@ -1107,6 +1108,7 @@ source_group(
         tests/test_llamacpp_provider.cpp
         tests/test_mcp_server.cpp
         tests/test_mcp_tasks.cpp
+        tests/test_mcp_connection_manager.cpp
         tests/test_oauth.cpp
         tests/test_logger.cpp
         tests/test_hook_manager.cpp

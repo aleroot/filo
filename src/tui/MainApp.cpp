@@ -830,7 +830,9 @@ RunResult run(RunOptions opts) {
     core::tools::register_builtin_tools(tool_manager, std::move(tool_options));
 
     // ── MCP client connections ───────────────────────────────────────────────
-    core::mcp::McpConnectionManager::get_instance().connect_all(
+    // Background only: servers show as connecting until their handshake ends
+    // and their tools join the next request. Startup never waits for them.
+    core::mcp::McpConnectionManager::get_instance().connect_all_async(
         config,
         tool_manager,
         llm_provider,
@@ -1054,6 +1056,14 @@ RunResult run(RunOptions opts) {
             screen.PostEvent(Event::Custom);
         }
     };
+    // MCP handshakes finish on background threads; repaint when one does.
+    // Detached again before this frame's locals go away, on every exit path.
+    auto& mcp_connections = core::mcp::McpConnectionManager::get_instance();
+    mcp_connections.set_change_listener([&wake_ui] { wake_ui(); });
+    struct McpListenerDetach {
+        core::mcp::McpConnectionManager& connections;
+        ~McpListenerDetach() { connections.set_change_listener({}); }
+    } mcp_listener_detach{mcp_connections};
     auto& remote_activity_hub =
         core::mcp::RemoteActivityHub::get_instance();
     // Owns the whole prompt-editor lifecycle: scratch buffer, backend
@@ -3493,7 +3503,7 @@ RunResult run(RunOptions opts) {
 
     reload_mcp_live = [&]() -> std::string {
         config = config_manager.get_config();
-        core::mcp::McpConnectionManager::get_instance().connect_all(
+        core::mcp::McpConnectionManager::get_instance().connect_all_async(
             config,
             tool_manager,
             llm_provider,
@@ -3504,7 +3514,7 @@ RunResult run(RunOptions opts) {
         refresh_status_labels();
         animation_cv.notify_one();
         wake_ui();
-        return "Reloaded MCP servers live.";
+        return "Reconnecting MCP servers in the background.";
     };
 
     apply_active_profile_live = [&]() -> std::string {
@@ -3595,7 +3605,7 @@ RunResult run(RunOptions opts) {
         prompt_cache_settings.store(core::agent::prompt_cache_guard_settings(config));
         agent->reload_subagent_profiles(config);
 
-        core::mcp::McpConnectionManager::get_instance().connect_all(
+        core::mcp::McpConnectionManager::get_instance().connect_all_async(
             config,
             tool_manager,
             llm_provider,
