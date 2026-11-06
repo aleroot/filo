@@ -100,10 +100,12 @@ struct PromptCacheWatch::Shared final : std::enable_shared_from_this<Shared> {
     }
 
     /// Asks and waits. nullopt when dismissed, withdrawn or shut down.
+    /// An optional positive countdown applies only to single-choice dialogs.
     [[nodiscard]] std::optional<QuestionDialogAnswers> ask(
         const std::string& session_id,
         core::tools::QuestionItem question,
-        const QuestionDialogPromise& promise) {
+        const QuestionDialogPromise& promise,
+        std::optional<int> countdown = std::nullopt) {
         auto answer = promise->get_future();
         bool posted = false;
         with_dependencies([&](const Dependencies& d) {
@@ -113,6 +115,13 @@ struct PromptCacheWatch::Shared final : std::enable_shared_from_this<Shared> {
             }
         });
         if (!posted) return std::nullopt;
+        if (countdown && *countdown > 0) {
+            do {
+                with_dependencies([&](const Dependencies& d) {
+                    if (d.countdown_question) d.countdown_question(session_id, promise, *countdown);
+                });
+            } while (answer.wait_for(std::chrono::seconds(1)) != std::future_status::ready);
+        }
         try {
             return answer.get();
         } catch (const std::future_error&) {
@@ -362,7 +371,8 @@ prompt_cache::SendChoice PromptCacheWatch::confirm_send(const ThreadRuntime::Ptr
     }
     const auto promise = make_promise();
     return prompt_cache::send_choice(
-        shared_->ask(session_id, prompt_cache::send_question(assessment), promise));
+        shared_->ask(session_id, prompt_cache::send_question(assessment), promise,
+                     /*countdown=*/30));
 }
 
 void PromptCacheWatch::shutdown() {

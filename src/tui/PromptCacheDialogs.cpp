@@ -62,11 +62,11 @@ core::tools::QuestionItem send_question(
             size, duration(assessment.idle), has_expired(assessment.profile)),
         .header = "Cold cache",
         .options = {
-            option(kCompactThenSendLabel,
-                   "Summarize the conversation first, so this and every later prompt re-read far less"),
             option(kSendAnywayLabel,
                    std::format("Re-send all {} tokens uncached; they stay cached for {} after each request",
                                size, lifetime(assessment.profile))),
+            option(kCompactThenSendLabel,
+                   "Summarize the conversation first, so this and every later prompt re-read far less"),
             option(kCancelLabel, "Send nothing and put the prompt back in the composer"),
         },
     };

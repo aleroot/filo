@@ -43,6 +43,9 @@ public:
         /// @p promise; true when it did. Called from worker threads.
         std::function<bool(std::string_view session_id,
                            const QuestionDialogPromise& promise)> withdraw_question;
+        /// Advances the optional countdown, resolving the matching dialog at expiry.
+        /// The last argument is the full duration in seconds, not remaining time.
+        std::function<void(std::string_view, const QuestionDialogPromise&, int)> countdown_question;
         /// Appends a status line to the runtime's transcript.
         std::function<void(const ThreadRuntime::Ptr& runtime, std::string text)> notify;
         /// The thresholds in force now; read at every decision so a change in

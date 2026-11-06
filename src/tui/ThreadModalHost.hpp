@@ -128,6 +128,9 @@ public:
         const ftxui::Event& event,
         bool is_interrupt);
 
+    [[nodiscard]] QuestionDialogEventResult countdown_question(
+        std::string_view session_id, const QuestionDialogPromise& promise, int seconds);
+
     [[nodiscard]] std::vector<QuestionDialogEventResult> interrupt_all_questions();
     [[nodiscard]] QuestionDialogEventResult interrupt_question(
         std::string_view session_id);

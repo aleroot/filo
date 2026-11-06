@@ -162,6 +162,19 @@ QuestionDialogEventResult ThreadModalHost::handle_question_event(
     return result;
 }
 
+QuestionDialogEventResult ThreadModalHost::countdown_question(
+    std::string_view session_id, const QuestionDialogPromise& promise, int seconds) {
+    std::shared_ptr<QuestionDialogController> controller;
+    {
+        std::lock_guard lock(mutex_);
+        controller = busy_question_locked(session_id);
+    }
+    if (!controller) return {};
+    auto result = controller->countdown(promise, seconds);
+    if (result.has_resolution()) mark_question_idle(session_id);
+    return result;
+}
+
 std::vector<QuestionDialogEventResult> ThreadModalHost::interrupt_all_questions() {
     std::vector<std::pair<std::string, std::shared_ptr<QuestionDialogController>>>
         controllers;

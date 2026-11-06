@@ -151,6 +151,10 @@ Element render_question_dialog_panel(
         children.push_back(
             text("  (SPACE to toggle, ENTER to submit)") | dim);
     }
+    if (state.countdown_seconds >= 0) {
+        children.push_back(
+            text(std::format("  Selected option will run in {}s", state.countdown_seconds)) | dim);
+    }
     children.push_back(text(""));
 
     if (!current_question.body.empty()) {

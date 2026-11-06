@@ -81,6 +81,9 @@ QuestionDialogPromise QuestionDialogController::open(
     std::lock_guard lock(mutex_);
     auto displaced = std::move(promise_);
     activate_question_dialog(state_, std::move(questions));
+    state_.countdown_seconds = -1;
+    countdown_deadline_.reset();
+    countdown_duration_ = std::chrono::seconds{0};
     promise_ = std::move(request.promise);
     origin_label_ = std::move(origin_label);
     origin_session_id_ = std::move(request.session_id);
@@ -107,6 +110,26 @@ QuestionDialogEventResult QuestionDialogController::withdraw(
     }
     result.handled = true;
     dismiss(false, result);
+    return result;
+}
+
+QuestionDialogEventResult QuestionDialogController::countdown(
+    const QuestionDialogPromise& promise, int duration_seconds,
+    std::chrono::steady_clock::time_point now) {
+    std::lock_guard lock(mutex_);
+    QuestionDialogEventResult result;
+    if (!state_.active || !promise || promise_ != promise || duration_seconds <= 0) return result;
+    if (!countdown_deadline_) {
+        countdown_duration_ = std::chrono::seconds{duration_seconds};
+        countdown_deadline_ = now + countdown_duration_;
+    }
+    const auto remaining = *countdown_deadline_ - now;
+    state_.countdown_seconds = remaining <= std::chrono::steady_clock::duration::zero()
+        ? 0 : static_cast<int>(std::chrono::ceil<std::chrono::seconds>(remaining).count());
+    if (state_.countdown_seconds == 0) {
+        result.handled = true;
+        apply_answer_progress(accept_question_dialog_answer(state_), result);
+    }
     return result;
 }
 
@@ -177,7 +200,8 @@ void QuestionDialogController::dismiss(
 
 QuestionDialogEventResult QuestionDialogController::handle_event(
     const Event& event,
-    bool is_interrupt) {
+    bool is_interrupt,
+    std::chrono::steady_clock::time_point now) {
     std::lock_guard lock(mutex_);
 
     QuestionDialogEventResult result;
@@ -193,13 +217,13 @@ QuestionDialogEventResult QuestionDialogController::handle_event(
 
     // Navigation and dismissal stay owned by the dialog while the embedded
     // "Other" editor is selected, so the highlight never gets trapped in it.
-    if (event == Event::ArrowUp) {
-        move_question_dialog_selection(state_, -1);
-        sync_selection_focus(result);
-        return result;
-    }
-    if (event == Event::ArrowDown) {
-        move_question_dialog_selection(state_, 1);
+    if (event == Event::ArrowUp || event == Event::ArrowDown) {
+        const int previous = state_.selected_option;
+        move_question_dialog_selection(state_, event == Event::ArrowUp ? -1 : 1);
+        if (countdown_deadline_ && state_.selected_option != previous) {
+            countdown_deadline_ = now + countdown_duration_;
+            state_.countdown_seconds = static_cast<int>(countdown_duration_.count());
+        }
         sync_selection_focus(result);
         return result;
     }

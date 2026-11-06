@@ -438,3 +438,68 @@ TEST_CASE("QuestionDialogController returns a displaced request for safe resolut
     CHECK_FALSE(first_future.get().has_value());
     CHECK(controller.active());
 }
+
+TEST_CASE("Question countdown restarts when the highlighted option changes",
+          "[tui][question-dialog][controller]") {
+    using namespace std::chrono_literals;
+    QuestionDialogController controller;
+    auto request = make_request();
+    request.questions.front().options[1] = {"Compact", "Summarize first."};
+    auto promise = request.promise;
+    auto future = promise->get_future();
+    CHECK_FALSE(controller.open(std::move(request)));
+    auto other = std::make_shared<std::promise<std::optional<QuestionDialogAnswers>>>();
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(controller.countdown(other, 30, start).has_resolution());
+    CHECK_FALSE(controller.countdown(promise, 30, start).has_resolution());
+    CHECK(render(controller).find("Selected option will run in 30s") != std::string::npos);
+    (void)controller.handle_event(ftxui::Event::ArrowDown, false, start + 29s);
+    CHECK(render(controller).find("Selected option will run in 30s") != std::string::npos);
+    CHECK_FALSE(controller.countdown(promise, 30, start + 30s).has_resolution());
+    CHECK(render(controller).find("Selected option will run in 29s") != std::string::npos);
+    auto result = controller.countdown(promise, 30, start + 59s);
+    REQUIRE(result.has_resolution());
+    result.resolve();
+    REQUIRE(future.get()->front().second == "Compact");
+    CHECK_FALSE(controller.countdown(promise, 30, start + 60s).has_resolution());
+}
+
+TEST_CASE("Question countdown defaults to the first option and respects dismissal",
+          "[tui][question-dialog][controller]") {
+    using namespace std::chrono_literals;
+    const auto start = std::chrono::steady_clock::now();
+    SECTION("an untouched countdown accepts the default") {
+        QuestionDialogController controller;
+        auto request = make_request();
+        auto promise = request.promise;
+        auto future = promise->get_future();
+        CHECK_FALSE(controller.open(std::move(request)));
+        CHECK_FALSE(controller.countdown(promise, 30, start).has_resolution());
+        CHECK_FALSE(controller.countdown(promise, 30, start + 29s).has_resolution());
+        auto result = controller.countdown(promise, 30, start + 30s);
+        REQUIRE(result.has_resolution());
+        result.resolve();
+        REQUIRE(future.get()->front().second == "Use defaults");
+    }
+    SECTION("escape cancels and later ticks do nothing") {
+        QuestionDialogController controller;
+        auto request = make_request();
+        auto promise = request.promise;
+        auto future = promise->get_future();
+        CHECK_FALSE(controller.open(std::move(request)));
+        CHECK_FALSE(controller.countdown(promise, 30, start).has_resolution());
+        auto result = controller.handle_event(ftxui::Event::Escape, false, start + 1s);
+        REQUIRE(result.has_resolution());
+        result.resolve();
+        CHECK_FALSE(future.get().has_value());
+        CHECK_FALSE(controller.countdown(promise, 30, start + 31s).has_resolution());
+    }
+    SECTION("untimed dialogs do not acquire a countdown") {
+        QuestionDialogController controller;
+        auto request = make_request();
+        CHECK_FALSE(controller.open(std::move(request)));
+        (void)controller.handle_event(ftxui::Event::ArrowDown, false, start + 1s);
+        CHECK(render(controller).find("Selected option will run") == std::string::npos);
+        CHECK(controller.active());
+    }
+}

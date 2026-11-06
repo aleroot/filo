@@ -5855,6 +5855,12 @@ RunResult run(RunOptions opts) {
                     wake_ui();
                     return true;
                 },
+            .countdown_question =
+                [&](std::string_view session_id, const QuestionDialogPromise& promise, int seconds) {
+                    auto result = thread_modals.countdown_question(session_id, promise, seconds);
+                    if (result.has_resolution()) result.resolve();
+                    wake_ui();
+                },
             .notify =
                 [&](const ThreadRuntime::Ptr& runtime, std::string text) {
                     append_runtime_history(runtime, text);

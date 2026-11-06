@@ -54,6 +54,10 @@ public:
                 cv_.notify_all();
                 return true;
             },
+            .countdown_question = [this](std::string_view, const tui::QuestionDialogPromise&, int seconds) {
+                std::lock_guard lock(mutex_);
+                countdowns_.push_back(seconds);
+            },
             .notify = [this](const tui::ThreadRuntime::Ptr&, std::string text) {
                 std::lock_guard lock(mutex_);
                 notes_.push_back(std::move(text));
@@ -73,6 +77,7 @@ public:
     std::vector<std::string> sessions_;
     std::vector<std::string> notes_;
     int withdrawn_ = 0;
+    std::vector<int> countdowns_;
 
 private:
     std::optional<std::string> answer_;
@@ -114,6 +119,7 @@ TEST_CASE("The send question carries the session and maps every answer",
         CHECK(watch.confirm_send(runtime) == expected);
         REQUIRE(fake.questions_.size() == 1);
         CHECK(fake.sessions_.front() == "cache0001");
+        CHECK(fake.countdowns_ == std::vector<int>{30});
         CHECK_THAT(fake.questions_.front().question, ContainsSubstring("has expired"));
     }
 }

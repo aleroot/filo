@@ -7,6 +7,7 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 
+#include <chrono>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -66,13 +67,20 @@ public:
     /// ever closing a dialog somebody else opened meanwhile.
     [[nodiscard]] QuestionDialogEventResult withdraw(const QuestionDialogPromise& promise);
 
+    /// Advance an opt-in single-choice countdown; ignore stale promises.
+    /// Changing the highlight restarts the full duration.
+    [[nodiscard]] QuestionDialogEventResult countdown(
+        const QuestionDialogPromise& promise, int duration_seconds,
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+
     [[nodiscard]] bool active() const;
     [[nodiscard]] ftxui::Component editor_component() const;
     [[nodiscard]] ftxui::Element render();
 
     [[nodiscard]] QuestionDialogEventResult handle_event(
         const ftxui::Event& event,
-        bool is_interrupt);
+        bool is_interrupt,
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
 private:
     void focus_other_editor_if_selected();
@@ -88,6 +96,8 @@ private:
     std::string origin_label_;
     std::string origin_session_id_;
     bool submit_requested_ = false;
+    std::optional<std::chrono::steady_clock::time_point> countdown_deadline_;
+    std::chrono::seconds countdown_duration_{0};
     ftxui::Component editor_component_;
 };
 

@@ -55,14 +55,14 @@ TEST_CASE("The cold-send question states the size, the idle time and the evidenc
     CHECK_THAT(documented.question, ContainsSubstring("2h 5m"));
     CHECK_THAT(documented.question, ContainsSubstring("has expired"));
     CHECK(labels(documented) == std::vector<std::string>{
-        std::string(prompt_cache::kCompactThenSendLabel),
         std::string(prompt_cache::kSendAnywayLabel),
+        std::string(prompt_cache::kCompactThenSendLabel),
         std::string(prompt_cache::kCancelLabel)});
 
     const auto estimated = prompt_cache::send_question(
         expired(PromptCacheProfile::estimated(5min)));
     CHECK_THAT(estimated.question, ContainsSubstring("has likely expired"));
-    CHECK_THAT(estimated.options[1].description, ContainsSubstring("about 5m"));
+    CHECK_THAT(estimated.options[0].description, ContainsSubstring("about 5m"));
 }
 
 TEST_CASE("Every cold-send answer maps back to its action, and silence cancels",

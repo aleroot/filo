@@ -28,6 +28,7 @@ struct QuestionDialogItem {
 /// remains the single source of truth for whether that editor owns focus.
 struct QuestionDialogState {
     bool active = false;
+    int countdown_seconds = -1;
     std::vector<QuestionDialogItem> questions = {};
     int current_question_index = 0;
     int selected_option = 0;
