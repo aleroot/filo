@@ -204,6 +204,22 @@ TEST_CASE("Exported bundles stay sparse and their refreshed logins survive reope
     CHECK((fs::status(state / "oauth_claude.json.selected").permissions() & fs::perms::others_all) == fs::perms::none);
 }
 
+TEST_CASE("A supplied folder carries the client identity of its login", "[config-overlay][portability]") {
+    Fixture f;
+    // The Antigravity client pair lives next to the token it renews.
+    write(f.custom / "antigravity.json",
+          R"({"client_id":"ag-client","client_secret":"ag-secret"})");
+    FileTokenStore(f.custom.string()).save("google", token("google"));
+    f.select(f.custom);
+    const fs::path state = f.manager.get_config_dir();
+    const auto identity = read(state / "antigravity.json");
+    CHECK_THAT(identity, Catch::Matchers::ContainsSubstring("ag-client"));
+    CHECK_THAT(identity, Catch::Matchers::ContainsSubstring("ag-secret"));
+    const auto google = FileTokenStore(state.string()).load("google");
+    REQUIRE(google.has_value());
+    CHECK(google->account_id == "google");
+}
+
 TEST_CASE("A compressed bundle is read in place and signs in with its Claude login", "[config-overlay][portability][gzip]") {
     Fixture f;
     write(f.base / "config.json", R"({"default_provider":"openai","ui_theme":"light"})");

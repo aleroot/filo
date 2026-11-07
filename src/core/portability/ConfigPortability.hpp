@@ -12,8 +12,9 @@
 //   providers    `providers.<name>` in config.json, auth_defaults.json and
 //                model_defaults.json, gathered into one item per name
 //   mcp          `mcp_servers[name]` in config.json and mcp_servers.json
-//   credentials  oauth_<name>.json (and companion files such as Kimi's
-//                device id)
+//   credentials  oauth_<name>.json (and the companion files the login needs:
+//                Kimi's device id, the Antigravity client pair, the Codex
+//                installation id, the MiMo key name)
 //   memories     memory.json entries, grouped by project
 //
 // Secrets never leave the machine by accident: unless include_secrets is set,
@@ -119,5 +120,10 @@ struct ConfigOverlayFiles {
 
 /// Additional files needed alongside a token (device identity, OAuth metadata).
 [[nodiscard]] std::vector<std::string> credential_companion_files(std::string_view store);
+
+/// The login a companion file belongs to, when it is one. A companion may
+/// travel without its token: the client identity is what makes the next
+/// login possible.
+[[nodiscard]] std::optional<std::string> store_for_companion(std::string_view file);
 
 } // namespace core::portability

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <pwd.h>
+#include <set>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -73,11 +74,44 @@ ConfigOverlayFiles read_input(const fs::path& path) {
                             "profile_defaults.json", "model_defaults.json"}) {
         if (auto document = ConfigSource::read_document(path / name)) files.configuration.emplace(name, std::move(*document));
     }
+    std::set<std::string> stores;
     for (const auto& entry : fs::directory_iterator(path)) {
         const auto name = entry.path().filename().string();
         const auto id = FileTokenStore::provider_id_from_file_name(name);
         if (id && FileTokenStore::is_valid_provider_id(*id)) {
             if (auto document = ConfigSource::read_document(entry.path())) files.credentials.emplace(name, std::move(*document));
+            stores.insert(*id);
+        }
+    }
+    // The client identity of a login travels with its token, exactly as the
+    // export carries it: the Antigravity client pair, the Codex installation
+    // id, the MiMo key name.
+    for (const auto& store : stores) {
+        for (const auto& name : core::portability::credential_companion_files(store)) {
+            const fs::path file = path / name;
+            if (!fs::exists(fs::symlink_status(file))) continue;
+            if (name.ends_with(".json")) {
+                if (auto document = ConfigSource::read_document(file)) {
+                    files.credentials.emplace(name, std::move(*document));
+                }
+            } else {
+                files.credentials.emplace(name, read_regular_file(file));
+            }
+        }
+    }
+    // An identity whose login is not here travels on its own: it is what
+    // makes the next login possible.
+    for (const auto& entry : fs::directory_iterator(path)) {
+        const auto name = entry.path().filename().string();
+        const auto store = core::portability::store_for_companion(name);
+        if (!store || stores.contains(*store)) continue;
+        if (!fs::is_regular_file(entry.path())) continue;
+        if (name.ends_with(".json")) {
+            if (auto document = ConfigSource::read_document(entry.path())) {
+                files.credentials.emplace(name, std::move(*document));
+            }
+        } else {
+            files.credentials.emplace(name, read_regular_file(entry.path()));
         }
     }
     // These non-token companions share the token's lifecycle and state store.
@@ -121,10 +155,19 @@ ConfigSource::Documents credential_groups(const ConfigSource::Documents& files) 
     for (const auto& [_, id] : tokens) {
         for (const auto& name : core::portability::credential_companion_files(id)) owners[name] = id;
     }
+    // A client identity may travel without its login.
+    for (const auto& [name, _] : files) {
+        if (owners.contains(name)) continue;
+        if (const auto store = core::portability::store_for_companion(name)) owners[name] = *store;
+    }
     for (const auto& name : core::portability::credential_companion_files("kimi")) owners[name] = "kimi";
     ConfigSource::Documents groups;
     for (const auto& [name, content] : files) {
-        auto [group, _] = groups.try_emplace(owners.at(name), JsonValue::object());
+        const auto owner = owners.find(name);
+        if (owner == owners.end()) {
+            throw std::runtime_error("credential file without an owner: " + name);
+        }
+        auto [group, _] = groups.try_emplace(owner->second, JsonValue::object());
         group->second.set(name, content);
     }
     return groups;

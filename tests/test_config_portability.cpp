@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/auth/AntigravityClientCredentials.hpp"
 #include "core/cli/ConfigTransfer.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/memory/MemoryStore.hpp"
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -267,6 +269,163 @@ TEST_CASE("Export withholds secrets unless asked", "[portability][export]") {
     CHECK(std::ranges::is_sorted(bundle.items, {}, [](const BundleItem& item) {
         return static_cast<int>(item.kind);
     }));
+}
+
+TEST_CASE("The client identity of a login travels with its token", "[portability][export]") {
+    Machine source("filo_portability_identity_source");
+    Machine target("filo_portability_identity_target");
+    // The Antigravity client is confidential and lives only in this file.
+    source.write("antigravity.json",
+                 R"({"client_id": "ag-client", "client_secret": "ag-secret"})");
+    source.write("oauth_google.json",
+                 R"({"access_token": "google-access", "refresh_token": "google-refresh"})");
+    source.write("codex_installation_id", "installation-1\n");
+    source.write("oauth_openai-pkce.json", R"({"access_token": "codex-access"})");
+
+    // Without --include-secrets the identity stays on this machine.
+    const auto plain = core::portability::export_bundle(source.paths, {});
+    CHECK(plain.withheld == std::vector<std::string>{"credentials:google",
+                                                     "credentials:openai-pkce"});
+    const auto plain_text = core::portability::serialize_bundle(plain.bundle);
+    CHECK_THAT(plain_text, !Catch::Matchers::ContainsSubstring("ag-client"));
+    CHECK_THAT(plain_text, !Catch::Matchers::ContainsSubstring("ag-secret"));
+
+    const auto exported = core::portability::export_bundle(source.paths, {.include_secrets = true});
+    const auto* google = find_item(exported.bundle, ItemKind::Credential, "google");
+    REQUIRE(google != nullptr);
+    const auto* identity = google->data.find("antigravity.json");
+    REQUIRE(identity != nullptr);
+    CHECK(identity->find("client_secret")->as_string() == "ag-secret");
+    const auto* codex = find_item(exported.bundle, ItemKind::Credential, "openai-pkce");
+    REQUIRE(codex != nullptr);
+    REQUIRE(codex->data.find("codex_installation_id") != nullptr);
+    CHECK(codex->data.find("codex_installation_id")->as_string() == "installation-1\n");
+
+    const auto result = core::portability::import_bundle(
+        round_trip(exported.bundle), target.paths, {});
+    REQUIRE(result.ok());
+    CHECK(target.json("antigravity.json").find("client_id")->as_string() == "ag-client");
+    CHECK(target.read("codex_installation_id") == "installation-1\n");
+    // The imported pair is the one the Google login needs to renew its token.
+    const auto credentials = core::auth::antigravity::load_client_credentials(
+        target.paths.config_dir.string());
+    CHECK(credentials.complete());
+    // The client secret is not readable by anyone else.
+    CHECK((fs::status(target.paths.config_dir / "antigravity.json").permissions()
+           & fs::perms::others_all) == fs::perms::none);
+}
+
+TEST_CASE("A replaced client identity is saved and can be restored", "[portability][import]") {
+    Machine source("filo_portability_identity_backup_source");
+    Machine target("filo_portability_identity_backup_target");
+    source.write("antigravity.json", R"({"client_id": "new-client", "client_secret": "new-secret"})");
+    source.write("oauth_google.json", R"({"access_token": "google-access"})");
+    target.write("antigravity.json", R"({"client_id": "old-client", "client_secret": "old-secret"})");
+    target.write("oauth_google.json", R"({"access_token": "old-access"})");
+
+    const auto bundle = core::portability::export_bundle(source.paths, {.include_secrets = true}).bundle;
+    const auto result = core::portability::import_bundle(bundle, target.paths, {});
+    REQUIRE(result.ok());
+    CHECK(target.json("antigravity.json").find("client_id")->as_string() == "new-client");
+
+    REQUIRE(result.backup.has_value());
+    std::ifstream backup_in(*result.backup);
+    const auto backup = core::portability::parse_bundle(
+        std::string(std::istreambuf_iterator<char>(backup_in), {}));
+    REQUIRE(backup.has_value());
+    REQUIRE(core::portability::import_bundle(*backup, target.paths, {}).ok());
+    CHECK(target.json("antigravity.json").find("client_id")->as_string() == "old-client");
+}
+
+TEST_CASE("A client identity without a login still travels", "[portability][export]") {
+    Machine source("filo_portability_orphan_source");
+    Machine target("filo_portability_orphan_target");
+    // Signed out of Google, but the client pair is still configured: it is
+    // what makes the next login possible on the other machine.
+    source.write("antigravity.json",
+                 R"({"client_id": "ag-client", "client_secret": "ag-secret"})");
+    source.write("mimo_key_name", "filo-cli-key-1234\n");
+
+    const auto plain = core::portability::export_bundle(source.paths, {});
+    CHECK(plain.withheld == std::vector<std::string>{"credentials:google", "credentials:mimo"});
+    const auto plain_text = core::portability::serialize_bundle(plain.bundle);
+    CHECK_THAT(plain_text, !Catch::Matchers::ContainsSubstring("ag-secret"));
+
+    const auto exported = core::portability::export_bundle(source.paths, {.include_secrets = true});
+    const auto* google = find_item(exported.bundle, ItemKind::Credential, "google");
+    REQUIRE(google != nullptr);
+    REQUIRE(google->data.find("antigravity.json") != nullptr);
+    CHECK(google->data.find("antigravity.json")->find("client_id")->as_string() == "ag-client");
+    const auto* mimo = find_item(exported.bundle, ItemKind::Credential, "mimo");
+    REQUIRE(mimo != nullptr);
+    REQUIRE(mimo->data.find("mimo_key_name") != nullptr);
+    CHECK(mimo->data.find("mimo_key_name")->as_string() == "filo-cli-key-1234\n");
+
+    const auto result = core::portability::import_bundle(
+        round_trip(exported.bundle), target.paths, {});
+    REQUIRE(result.ok());
+    CHECK(target.json("antigravity.json").find("client_secret")->as_string() == "ag-secret");
+    CHECK(target.read("mimo_key_name") == "filo-cli-key-1234\n");
+    // The identity alone is not a login: no token file is written.
+    CHECK_FALSE(fs::exists(target.paths.config_dir / "oauth_google.json"));
+}
+
+TEST_CASE("Invalid client identity is omitted without producing an invalid bundle", "[portability][export]") {
+    Machine source("filo_portability_invalid_identity_source");
+    Machine target("filo_portability_invalid_identity_target");
+    for (const bool with_token : {false, true}) {
+        for (const auto* invalid : {"{", "[]"}) {
+            source.write("antigravity.json", invalid);
+            if (with_token) source.write("oauth_google.json", R"({"access_token":"token"})");
+            const auto exported = core::portability::export_bundle(source.paths, {.include_secrets = true});
+            CHECK_FALSE(exported.warnings.empty());
+            const auto* google = find_item(exported.bundle, ItemKind::Credential, "google");
+            if (with_token) {
+                REQUIRE(google != nullptr);
+                CHECK(google->data.find("antigravity.json") == nullptr);
+            } else {
+                CHECK(google == nullptr);
+            }
+            CHECK(core::portability::import_bundle(round_trip(exported.bundle), target.paths, {}).ok());
+        }
+    }
+}
+
+TEST_CASE("Every file of a configuration directory is carried by the bundle",
+          "[portability][export]") {
+    Machine source("filo_portability_coverage");
+    // The inventory of a user's configuration directory.
+    source.write("config.json", R"({"default_provider": "claude"})");
+    source.write("auth_defaults.json", R"({"default_provider": "claude"})");
+    source.write("model_defaults.json", R"({"providers": {"claude": {"model": "m"}}})");
+    source.write("profile_defaults.json", R"({"active_profile": "work"})");
+    source.write("settings.json", R"({"default_mode": "BUILD"})");
+    source.write("mcp_servers.json",
+                 R"({"mcp_servers": [{"name": "linear", "transport": "http", "url": "https://mcp.linear.app/mcp"}]})");
+    source.write("oauth_google.json", R"({"access_token": "a"})");
+    source.write("antigravity.json", R"({"client_id": "c", "client_secret": "s"})");
+    source.write("oauth_openai-pkce.json", R"({"access_token": "a"})");
+    source.write("codex_installation_id", "id\n");
+    source.write("oauth_kimi.json", R"({"access_token": "a"})");
+    source.write("kimi_device_id", "dev");
+    source.write("kimi_oauth_host", "https://auth.kimi.ai");
+    // The learned tool-recovery lessons are the one file the bundle does not
+    // carry yet; the memory store is carried as memory items, not as a file.
+    source.write("tool-recovery.json", R"({"version": 1, "lessons": []})");
+
+    const auto exported = core::portability::export_bundle(source.paths, {.include_secrets = true});
+    std::set<std::string> carried;
+    for (const auto& item : exported.bundle.items) {
+        for (const auto& [file, _] : item.data.members()) carried.insert(file);
+    }
+    const std::set<std::string> expected{
+        "config.json", "auth_defaults.json", "model_defaults.json",
+        "profile_defaults.json", "settings.json", "mcp_servers.json",
+        "oauth_google.json", "antigravity.json",
+        "oauth_openai-pkce.json", "codex_installation_id",
+        "oauth_kimi.json", "kimi_device_id", "kimi_oauth_host",
+    };
+    CHECK(carried == expected);
 }
 
 TEST_CASE("A full export moves logins, providers and memories to another machine",

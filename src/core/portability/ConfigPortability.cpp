@@ -66,15 +66,26 @@ constexpr std::array kSections{
 };
 
 /// Files a token store needs besides its token file to be usable elsewhere.
-struct CredentialCompanions {
+struct CredentialCompanion {
     std::string_view store;
-    std::array<std::string_view, 2> files;
+    std::string_view file;
 };
 
 /// KimiSessionStore keeps the pre-login device identity and last OAuth host
 /// alongside tokens so the complete session remains portable.
+///
+/// The other entries are the client identity of a login: without it the
+/// imported token cannot be renewed, so it travels with the token it belongs
+/// to. The Antigravity client is confidential and Filo embeds neither half of
+/// it, so `antigravity.json` is the only copy of that pair; the Codex client
+/// identifies the installation to the ChatGPT backend; the MiMo name is the
+/// key the console provisioned for this login.
 constexpr std::array kCredentialCompanions{
-    CredentialCompanions{"kimi", {"kimi_device_id", "kimi_oauth_host"}},
+    CredentialCompanion{"kimi", "kimi_device_id"},
+    CredentialCompanion{"kimi", "kimi_oauth_host"},
+    CredentialCompanion{"google", "antigravity.json"},
+    CredentialCompanion{"openai-pkce", "codex_installation_id"},
+    CredentialCompanion{"mimo", "mimo_key_name"},
 };
 
 constexpr std::string_view kBackupDirectory = "backups";
@@ -97,17 +108,24 @@ constexpr std::string_view kSeededConfigFile = kConfigFiles.front();
     return std::ranges::find(kConfigFiles, name) != kConfigFiles.end();
 }
 
-/// Companion files of a credential: its kCredentialCompanions entry, plus the
-/// metadata store an MCP login refreshes through. Only those present are used.
+/// Companion files of a credential: its kCredentialCompanions entries, plus
+/// the metadata store an MCP login refreshes through. Only those present are
+/// used.
 [[nodiscard]] std::vector<std::string> companions_for(std::string_view store) {
     std::vector<std::string> files;
-    if (const auto entry = std::ranges::find(kCredentialCompanions, store,
-                                             &CredentialCompanions::store);
-        entry != kCredentialCompanions.end()) {
-        files.assign(entry->files.begin(), entry->files.end());
+    for (const auto& companion : kCredentialCompanions) {
+        if (companion.store == store) files.emplace_back(companion.file);
     }
     files.push_back(FileTokenStore::file_name(core::mcp::mcp_oauth_meta_id(store)));
     return files;
+}
+
+/// The login a companion file belongs to, when it is one.
+[[nodiscard]] std::optional<std::string> store_for_companion_impl(std::string_view file) {
+    for (const auto& companion : kCredentialCompanions) {
+        if (companion.file == file) return std::string(companion.store);
+    }
+    return std::nullopt;
 }
 
 /// Companions are stored verbatim, except JSON files, which stay structured
@@ -251,8 +269,17 @@ void collect_config(const PortabilityPaths& paths, Collector& collector, ExportR
         if (!fs::exists(path, ec)) continue;
         std::string error;
         auto root = JsonValue::load(path, &error);
-        if (!root) result.warnings.push_back(error);
-        if (!root || !root->is_object()) continue;
+        if (!root) {
+            result.warnings.push_back(error);
+            continue;
+        }
+        if (!root->is_object()) {
+            // A file Filo cannot read as a configuration object is left out;
+            // say so instead of dropping it silently.
+            result.warnings.push_back(std::format(
+                "skipped {}: not a JSON object", path.string()));
+            continue;
+        }
 
         for (const auto& [key, value] : root->members()) {
             if (!is_section_key(key)) {
@@ -295,10 +322,18 @@ void collect_credentials(const PortabilityPaths& paths, Collector& collector,
         }
     }
 
+    std::set<std::string> withheld;
+    const auto withhold = [&](std::string_view store) {
+        if (!withheld.emplace(store).second) return;
+        result.withheld.push_back(std::format("{}:{}", kind_info(ItemKind::Credential).name, store));
+    };
+    // Stores whose client identity left the machine with their token.
+    std::set<std::string> travelled;
+
     for (const auto& store : stores) {
         if (!collector.wanted(ItemKind::Credential, store)) continue;
         if (!collector.include_secrets()) {
-            result.withheld.push_back(std::format("{}:{}", kind_info(ItemKind::Credential).name, store));
+            withhold(store);
             continue;
         }
         const std::string token_file = FileTokenStore::file_name(store);
@@ -321,12 +356,47 @@ void collect_credentials(const PortabilityPaths& paths, Collector& collector,
             const fs::path path = paths.config_dir / companion;
             if (!fs::exists(path, ec)) continue;
             if (is_json_file(companion)) {
-                if (auto json = JsonValue::load(path, &error)) item.data.set(companion, std::move(*json));
-                else result.warnings.push_back(std::format("credential {}: {}", store, error));
+                if (auto json = JsonValue::load(path, &error); json && json->is_object()) {
+                    item.data.set(companion, std::move(*json));
+                } else {
+                    result.warnings.push_back(std::format("credential {}: {}", store,
+                        error.empty() ? "companion is not a JSON object" : error));
+                }
             } else if (auto text = core::utils::read_file(path)) {
                 item.data.set(companion, std::move(*text));
             }
         }
+        travelled.insert(store);
+    }
+
+    // The client identity of a login that is not signed in — or whose token
+    // could not be read — travels on its own: it is what makes the next
+    // login possible on the other machine.
+    for (const auto& entry : fs::directory_iterator(paths.config_dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        const auto store = store_for_companion_impl(name);
+        if (!store || travelled.contains(*store)) continue;
+        if (!collector.wanted(ItemKind::Credential, *store)) continue;
+        if (!collector.include_secrets()) {
+            withhold(*store);
+            continue;
+        }
+        std::string error;
+        const fs::path path = paths.config_dir / name;
+        std::optional<JsonValue> content;
+        if (is_json_file(name)) {
+            auto json = JsonValue::load(path, &error);
+            if (json && json->is_object()) content = std::move(*json);
+            else result.warnings.push_back(std::format("credential {}: {}", *store,
+                error.empty() ? "companion is not a JSON object" : error));
+        } else if (auto text = core::utils::read_file(path)) {
+            content = JsonValue(std::move(*text));
+        }
+        if (!content) continue;
+        auto& item = collector.item_for(ItemKind::Credential, *store);
+        item.secret = true;
+        item.data.set(name, std::move(*content));
     }
 }
 
@@ -523,7 +593,15 @@ void place(JsonValue& root, ItemKind kind, std::string_view name, JsonValue frag
         }
     }
     const auto* token = item.data.find(token_file);
-    const auto* access_token = token ? token->find("access_token") : nullptr;
+    if (!token) {
+        // A client identity may travel without its login: it is what makes
+        // the next login possible. Anything else needs a usable token.
+        const bool has_identity = std::ranges::any_of(item.data.members(),
+            [&](const auto& member) { return member.second.is_object() || member.second.is_string(); });
+        if (!has_identity) return "credential carries no token and no client identity";
+        return std::nullopt;
+    }
+    const auto* access_token = token->find("access_token");
     if (!access_token || access_token->as_string().empty()) {
         return std::format("{} has no access_token", token_file);
     }
@@ -547,13 +625,15 @@ void place(JsonValue& root, ItemKind kind, std::string_view name, JsonValue frag
         }
     }
 
-    const fs::path token_path = paths.config_dir / token_file;
     std::string error;
     std::error_code ec;
-    const bool existed = fs::exists(token_path, ec);
+    // A client identity can travel without its token, so "existed" asks
+    // about the item's files, not about the token alone.
+    bool existed = false;
     bool changed = false;
     for (const auto& [file, content] : item.data.members()) {
         const fs::path path = paths.config_dir / file;
+        existed = existed || fs::exists(path, ec);
         const bool unchanged = content.is_string()
             ? core::utils::read_file(path) == content.as_string()
             : JsonValue::load(path) == content;
@@ -749,6 +829,10 @@ ImportResult import_bundle(const Bundle& bundle,
 
 std::vector<std::string> credential_companion_files(std::string_view store) {
     return companions_for(store);
+}
+
+std::optional<std::string> store_for_companion(std::string_view file) {
+    return store_for_companion_impl(file);
 }
 
 ConfigOverlayFiles config_overlay_files(const Bundle& bundle) {
