@@ -371,10 +371,14 @@ void collect_credentials(const PortabilityPaths& paths, Collector& collector,
 
     // The client identity of a login that is not signed in — or whose token
     // could not be read — travels on its own: it is what makes the next
-    // login possible on the other machine.
+    // login possible on the other machine. Visited by name: directory order
+    // is the filesystem's (sorted on APFS, hashed on ext4), and it would
+    // decide the order of the withheld list and of the bundle items.
+    std::set<std::string> file_names;
     for (const auto& entry : fs::directory_iterator(paths.config_dir, ec)) {
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string name = entry.path().filename().string();
+        if (entry.is_regular_file(ec)) file_names.insert(entry.path().filename().string());
+    }
+    for (const auto& name : file_names) {
         const auto store = store_for_companion_impl(name);
         if (!store || travelled.contains(*store)) continue;
         if (!collector.wanted(ItemKind::Credential, *store)) continue;

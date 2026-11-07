@@ -566,6 +566,7 @@ set(FILO_CORE_SOURCES
     src/core/cli/TrustFlagResolver.cpp
     src/core/cli/WorkDirLayout.cpp
     src/core/cli/ConfigTransfer.cpp
+    src/core/cli/OptionValueGuard.cpp
     src/core/portability/ConfigBundle.cpp
     src/core/portability/ConfigPortability.cpp
 )
@@ -677,6 +678,8 @@ target_link_libraries(filo_core
         httplib::httplib
         uni-algo::uni-algo
         ${CMAKE_DL_LIBS}
+    PRIVATE
+        CLI11::CLI11
 )
 
 # zlib backs core::utils::gzip: Claude request bodies (as Claude Code sends
@@ -904,6 +907,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
+    tests/test_option_value_guard.cpp
     tests/test_work_dir_layout.cpp
     tests/test_landrun.cpp
     tests/test_network_policy.cpp
@@ -924,7 +928,7 @@ set(FILO_INTEGRATION_TEST_SOURCES
 )
 
 add_executable(filo_tests ${FILO_UNIT_TEST_SOURCES})
-target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
+target_link_libraries(filo_tests PRIVATE filo_core CLI11::CLI11 Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
     FOLDER "Tests"
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}

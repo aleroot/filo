@@ -42,6 +42,13 @@ endfunction()
 
 run_cli(0 "${root}/source" --export work.json --only claude --include-secrets)
 file(READ "${root}/work.json" bundle)
+# A missing second workspace must not consume --config and silently use the
+# personal account. Validation must fail before touching configuration state.
+run_cli(failure "${root}/personal" -y --mcp tcp -w project -w --config work.json --auth logout claude)
+check_personal()
+if(EXISTS "${root}/state/filo/configs")
+    message(FATAL_ERROR "Invalid workspace arguments created configuration state")
+endif()
 run_cli(0 "${root}/personal" --config work.json -w project --auth logout claude)
 file(GLOB states "${root}/state/filo/configs/*")
 list(LENGTH states count)

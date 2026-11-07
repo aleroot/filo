@@ -13,6 +13,7 @@
 #include "core/utils/StringUtils.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
 #include "core/cli/ConfigTransfer.hpp"
+#include "core/cli/OptionValueGuard.hpp"
 #include "core/cli/WorkDirLayout.hpp"
 #include "core/landrun/LandrunHelper.hpp"
 #include "core/landrun/LandrunDriverFactory.hpp"
@@ -298,7 +299,17 @@ int main(int argc, char** argv) {
         "Paths under the exporting home directory follow the home directory automatically.")
         ->needs(import_opt);
 
-    CLI11_PARSE(app, argc, argv);
+    try {
+        // Checked before parsing: CLI11 would hand `-w --config x` the option
+        // as the directory, and its callbacks would already have run.
+        const std::vector<std::string> arguments(argv + 1, argv + argc);
+        if (auto problem = core::cli::find_option_missing_value(app, arguments)) {
+            throw CLI::ArgumentMismatch(std::move(*problem));
+        }
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError& error) {
+        return app.exit(error);
+    }
 
     const bool config_transfer = export_opt->count() > 0 || import_opt->count() > 0;
     if (!config_transfer
