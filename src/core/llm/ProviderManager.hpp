@@ -1,11 +1,13 @@
 #pragma once
 
 #include "LLMProvider.hpp"
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <string>
 #include <stdexcept>
+#include <vector>
 
 namespace core::llm {
 
@@ -33,6 +35,16 @@ public:
     [[nodiscard]] bool has_provider(const std::string& name) const {
         std::lock_guard lock(mutex_);
         return providers_.contains(name);
+    }
+
+    /// Registered provider names, sorted.
+    [[nodiscard]] std::vector<std::string> names() const {
+        std::lock_guard lock(mutex_);
+        std::vector<std::string> out;
+        out.reserve(providers_.size());
+        for (const auto& [name, provider] : providers_) out.push_back(name);
+        std::ranges::sort(out);
+        return out;
     }
 
 private:

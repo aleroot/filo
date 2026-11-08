@@ -1,5 +1,6 @@
 #include "Prompter.hpp"
 
+#include "ProviderRuntime.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/memory/MemorySystem.hpp"
 #include "core/budget/BudgetTracker.hpp"
@@ -511,62 +512,16 @@ void register_default_tools(core::tools::ToolManager& tool_manager,
     const RunOptions& options,
     std::string& error) {
     error.clear();
-
-    auto& config_manager = core::config::ConfigManager::get_instance();
-    auto config = config_manager.get_config();
-    if (options.startup_model.has_value()) {
-        if (auto applied = core::config::apply_session_model_override(
-                config, *options.startup_model); !applied) {
-            error = applied.error();
-            return {};
-        }
-    }
-
-    auto& provider_manager = core::llm::ProviderManager::get_instance();
-
-    std::vector<std::string> provider_names;
-    provider_names.reserve(config.providers.size());
-
-    for (const auto& [name, pconfig] : config.providers) {
-        if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
-            provider_manager.register_provider(name, provider);
-            provider_names.push_back(name);
-        }
-    }
-
-    if (provider_names.empty()) {
-        error = "No providers could be initialized from configuration.";
+    const auto loaded = load_provider_runtime(options.startup_model);
+    if (!loaded.error.empty()) {
+        error = loaded.error;
         return {};
     }
-
-    std::ranges::sort(provider_names);
-
-    std::string provider_name = config.default_provider;
-    if (!std::ranges::contains(provider_names, provider_name)) {
-        provider_name = provider_names.front();
-    }
-
-    std::shared_ptr<core::llm::LLMProvider> provider;
-    try {
-        provider = provider_manager.get_provider(provider_name);
-    } catch (const std::exception& ex) {
-        error = std::format("Failed to initialize provider '{}': {}", provider_name, ex.what());
-        return {};
-    }
-
-    core::llm::request_model_catalog_discovery(provider, {.timeout_ms = 3000});
-
-    std::string model_name;
-    if (const auto it = config.providers.find(provider_name);
-        it != config.providers.end()) {
-        model_name = it->second.model;
-    }
-
     RuntimeContext runtime;
-    runtime.provider = std::move(provider);
-    runtime.provider_name = provider_name;
-    runtime.model_name = model_name;
-    runtime.default_mode = config.default_mode.empty() ? "BUILD" : config.default_mode;
+    runtime.provider = loaded.provider;
+    runtime.provider_name = loaded.provider_name;
+    runtime.model_name = loaded.model_name;
+    runtime.default_mode = loaded.default_mode;
     return runtime;
 }
 

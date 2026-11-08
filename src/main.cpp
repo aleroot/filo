@@ -32,6 +32,7 @@
 #include "exec/Server.hpp"
 #include "exec/Daemon.hpp"
 #include "exec/Prompter.hpp"
+#include "exec/acp/AcpServer.hpp"
 #include <chrono>
 #include <format>
 #include <filesystem>
@@ -81,6 +82,7 @@ int main(int argc, char** argv) {
     bool        daemon_mode_legacy = false;
     bool        headless    = false;
     bool        prompter_mode = false;
+    bool        acp_mode = false;
     int         port        = 8080;
     std::string host        = "127.0.0.1";
     std::string login_provider;
@@ -122,6 +124,8 @@ int main(int argc, char** argv) {
                  "Deprecated alias for --mcp tcp");
     app.add_flag("--headless", headless,   "Suppress the Terminal UI (required for MCP-only usage)");
     app.add_flag("--prompter", prompter_mode, "Run a single non-interactive prompt (script/CI mode)");
+    app.add_flag("--acp", acp_mode,
+                 "Speak the Agent Client Protocol on stdin/stdout (Xcode, Zed, and other ACP clients)");
     auto* prompt_opt = app.add_option("-p,--prompt", prompter_prompt,
                    "Prompt text for prompter mode. Can be combined with piped stdin input.");
     auto* output_format_opt = app.add_option("-o,--output-format", output_format,
@@ -745,6 +749,23 @@ int main(int argc, char** argv) {
     }
 
     const bool has_stdin_input = stdin_has_data();
+
+    if (acp_mode) {
+        if (mcp_mode || enable_api_gateway || prompter_mode) {
+            std::cerr << "--acp cannot be combined with --mcp, --api, or --prompter.\n";
+            return 2;
+        }
+        exec::acp::HostOptions opts;
+        opts.yolo = trust_resolution.trust_all_tools;
+        opts.trusted_tools = trust_resolution.trusted_tool_names;
+        if (model_opt->count() > 0) opts.startup_model = startup_model;
+        if (effort_opt->count() > 0) {
+            opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
+        }
+        opts.steering = startup_steering_policy;
+        return exec::acp::run(opts);
+    }
+
     const bool run_prompter_mode = !mcp_mode
         && !enable_api_gateway
         && exec::prompter::should_run(

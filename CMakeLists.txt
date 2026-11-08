@@ -195,6 +195,11 @@ set(FILO_CORE_SOURCES
     src/exec/ApiGateway.cpp
     src/exec/openai/OpenAIChatCompletionStreamEncoder.cpp
     src/exec/Prompter.cpp
+    src/exec/ProviderRuntime.cpp
+    src/exec/acp/AcpProtocol.cpp
+    src/exec/acp/AcpSession.cpp
+    src/exec/acp/AcpServer.cpp
+    src/core/jsonrpc/StdioLineReader.cpp
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp
     src/core/mcp/McpOAuth.cpp
@@ -896,6 +901,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mcp_oauth.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
+    tests/test_acp.cpp
     tests/test_agent_loop_control.cpp
     tests/test_tool_loop_efficiency.cpp
     tests/test_tool_output_history.cpp

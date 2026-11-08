@@ -242,10 +242,15 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 |---|---|
 | Interactive TUI | `filo` |
 | Prompter (single-shot) | `filo --prompt "Summarize this diff"` |
+| Agent Client Protocol (Xcode, Zed) | `filo --acp` |
 | MCP over stdio | `filo --mcp stdio` or `filo --mcp stdio --headless` |
 | MCP over TCP (HTTP `/mcp` endpoint) | `filo --mcp --headless --port 8080` or `filo --mcp tcp --headless --port 8080` |
 | API gateway only | `filo --api --headless --port 8080` |
 | MCP + API gateway | `filo --mcp --headless --api --port 8080` |
+
+`--acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout. That is the whole standard: the editor is the client, it launches Filo, and Filo is the agent. Any editor that can launch an ACP agent uses the same command. Xcode 27: Settings → Intelligence → Add an Agent, set Executable to the absolute path of `filo` (`which filo`; `~` may not expand), leave Interpreter empty, and add one argument: `--acp`. Zed uses the same binary under `agent_servers` (`command` plus `args: ["--acp"]`). Optional further arguments, one per row: `--model` then `provider/model`, or `--yolo` to skip permission prompts. Credentials must already be in Filo's store or in the environment the editor passes — the editor does not load your shell profile. The editor's project directory is the session workspace, and MCP servers it passes (Xcode's own build, test and preview tools among them) are connected for that session. One `filo` process can serve several projects at once.
+
+In the editor, Filo offers its modes (`plan` is the read-only one, and Xcode's "Implement this Plan" returns to the mode used before), a model picker that lists every signed-in provider as `provider/model`, reasoning effort, and the slash commands `/help`, `/mode`, `/model`, `/effort` and `/compact`. Edits show as diffs, the to-do list as the plan, questions as a form, and past conversations can be listed, resumed and deleted. When a provider sign-in expires, editors with terminal sign-in (Xcode) offer to run `filo --auth <provider>`. Point the editor at a stable, release build: a debug build is slower, and every rebuild changes its signature, so Xcode asks again whether to trust it. To diagnose an editor integration, set `FILO_ACP_TRACE=/path/to/file` in the agent's environment; every protocol message is appended there, including prompts, file contents and MCP credentials, so remove it afterwards.
 
 <details>
 <summary><b>Daemon and transport</b></summary>
@@ -276,6 +281,7 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 
 - `--version` print the Filo version and exit
 - `--mcp [tcp|stdio]` run as MCP server (default transport: `tcp`)
+- `--acp` speak the Agent Client Protocol on stdin/stdout
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional chat API proxy mode
 - `filo --auth <provider> [login|logout]` authenticate or sign out and exit

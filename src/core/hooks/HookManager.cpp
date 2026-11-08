@@ -79,6 +79,8 @@ using core::tools::detail::shell_single_quote;
             return "mcp_http";
         case core::context::SessionTransport::mcp_client:
             return "mcp_client";
+        case core::context::SessionTransport::acp:
+            return "acp";
         case core::context::SessionTransport::unspecified:
             break;
     }

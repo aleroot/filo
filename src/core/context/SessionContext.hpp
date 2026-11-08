@@ -24,6 +24,7 @@ enum class SessionTransport {
     mcp_stdio,
     mcp_http,
     mcp_client,
+    acp,
 };
 
 struct SessionContext {
