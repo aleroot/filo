@@ -517,15 +517,19 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
-        if (!quoted && is_reserved_subagent_mention(raw_path)) {
-            append_plain_text("@");
-            append_plain_text(raw_path);
-            append_plain_text(trailing_suffix);
+        const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
+        // A bare `@word` is prose, not a file request, when it is a subagent
+        // tag or names nothing on disk (a GitHub handle, a decorator, `@here`):
+        // keep it verbatim. Quoted mentions are an explicit path request and
+        // still report a miss.
+        if (std::error_code ec;
+            !quoted
+            && (is_reserved_subagent_mention(raw_path)
+                || !std::filesystem::exists(resolved, ec))) {
+            append_plain_text(input.substr(i, cursor - i));
             i = cursor;
             continue;
         }
-
-        const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
         if (!visibility.is_visible(resolved)) {
             std::string expansion = render_ignored_path(raw_path);
             append_trailing_suffix(expansion, trailing_suffix);

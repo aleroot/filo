@@ -220,6 +220,23 @@ TEST_CASE("Context mentions keep reserved subagent tags untouched", "[context]")
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("Context mentions keep unresolved bare mentions as plain text", "[context]") {
+    const fs::path sandbox = make_temp_dir("filo_context_handle");
+
+    const std::string expanded = core::context::expand_mentions(
+        "Thanks @augustas, see @missing/file.txt. And @\"no such.txt\"",
+        sandbox);
+
+    REQUIRE_THAT(expanded, Catch::Matchers::StartsWith(
+        "Thanks @augustas, see @missing/file.txt. And "));
+    REQUIRE_FALSE(expanded.find("[Context for augustas]") != std::string::npos);
+    REQUIRE_FALSE(expanded.find("[Context for missing/file.txt]") != std::string::npos);
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring(
+        "[Context for no such.txt]\nError: path not found."));
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("Context mentions do not treat emails as active mentions", "[context]") {
     const auto mention = core::context::find_active_mention("mail test@example.com", 21);
     REQUIRE_FALSE(mention.has_value());

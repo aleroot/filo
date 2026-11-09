@@ -253,7 +253,9 @@ public:
 };
 
 [[nodiscard]] std::filesystem::path scratch_dir() {
-    auto dir = std::filesystem::temp_directory_path() / "filo-acp-test";
+    // ctest runs each test case in its own process, in parallel: a shared directory
+    // would let one case's remove_all race another case's session writes.
+    auto dir = std::filesystem::temp_directory_path() / ("filo-acp-test-" + std::to_string(::getpid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
