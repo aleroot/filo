@@ -8,15 +8,15 @@
 #include "../utils/InterprocessFile.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <filesystem>
 #include <format>
-#include <fstream>
 #include <functional>
 #include <map>
+#include <set>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace core::session {
 namespace fs = std::filesystem;
@@ -37,23 +37,41 @@ std::optional<std::chrono::days> parse_retention_days(
 
 namespace {
 
-constexpr std::string_view kLeaseSuffix = ".active.lock";
-constexpr std::string_view kLockSuffix = ".lock";
 /// A lock file younger than this may be about to be taken by the writer that
 /// created it, so it is never removed.
 constexpr std::chrono::hours kLockGrace{24};
 
-/// A name Filo itself gives a per-session directory or journal.
-bool storage_id(std::string_view id) {
-    return !id.empty() && id.size() <= 80 && std::ranges::all_of(id, [](unsigned char c) {
-        return std::isalnum(c) || c == '-' || c == '_';
-    });
+// ── Filesystem queries ───────────────────────────────────────────────────────
+
+/// What is at @p path, symlinks not followed; `none` when that cannot be told.
+fs::file_type type_of(const fs::path& path) {
+    std::error_code ec;
+    return fs::symlink_status(path, ec).type();
 }
 
 /// Whether anything is at @p path; true when that cannot be told.
-bool present(const fs::path& path) {
+bool present(const fs::path& path) { return type_of(path) != fs::file_type::not_found; }
+
+/// What @p directory holds; nullopt when it cannot be listed.
+std::optional<std::vector<fs::path>> try_list(const fs::path& directory) {
+    std::vector<fs::path> entries;
     std::error_code ec;
-    return fs::symlink_status(path, ec).type() != fs::file_type::not_found;
+    for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
+        entries.push_back(it->path());
+    if (ec) return std::nullopt;
+    return entries;
+}
+
+/// What @p directory holds; nothing when it cannot be listed.
+std::vector<fs::path> listing(const fs::path& directory) {
+    return try_list(directory).value_or(std::vector<fs::path>{});
+}
+
+/// The directories (not symlinks to them) in @p directory.
+std::vector<fs::path> subdirectories_of(const fs::path& directory) {
+    auto entries = listing(directory);
+    std::erase_if(entries, [](const fs::path& entry) { return type_of(entry) != fs::file_type::directory; });
+    return entries;
 }
 
 std::optional<Clock::time_point> modified(const fs::path& path) {
@@ -63,221 +81,260 @@ std::optional<Clock::time_point> modified(const fs::path& path) {
     return std::chrono::time_point_cast<Clock::duration>(fs::file_time_type::clock::to_sys(time));
 }
 
-/// The newest change to a file, or to a per-session directory, its entries
-/// and their manifests; nullopt when any of them cannot be dated.
-std::optional<Clock::time_point> latest_activity(const fs::path& path) {
-    auto newest = modified(path);
-    std::error_code ec;
-    if (!newest || !fs::is_directory(fs::symlink_status(path, ec))) return newest;
-    for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
-        for (const auto& entry : {it->path(), it->path() / "manifest.json"}) {
-            if (!present(entry)) continue;
-            const auto time = modified(entry);
-            if (!time) return std::nullopt;
-            newest = std::max(*newest, *time);
+/// Whether none of @p uses was written since @p cutoff. A directory counts as
+/// written when it, one of its entries or an entry's manifest is (a turn's
+/// manifest is rewritten while the turn runs). False when anything present
+/// cannot be dated, so what cannot be aged is kept.
+bool idle_since(const std::vector<fs::path>& uses, Clock::time_point cutoff) {
+    std::vector<fs::path> dated;
+    for (const auto& use : uses) {
+        dated.push_back(use);
+        if (type_of(use) != fs::file_type::directory) continue;
+        const auto entries = try_list(use);
+        if (!entries) return false;
+        for (const auto& entry : *entries) {
+            dated.push_back(entry);
+            dated.push_back(entry / "manifest.json");
         }
     }
-    if (ec) return std::nullopt;
-    return newest;
+    bool any = false;
+    for (const auto& path : dated) {
+        if (!present(path)) continue;
+        const auto time = modified(path);
+        if (!time || *time >= cutoff) return false;
+        any = true;
+    }
+    return any;
 }
 
-/// What the sessions directory holds, by session ID.
-struct Catalogue {
-    std::map<std::string, fs::path, std::less<>> sessions;
-    std::map<std::string, std::vector<fs::path>, std::less<>> leases;
-    std::vector<fs::path> locks;
-};
-
-Catalogue scan(const fs::path& directory) {
-    Catalogue result;
+bool remove_tree(const fs::path& path, std::string* error) {
     std::error_code ec;
-    for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
-        const auto name = it->path().filename().string();
-        if (name.ends_with(kLockSuffix)) {
-            result.locks.push_back(it->path());
-            if (name.ends_with(kLeaseSuffix)) {
-                const auto base = std::string_view(name).substr(0, name.size() - kLeaseSuffix.size());
-                if (const auto id = SessionStore::session_id_from_filename(base))
-                    result.leases[std::string(*id)].push_back(it->path());
-            }
-            continue;
-        }
-        std::error_code type_ec;
-        if (!it->is_regular_file(type_ec)) continue;
-        if (const auto id = SessionStore::session_id_from_filename(name))
-            result.sessions.emplace(std::string(*id), it->path());
-    }
-    return result;
+    fs::remove_all(path, ec);
+    if (ec && error) *error = ec.message();
+    return !ec;
 }
 
-/// Every session lease of @p id, held; nullopt when a process holds one.
-std::optional<std::vector<InterprocessFileLock>> claim(const Catalogue& catalogue, std::string_view id) {
-    std::vector<fs::path> paths;
-    if (const auto it = catalogue.leases.find(id); it != catalogue.leases.end()) paths = it->second;
-    if (const auto it = catalogue.sessions.find(id); it != catalogue.sessions.end()) {
-        auto lease = active_session_lease_path(it->second);
-        if (!std::ranges::contains(paths, lease)) paths.push_back(std::move(lease));
-    }
-    std::vector<InterprocessFileLock> held;
-    for (const auto& path : paths) {
-        auto lock = InterprocessFileLock::try_acquire(path);
-        if (!lock) return std::nullopt;
-        held.push_back(std::move(*lock));
-    }
-    return held;
+// ── Lock files ───────────────────────────────────────────────────────────────
+
+using LockPathFor = fs::path (*)(const fs::path&);
+
+/// The file @p lock is the @p lock_for lock of; @p lock_for appends a suffix.
+std::optional<fs::path> guarded_by(const fs::path& lock, LockPathFor lock_for) {
+    const auto suffix = lock_for(fs::path{}).native();
+    const auto& name = lock.native();
+    if (name.size() <= suffix.size() || !name.ends_with(suffix)) return std::nullopt;
+    return fs::path(name.substr(0, name.size() - suffix.size()));
 }
 
-/// Removes a lock file that guards a file which no longer exists, once no
-/// process holds it.
-bool remove_stale_lock(const fs::path& lock, const fs::path& guarded, Clock::time_point now) {
-    if (present(guarded)) return false;
+std::optional<std::string> session_id_of(const fs::path& file) {
+    const auto name = file.filename().string();
+    if (const auto id = SessionStore::session_id_from_filename(name)) return std::string(*id);
+    return std::nullopt;
+}
+
+/// Removes @p lock, guarding @p file, once @p file is gone and no process
+/// holds the lock.
+bool remove_stale_lock(const fs::path& lock, const fs::path& file, Clock::time_point now) {
+    if (present(file)) return false;
     const auto created = modified(lock);
     if (!created || *created > now - kLockGrace) return false;
     const auto held = InterprocessFileLock::try_acquire(lock);
-    if (!held || present(guarded)) return false;
+    if (!held || present(file)) return false;
     std::error_code ec;
     return fs::remove(lock, ec);
 }
 
-class Pass {
-public:
-    Pass(const SessionStore& store, Clock::time_point now, std::stop_token stop)
-        : store_(store), directory_(store.sessions_dir()), now_(now), stop_(std::move(stop)) {}
+// ── The sessions directory ───────────────────────────────────────────────────
 
-    void sessions(std::chrono::days age) {
-        const auto cutoff = now_ - age;
-        for (const auto& info : store_.list()) {
-            if (stop_.stop_requested()) return;
-            if (!info.name.empty()) continue;
+/// What the sessions directory holds, by session ID.
+class Catalogue {
+public:
+    struct Lock {
+        fs::path path;
+        fs::path guards;  ///< The session file it is the lock or lease of.
+    };
+
+    static Catalogue scan(const fs::path& directory) {
+        Catalogue catalogue;
+        for (const auto& path : listing(directory)) {
+            // A lease is a lock file too, so it is told apart first.
+            if (const auto file = guarded_by(path, active_session_lease_path)) {
+                if (const auto id = session_id_of(*file)) {
+                    catalogue.leases_[*id].insert(path);
+                    catalogue.locks_.push_back({path, *file});
+                }
+            } else if (const auto locked = guarded_by(path, core::utils::lock_path_for)) {
+                if (session_id_of(*locked)) catalogue.locks_.push_back({path, *locked});
+            } else if (const auto id = session_id_of(path)) {
+                std::error_code ec;
+                if (!fs::is_regular_file(path, ec)) continue;
+                catalogue.leases_[*id].insert(active_session_lease_path(path));
+                catalogue.sessions_.emplace(*id, path);
+            }
+        }
+        return catalogue;
+    }
+
+    /// The saved file of session @p id.
+    [[nodiscard]] std::optional<fs::path> session(std::string_view id) const {
+        const auto it = sessions_.find(id);
+        return it == sessions_.end() ? std::nullopt : std::optional(it->second);
+    }
+
+    /// Lock and lease files of the session files they name.
+    [[nodiscard]] const std::vector<Lock>& locks() const noexcept { return locks_; }
+
+    /// Every lease of session @p id, held; nullopt while a process holds one.
+    [[nodiscard]] std::optional<std::vector<InterprocessFileLock>> claim(std::string_view id) const {
+        std::vector<InterprocessFileLock> held;
+        const auto it = leases_.find(id);
+        if (it == leases_.end()) return held;
+        for (const auto& path : it->second) {
+            auto lock = InterprocessFileLock::try_acquire(path);
+            if (!lock) return std::nullopt;
+            held.push_back(std::move(*lock));
+        }
+        return held;
+    }
+
+private:
+    std::map<std::string, fs::path, std::less<>> sessions_;
+    /// By session: the lease of its saved file and any other lease named for it.
+    std::map<std::string, std::set<fs::path>, std::less<>> leases_;
+    std::vector<Lock> locks_;
+};
+
+// ── The pass ─────────────────────────────────────────────────────────────────
+
+class Sweep {
+public:
+    Sweep(const SessionStore& store, const RetentionPolicy& policy, Clock::time_point now, std::stop_token stop)
+        : store_(store),
+          directory_(store.sessions_dir()),
+          journals_(directory_ / "journals"),
+          journal_(journals_),
+          sessions_cutoff_(cutoff(policy.sessions, now)),
+          revert_history_cutoff_(cutoff(policy.revert_history, now)),
+          now_(now),
+          stop_(std::move(stop)) {}
+
+    RetentionReport run() && {
+        for (const auto step : {&Sweep::sessions, &Sweep::revert_history, &Sweep::leftovers,
+                                &Sweep::stale_locks, &Sweep::compress_saved}) {
+            if (stop_.stop_requested()) break;
+            (this->*step)();
+        }
+        return std::move(report_);
+    }
+
+private:
+    static std::optional<Clock::time_point> cutoff(std::optional<std::chrono::days> age, Clock::time_point now) {
+        return age ? std::optional(now - *age) : std::nullopt;
+    }
+
+    /// Unnamed conversations neither used nor saved since the cutoff.
+    void sessions() {
+        if (!sessions_cutoff_) return;
+        each(store_.list(), [&](const SessionInfo& info) {
+            if (!info.name.empty()) return;
             const auto active = parse_iso8601_utc(thread_activity_timestamp(info));
             const auto written = modified(info.path);
-            if (!active || !written || std::max(*active, *written) >= cutoff) continue;
+            if (!active || !written || std::max(*active, *written) >= *sessions_cutoff_) return;
             std::string error;
-            if (store_.remove(info.session_id, &error)) ++report_.sessions;
-            else fail(info.session_id, error);
-        }
+            tally(info.session_id, store_.remove(info.session_id, &error), error, report_.sessions);
+        });
     }
 
-    void revert_history(std::chrono::days age) {
-        const auto cutoff = now_ - age;
-        const auto catalogue = scan(directory_);
-        for_each_directory(directory_ / "recovery", [&](const fs::path& root, std::string_view id) {
+    /// Revert checkpoints of conversations idle since the cutoff.
+    void revert_history() {
+        if (!revert_history_cutoff_) return;
+        const auto catalogue = Catalogue::scan(directory_);
+        each(subdirectories_of(directory_ / "recovery"), [&](const fs::path& root) {
+            const auto id = root.filename().string();
             if (root != core::changes::RecoveryStore::session_root_in(directory_, id)) return;
-            const auto idle = [&] {
-                auto newest = latest_activity(root);
-                if (const auto it = catalogue.sessions.find(id); newest && it != catalogue.sessions.end()) {
-                    const auto written = modified(it->second);
-                    newest = written ? std::optional(std::max(*newest, *written)) : std::nullopt;
-                }
-                return newest && *newest < cutoff;
-            };
-            if (!idle()) return;
-            const auto held = claim(catalogue, id);
-            if (!held || !idle()) return;  // Opened, or used, meanwhile.
-            std::error_code ec;
-            fs::remove_all(root, ec);
-            if (ec) fail(id, ec.message());
-            else ++report_.checkpoints;
+            std::vector<fs::path> uses{root};
+            if (auto session = catalogue.session(id)) uses.push_back(std::move(*session));
+            expire(catalogue, id, uses, *revert_history_cutoff_,
+                   [&](std::string* error) { return remove_tree(root, error); }, report_.checkpoints);
         });
     }
 
-    /// Journals and tool results whose session is gone (or was never saved).
-    void leftovers(std::chrono::days age) {
-        const auto cutoff = now_ - age;
-        const auto catalogue = scan(directory_);
-        const auto orphaned = [&](const fs::path& path, std::string_view id) {
-            if (catalogue.sessions.contains(id)) return false;
-            const auto newest = latest_activity(path);
-            return newest && *newest < cutoff;
-        };
-        const auto journals = directory_ / "journals";
-        const ExecutionJournal journal(journals);
-        std::error_code ec;
-        for (fs::directory_iterator it(journals, ec), end; !ec && it != end; it.increment(ec)) {
-            if (stop_.stop_requested()) return;
-            const auto& path = it->path();
+    /// Journals and tool results of no saved conversation, idle since the
+    /// conversation cutoff.
+    void leftovers() {
+        if (!sessions_cutoff_) return;
+        const auto catalogue = Catalogue::scan(directory_);
+        each(listing(journals_), [&](const fs::path& path) {
             const auto id = path.stem().string();
-            std::error_code type_ec;
-            if (path.extension() != ".jsonl" || !it->is_regular_file(type_ec) || journal.path_for(id) != path ||
-                !orphaned(path, id)) continue;
-            const auto held = claim(catalogue, id);
-            if (!held || !orphaned(path, id)) continue;
-            std::string error;
-            if (journal.remove(id, &error)) ++report_.leftovers;
-            else fail(id, error);
-        }
-        for_each_directory(SessionStore::tool_results_dir(directory_), [&](const fs::path& path, std::string_view id) {
-            if (!orphaned(path, id)) return;
-            const auto held = claim(catalogue, id);
-            if (!held || !orphaned(path, id)) return;
-            std::error_code remove_ec;
-            fs::remove_all(path, remove_ec);
-            if (remove_ec) fail(id, remove_ec.message());
-            else ++report_.leftovers;
+            std::error_code ec;
+            if (catalogue.session(id) || journal_.path_for(id) != path || !fs::is_regular_file(path, ec)) return;
+            expire(catalogue, id, {path}, *sessions_cutoff_,
+                   [&](std::string* error) { return journal_.remove(id, error); }, report_.leftovers);
+        });
+        each(subdirectories_of(SessionStore::tool_results_dir(directory_)), [&](const fs::path& path) {
+            const auto id = path.filename().string();
+            if (catalogue.session(id) || SessionStore::tool_results_dir(directory_, id) != path) return;
+            expire(catalogue, id, {path}, *sessions_cutoff_,
+                   [&](std::string* error) { return remove_tree(path, error); }, report_.leftovers);
         });
     }
 
-    /// Lock files left by sessions and journals deleted before they were
-    /// removed together.
+    /// Lock files of sessions and journals deleted before their locks were
+    /// deleted with them.
     void stale_locks() {
-        for (const auto& lock : scan(directory_).locks) {
-            if (stop_.stop_requested()) return;
-            const auto name = lock.filename().string();
-            const auto suffix = name.ends_with(kLeaseSuffix) ? kLeaseSuffix : kLockSuffix;
-            const auto base = std::string_view(name).substr(0, name.size() - suffix.size());
-            if (!SessionStore::session_id_from_filename(base)) continue;
-            if (remove_stale_lock(lock, directory_ / base, now_)) ++report_.leftovers;
-        }
-        std::error_code ec;
-        for (fs::directory_iterator it(directory_ / "journals", ec), end; !ec && it != end; it.increment(ec)) {
-            if (stop_.stop_requested()) return;
-            const auto& lock = it->path();
-            const auto name = lock.filename().string();
-            if (!name.ends_with(".jsonl.lock")) continue;
-            if (remove_stale_lock(lock, lock.parent_path() / name.substr(0, name.size() - kLockSuffix.size()), now_))
-                ++report_.leftovers;
-        }
+        each(Catalogue::scan(directory_).locks(), [&](const Catalogue::Lock& lock) {
+            if (remove_stale_lock(lock.path, lock.guards, now_)) ++report_.leftovers;
+        });
+        each(listing(journals_), [&](const fs::path& lock) {
+            const auto journal = guarded_by(lock, core::utils::lock_path_for);
+            if (!journal || journal_.path_for(journal->stem().string()) != *journal) return;
+            if (remove_stale_lock(lock, *journal, now_)) ++report_.leftovers;
+        });
     }
 
     /// Conversations saved as plain JSON, before sessions were compressed.
     void compress_saved() {
-        for (const auto& [id, path] : scan(directory_).sessions) {
-            if (stop_.stop_requested()) return;
-            if (!path.filename().string().starts_with("session-")) continue;
-            char magic[2]{};
-            {
-                std::ifstream in(path, std::ios::binary);
-                if (!in.read(magic, sizeof magic)) continue;
-            }
-            if (magic[0] == '\x1f' && magic[1] == '\x8b') continue;
+        each(store_.list(), [&](const SessionInfo& info) {
             std::string error;
-            if (store_.compress_saved(path, &error)) ++report_.compressed;
-            else if (!error.empty()) fail(id, error);
-        }
+            if (store_.compress_saved(info.path, &error)) ++report_.compressed;
+            else if (!error.empty()) fail(info.session_id, error);
+        });
     }
 
-    [[nodiscard]] bool stopped() const { return stop_.stop_requested(); }
-    RetentionReport take() && { return std::move(report_); }
-
-private:
-    template <typename Visit>
-    void for_each_directory(const fs::path& parent, Visit&& visit) {
-        std::error_code ec;
-        for (fs::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
+    /// Visits @p items until a stop is requested.
+    template <typename Items, typename Visit>
+    void each(const Items& items, Visit visit) const {
+        for (const auto& item : items) {
             if (stop_.stop_requested()) return;
-            std::error_code type_ec;
-            if (it->is_symlink(type_ec) || !it->is_directory(type_ec)) continue;
-            const auto id = it->path().filename().string();
-            if (storage_id(id)) visit(it->path(), id);
+            visit(item);
         }
     }
 
-    void fail(std::string_view id, std::string_view error) {
-        report_.errors.push_back(std::format("{}: {}", id, error.empty() ? "not removed" : error));
+    /// Erases what is stored for session @p id when none of @p uses was
+    /// written since @p cutoff, both before and after claiming every lease of
+    /// the session: a conversation opened, or used, meanwhile keeps it.
+    void expire(const Catalogue& catalogue, std::string_view id, const std::vector<fs::path>& uses,
+                Clock::time_point cutoff, const std::function<bool(std::string*)>& erase, std::size_t& count) {
+        if (!idle_since(uses, cutoff)) return;
+        const auto held = catalogue.claim(id);
+        if (!held || !idle_since(uses, cutoff)) return;
+        std::string error;
+        tally(id, erase(&error), error, count);
     }
+
+    void tally(std::string_view id, bool removed, std::string_view error, std::size_t& count) {
+        if (removed) ++count;
+        else fail(id, error.empty() ? "not removed" : error);
+    }
+
+    void fail(std::string_view id, std::string_view error) { report_.errors.push_back(std::format("{}: {}", id, error)); }
 
     const SessionStore& store_;
     fs::path directory_;
+    fs::path journals_;
+    ExecutionJournal journal_;
+    std::optional<Clock::time_point> sessions_cutoff_;
+    std::optional<Clock::time_point> revert_history_cutoff_;
     Clock::time_point now_;
     std::stop_token stop_;
     RetentionReport report_;
@@ -292,13 +349,7 @@ RetentionReport apply_retention(const SessionStore& store, const RetentionPolicy
     // One pass at a time: two would race to delete the same trees.
     const auto exclusive = InterprocessFileLock::try_acquire(store.sessions_dir() / ".retention.lock");
     if (!exclusive) return {};
-    Pass pass(store, now, std::move(stop));
-    if (policy.sessions) pass.sessions(*policy.sessions);
-    if (policy.revert_history && !pass.stopped()) pass.revert_history(*policy.revert_history);
-    if (policy.sessions && !pass.stopped()) pass.leftovers(*policy.sessions);
-    if (!pass.stopped()) pass.stale_locks();
-    if (!pass.stopped()) pass.compress_saved();
-    return std::move(pass).take();
+    return Sweep(store, policy, now, std::move(stop)).run();
 }
 
 } // namespace core::session

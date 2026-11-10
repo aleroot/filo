@@ -131,6 +131,11 @@ public:
     [[nodiscard]] static std::filesystem::path tool_results_dir(
         const std::filesystem::path& sessions_dir);
 
+    /// The offloaded tool results directory of session @p session_id, or an
+    /// empty path when that ID never names one.
+    [[nodiscard]] static std::filesystem::path tool_results_dir(
+        const std::filesystem::path& sessions_dir, std::string_view session_id);
+
     /// The session ID a saved session's file name carries (`…-<id>.json`),
     /// or nullopt when @p file_name does not name a saved session.
     [[nodiscard]] static std::optional<std::string_view> session_id_from_filename(

@@ -10,6 +10,7 @@
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -144,6 +145,16 @@ std::optional<std::string_view> SessionStore::session_id_from_filename(std::stri
 
 std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir) {
     return sessions_dir.parent_path() / "tool-results";
+}
+
+std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir,
+                                                     std::string_view session_id) {
+    // ToolResultStore names the directory after the session ID; an ID it
+    // would have rewritten never named one.
+    if (session_id.empty() || session_id.size() > 80 || !std::ranges::all_of(session_id, [](unsigned char c) {
+            return std::isalnum(c) || c == '-' || c == '_';
+        })) return {};
+    return tool_results_dir(sessions_dir) / session_id;
 }
 
 std::filesystem::path SessionStore::canonicalize_working_dir(std::string_view dir) {
@@ -1257,6 +1268,13 @@ std::optional<SessionData> SessionStore::load_by_path(
 }
 
 bool SessionStore::compress_saved(const std::filesystem::path& path, std::string* error) const {
+    // Most files already are; telling so takes two bytes, not the lock.
+    {
+        std::array<char, 2> magic{};
+        std::ifstream in(path, std::ios::binary);
+        if (!in.read(magic.data(), magic.size()) ||
+            core::utils::gzip::is_compressed({magic.data(), magic.size()})) return false;
+    }
     // Under the save lock nothing else writes the file; the bytes it holds
     // are kept exactly, so a reader sees the conversation either way.
     auto file_lock = core::utils::InterprocessFileLock::acquire(
@@ -1477,12 +1495,8 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
             if (error) *error = ec.message();
             return false;
         }
-        // ToolResultStore names the directory after the session ID; an ID it
-        // would have rewritten never named one here.
-        if (!session_id.empty() && session_id.size() <= 80 && std::ranges::all_of(session_id, [](unsigned char c) {
-                return std::isalnum(c) || c == '-' || c == '_';
-            })) {
-            std::filesystem::remove_all(tool_results_dir(sessions_dir_) / session_id, ec);
+        if (const auto results = tool_results_dir(sessions_dir_, session_id); !results.empty()) {
+            std::filesystem::remove_all(results, ec);
             if (ec) {
                 if (error) *error = ec.message();
                 return false;
