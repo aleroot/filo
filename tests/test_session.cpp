@@ -13,6 +13,7 @@
 #include "core/tools/ReadToolResultTool.hpp"
 #include "core/tools/TodoTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/utils/Gzip.hpp"
 #include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
 #include <simdjson.h>
@@ -33,6 +34,16 @@
 // Helpers
 // ---------------------------------------------------------------------------
 namespace {
+
+/// The JSON a saved session file holds: sessions are written compressed.
+std::string read_saved_json(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    REQUIRE(core::utils::gzip::is_compressed(bytes));
+    auto json = core::utils::gzip::decompress(bytes);
+    REQUIRE(json.has_value());
+    return std::move(*json);
+}
 
 std::string fixed_todo_time() {
     return "2026-07-18T12:00:00Z";
@@ -262,10 +273,7 @@ TEST_CASE("SessionStore repairs malformed UTF-8 while saving", "[session][json][
     REQUIRE(store.save(data));
 
     const auto path = store.compute_path(data);
-    std::ifstream input(path, std::ios::binary);
-    const std::string persisted{
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()};
+    const std::string persisted = read_saved_json(path);
     REQUIRE(simdjson::validate_utf8(persisted));
 
     const auto loaded = store.load_by_id("utf8save");
@@ -283,10 +291,8 @@ TEST_CASE("SessionStore recovers legacy sessions containing malformed UTF-8",
     REQUIRE(store.save(data));
     const auto path = store.compute_path(data);
 
-    std::ifstream input(path, std::ios::binary);
-    std::string persisted{
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()};
+    // Legacy sessions were saved as plain JSON.
+    std::string persisted = read_saved_json(path);
     const auto content = persisted.find("Hello, Filo!");
     REQUIRE(content != std::string::npos);
     persisted.replace(content, std::string_view("Hello, Filo!").size(),
@@ -425,10 +431,7 @@ TEST_CASE("SessionStore rejects future schemas and always writes the current ver
     current.version = 1;
     const core::session::SessionStore store{tmp.path};
     REQUIRE(store.save(current));
-    std::ifstream saved{store.compute_path(current)};
-    const std::string serialized{
-        std::istreambuf_iterator<char>{saved},
-        std::istreambuf_iterator<char>{}};
+    const std::string serialized = read_saved_json(store.compute_path(current));
     CHECK(serialized.starts_with(
         std::format("{{\"version\":{}", core::session::SessionData::kVersion)));
 
@@ -700,9 +703,10 @@ TEST_CASE("SessionStore list serves unchanged sessions from a stat-validated cac
     REQUIRE(store.list().front().name == "original");
     REQUIRE(std::filesystem::exists(tmp.path / ".catalog-cache"));
 
-    // Same size and mtime: the cached row is trusted without reading the file.
-    data.name = "renamed!";
-    REQUIRE(store.save(data));
+    // Same size and mtime: the cached row is trusted without reading the file
+    // (which now holds bytes of that size that are no session at all).
+    const auto size = std::filesystem::file_size(path);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << std::string(size, 'x');
     std::filesystem::last_write_time(path, settled);
     CHECK(store.list().front().name == "original");
 
@@ -712,7 +716,7 @@ TEST_CASE("SessionStore list serves unchanged sessions from a stat-validated cac
     std::filesystem::last_write_time(path, settled);
     CHECK(store.list().front().name == "renamed and longer");
 
-    data.name = "renamed and LONGER";  // same size, different mtime
+    data.name = "renamed and LONGER";  // a different mtime is enough
     REQUIRE(store.save(data));
     std::filesystem::last_write_time(path, settled + std::chrono::seconds(1));
     CHECK(store.list().front().name == "renamed and LONGER");
@@ -1346,4 +1350,99 @@ TEST_CASE("Session resume preserves Responses message phases and boundaries",
     const auto replay = core::llm::protocols::CodexResponsesProtocol{}.serialize(request);
     CHECK(replay.find(R"("phase":"commentary")") != std::string::npos);
     CHECK(replay.find(R"("phase":"final_answer")") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Compressed storage
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Rewrites a saved session as the plain JSON sessions were saved as before.
+std::string make_plain(const std::filesystem::path& path) {
+    const auto json = read_saved_json(path);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << json;
+    return json;
+}
+
+std::string raw_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+} // namespace
+
+TEST_CASE("SessionStore saves sessions compressed and reads plain JSON ones",
+          "[session][store][compression]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_compressed"};
+    const core::session::SessionStore store{tmp.path};
+    auto compressed = make_test_session("aaaa0001");
+    compressed.name = "compressed";
+    REQUIRE(store.save(compressed));
+    auto plain = make_test_session("aaaa0002");
+    plain.name = "plain";
+    plain.created_at = "2026-03-21T10:15:30Z";
+    REQUIRE(store.save(plain));
+    make_plain(store.compute_path(plain));
+
+    CHECK(core::utils::gzip::is_compressed(raw_bytes(store.compute_path(compressed))));
+    CHECK_FALSE(core::utils::gzip::is_compressed(raw_bytes(store.compute_path(plain))));
+    for (const auto* data : {&compressed, &plain}) {
+        const auto loaded = store.load_by_id(data->session_id);
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->name == data->name);
+        REQUIRE(loaded->messages.size() == 2);
+        CHECK(loaded->messages[0].content == "Hello, Filo!");
+        CHECK(loaded->stats.turn_count == 1);
+    }
+    const auto listed = store.list();
+    REQUIRE(listed.size() == 2);
+    for (const auto& info : listed) {
+        CHECK((info.name == "compressed" || info.name == "plain"));
+        CHECK(info.preview == "Hello, Filo!");
+        CHECK(info.turn_count == 1);
+        CHECK(info.working_dir == "/home/user/project");
+    }
+    CHECK(store.load("compressed").has_value());
+    CHECK(store.remove("aaaa0001"));
+    CHECK_FALSE(std::filesystem::exists(store.compute_path(compressed)));
+}
+
+TEST_CASE("Compressing a session saved as plain JSON keeps its contents and age",
+          "[session][store][compression]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_compress_saved"};
+    const core::session::SessionStore store{tmp.path};
+    const auto data = make_test_session("bbbb0001");
+    REQUIRE(store.save(data));
+    const auto path = store.compute_path(data);
+    const auto json = make_plain(path);
+    const auto modified = std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 40);
+    std::filesystem::last_write_time(path, modified);
+
+    std::string error;
+    REQUIRE(store.compress_saved(path, &error));
+    CHECK(error.empty());
+    CHECK(read_saved_json(path) == json);  // Byte for byte.
+    CHECK((std::filesystem::last_write_time(path) == modified));
+    const auto loaded = store.load_by_id("bbbb0001");
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->messages.size() == 2);
+
+    CHECK_FALSE(store.compress_saved(path, &error));  // Already compressed.
+    CHECK(error.empty());
+}
+
+TEST_CASE("A damaged compressed session is skipped, not fatal", "[session][store][compression]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_damaged_gzip"};
+    const core::session::SessionStore store{tmp.path};
+    const auto good = make_test_session("cccc0001");
+    REQUIRE(store.save(good));
+    auto bytes = raw_bytes(store.compute_path(good));
+    bytes.resize(bytes.size() / 2);  // Truncated.
+    std::ofstream(tmp.path / "session-20260322-101530-cccc0002.json", std::ios::binary) << bytes;
+
+    CHECK_FALSE(store.load_by_id("cccc0002").has_value());
+    const auto listed = store.list();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front().session_id == "cccc0001");
 }

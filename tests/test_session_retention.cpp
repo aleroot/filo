@@ -6,6 +6,7 @@
 #include "core/session/ExecutionJournal.hpp"
 #include "core/session/SessionRetention.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
 
 #include <chrono>
@@ -287,4 +288,34 @@ TEST_CASE("Only one retention pass runs at a time", "[session][retention]") {
     const auto report = fixture.run(RetentionPolicy{.sessions = days{30}, .revert_history = days{7}});
     CHECK(report.empty());
     CHECK(fixture.stored(idle));
+}
+
+TEST_CASE("Retention compresses conversations saved as plain JSON", "[session][retention][compression]") {
+    RetentionFixture fixture;
+    const auto data = fixture.session("aaaa0001", days{3});
+    const auto path = fixture.store.compute_path(data);
+    std::string bytes;
+    {
+        std::ifstream input(path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    const auto json = core::utils::gzip::decompress(bytes);
+    REQUIRE(json.has_value());
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << *json;
+    fixture.age(path, days{3});
+
+    const auto report = fixture.run(RetentionPolicy{.sessions = std::nullopt, .revert_history = std::nullopt});
+
+    CHECK(report.compressed == 1);
+    std::ifstream input(path, std::ios::binary);
+    const std::string stored{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    const auto inflated = core::utils::gzip::decompress(stored);
+    REQUIRE(inflated.has_value());
+    CHECK(*inflated == *json);
+    const auto loaded = fixture.store.load_by_id(data.session_id);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->last_active_at == data.last_active_at);
+    // Its age is unchanged, so retention still dates it correctly.
+    fixture.run(RetentionPolicy{.sessions = days{2}, .revert_history = std::nullopt});
+    CHECK_FALSE(fs::exists(path));
 }

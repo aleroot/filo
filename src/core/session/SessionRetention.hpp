@@ -34,17 +34,19 @@ struct RetentionReport {
     std::size_t sessions = 0;     ///< Conversations deleted.
     std::size_t checkpoints = 0;  ///< Conversations whose revert history was deleted.
     std::size_t leftovers = 0;    ///< Journals, tool results and lock files of no conversation.
+    std::size_t compressed = 0;   ///< Conversations saved before compression, now compressed.
     std::vector<std::string> errors;
     [[nodiscard]] bool empty() const noexcept {
-        return sessions == 0 && checkpoints == 0 && leftovers == 0 && errors.empty();
+        return sessions == 0 && checkpoints == 0 && leftovers == 0 && compressed == 0 && errors.empty();
     }
 };
 
 /// Deletes what @p policy no longer keeps from @p store's directory and the
-/// tool results beside it. Anything a Filo process holds open (its session
-/// lease) is skipped, so is anything whose age cannot be established, and
-/// one pass runs at a time across processes. Returns between items once
-/// @p stop is requested.
+/// tool results beside it, then compresses conversations saved before
+/// sessions were. Anything a Filo process holds open (its session lease) is
+/// not deleted, nor is anything whose age cannot be established, and one pass
+/// runs at a time across processes. Returns between items once @p stop is
+/// requested.
 RetentionReport apply_retention(const SessionStore& store, const RetentionPolicy& policy,
                                 std::chrono::system_clock::time_point now,
                                 std::stop_token stop = {});

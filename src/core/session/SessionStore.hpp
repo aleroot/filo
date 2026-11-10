@@ -27,10 +27,12 @@ struct SessionInfo {
 };
 
 // ---------------------------------------------------------------------------
-// SessionStore — persists sessions as JSON files under sessions_dir.
+// SessionStore — persists sessions as gzip-compressed JSON under sessions_dir.
 //
 // File naming: session-YYYYMMDD-HHMMSS-<8hex-id>.json
-//   (lexicographic sort equals chronological sort)
+//   (lexicographic sort equals chronological sort). The name stays `.json`
+//   so a session keeps one path, lease and lock whether it was saved before
+//   compression (plain JSON, still read) or after; `gunzip -c < file` shows it.
 //
 // Concurrency safety:
 //   save()       — cross-process lock + unique fsynced temp file + atomic rename.
@@ -74,6 +76,11 @@ public:
     // checkpoints, offloaded tool results and lock files (returns true even
     // when not found).
     bool remove(std::string_view session_id, std::string* error = nullptr) const;
+
+    /// Rewrites a session file saved before sessions were compressed in the
+    /// compressed form, keeping its contents and modification time. False
+    /// when there was nothing to do or it failed (then @p error says why).
+    bool compress_saved(const std::filesystem::path& path, std::string* error = nullptr) const;
 
     // Compute the canonical file path for the given session data.
     [[nodiscard]] std::filesystem::path compute_path(const SessionData& data) const;

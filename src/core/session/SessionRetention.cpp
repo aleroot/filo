@@ -12,6 +12,7 @@
 #include <charconv>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <string_view>
@@ -238,6 +239,23 @@ public:
         }
     }
 
+    /// Conversations saved as plain JSON, before sessions were compressed.
+    void compress_saved() {
+        for (const auto& [id, path] : scan(directory_).sessions) {
+            if (stop_.stop_requested()) return;
+            if (!path.filename().string().starts_with("session-")) continue;
+            char magic[2]{};
+            {
+                std::ifstream in(path, std::ios::binary);
+                if (!in.read(magic, sizeof magic)) continue;
+            }
+            if (magic[0] == '\x1f' && magic[1] == '\x8b') continue;
+            std::string error;
+            if (store_.compress_saved(path, &error)) ++report_.compressed;
+            else if (!error.empty()) fail(id, error);
+        }
+    }
+
     [[nodiscard]] bool stopped() const { return stop_.stop_requested(); }
     RetentionReport take() && { return std::move(report_); }
 
@@ -279,6 +297,7 @@ RetentionReport apply_retention(const SessionStore& store, const RetentionPolicy
     if (policy.revert_history && !pass.stopped()) pass.revert_history(*policy.revert_history);
     if (policy.sessions && !pass.stopped()) pass.leftovers(*policy.sessions);
     if (!pass.stopped()) pass.stale_locks();
+    if (!pass.stopped()) pass.compress_saved();
     return std::move(pass).take();
 }
 

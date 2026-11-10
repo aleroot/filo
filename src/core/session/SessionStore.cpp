@@ -5,6 +5,7 @@
 #include "ActiveSessionLease.hpp"
 #include "ThreadCatalog.hpp"
 #include "core/changes/FileChangeJson.hpp"
+#include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -21,6 +22,7 @@
 #include <iterator>
 #include <random>
 #include <ranges>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -42,6 +44,22 @@ namespace {
     in.read(content.data(), size);
     content.resize(static_cast<std::size_t>(std::max<std::streamsize>(in.gcount(), 0)));
     return content;
+}
+
+/// Sessions are saved as gzip streams: conversations shrink about threefold.
+/// Level 1 keeps a multi-megabyte save within tens of milliseconds.
+constexpr core::utils::gzip::CompressOptions kSessionCompression{.level = 1};
+/// Far above any conversation, below what a corrupt stream may claim.
+constexpr std::size_t kMaxSessionBytes = std::size_t{1} << 30;
+
+/// The JSON a session file holds, whether it was saved compressed or, before
+/// compression, as plain JSON (which never starts with the gzip magic).
+[[nodiscard]] std::optional<std::string> read_session_file(const std::filesystem::path& path) {
+    auto content = read_whole_file(path);
+    if (!content || !core::utils::gzip::is_compressed(*content)) return content;
+    auto json = core::utils::gzip::decompress(*content, kMaxSessionBytes);
+    if (!json) return std::nullopt;
+    return std::move(*json);
 }
 
 [[nodiscard]] bool more_recent(const SessionInfo& lhs, const SessionInfo& rhs) {
@@ -752,8 +770,14 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
         return false;
     }
 
-    const std::string json = to_json(data);
-    if (!core::utils::atomic_write_file(target_path, json, error)) return false;
+    std::string compressed;
+    try {
+        compressed = core::utils::gzip::compress(to_json(data), kSessionCompression);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+    if (!core::utils::atomic_write_file(target_path, compressed, error)) return false;
     std::error_code recovery_ec;
     const auto recovery_root = std::filesystem::weakly_canonical(core::changes::RecoveryStore::session_root_in(sessions_dir_, data.session_id), recovery_ec);
     for (const auto& message : data.messages) {
@@ -1195,17 +1219,31 @@ private:
 
 std::optional<SessionInfo> SessionStore::read_session_header(
     const std::filesystem::path& path) const {
-    {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) return std::nullopt;
-        if (auto info = scan_catalogue_row(in); info.has_value()) {
-            info->path = path;
-            return info;
-        }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    const auto scan = [&path](std::istream& input) {
+        auto info = scan_catalogue_row(input);
+        if (info) info->path = path;
+        return info;
+    };
+    std::optional<std::string> json;
+    if (in.peek() == 0x1f) {
+        // Compressed: inflated whole, once; the catalogue cache keeps it the
+        // only time while the file is unchanged.
+        in.close();
+        json = read_session_file(path);
+        if (!json) return std::nullopt;
+        std::istringstream text(std::move(*json));
+        if (auto info = scan(text)) return info;
+        json = std::string(text.view());
+    } else if (auto info = scan(in)) {
+        return info;
     }
     // Unusual layouts and damaged files keep the canonical decoder's
     // compatibility and UTF-8 repair behavior.
-    if (auto data = load_by_path(path); data.has_value()) {
+    if (!json) json = read_session_file(path);
+    if (!json) return std::nullopt;
+    if (auto data = from_json(*json); data.has_value()) {
         return session_info_from_data(*data, path);
     }
     return std::nullopt;
@@ -1213,9 +1251,40 @@ std::optional<SessionInfo> SessionStore::read_session_header(
 
 std::optional<SessionData> SessionStore::load_by_path(
     const std::filesystem::path& path) const {
-    const auto content = read_whole_file(path);
+    const auto content = read_session_file(path);
     if (!content.has_value()) return std::nullopt;
     return from_json(*content);
+}
+
+bool SessionStore::compress_saved(const std::filesystem::path& path, std::string* error) const {
+    // Under the save lock nothing else writes the file; the bytes it holds
+    // are kept exactly, so a reader sees the conversation either way.
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path), error);
+    if (!file_lock) return false;
+    std::error_code ec;
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+        if (error) *error = ec.message();
+        return false;
+    }
+    const auto content = read_whole_file(path);
+    if (!content || content->empty() || core::utils::gzip::is_compressed(*content)) return false;
+    std::string compressed;
+    try {
+        compressed = core::utils::gzip::compress(*content, kSessionCompression);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+    if (core::utils::gzip::decompress(compressed, kMaxSessionBytes) != *content) {
+        if (error) *error = "compressed session does not decompress to the original";
+        return false;
+    }
+    if (!core::utils::atomic_write_file(path, compressed, error)) return false;
+    // Retention dates a session by it: compressing is not using it.
+    std::filesystem::last_write_time(path, modified, ec);
+    return true;
 }
 
 std::vector<SessionInfo> SessionStore::list() const {

@@ -605,6 +605,11 @@ applied in the background each time the interactive app starts:
 Nothing a running Filo process has open is touched, and lock files left by
 deleted sessions are cleaned up.
 
+Saved conversations (`~/.local/share/filo/sessions/session-*.json`) are stored
+gzip-compressed, about a third of their JSON size; the same pass compresses
+conversations saved before that, keeping their contents byte for byte. To read
+one yourself: `gunzip -c < session-….json | jq`.
+
 </details>
 
 ### Slash commands

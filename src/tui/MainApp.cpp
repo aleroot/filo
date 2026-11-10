@@ -1887,6 +1887,10 @@ RunResult run(RunOptions opts) {
                     "and {} leftover file(s).",
                     report.sessions, report.checkpoints, report.leftovers);
             }
+            if (report.compressed) {
+                core::logging::info("Compressed {} conversation(s) saved before compression.",
+                                    report.compressed);
+            }
             for (const auto& error : report.errors) {
                 core::logging::debug("Storage retention kept {}", error);
             }
