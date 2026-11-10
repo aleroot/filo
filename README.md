@@ -603,7 +603,9 @@ applied in the background each time the interactive app starts:
   `/revert` falls back to its saved text diffs.
 
 Nothing a running Filo process has open is touched, and lock files left by
-deleted sessions are cleaned up.
+deleted sessions are cleaned up. The **Storage** page of `/settings` also shows
+how much disk the saved conversations, their revert history, journals and tool
+output take, measured in the background each time `/settings` opens.
 
 Saved conversations (`~/.local/share/filo/sessions/session-*.json`) are stored
 gzip-compressed, about a third of their JSON size; the same pass compresses

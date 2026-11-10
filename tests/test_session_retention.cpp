@@ -290,6 +290,58 @@ TEST_CASE("Only one retention pass runs at a time", "[session][retention]") {
     CHECK(fixture.stored(idle));
 }
 
+namespace {
+void write_bytes(const fs::path& path, std::size_t size) {
+    fs::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary) << std::string(size, 'x');
+}
+} // namespace
+
+TEST_CASE("Storage usage adds up each kind of stored data", "[session][retention][usage]") {
+    RetentionFixture fixture;
+    SECTION("an empty directory holds nothing") {
+        const auto usage = core::session::measure_storage(fixture.store);
+        CHECK(usage.total() == 0);
+        CHECK(usage.conversation_count == 0);
+        CHECK(usage.complete);
+    }
+    SECTION("each area is measured on its own, symlinks not followed") {
+        const auto session = fixture.sessions / "session-20260101-000000-aaaa0001.json";
+        write_bytes(session, 100);
+        write_bytes(core::utils::lock_path_for(session), 0);
+        write_bytes(fixture.recovery("aaaa0001") / "turn" / "manifest.json", 10);
+        write_bytes(fixture.recovery("aaaa0001") / "objects" / "hash", 20);
+        write_bytes(fixture.journal().path_for("aaaa0001"), 30);
+        write_bytes(fixture.tool_results("aaaa0001") / "call-1", 40);
+        write_bytes(fixture.root / "outside", 5000);
+        fs::create_symlink(fixture.root / "outside", fixture.recovery("aaaa0001") / "link");
+        fs::create_symlink(fixture.root / "outside", fixture.sessions / "stray-link");
+
+        const auto usage = core::session::measure_storage(fixture.store);
+        CHECK(usage.conversations == 100);
+        CHECK(usage.conversation_count == 1);
+        CHECK(usage.revert_history == 30);
+        CHECK(usage.journals == 30);
+        CHECK(usage.tool_output == 40);
+        CHECK(usage.total() == 200);
+        CHECK(usage.complete);
+    }
+    SECTION("a missing sessions directory holds nothing") {
+        fs::remove_all(fixture.sessions);
+        const auto usage = core::session::measure_storage(fixture.store);
+        CHECK(usage.total() == 0);
+        CHECK(usage.complete);
+    }
+    SECTION("a stopped measurement is marked incomplete") {
+        write_bytes(fixture.recovery("aaaa0001") / "turn" / "manifest.json", 10);
+        std::stop_source stop;
+        stop.request_stop();
+        const auto usage = core::session::measure_storage(fixture.store, stop.get_token());
+        CHECK_FALSE(usage.complete);
+        CHECK(usage.revert_history == 0);
+    }
+}
+
 TEST_CASE("Retention compresses conversations saved as plain JSON", "[session][retention][compression]") {
     RetentionFixture fixture;
     const auto data = fixture.session("aaaa0001", days{3});

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -40,6 +41,25 @@ struct RetentionReport {
         return sessions == 0 && checkpoints == 0 && leftovers == 0 && compressed == 0 && errors.empty();
     }
 };
+
+/// Bytes stored for saved conversations, by what they are kept for.
+struct StorageUsage {
+    std::uintmax_t conversations = 0;   ///< Saved conversations and their lock files.
+    std::uintmax_t revert_history = 0;  ///< File checkpoints behind `/revert`.
+    std::uintmax_t journals = 0;        ///< Execution journals.
+    std::uintmax_t tool_output = 0;     ///< Offloaded tool results.
+    std::size_t conversation_count = 0;
+    /// False when something could not be measured or the measurement was
+    /// stopped, so the figures are a lower bound.
+    bool complete = true;
+    [[nodiscard]] std::uintmax_t total() const noexcept {
+        return conversations + revert_history + journals + tool_output;
+    }
+};
+
+/// Measures what @p store's directory and the tool results beside it hold.
+/// Reads only; returns early, incomplete, once @p stop is requested.
+[[nodiscard]] StorageUsage measure_storage(const SessionStore& store, std::stop_token stop = {});
 
 /// Deletes what @p policy no longer keeps from @p store's directory and the
 /// tool results beside it, then compresses conversations saved before

@@ -711,6 +711,24 @@ TEST_CASE("render_settings_panel — inherited and scoped rows render without cr
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Current scope inherits this value."));
 }
 
+TEST_CASE("render_settings_panel — a note renders above the settings",
+          "[tui][picker][settings]") {
+    std::vector<SettingsPanelRow> rows = {
+        {.label = "Revert History", .value = "7 days (Default)", .description = "Checkpoints."},
+    };
+    auto panel = render_settings_panel(
+        "User", "/tmp/settings.json", "Storage", rows, 0, "",
+        "On disk: 3.0 GB — revert history 2.4 GB · journals 320 MB");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fixed(16));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    const auto note = output.find("On disk: 3.0 GB");
+    REQUIRE(note != std::string::npos);
+    REQUIRE(note < output.find("Revert History: 7 days"));
+}
+
 TEST_CASE("render_settings_categories_panel — overview lists categories with counts",
           "[tui][picker][settings]") {
     std::vector<SettingsCategoryRow> categories = {

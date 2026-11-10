@@ -181,6 +181,9 @@ public:
         return it == sessions_.end() ? std::nullopt : std::optional(it->second);
     }
 
+    /// How many conversations are saved.
+    [[nodiscard]] std::size_t size() const noexcept { return sessions_.size(); }
+
     /// Lock and lease files of the session files they name.
     [[nodiscard]] const std::vector<Lock>& locks() const noexcept { return locks_; }
 
@@ -203,6 +206,38 @@ private:
     std::map<std::string, std::set<fs::path>, std::less<>> leases_;
     std::vector<Lock> locks_;
 };
+
+// ── Disk use ─────────────────────────────────────────────────────────────────
+
+/// Adds up the regular files under @p path, or @p path itself when it is one;
+/// symlinks are not followed. Files deleted meanwhile count as nothing. Clears
+/// @p complete when anything else cannot be measured or @p stop is requested.
+std::uintmax_t bytes_under(const fs::path& path, const std::stop_token& stop, bool& complete) {
+    const auto measure = [&](const fs::directory_entry& entry) -> std::uintmax_t {
+        std::error_code ec;
+        const auto type = entry.symlink_status(ec).type();
+        if (ec || type != fs::file_type::regular) {
+            if (ec && ec != std::errc::no_such_file_or_directory) complete = false;
+            return 0;
+        }
+        const auto size = entry.file_size(ec);
+        if (!ec) return size;
+        if (ec != std::errc::no_such_file_or_directory) complete = false;
+        return 0;
+    };
+    std::error_code ec;
+    if (type_of(path) != fs::file_type::directory) return present(path) ? measure(fs::directory_entry(path, ec)) : 0;
+    std::uintmax_t total = 0;
+    for (fs::recursive_directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+        if (stop.stop_requested()) {
+            complete = false;
+            return total;
+        }
+        total += measure(*it);
+    }
+    if (ec && ec != std::errc::no_such_file_or_directory) complete = false;
+    return total;
+}
 
 // ── The pass ─────────────────────────────────────────────────────────────────
 
@@ -341,6 +376,19 @@ private:
 };
 
 } // namespace
+
+StorageUsage measure_storage(const SessionStore& store, std::stop_token stop) {
+    const auto& directory = store.sessions_dir();
+    StorageUsage usage;
+    for (const auto& path : listing(directory)) {
+        if (type_of(path) != fs::file_type::directory) usage.conversations += bytes_under(path, stop, usage.complete);
+    }
+    usage.conversation_count = Catalogue::scan(directory).size();
+    usage.revert_history = bytes_under(core::changes::RecoveryStore::root_in(directory), stop, usage.complete);
+    usage.journals = bytes_under(ExecutionJournal::root_in(directory), stop, usage.complete);
+    usage.tool_output = bytes_under(SessionStore::tool_results_dir(directory), stop, usage.complete);
+    return usage;
+}
 
 RetentionReport apply_retention(const SessionStore& store, const RetentionPolicy& policy,
                                 Clock::time_point now, std::stop_token stop) {

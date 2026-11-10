@@ -46,6 +46,7 @@
 #include "core/session/SessionReference.hpp"
 #include "core/session/SessionReferenceCatalogue.hpp"
 #include "core/session/SessionRetention.hpp"
+#include "core/net/NetworkTraffic.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ActiveSessionLease.hpp"
@@ -170,6 +171,29 @@ constexpr std::string_view kDisableTerminalInputModes =
 
 constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
 constexpr std::size_t kMaxStderrPanelLines = 20;
+
+/// The /settings category that also shows what saved conversations occupy.
+constexpr std::string_view kStorageSettingsCategory = "Storage";
+
+/// What saved conversations occupy, largest kind first.
+std::string describe_storage_usage(const core::session::StorageUsage& usage) {
+    using core::net::format_bytes;
+    std::vector<std::pair<std::uintmax_t, std::string>> parts{
+        {usage.conversations, std::format("{} conversation{} {}", usage.conversation_count,
+                                          usage.conversation_count == 1 ? "" : "s",
+                                          format_bytes(usage.conversations))},
+        {usage.revert_history, "revert history " + format_bytes(usage.revert_history)},
+        {usage.journals, "journals " + format_bytes(usage.journals)},
+        {usage.tool_output, "tool output " + format_bytes(usage.tool_output)},
+    };
+    std::ranges::stable_sort(parts, std::ranges::greater{}, &decltype(parts)::value_type::first);
+    std::string text = std::format("On disk: {}{} — ", format_bytes(usage.total()),
+                                   usage.complete ? "" : " or more");
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        text += (i == 0 ? "" : " · ") + parts[i].second;
+    }
+    return text;
+}
 
 std::string join_context_source_labels(const std::vector<std::string>& source_labels) {
     std::string joined;
@@ -1641,7 +1665,7 @@ RunResult run(RunOptions opts) {
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::SessionRetentionDays,
-            .category = "Storage",
+            .category = std::string(kStorageSettingsCategory),
             .label = "Conversation Retention",
             .description = "Delete saved conversations idle this long, with their revert history, "
                            "journal and tool output. Renamed conversations are kept. User settings "
@@ -1656,7 +1680,7 @@ RunResult run(RunOptions opts) {
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::RevertHistoryDays,
-            .category = "Storage",
+            .category = std::string(kStorageSettingsCategory),
             .label = "Revert History",
             .description = "Delete the file checkpoints behind /revert once a conversation has been "
                            "idle this long; /revert then relies on saved diffs. User settings only; "
@@ -1709,7 +1733,9 @@ RunResult run(RunOptions opts) {
             {"Routing", "The router policy new Router/Auto sessions start from."},
             {"UI", "What the interface shows: banner, footer, badges and disclosures."},
             {"Session", "How conversation context is summarised and compacted."},
-            {"Storage", "How long saved conversations and their revert history are kept."},
+            {std::string(kStorageSettingsCategory),
+             "What saved conversations occupy on disk, and how long they and their revert "
+             "history are kept."},
             {"Context", "Which project steering files load into the prompt."},
         };
         const auto it = kBlurbs.find(std::string(category));
@@ -1864,6 +1890,30 @@ RunResult run(RunOptions opts) {
         }
         lease->commit();
     }
+    // What saved conversations occupy, shown under /settings → Storage. Walking
+    // the revert history can take seconds, so it is measured in the background
+    // each time /settings opens, never on the UI thread.
+    std::mutex storage_usage_mutex;
+    std::optional<core::session::StorageUsage> storage_usage;
+    std::atomic_bool storage_usage_measuring{false};
+    std::jthread storage_usage_probe;
+    const auto measure_storage_usage = [&] {
+        if (storage_usage_measuring.exchange(true)) return;
+        storage_usage_probe = std::jthread([&, store = session_store](std::stop_token stop) {
+            auto usage = core::session::measure_storage(*store, stop);
+            if (!stop.stop_requested()) {
+                std::lock_guard lock(storage_usage_mutex);
+                storage_usage = usage;
+            }
+            storage_usage_measuring.store(false);
+            wake_ui();
+        });
+    };
+    const auto storage_usage_snapshot = [&] {
+        std::lock_guard lock(storage_usage_mutex);
+        return storage_usage;
+    };
+
     // Started only now: the session being resumed holds its lease, so the
     // pass cannot delete what this process is about to use. Exiting stops it
     // between two items and waits for the current one.
@@ -5735,6 +5785,7 @@ RunResult run(RunOptions opts) {
             settings_panel_state.status_message =
                 "Edit scoped app preferences here. Use /model for provider and session routing choices.";
         }
+        measure_storage_usage();
         wake_ui();
         return true;
     };
@@ -10704,13 +10755,20 @@ RunResult run(RunOptions opts) {
                     });
                 }
 
+                const auto& category = settings_categories[*settings_panel_open_category];
+                std::string note;
+                if (category == kStorageSettingsCategory) {
+                    const auto usage = storage_usage_snapshot();
+                    note = usage ? describe_storage_usage(*usage) : "On disk: measuring…";
+                }
                 bottom_el = render_settings_panel(
                     settings_scope_label(settings_panel_scope),
                     scope_path,
-                    settings_categories[*settings_panel_open_category],
+                    category,
                     settings_rows,
                     settings_panel_selected,
-                    settings_panel_status);
+                    settings_panel_status,
+                    note);
             } else {
                 std::vector<SettingsCategoryRow> category_rows;
                 category_rows.reserve(settings_categories.size());
@@ -10729,6 +10787,13 @@ RunResult run(RunOptions opts) {
                     std::string summary = std::format("{} settings", indices.size());
                     if (set_in_scope > 0) {
                         summary += std::format(" · {} set in this scope", set_in_scope);
+                    }
+                    if (settings_categories[category] == kStorageSettingsCategory) {
+                        const auto usage = storage_usage_snapshot();
+                        summary += usage ? std::format(" · {}{} on disk",
+                                                       core::net::format_bytes(usage->total()),
+                                                       usage->complete ? "" : " or more")
+                                         : std::string(" · measuring disk use…");
                     }
                     category_rows.push_back(SettingsCategoryRow{
                         .name = settings_categories[category],

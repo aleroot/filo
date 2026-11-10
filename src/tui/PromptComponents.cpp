@@ -1512,9 +1512,14 @@ Element render_settings_panel(std::string_view scope_label,
                               std::string_view category_label,
                               const std::vector<SettingsPanelRow>& rows,
                               int selected_index,
-                              std::string_view status_message) {
+                              std::string_view status_message,
+                              std::string_view note) {
     Elements rendered_rows;
-    rendered_rows.reserve(rows.size());
+    rendered_rows.reserve(rows.size() + 2);
+    if (!note.empty()) {
+        rendered_rows.push_back(paragraph(std::string(note)) | color(ColorTextSecondary));
+        rendered_rows.push_back(separator());
+    }
 
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const bool selected = static_cast<int>(i) == selected_index;
@@ -1540,7 +1545,7 @@ Element render_settings_panel(std::string_view scope_label,
         "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.",
         status_message,
         std::move(rendered_rows),
-        std::max(10, static_cast<int>(rows.size()) * 2 + 6));
+        std::max(10, static_cast<int>(rows.size()) * 2 + (note.empty() ? 6 : 8)));
 }
 
 Element render_settings_categories_panel(std::string_view scope_label,

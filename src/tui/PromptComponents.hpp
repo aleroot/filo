@@ -233,13 +233,15 @@ ftxui::Element render_authentication_recovery_panel(
     int selected_index);
 
 /// Second level of the /settings drill-down: the settings of one category.
-/// @p category_label is the breadcrumb shown next to the scope.
+/// @p category_label is the breadcrumb shown next to the scope; a non-empty
+/// @p note is shown above the settings.
 ftxui::Element render_settings_panel(std::string_view scope_label,
                                      std::string_view scope_path,
                                      std::string_view category_label,
                                      const std::vector<SettingsPanelRow>& rows,
                                      int selected_index,
-                                     std::string_view status_message);
+                                     std::string_view status_message,
+                                     std::string_view note = {});
 
 /// First level of the /settings drill-down: one row per category.
 ftxui::Element render_settings_categories_panel(std::string_view scope_label,
