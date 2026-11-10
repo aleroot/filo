@@ -116,6 +116,14 @@ std::filesystem::path SessionStore::default_sessions_dir() {
     return std::filesystem::temp_directory_path() / "filo" / "sessions";
 }
 
+std::optional<std::string_view> SessionStore::session_id_from_filename(std::string_view name) {
+    if (!name.ends_with(".json")) return std::nullopt;
+    const auto dot_pos  = name.size() - 5;
+    const auto dash_pos = name.rfind('-', dot_pos);
+    if (dash_pos == std::string_view::npos || dash_pos + 1 >= dot_pos) return std::nullopt;
+    return name.substr(dash_pos + 1, dot_pos - dash_pos - 1);
+}
+
 std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir) {
     return sessions_dir.parent_path() / "tool-results";
 }
@@ -1292,14 +1300,8 @@ std::optional<SessionData> SessionStore::load_by_id(std::string_view session_id)
         if (ec) break;
         if (!entry.is_regular_file()) continue;
         const auto& p = entry.path();
-        if (p.extension() != ".json") continue;
-        const std::string fname  = p.filename().string();
-        const auto dot_pos  = fname.rfind('.');
-        const auto dash_pos = fname.rfind('-', dot_pos);
-        if (dash_pos == std::string::npos || dash_pos + 1 >= dot_pos) continue;
-        const std::string_view file_id =
-            std::string_view(fname).substr(dash_pos + 1, dot_pos - dash_pos - 1);
-        if (file_id != session_id) continue;
+        const std::string fname = p.filename().string();
+        if (session_id_from_filename(fname) != session_id) continue;
 
         return load_by_path(p);
     }
@@ -1378,14 +1380,8 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
         if (ec) break;
         if (!entry.is_regular_file()) continue;
         const auto& p = entry.path();
-        if (p.extension() != ".json") continue;
-        const std::string fname  = p.filename().string();
-        const auto dot_pos  = fname.rfind('.');
-        const auto dash_pos = fname.rfind('-', dot_pos);
-        if (dash_pos == std::string::npos || dash_pos + 1 >= dot_pos) continue;
-        const std::string_view file_id =
-            std::string_view(fname).substr(dash_pos + 1, dot_pos - dash_pos - 1);
-        if (file_id != session_id) continue;
+        const std::string fname = p.filename().string();
+        if (session_id_from_filename(fname) != session_id) continue;
 
         std::string lock_error;
         auto active_lock = core::utils::InterprocessFileLock::try_acquire(

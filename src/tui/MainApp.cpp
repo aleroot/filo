@@ -45,6 +45,7 @@
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionReference.hpp"
 #include "core/session/SessionReferenceCatalogue.hpp"
+#include "core/session/SessionRetention.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ActiveSessionLease.hpp"
@@ -1638,6 +1639,37 @@ RunResult run(RunOptions opts) {
                                .label = "Auto"},
             },
         });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::SessionRetentionDays,
+            .category = "Storage",
+            .label = "Conversation Retention",
+            .description = "Delete saved conversations idle this long, with their revert history, "
+                           "journal and tool output. Renamed conversations are kept. User settings "
+                           "only; applied when Filo starts.",
+            .choices = {
+                SettingsChoice{.value = "0",   .label = "Keep forever (Default)"},
+                SettingsChoice{.value = "30",  .label = "30 days"},
+                SettingsChoice{.value = "90",  .label = "90 days"},
+                SettingsChoice{.value = "180", .label = "180 days"},
+                SettingsChoice{.value = "365", .label = "1 year"},
+            },
+        });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::RevertHistoryDays,
+            .category = "Storage",
+            .label = "Revert History",
+            .description = "Delete the file checkpoints behind /revert once a conversation has been "
+                           "idle this long; /revert then relies on saved diffs. User settings only; "
+                           "applied when Filo starts.",
+            .choices = {
+                SettingsChoice{.value = "1",  .label = "1 day"},
+                SettingsChoice{.value = std::to_string(
+                                   core::session::kDefaultRevertHistoryRetention.count()),
+                               .label = "7 days (Default)"},
+                SettingsChoice{.value = "30", .label = "30 days"},
+                SettingsChoice{.value = "0",  .label = "Keep with the conversation"},
+            },
+        });
         // Choices come from the shared steering-mode table, so this panel can
         // never offer a token that parse_steering_policy() would misread as a
         // path. Custom file/directory steering stays CLI- and command-only
@@ -1677,6 +1709,7 @@ RunResult run(RunOptions opts) {
             {"Routing", "The router policy new Router/Auto sessions start from."},
             {"UI", "What the interface shows: banner, footer, badges and disclosures."},
             {"Session", "How conversation context is summarised and compacted."},
+            {"Storage", "How long saved conversations and their revert history are kept."},
             {"Context", "Which project steering files load into the prompt."},
         };
         const auto it = kBlurbs.find(std::string(category));
@@ -1831,6 +1864,36 @@ RunResult run(RunOptions opts) {
         }
         lease->commit();
     }
+    // Started only now: the session being resumed holds its lease, so the
+    // pass cannot delete what this process is about to use. Exiting stops it
+    // between two items and waits for the current one.
+    std::jthread storage_retention([store = session_store,
+                                    policy = core::session::RetentionPolicy{
+                                        .sessions = core::session::parse_retention_days(
+                                            config_manager.get_settings_overlay(
+                                                core::config::SettingsScope::User).session_retention_days,
+                                            std::nullopt),
+                                        .revert_history = core::session::parse_retention_days(
+                                            config_manager.get_settings_overlay(
+                                                core::config::SettingsScope::User).revert_history_days,
+                                            core::session::kDefaultRevertHistoryRetention),
+                                    }](std::stop_token stop) {
+        try {
+            const auto report = core::session::apply_retention(
+                *store, policy, std::chrono::system_clock::now(), stop);
+            if (report.sessions || report.checkpoints || report.leftovers) {
+                core::logging::info(
+                    "Storage retention deleted {} idle conversation(s), the revert history of {}, "
+                    "and {} leftover file(s).",
+                    report.sessions, report.checkpoints, report.leftovers);
+            }
+            for (const auto& error : report.errors) {
+                core::logging::debug("Storage retention kept {}", error);
+            }
+        } catch (const std::exception& error) {
+            core::logging::warn("Storage retention failed: {}", error.what());
+        }
+    });
     core::budget::BudgetTracker::get_instance().reset_session(session_id);
     session_stats_registry->reset(session_id);
     agent->set_session_id(session_id);
@@ -4968,6 +5031,10 @@ RunResult run(RunOptions opts) {
                 return settings.prompt_cache_notice_seconds;
             case core::config::ManagedSettingKey::PromptCacheKeepWarm:
                 return settings.prompt_cache_keep_warm;
+            case core::config::ManagedSettingKey::SessionRetentionDays:
+                return settings.session_retention_days;
+            case core::config::ManagedSettingKey::RevertHistoryDays:
+                return settings.revert_history_days;
         }
         return std::nullopt;
     };
@@ -5032,6 +5099,17 @@ RunResult run(RunOptions opts) {
                             == core::agent::PromptCacheKeepWarm::Auto
                         ? core::agent::kPromptCacheKeepWarmAuto
                         : core::agent::kPromptCacheKeepWarmAsk);
+            case core::config::ManagedSettingKey::SessionRetentionDays:
+            case core::config::ManagedSettingKey::RevertHistoryDays: {
+                // User-only: workspace files never decide what is deleted.
+                const auto& user = config_manager.get_settings_overlay(
+                    core::config::SettingsScope::User);
+                const auto days = key == core::config::ManagedSettingKey::SessionRetentionDays
+                    ? core::session::parse_retention_days(user.session_retention_days, std::nullopt)
+                    : core::session::parse_retention_days(
+                          user.revert_history_days, core::session::kDefaultRevertHistoryRetention);
+                return std::to_string(days ? days->count() : 0);
+            }
         }
         return {};
     };

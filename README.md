@@ -481,7 +481,9 @@ files: rerun the checks appropriate to the state you intend to keep.
 Checkpoints live beside session journals under `recovery/<session-id>/`.
 Original storage is capped at 8 MiB per file, 64 MiB and 4,096 files per turn;
 the automatic inventory follows the existing 1,000-file turn scan limit.
-The newest eight completed checkpoints are retained per session. Older text
+The newest eight completed checkpoints are retained per session, and all of
+them are deleted once the session has been idle for the Revert History setting
+(7 days by default, see [Settings](#settings)). Older text
 changes can still use their saved diffs; unsupported, excluded, or over-budget
 paths are reported as incomplete coverage. Deleting a session removes its
 checkpoints. External services and processes that deliberately detach from a
@@ -555,7 +557,7 @@ provider. Use a provider you trust with that data.
 
 ## Settings
 
-Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, diff comparer, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.
+Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, diff comparer, auto-compaction, tool compression, steering mode, storage retention). Model selection is separate via **`/model`**.
 
 Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settings.json` (workspace). Workspace values override user values.
 
@@ -583,8 +585,25 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Cold-Cache Guard | `prompt_cache_guard_tokens` | `0` (off), `50000`, `100000` (default), `200000` |
 | Cache Expiry Notice | `prompt_cache_notice_seconds` | `0` (off), `30`, `60` (default), `120` |
 | Cache Keep-Warm | `prompt_cache_keep_warm` | `ask` (default), `auto` |
+| Conversation Retention | `session_retention_days` | `0` (keep forever, default), `30`, `90`, `180`, `365`, or any number of days |
+| Revert History | `revert_history_days` | `1`, `7` (default), `30`, `0` (keep with the conversation), or any number of days |
 
 `--steering` on the command line overrides the saved `steering_mode` for that run only.
+
+The two **Storage** settings are read from the user `settings.json` only, so a
+repository's `.filo/settings.json` can never decide what is deleted. They are
+applied in the background each time the interactive app starts:
+
+- Conversation Retention deletes saved conversations idle for longer than the
+  setting, together with their execution journal, revert history and
+  offloaded tool output (and journals or tool output that belong to no saved
+  conversation). Conversations you named with `/rename` are always kept.
+- Revert History deletes the file checkpoints behind `/revert` of conversations
+  idle for longer than the setting; the conversation itself stays, and
+  `/revert` falls back to its saved text diffs.
+
+Nothing a running Filo process has open is touched, and lock files left by
+deleted sessions are cleaned up.
 
 </details>
 

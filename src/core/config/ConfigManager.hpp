@@ -40,7 +40,18 @@ enum class ManagedSettingKey {
     PromptCacheGuardTokens,
     PromptCacheNoticeSeconds,
     PromptCacheKeepWarm,
+    SessionRetentionDays,
+    RevertHistoryDays,
 };
+
+/// Settings about Filo's own storage rather than a project. They are read
+/// from the user's settings.json only: a workspace file, which a cloned
+/// repository may supply, must not decide what gets deleted. They are not
+/// part of AppConfig; read them from the user settings overlay.
+[[nodiscard]] constexpr bool is_user_only_setting(ManagedSettingKey key) noexcept {
+    return key == ManagedSettingKey::SessionRetentionDays
+        || key == ManagedSettingKey::RevertHistoryDays;
+}
 
 struct ManagedSettings {
     std::optional<std::string> default_mode;
@@ -62,6 +73,8 @@ struct ManagedSettings {
     std::optional<std::string> prompt_cache_guard_tokens;
     std::optional<std::string> prompt_cache_notice_seconds;
     std::optional<std::string> prompt_cache_keep_warm;
+    std::optional<std::string> session_retention_days;
+    std::optional<std::string> revert_history_days;
 
     [[nodiscard]] bool empty() const;
 };

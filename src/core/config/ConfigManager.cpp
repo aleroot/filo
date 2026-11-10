@@ -64,7 +64,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 19> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 21> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -102,6 +102,12 @@ static constexpr std::array<ManagedSettingDescriptor, 19> kManagedSettingDescrip
     { ManagedSettingKey::PromptCacheKeepWarm,
       "prompt_cache_keep_warm",
       &ManagedSettings::prompt_cache_keep_warm },
+    { ManagedSettingKey::SessionRetentionDays,
+      "session_retention_days",
+      &ManagedSettings::session_retention_days },
+    { ManagedSettingKey::RevertHistoryDays,
+      "revert_history_days",
+      &ManagedSettings::revert_history_days },
 }};
 
 /// settings.json stores every managed value as a string; a numeric one that
@@ -196,6 +202,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
         case ManagedSettingKey::PromptCacheKeepWarm:
             config.prompt_cache_keep_warm = value;
             break;
+        case ManagedSettingKey::SessionRetentionDays:
+        case ManagedSettingKey::RevertHistoryDays:
+            break;  // User-only: read from the user overlay, never a layer.
     }
 }
 
@@ -2149,6 +2158,10 @@ bool ConfigManager::persist_managed_setting(SettingsScope scope,
                                             std::optional<std::string> value,
                                             std::optional<std::filesystem::path> working_dir,
                                             std::string* error) {
+    if (scope != SettingsScope::User && is_user_only_setting(key)) {
+        if (error) *error = "this setting applies to every project and can only be saved in user settings";
+        return false;
+    }
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
     const fs::path settings_path = get_settings_path(scope, cwd);

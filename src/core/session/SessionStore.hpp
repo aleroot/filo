@@ -124,6 +124,11 @@ public:
     [[nodiscard]] static std::filesystem::path tool_results_dir(
         const std::filesystem::path& sessions_dir);
 
+    /// The session ID a saved session's file name carries (`…-<id>.json`),
+    /// or nullopt when @p file_name does not name a saved session.
+    [[nodiscard]] static std::optional<std::string_view> session_id_from_filename(
+        std::string_view file_name);
+
     [[nodiscard]] const std::filesystem::path& sessions_dir() const noexcept {
         return sessions_dir_;
     }

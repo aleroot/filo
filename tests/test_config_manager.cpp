@@ -105,6 +105,10 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.prompt_cache_notice_seconds;
         case core::config::ManagedSettingKey::PromptCacheKeepWarm:
             return settings.prompt_cache_keep_warm;
+        case core::config::ManagedSettingKey::SessionRetentionDays:
+            return settings.session_retention_days;
+        case core::config::ManagedSettingKey::RevertHistoryDays:
+            return settings.revert_history_days;
     }
     return settings.default_mode;
 }
@@ -152,6 +156,9 @@ std::string effective_managed_value(const core::config::AppConfig& config,
                 ? std::to_string(*config.prompt_cache_notice_seconds) : std::string{};
         case core::config::ManagedSettingKey::PromptCacheKeepWarm:
             return config.prompt_cache_keep_warm;
+        case core::config::ManagedSettingKey::SessionRetentionDays:
+        case core::config::ManagedSettingKey::RevertHistoryDays:
+            return {};  // User-only: not part of AppConfig.
     }
     return config.default_mode;
 }
@@ -1365,6 +1372,50 @@ TEST_CASE("ConfigManager persists managed settings and reset removes empty setti
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().context_compression == "off");
     REQUIRE_FALSE(fs::exists(user_settings));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager keeps storage retention settings out of workspace settings",
+          "[config][settings]") {
+    const fs::path sandbox = make_temp_dir("filo_managed_settings_user_only");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+    // A cloned repository may ship this file; it must not decide deletions.
+    write_text(project_dir / ".filo" / "settings.json",
+               R"({"session_retention_days": "1", "revert_history_days": "1"})");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& user = manager.get_settings_overlay(core::config::SettingsScope::User);
+    CHECK_FALSE(user.session_retention_days.has_value());
+    CHECK_FALSE(user.revert_history_days.has_value());
+
+    std::string error;
+    for (const auto key : {core::config::ManagedSettingKey::SessionRetentionDays,
+                           core::config::ManagedSettingKey::RevertHistoryDays}) {
+        CHECK(core::config::is_user_only_setting(key));
+        CHECK_FALSE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                                    key, std::string("2"), project_dir, &error));
+        CHECK_FALSE(error.empty());
+        error.clear();
+    }
+    CHECK(read_text(project_dir / ".filo" / "settings.json").find("\"2\"") == std::string::npos);
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::SessionRetentionDays,
+                                            std::string("90"), project_dir, &error));
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::RevertHistoryDays,
+                                            std::string("0"), project_dir, &error));
+    const auto& saved = manager.get_settings_overlay(core::config::SettingsScope::User);
+    CHECK(saved.session_retention_days == std::optional<std::string>("90"));
+    CHECK(saved.revert_history_days == std::optional<std::string>("0"));
+    const auto persisted = read_text(xdg_home / "filo" / "settings.json");
+    CHECK(persisted.find("\"session_retention_days\":\"90\"") != std::string::npos);
+    CHECK(persisted.find("\"revert_history_days\":\"0\"") != std::string::npos);
+    CHECK_FALSE(core::config::is_user_only_setting(core::config::ManagedSettingKey::UiFooter));
 
     fs::remove_all(sandbox);
 }
