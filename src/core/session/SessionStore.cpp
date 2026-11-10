@@ -9,6 +9,7 @@
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -113,6 +114,10 @@ std::filesystem::path SessionStore::default_sessions_dir() {
         return std::filesystem::path{home} / ".local" / "share" / "filo" / "sessions";
     }
     return std::filesystem::temp_directory_path() / "filo" / "sessions";
+}
+
+std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir) {
+    return sessions_dir.parent_path() / "tool-results";
 }
 
 std::filesystem::path SessionStore::canonicalize_working_dir(std::string_view dir) {
@@ -1407,12 +1412,30 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
             if (error) *error = ec.message();
             return false;
         }
+        // ToolResultStore names the directory after the session ID; an ID it
+        // would have rewritten never named one here.
+        if (!session_id.empty() && session_id.size() <= 80 && std::ranges::all_of(session_id, [](unsigned char c) {
+                return std::isalnum(c) || c == '-' || c == '_';
+            })) {
+            std::filesystem::remove_all(tool_results_dir(sessions_dir_) / session_id, ec);
+            if (ec) {
+                if (error) *error = ec.message();
+                return false;
+            }
+        }
         std::filesystem::remove(p, ec);
-        if (ec && error) {
-            *error = std::format("Cannot remove session file '{}': {}",
-                                 p.string(), ec.message());
+        if (ec) {
+            if (error) {
+                *error = std::format("Cannot remove session file '{}': {}",
+                                     p.string(), ec.message());
+            }
             return false;
         }
+        // Unlinked while still held; only a process already waiting on one
+        // could lock it afterwards, for a session that no longer exists.
+        std::error_code ignored;
+        std::filesystem::remove(core::utils::lock_path_for(p), ignored);
+        std::filesystem::remove(active_session_lease_path(p), ignored);
         return true;
     }
     return true; // not found — treat as success

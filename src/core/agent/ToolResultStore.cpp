@@ -45,8 +45,8 @@ ToolResultStore::ToolResultStore(std::filesystem::path root)
     : root_(std::move(root)) {}
 
 std::filesystem::path ToolResultStore::default_root() {
-    return core::session::SessionStore::default_sessions_dir().parent_path()
-        / "tool-results";
+    return core::session::SessionStore::tool_results_dir(
+        core::session::SessionStore::default_sessions_dir());
 }
 
 std::expected<StoredToolResult, std::string> ToolResultStore::store(

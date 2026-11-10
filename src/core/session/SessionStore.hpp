@@ -70,7 +70,9 @@ public:
     // unchanged sessions are never re-read.
     [[nodiscard]] std::vector<SessionInfo> list() const;
 
-    // Delete a session file by ID (returns true even when not found).
+    // Delete a session by ID with everything stored for it: journal, revert
+    // checkpoints, offloaded tool results and lock files (returns true even
+    // when not found).
     bool remove(std::string_view session_id, std::string* error = nullptr) const;
 
     // Compute the canonical file path for the given session data.
@@ -116,6 +118,11 @@ public:
 
     /// XDG-aware default session storage directory.
     [[nodiscard]] static std::filesystem::path default_sessions_dir();
+
+    /// Where offloaded tool results of the sessions in @p sessions_dir live:
+    /// `tool-results/<session-id>/` beside that directory.
+    [[nodiscard]] static std::filesystem::path tool_results_dir(
+        const std::filesystem::path& sessions_dir);
 
     [[nodiscard]] const std::filesystem::path& sessions_dir() const noexcept {
         return sessions_dir_;

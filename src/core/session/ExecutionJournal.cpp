@@ -29,11 +29,16 @@ bool ExecutionJournal::remove(std::string_view id, std::string* error) const {
     if (target.empty()) return true;
     std::error_code ec;
     if (!std::filesystem::exists(target, ec)) return !ec;
-    auto lock = core::utils::InterprocessFileLock::acquire(core::utils::lock_path_for(target), error);
+    const auto lock_path = core::utils::lock_path_for(target);
+    auto lock = core::utils::InterprocessFileLock::acquire(lock_path, error);
     if (!lock) return false;
     std::filesystem::remove(target, ec);
-    if (ec && error) *error = ec.message();
-    return !ec;
+    if (ec) {
+        if (error) *error = ec.message();
+        return false;
+    }
+    std::filesystem::remove(lock_path, ec);  // Still held, like the session's.
+    return true;
 }
 
 bool ExecutionJournal::append(std::string_view id, std::string_view actor,

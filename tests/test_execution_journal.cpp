@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/session/ActiveSessionLease.hpp"
 #include "core/session/ExecutionJournal.hpp"
 #include "core/changes/TurnRecovery.hpp"
 #include "core/utils/InterprocessFile.hpp"
@@ -251,6 +252,63 @@ TEST_CASE("Deleting a saved session also deletes its execution journal", "[journ
     REQUIRE(store.remove(data.session_id));
     CHECK_FALSE(std::filesystem::exists(journal->path_for(data.session_id)));
     CHECK_FALSE(store.load_by_id(data.session_id));
+}
+
+TEST_CASE("Deleting a saved session leaves none of its files behind", "[journal][session]") {
+    JournalFixture fixture;
+    const auto sessions = fixture.root / "sessions";
+    core::session::SessionStore store(sessions);
+    core::session::SessionData data;
+    data.session_id = "abcd1234";
+    data.created_at = core::session::SessionStore::now_iso8601();
+    data.last_active_at = data.created_at;
+    REQUIRE(store.save(data));
+    const auto session_file = store.compute_path(data);
+    {
+        auto lease = core::session::ActiveSessionLease::acquire(store, data);
+        REQUIRE(lease);
+    }
+    core::session::ExecutionJournal journal(sessions / "journals");
+    REQUIRE(journal.append(data.session_id, "agent", "", "clear", "{}"));
+    const core::agent::ToolResultStore results(
+        core::session::SessionStore::tool_results_dir(sessions));
+    REQUIRE(results.store(data.session_id, "call-1", "output"));
+    REQUIRE(results.store("other123", "call-1", "output"));
+    const auto results_dir = core::session::SessionStore::tool_results_dir(sessions);
+    REQUIRE(std::filesystem::exists(results_dir / data.session_id));
+    REQUIRE(std::filesystem::exists(core::utils::lock_path_for(session_file)));
+    REQUIRE(std::filesystem::exists(core::session::active_session_lease_path(session_file)));
+    REQUIRE(std::filesystem::exists(core::utils::lock_path_for(journal.path_for(data.session_id))));
+
+    REQUIRE(store.remove(data.session_id));
+    CHECK_FALSE(std::filesystem::exists(session_file));
+    CHECK_FALSE(std::filesystem::exists(results_dir / data.session_id));
+    CHECK(std::filesystem::exists(results_dir / "other123"));  // Another session's stay.
+    CHECK_FALSE(std::filesystem::exists(core::utils::lock_path_for(session_file)));
+    CHECK_FALSE(std::filesystem::exists(core::session::active_session_lease_path(session_file)));
+    CHECK_FALSE(std::filesystem::exists(journal.path_for(data.session_id)));
+    CHECK_FALSE(std::filesystem::exists(core::utils::lock_path_for(journal.path_for(data.session_id))));
+}
+
+TEST_CASE("An open session cannot be deleted", "[journal][session]") {
+    JournalFixture fixture;
+    const auto sessions = fixture.root / "sessions";
+    core::session::SessionStore store(sessions);
+    core::session::SessionData data;
+    data.session_id = "abcd1234";
+    data.created_at = core::session::SessionStore::now_iso8601();
+    REQUIRE(store.save(data));
+    const core::agent::ToolResultStore results(
+        core::session::SessionStore::tool_results_dir(sessions));
+    REQUIRE(results.store(data.session_id, "call-1", "output"));
+    auto lease = core::session::ActiveSessionLease::acquire(store, data);
+    REQUIRE(lease);
+    std::string error;
+    CHECK_FALSE(store.remove(data.session_id, &error));
+    CHECK_FALSE(error.empty());
+    CHECK(std::filesystem::exists(store.compute_path(data)));
+    CHECK(std::filesystem::exists(
+        core::session::SessionStore::tool_results_dir(sessions) / data.session_id));
 }
 
 TEST_CASE("A session whose ID cannot name a journal can still be deleted", "[journal][session]") {
