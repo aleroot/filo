@@ -279,6 +279,26 @@ constexpr ModelReasoningProfile kClaudeBudgetOnlyReasoning = {
 std::vector<ModelInfo> build_anthropic_catalog() {
     return {
         {
+            .canonical_id = "claude-fable-5-2",
+            .aliases = {"fable-5-2"},
+            .display_name = "Claude Fable 5.2",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = claude::model_policy("fable-5-2")->reasoning(),
+            .wire = claude::model_policy("fable-5-2")->wire,
+            .tier = ModelTier::Powerful,
+            .pricing = {8.0, 40.0, 0.2, 10.0},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
+        {
             .canonical_id = "claude-fable-5-1",
             .aliases = {"fable", "best", "claude-fable", "fable-5-1"},
             .display_name = "Claude Fable 5.1",

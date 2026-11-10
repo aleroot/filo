@@ -141,7 +141,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
     const auto backend = web::make_anthropic_web_search_backend();
     const std::vector<std::string> models{
         "fable", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "sonnet[1m]",
-        "claude-opus-5-5", "claude-opus-5"};
+        "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-opus-5-6"};
     for (const auto& model : models) {
         auto provider = std::make_shared<core::llm::HttpLLMProvider>(
             std::format("http://127.0.0.1:{}", port),
@@ -186,6 +186,51 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
             CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
         }
     }
+}
+
+TEST_CASE("Claude web search retries unforced when a model rejects forced tool choice",
+          "[integration][web][claude]") {
+    httplib::Server server;
+    std::vector<std::string> choices;
+    std::mutex mutex;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        simdjson::dom::parser parser;
+        const auto doc = parser.parse(request.body);
+        const std::string choice(doc["tool_choice"]["type"].get_string().value());
+        std::lock_guard lock(mutex);
+        choices.push_back(choice);
+        if (choice != "auto") {
+            response.status = 400;
+            response.set_content(R"({"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}})", "application/json");
+            return;
+        }
+        response.set_content(R"({"content":[
+            {"type":"web_search_tool_result","content":[{"type":"web_search_result","title":"Reference","url":"https://example.com/reference"}]},
+            {"type":"text","text":"Found a reference."}]})", "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+
+    // A new major Filo has no policy for: it is forced first, then retried.
+    const std::string model = "claude-opus-6";
+    REQUIRE_FALSE(core::llm::protocols::claude_wire_policy(model).forced_tool_choice_rejected);
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_bearer(
+            "test-oauth-token", core::auth::BillingKind::Subscription),
+        model, std::make_unique<core::llm::protocols::ClaudeProtocol>(),
+        core::config::ApiType::Anthropic, "claude");
+    const auto backend = web::make_anthropic_web_search_backend();
+    const auto response = backend->search(web::SearchRequest{.query = "reference"},
+        ToolInvocationContext{.session_context = test_support::make_workspace_session_context(),
+                              .model_name = model, .provider = std::move(provider)});
+    INFO((response ? "success" : response.error()));
+    REQUIRE(response.has_value());
+    REQUIRE(response->results.size() == 1);
+    std::lock_guard lock(mutex);
+    CHECK(choices == std::vector<std::string>{"tool", "auto"});
 }
 
 TEST_CASE("Claude web search distinguishes missing search and tool errors from empty results",

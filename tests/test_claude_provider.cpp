@@ -187,8 +187,10 @@ TEST_CASE("Fable 5.1 binding controls do not leak to other models",
     ClaudeProtocol protocol;
     auto request = make_simple_request("fable");
     protocol.prepare_request(request);
+    // A later Fable point release (5.10) deliberately inherits the binding; see
+    // "Anthropic wire policy comes from metadata, not from the model name".
     for (const auto* model : {"claude-fable-5", "claude-sonnet-4-6", "claude-opus-5",
-                              "claude-mythos-5-1", "claude-fable-5-10", "custom-model"}) {
+                              "claude-mythos-5-1", "custom-model"}) {
         CAPTURE(model);
         request.model = model;
         protocol.prepare_request(request);
@@ -532,8 +534,26 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     CHECK(mythos51.forced_tool_choice_rejected);
     CHECK_FALSE(mythos51.reasoning_bound_to_prefix);
 
-    // A later Fable 5.10 must not inherit Fable 5.1's binding.
-    CHECK_FALSE(claude_wire_policy("claude-fable-5-10").reasoning_bound_to_prefix);
+    // Fable 5.2 has its own entry and 5.1's wire (forced tool choice is a 400).
+    const auto fable52 = claude_wire_policy("claude-fable-5-2");
+    CHECK(fable52.known);
+    CHECK(fable52.thinking_always_on);
+    CHECK(fable52.reasoning_bound_to_prefix);
+    CHECK(fable52.forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-mythos-5-2").forced_tool_choice_rejected);
+
+    // An unlisted point release inherits the newest listed one in its major,
+    // never an older generation that happens to be a prefix of its id.
+    CHECK(claude_wire_policy("claude-fable-5-10").reasoning_bound_to_prefix);
+    CHECK(claude_wire_policy("claude-fable-5-3").forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-opus-5-6").forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-sonnet-5-6[1m]").between_tools_thinking);
+    // ...and only upward: an id between two listed versions takes the lower.
+    CHECK_FALSE(claude_wire_policy("claude-opus-5-1").forced_tool_choice_rejected);
+    CHECK_FALSE(claude_wire_policy("claude-fable-5-0").reasoning_bound_to_prefix);
+    // A dated snapshot is its version, not a newer one.
+    CHECK_FALSE(claude_wire_policy("claude-opus-5-20260115").forced_tool_choice_rejected);
+    CHECK(claude_wire_policy("claude-opus-5-5-20260115").forced_tool_choice_rejected);
 
     // Unrecognized ids stay permissive so an older deployment keeps working.
     const auto custom = claude_wire_policy("custom-deployment");

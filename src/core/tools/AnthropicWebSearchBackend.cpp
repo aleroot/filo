@@ -54,7 +54,8 @@ void write_string_array(core::utils::JsonWriter& writer,
 }
 
 [[nodiscard]] std::string search_payload(const SearchRequest& request,
-                                         std::string_view model) {
+                                         std::string_view model,
+                                         bool force_search) {
     const std::string prompt = "Call the web_search tool to search for the following query. "
         "Base your answer on the search results and cite source URLs. Query: "
         + request.query;
@@ -98,8 +99,7 @@ void write_string_array(core::utils::JsonWriter& writer,
         writer.comma().key("tool_choice");
         {
             auto _choice = writer.object();
-            if (core::llm::protocols::claude_wire_policy(model)
-                    .forced_tool_choice_rejected) {
+            if (!force_search) {
                 writer.kv_str("type", "auto");
             } else {
                 writer.kv_str("type", "tool").comma()
@@ -195,6 +195,14 @@ void parse_web_result_block(SearchResponse& response,
     return std::nullopt;
 }
 
+/// The Messages API's 400 for a forced tool_choice the model does not accept:
+/// `tool_choice: type "tool" and "any" are not supported for this model.`
+[[nodiscard]] bool rejects_forced_tool_choice(const cpr::Response& response) {
+    return response.error.code == cpr::ErrorCode::OK
+        && response.status_code == 400
+        && response.text.find("tool_choice") != std::string::npos;
+}
+
 class AnthropicWebSearchBackend final : public IWebSearchBackend {
 public:
     [[nodiscard]] std::string_view name() const noexcept override {
@@ -231,11 +239,22 @@ public:
         model = std::move(normalized.model);
 
         const auto auth = metadata->credential_source->get_auth();
-        const cpr::Response response = cpr::Post(
-            cpr::Url{protocol.build_url(metadata->base_url, model)},
-            anthropic_headers(auth, protocol),
-            cpr::Body{search_payload(request, model)},
-            cpr::Timeout{kSearchTimeoutMs});
+        const auto post = [&](bool force_search) {
+            return cpr::Post(
+                cpr::Url{protocol.build_url(metadata->base_url, model)},
+                anthropic_headers(auth, protocol),
+                cpr::Body{search_payload(request, model, force_search)},
+                cpr::Timeout{kSearchTimeoutMs});
+        };
+        const bool force_search =
+            !core::llm::protocols::claude_wire_policy(model).forced_tool_choice_rejected;
+        cpr::Response response = post(force_search);
+        // A model released after this build can reject forced tool_choice
+        // before Filo knows it; the prompt already asks for the search, so
+        // retry once without forcing it.
+        if (force_search && rejects_forced_tool_choice(response)) {
+            response = post(false);
+        }
 
         if (response.error.code != cpr::ErrorCode::OK) {
             return std::unexpected("Claude web search request failed: " + response.error.message);
