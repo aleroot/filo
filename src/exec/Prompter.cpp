@@ -658,7 +658,8 @@ RunDiagnostics run_for_test(const RunOptions& options,
     const auto session_dir = session_dir_override.value_or(
         core::session::SessionStore::default_sessions_dir());
     core::session::SessionStore store(session_dir);
-    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>(session_dir / "journals"));
+    agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>(
+        core::session::ExecutionJournal::root_in(session_dir)));
 
     std::string session_id = core::session::SessionStore::generate_id();
     std::string session_name;

@@ -15,6 +15,8 @@ public:
     static constexpr int kVersion = 1;
     explicit ExecutionJournal(std::filesystem::path root = default_root());
     [[nodiscard]] static std::filesystem::path default_root();
+    /// Where the journals of the sessions saved in @p sessions_dir live.
+    [[nodiscard]] static std::filesystem::path root_in(const std::filesystem::path& sessions_dir);
     [[nodiscard]] std::filesystem::path path_for(std::string_view session_id) const;
 
     bool remove(std::string_view session_id, std::string* error = nullptr) const;

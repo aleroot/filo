@@ -12,7 +12,10 @@
 namespace core::session {
 ExecutionJournal::ExecutionJournal(std::filesystem::path root) : root_(std::move(root)) {}
 std::filesystem::path ExecutionJournal::default_root() {
-    return SessionStore::default_sessions_dir() / "journals";
+    return root_in(SessionStore::default_sessions_dir());
+}
+std::filesystem::path ExecutionJournal::root_in(const std::filesystem::path& sessions_dir) {
+    return sessions_dir / "journals";
 }
 std::filesystem::path ExecutionJournal::path_for(std::string_view id) const {
     if (id.empty() || id.size() > 128 || !std::ranges::all_of(id, [](unsigned char c) {

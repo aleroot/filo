@@ -211,7 +211,7 @@ public:
     Sweep(const SessionStore& store, const RetentionPolicy& policy, Clock::time_point now, std::stop_token stop)
         : store_(store),
           directory_(store.sessions_dir()),
-          journals_(directory_ / "journals"),
+          journals_(ExecutionJournal::root_in(directory_)),
           journal_(journals_),
           sessions_cutoff_(cutoff(policy.sessions, now)),
           revert_history_cutoff_(cutoff(policy.revert_history, now)),
@@ -249,7 +249,7 @@ private:
     void revert_history() {
         if (!revert_history_cutoff_) return;
         const auto catalogue = Catalogue::scan(directory_);
-        each(subdirectories_of(directory_ / "recovery"), [&](const fs::path& root) {
+        each(subdirectories_of(core::changes::RecoveryStore::root_in(directory_)), [&](const fs::path& root) {
             const auto id = root.filename().string();
             if (root != core::changes::RecoveryStore::session_root_in(directory_, id)) return;
             std::vector<fs::path> uses{root};

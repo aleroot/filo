@@ -58,7 +58,7 @@ RecoveryStore::RecoveryStore(fs::path directory)
     : directory_(normalized(directory)), objects_(directory_.parent_path() / kObjects),
       private_roots_{directory_, objects_} {
     const auto root = directory_.parent_path().parent_path();
-    if (root.filename() == "recovery") {
+    if (root == root_in(root.parent_path())) {
         private_roots_.push_back(root);
         private_roots_.push_back(root.parent_path() / "journals");
     }
@@ -100,7 +100,11 @@ fs::path RecoveryStore::session_root_in(const fs::path& sessions_directory, std:
     if (sessions_directory.empty() || id.empty() || !std::ranges::all_of(id, [](unsigned char c) {
         return std::isalnum(c) || c == '-' || c == '_';
     })) return {};
-    return sessions_directory / "recovery" / id;
+    return root_in(sessions_directory) / id;
+}
+
+fs::path RecoveryStore::root_in(const fs::path& sessions_directory) {
+    return sessions_directory / "recovery";
 }
 
 fs::path RecoveryStore::new_directory(const fs::path& root) {

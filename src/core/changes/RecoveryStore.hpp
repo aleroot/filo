@@ -79,6 +79,8 @@ public:
     [[nodiscard]] bool shares_objects() const;
     [[nodiscard]] static std::filesystem::path session_root(
         const std::filesystem::path& journal, std::string_view session_id);
+    /// Where the revert history of the sessions saved in @p sessions_directory lives.
+    [[nodiscard]] static std::filesystem::path root_in(const std::filesystem::path& sessions_directory);
     [[nodiscard]] static std::filesystem::path session_root_in(
         const std::filesystem::path& sessions_directory, std::string_view session_id);
     [[nodiscard]] static std::filesystem::path new_directory(const std::filesystem::path& root);
