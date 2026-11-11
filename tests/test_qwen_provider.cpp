@@ -1007,6 +1007,28 @@ TEST_CASE("Token Plan normalizes Qwen 3.8 effort for aliases and Flash",
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
 }
 
+TEST_CASE("Qwen 4 and latest-series previews take the tiered effort contract at 1M",
+          "[qwen][serializer][thinking][effort][qwen4]") {
+    for (const auto model : {"qwen4-max", "qwen4-plus", "qwen4.5-max",
+                             "qwen-latest-series-invite-202610-m4"}) {
+        CAPTURE(model);
+        CHECK(get_max_context_size(model) == 1'000'000);
+        CHECK(qwen_endpoint_context_window(model) == 1'000'000);
+
+        const auto caps = DashScopeTokenPlanProtocol{}.reasoning_capabilities(model);
+        CHECK(caps.supports_effort());
+        CHECK(caps.supports(ReasoningCapability::Disable));
+
+        auto request = make_simple_request(model);
+        request.effort = "medium";
+        const auto payload = DashScopeTokenPlanProtocol{}.serialize(request);
+        require_valid_json(payload);
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"medium")"));
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+    }
+}
+
 TEST_CASE("Token Plan preserves a Qwen 3.8 budget without competing effort",
           "[qwen][serializer][thinking][effort]") {
     DashScopeTokenPlanProtocol protocol({.thinking_budget = 4096});
@@ -1591,7 +1613,9 @@ TEST_CASE("Token Plan Chat route parses fragmented GLM tool arguments",
 
 TEST_CASE("Token Plan does not guess reasoning controls for an unknown future model",
           "[qwen][token-plan][routing][traits]") {
-    CHECK_FALSE(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen4-coder")
+    // qwen4 is no longer unknown: Qwen Code gives every qwen4 variant the
+    // tiered contract, so the probe uses a generation nobody has described.
+    CHECK_FALSE(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen5-coder")
           .supports_effort());
 }
 

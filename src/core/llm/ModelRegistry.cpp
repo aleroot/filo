@@ -103,6 +103,10 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Qwen / DashScope Models (Alibaba Cloud)
     // -----------------------------------------------------------------------
+    // Qwen Code sizes the whole qwen4 generation and the invite-only
+    // latest-series aliases at 1M (tokenLimits.ts).
+    { "qwen4",              1000000 },
+    { "qwen-latest-series-", 1000000 },
     { "qwen3.8-",           1000000 },
     { "qwen3.7-",           1000000 },
     { "qwen3.6-",           1000000 },

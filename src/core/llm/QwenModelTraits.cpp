@@ -254,8 +254,13 @@ bool qwen_model_supports_token_plan_hosted_tools(
 bool qwen_model_supports_tiered_effort(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(model_id));
+    // Qwen Code (modalityDefaults.ts isTieredEffortQwenPrefix) gives every
+    // qwen4 variant and the invite-only latest-series previews the same
+    // tiered `reasoning_effort` contract as Qwen 3.8.
     return lowered.starts_with("qwen3.8-max")
-        || lowered.starts_with("qwen3.8-flash");
+        || lowered.starts_with("qwen3.8-flash")
+        || lowered.starts_with("qwen4")
+        || lowered.starts_with("qwen-latest-series-invite-");
 }
 
 } // namespace core::llm
