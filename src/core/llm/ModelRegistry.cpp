@@ -284,7 +284,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
     return {
         {
             .canonical_id = "claude-fable-5-2",
-            .aliases = {"fable-5-2"},
+            .aliases = {"fable", "best", "claude-fable", "fable-5-2"},
             .display_name = "Claude Fable 5.2",
             .provider = "anthropic",
             .context_window = 1'000'000,
@@ -304,7 +304,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
         },
         {
             .canonical_id = "claude-fable-5-1",
-            .aliases = {"fable", "best", "claude-fable", "fable-5-1"},
+            .aliases = {"fable-5-1"},
             .display_name = "Claude Fable 5.1",
             .provider = "anthropic",
             .context_window = 1'000'000,

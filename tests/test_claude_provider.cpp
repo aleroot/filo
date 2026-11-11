@@ -142,8 +142,7 @@ TEST_CASE("Anthropic serializer replaces malformed tool input with an object",
 
 TEST_CASE("Fable 5.1 requests pair binding controls with current client headers",
           "[claude][fable51][serializer][headers]") {
-    for (const auto* model : {"claude-fable-5-1", "fable", "best", "claude-fable",
-                              "fable-5-1", "fable[1m]"}) {
+    for (const auto* model : {"claude-fable-5-1", "fable-5-1", "fable-5-1[1m]"}) {
         for (const auto* effort : {"", "low", "medium", "high", "xhigh", "max", "off"}) {
             CAPTURE(model, effort);
             ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
@@ -1362,12 +1361,19 @@ TEST_CASE("ClaudeProtocol::prepare_request resolves Opus alias to current Opus",
     REQUIRE(req.model == "claude-opus-5");
 }
 
-TEST_CASE("ClaudeProtocol::prepare_request resolves Fable alias to Fable 5.1", "[claude][headers]") {
-    ClaudeProtocol protocol;
-    ChatRequest req = make_simple_request("fable");
-    protocol.prepare_request(req);
-
-    REQUIRE(req.model == "claude-fable-5-1");
+TEST_CASE("ClaudeProtocol::prepare_request resolves Fable aliases to Fable 5.2", "[claude][headers]") {
+    // Claude Code 2.1.321 made Fable 5.2 the default Fable; fable-5-1 stays pinned.
+    for (const auto* model : {"fable", "best", "claude-fable", "FABLE", "fable[1m]"}) {
+        CAPTURE(model);
+        ClaudeProtocol protocol({.enabled = true, .budget_tokens = 5000});
+        ChatRequest req = make_simple_request(model);
+        protocol.prepare_request(req);
+        REQUIRE(req.model == "claude-fable-5-2");
+        const auto payload = protocol.serialize(req);
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("block_binding":{"prefix_mismatch_behavior":"drop_block"})"));
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("budget_tokens"));
+    }
 }
 
 TEST_CASE("ClaudeProtocol::prepare_request resolves Haiku alias to Haiku 5.5",

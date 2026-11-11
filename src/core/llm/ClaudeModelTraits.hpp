@@ -19,7 +19,7 @@ inline constexpr std::string_view kThinkingBindingBeta =
 // Canonical id behind each short Claude alias. The Messages API accepts only
 // these ids, so aliases have to be resolved before the request is written.
 inline constexpr std::string_view kDefaultSonnet = "claude-sonnet-5";
-inline constexpr std::string_view kDefaultFable  = "claude-fable-5-1";
+inline constexpr std::string_view kDefaultFable  = "claude-fable-5-2";
 inline constexpr std::string_view kDefaultOpus   = "claude-opus-5";
 inline constexpr std::string_view kDefaultOpus55 = "claude-opus-5-5";
 inline constexpr std::string_view kDefaultHaiku  = "claude-haiku-5-5";
@@ -27,8 +27,7 @@ inline constexpr std::string_view kDefaultHaiku  = "claude-haiku-5-5";
 // Id/alias shaping only. Which request fields a model accepts is metadata, not
 // a name: see AnthropicWirePolicy and ModelWireConstraints.
 [[nodiscard]] inline bool is_fable_alias(std::string_view model) {
-    return model == "fable" || model == "best" || model == "claude-fable"
-        || model == "fable-5-1";
+    return model == "fable" || model == "best" || model == "claude-fable";
 }
 
 [[nodiscard]] inline bool is_opus_55_alias(std::string_view model) {
@@ -132,9 +131,6 @@ inline constexpr std::array<ModelPolicy, 16>
         || normalized[end] == '[';
 }
 
-/// Token of the generation the bare Fable aliases resolve to.
-inline constexpr std::string_view kCurrentFableToken = "fable-5-1";
-
 namespace detail {
 
 struct GenerationVersion {
@@ -194,14 +190,7 @@ struct GenerationVersion {
     if (normalized == "haiku" || normalized == "claude-haiku") normalized = kDefaultHaiku;
     if (normalized == "sonnet" || normalized == "claude-sonnet") normalized = kDefaultSonnet;
     if (normalized == "opus" || normalized == "claude-opus") normalized = kDefaultOpus;
-    // Bare Fable aliases name the current Fable rather than a generation
-    // substring, so they resolve by token instead of by version.
-    if (is_fable_alias(normalized)) {
-        for (const auto& candidate : kModelPolicies) {
-            if (candidate.token == kCurrentFableToken) return &candidate;
-        }
-        return nullptr;
-    }
+    if (is_fable_alias(normalized)) normalized = kDefaultFable;
     const ModelPolicy* best = nullptr;
     detail::GenerationVersion best_version;
     for (const auto& candidate : kModelPolicies) {

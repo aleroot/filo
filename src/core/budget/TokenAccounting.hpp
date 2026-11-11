@@ -118,65 +118,87 @@ struct ModelRates {
     return nullptr;
 }
 
+enum class RateMatch { Contains, Exact };
+
+struct RateRow {
+    std::string_view pattern;
+    RateMatch match;
+    ModelRates rates;
+};
+
+/// Rates for ids the registry does not price. The first matching row wins, so a
+/// more specific pattern must come before any pattern it contains
+/// (`fable-5-2` before `fable-5`, `grok-3-mini` before `grok-3`).
+inline constexpr RateRow kFallbackRates[] = {
+    {"grok-code-fast-1", RateMatch::Contains, { 0.20,  1.50}},
+    {"grok-4-fast",      RateMatch::Contains, { 0.20,  0.50}},
+    {"grok-4.1-fast",    RateMatch::Contains, { 0.20,  0.50}},
+    {"grok-4.6",         RateMatch::Contains, { 2.00,  6.00}},
+    {"grok-4.7",         RateMatch::Contains, { 2.00,  6.00}},
+    {"grok-4.5",         RateMatch::Contains, { 2.00,  6.00}},
+    {"grok-3-mini",      RateMatch::Contains, { 0.30,  0.50}},
+    {"grok-3",           RateMatch::Contains, { 3.00, 15.00}},
+    {"grok-2",           RateMatch::Contains, { 2.00, 10.00}},
+    {"grok-4",           RateMatch::Contains, { 3.00, 15.00}},
+    {"fable-5-2",        RateMatch::Contains, { 8.00, 40.00}},
+    {"fable-5",          RateMatch::Contains, {10.00, 50.00}},
+    {"opus-5-5",         RateMatch::Contains, { 4.00, 20.00}},
+    {"opus-5.5",         RateMatch::Contains, { 4.00, 20.00}},
+    {"claude-opus-5",    RateMatch::Contains, { 5.00, 25.00}},
+    {"claude-sonnet-5",  RateMatch::Contains, { 2.00, 10.00}},
+    // Bare Fable aliases name Fable 5.2.
+    {"fable",            RateMatch::Contains, { 8.00, 40.00}},
+    {"sonnet",           RateMatch::Exact,    { 2.00, 10.00}},
+    {"claude-haiku-4-5", RateMatch::Contains, { 1.00,  5.00}},
+    {"claude-opus-4-8",  RateMatch::Contains, { 5.00, 25.00}},
+    {"claude-sonnet-4-6", RateMatch::Contains, { 3.00, 15.00}},
+    {"opus",             RateMatch::Contains, { 5.00, 25.00}},
+    {"sonnet",           RateMatch::Contains, { 3.00, 15.00}},
+    {"haiku",            RateMatch::Contains, { 1.00,  5.00}},
+    {"gpt-5.6-sol",      RateMatch::Contains, { 5.00, 30.00}},
+    {"gpt-5.6",          RateMatch::Exact,    { 5.00, 30.00}},
+    {"gpt-5.6-terra",    RateMatch::Contains, { 2.50, 15.00}},
+    {"gpt-5.6-luna",     RateMatch::Contains, { 1.00,  6.00}},
+    {"gpt-5.4",          RateMatch::Contains, { 2.50, 10.00}},
+    {"gpt-5",            RateMatch::Contains, { 2.50, 10.00}},
+    {"gpt-4o",           RateMatch::Contains, { 2.50, 10.00}},
+    {"gpt-4",            RateMatch::Contains, {30.00, 60.00}},
+    {"gpt-3.5",          RateMatch::Contains, { 0.50,  1.50}},
+    {"mimo-",            RateMatch::Contains, { 0.14,  0.28}},
+    {"mistral-vibe-cli-latest", RateMatch::Exact,    { 1.50, 7.50}},
+    {"mistral-medium-3.5",      RateMatch::Contains, { 1.50, 7.50}},
+    {"mistral-medium-3-5",      RateMatch::Contains, { 1.50, 7.50}},
+    {"mistral-medium-latest",   RateMatch::Exact,    { 1.50, 7.50}},
+    {"mistral-small-2603",      RateMatch::Contains, { 0.15, 0.60}},
+    {"mistral-small-latest",    RateMatch::Exact,    { 0.15, 0.60}},
+    {"mistral-large-2512",      RateMatch::Contains, { 0.50, 1.50}},
+    {"mistral-large-latest",    RateMatch::Exact,    { 0.50, 1.50}},
+    {"ministral-8b-2512",       RateMatch::Contains, { 0.15, 0.15}},
+    {"ministral-8b-latest",     RateMatch::Exact,    { 0.15, 0.15}},
+    {"codestral-2508",          RateMatch::Contains, { 0.30, 0.90}},
+    {"codestral-latest",        RateMatch::Exact,    { 0.30, 0.90}},
+    {"gemini-3.1",               RateMatch::Contains, { 1.25, 10.00}},
+    {"gemini-3",                 RateMatch::Contains, { 1.25, 10.00}},
+    {"gemini-2.5",               RateMatch::Contains, { 1.25,  5.00}},
+    {"gemini-2.0",               RateMatch::Contains, { 0.10,  0.40}},
+    {"gemini-1.5",               RateMatch::Contains, { 0.075, 0.30}},
+    {"gemini-pro-latest",        RateMatch::Contains, { 1.25,  5.00}},
+    {"gemini-flash-latest",      RateMatch::Contains, { 0.30,  2.50}},
+    {"gemini-flash-lite-latest", RateMatch::Contains, { 0.10,  0.40}},
+    {"auto-gemini-3",            RateMatch::Contains, { 1.25, 10.00}},
+    {"auto-gemini-2.5",          RateMatch::Contains, { 1.25,  5.00}},
+};
+
 [[nodiscard]] inline ModelRates rates_for_model(std::string_view model) noexcept {
     if (const auto info = registry_priced_model(model)) {
         return {info->pricing.input_per_mtok, info->pricing.output_per_mtok};
     }
-    if (model.find("grok-code-fast-1") != std::string_view::npos) return { 0.20,  1.50 };
-    if (model.find("grok-4-fast")      != std::string_view::npos) return { 0.20,  0.50 };
-    if (model.find("grok-4.1-fast")    != std::string_view::npos) return { 0.20,  0.50 };
-    if (model.find("grok-4.6")         != std::string_view::npos) return { 2.00,  6.00 };
-    if (model.find("grok-4.7")         != std::string_view::npos) return { 2.00,  6.00 };
-    if (model.find("grok-4.5")         != std::string_view::npos) return { 2.00,  6.00 };
-    if (model.find("grok-3-mini") != std::string_view::npos) return { 0.30,  0.50 };
-    if (model.find("grok-3")      != std::string_view::npos) return { 3.00, 15.00 };
-    if (model.find("grok-2")      != std::string_view::npos) return { 2.00, 10.00 };
-    if (model.find("grok-4")      != std::string_view::npos) return { 3.00, 15.00 };
-    if (model.find("claude-fable-5")   != std::string_view::npos) return {10.00, 50.00 };
-    // Opus 5.5 is $4/$20. Match it before the Opus 5 prefix, which is a substring.
-    if (model.find("opus-5-5") != std::string_view::npos
-        || model.find("opus-5.5") != std::string_view::npos) return { 4.00, 20.00 };
-    if (model.find("claude-opus-5")    != std::string_view::npos) return { 5.00, 25.00 };
-    if (model.find("claude-sonnet-5")  != std::string_view::npos) return { 2.00, 10.00 };
-    if (model.find("fable")            != std::string_view::npos) return {10.00, 50.00 };
-    if (model == "sonnet") return { 2.00, 10.00 };
-    if (model.find("claude-haiku-4-5") != std::string_view::npos) return { 1.00,  5.00 };
-    if (model.find("claude-opus-4-8")  != std::string_view::npos) return { 5.00, 25.00 };
-    if (model.find("claude-sonnet-4-6") != std::string_view::npos) return { 3.00, 15.00 };
-    if (model.find("opus")        != std::string_view::npos) return { 5.00, 25.00 };
-    if (model.find("sonnet")      != std::string_view::npos) return { 3.00, 15.00 };
-    if (model.find("haiku")       != std::string_view::npos) return { 1.00,  5.00 };
-    if (model.find("gpt-5.6-sol")   != std::string_view::npos || model == "gpt-5.6") return { 5.00, 30.00 };
-    if (model.find("gpt-5.6-terra") != std::string_view::npos) return { 2.50, 15.00 };
-    if (model.find("gpt-5.6-luna")  != std::string_view::npos) return { 1.00,  6.00 };
-    if (model.find("gpt-5.4")      != std::string_view::npos) return { 2.50, 10.00 };
-    if (model.find("gpt-5")        != std::string_view::npos) return { 2.50, 10.00 };
-    if (model.find("gpt-4o")      != std::string_view::npos) return { 2.50, 10.00 };
-    if (model.find("gpt-4")       != std::string_view::npos) return {30.00, 60.00 };
-    if (model.find("gpt-3.5")     != std::string_view::npos) return { 0.50,  1.50 };
-    if (model.find("mimo-")         != std::string_view::npos) return { 0.14, 0.28 };
-    if (model == "mistral-vibe-cli-latest"
-        || model.find("mistral-medium-3.5") != std::string_view::npos
-        || model.find("mistral-medium-3-5") != std::string_view::npos
-        || model == "mistral-medium-latest") return { 1.50, 7.50 };
-    if (model.find("mistral-small-2603") != std::string_view::npos
-        || model == "mistral-small-latest") return { 0.15, 0.60 };
-    if (model.find("mistral-large-2512") != std::string_view::npos
-        || model == "mistral-large-latest") return { 0.50, 1.50 };
-    if (model.find("ministral-8b-2512")  != std::string_view::npos
-        || model == "ministral-8b-latest") return { 0.15, 0.15 };
-    if (model.find("codestral-2508")     != std::string_view::npos
-        || model == "codestral-latest") return { 0.30, 0.90 };
-    if (model.find("gemini-3.1")  != std::string_view::npos) return { 1.25, 10.00 };
-    if (model.find("gemini-3")    != std::string_view::npos) return { 1.25, 10.00 };
-    if (model.find("gemini-2.5")  != std::string_view::npos) return { 1.25,  5.00 };
-    if (model.find("gemini-2.0")  != std::string_view::npos) return { 0.10,  0.40 };
-    if (model.find("gemini-1.5")  != std::string_view::npos) return { 0.075, 0.30 };
-    if (model.find("gemini-pro-latest") != std::string_view::npos) return { 1.25,  5.00 };
-    if (model.find("gemini-flash-latest") != std::string_view::npos) return { 0.30,  2.50 };
-    if (model.find("gemini-flash-lite-latest") != std::string_view::npos) return { 0.10,  0.40 };
-    if (model.find("auto-gemini-3") != std::string_view::npos) return { 1.25, 10.00 };
-    if (model.find("auto-gemini-2.5") != std::string_view::npos) return { 1.25,  5.00 };
+    using enum RateMatch;
+    for (const auto& row : kFallbackRates) {
+        const bool hit = row.match == Exact ? model == row.pattern
+                                            : model.find(row.pattern) != std::string_view::npos;
+        if (hit) return row.rates;
+    }
     return { 2.00, 8.00 };
 }
 

@@ -407,6 +407,20 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_fable.input_per_m  == Catch::Approx(10.00));
     REQUIRE(r_fable.output_per_m == Catch::Approx(50.00));
 
+    // Fable 5.2 is cheaper, and the bare aliases now name it.
+    for (const auto* model : {"claude-fable-5-2", "fable-5-2", "fable"}) {
+        CAPTURE(model);
+        const auto rates = rates_for_model(model);
+        CHECK(rates.input_per_m  == Catch::Approx(8.00));
+        CHECK(rates.output_per_m == Catch::Approx(40.00));
+    }
+    for (const auto* model : {"claude-fable-5-1", "fable-5-1"}) {
+        CAPTURE(model);
+        const auto rates = rates_for_model(model);
+        CHECK(rates.input_per_m  == Catch::Approx(10.00));
+        CHECK(rates.output_per_m == Catch::Approx(50.00));
+    }
+
     auto r_sonnet5 = rates_for_model("claude-sonnet-5");
     REQUIRE(r_sonnet5.input_per_m  == Catch::Approx(2.00));
     REQUIRE(r_sonnet5.output_per_m == Catch::Approx(10.00));
