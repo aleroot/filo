@@ -9,7 +9,10 @@
 //     Let it expire". An unanswered notice is withdrawn at expiry and replaced
 //     by a one-line note in the transcript. With `prompt_cache_keep_warm`
 //     set to auto the cache is renewed instead, without asking, until the
-//     renewals would cost more than the cold write they avoid.
+//     renewals would cost more than the cold write they avoid. Set to
+//     compact, a summary is written from the warm cache instead, and the
+//     next prompt uses it only if it comes after the cache expired; the
+//     question is asked as usual when no summary could be written.
 //
 // The decisions themselves are core::agent::PromptCacheGuard's and the wording
 // is prompt_cache::*'s; this class only owns timing and threads. Everything

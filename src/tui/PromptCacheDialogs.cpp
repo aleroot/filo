@@ -157,4 +157,9 @@ std::string compaction_skipped_notice() {
     return "\n\xe2\x84\xb9  The conversation was not compacted; sending the prompt as it is.\n";
 }
 
+std::string idle_compaction_used_notice() {
+    return "\n\xe2\x9c\x93  The prompt cache expired while you were away: compacted using the summary "
+           "written before it did.\n";
+}
+
 } // namespace tui::prompt_cache

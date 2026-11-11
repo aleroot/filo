@@ -21,11 +21,27 @@ enum class PromptCacheKeepWarm : std::uint8_t {
     /// Renew it without asking while that is cheaper than letting it go cold
     /// (PromptCacheGuard::keep_warm_budget), then ask as usual.
     Auto,
+    /// Write a compaction summary from the warm cache without asking, and use
+    /// it only if the next prompt comes after the cache has expired; ask as
+    /// usual where that is impossible or fails.
+    Compact,
 };
 
 /// The `prompt_cache_keep_warm` spellings.
 inline constexpr std::string_view kPromptCacheKeepWarmAsk = "ask";
 inline constexpr std::string_view kPromptCacheKeepWarmAuto = "auto";
+inline constexpr std::string_view kPromptCacheKeepWarmCompact = "compact";
+
+/// The setting's spelling of @p mode.
+[[nodiscard]] constexpr std::string_view prompt_cache_keep_warm_token(
+    PromptCacheKeepWarm mode) noexcept {
+    switch (mode) {
+    case PromptCacheKeepWarm::Ask: return kPromptCacheKeepWarmAsk;
+    case PromptCacheKeepWarm::Auto: return kPromptCacheKeepWarmAuto;
+    case PromptCacheKeepWarm::Compact: return kPromptCacheKeepWarmCompact;
+    }
+    return kPromptCacheKeepWarmAsk;
+}
 
 /// The shortest automatic notice lead: a minute is about what a user needs to
 /// read the notice and answer it before the cache is gone.
@@ -157,6 +173,14 @@ public:
         const core::llm::PromptCacheProfile& profile, int replays) const noexcept {
         return settings_.keep_warm == PromptCacheKeepWarm::Auto
             && replays < keep_warm_budget(profile);
+    }
+
+    /// True when an idle heavy cache should be summarised at its notice rather
+    /// than renewed or put to the user. Summarising re-reads the warm cache
+    /// the way a keep-warm replay does, so it needs the same guarantee.
+    [[nodiscard]] constexpr bool should_compact_idle(
+        const core::llm::PromptCacheProfile& profile) const noexcept {
+        return settings_.keep_warm == PromptCacheKeepWarm::Compact && can_keep_warm(profile);
     }
 
 private:

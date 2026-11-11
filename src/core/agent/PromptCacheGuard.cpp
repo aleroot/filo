@@ -17,6 +17,8 @@ PromptCacheGuardSettings prompt_cache_guard_settings(
     }
     if (config.prompt_cache_keep_warm == kPromptCacheKeepWarmAuto) {
         settings.keep_warm = PromptCacheKeepWarm::Auto;
+    } else if (config.prompt_cache_keep_warm == kPromptCacheKeepWarmCompact) {
+        settings.keep_warm = PromptCacheKeepWarm::Compact;
     }
     return settings;
 }

@@ -28,6 +28,8 @@ public:
     struct Log {
         std::mutex mutex;
         std::vector<core::llm::ChatRequest> requests;
+        /// Answers with a tool call instead of text, from the next request on.
+        bool reply_with_tool_call = false;
     };
 
     explicit CachingProvider(core::llm::PromptCacheProfile profile,
@@ -36,9 +38,11 @@ public:
 
     void stream_response(const core::llm::ChatRequest& request,
                          std::function<void(const core::llm::StreamChunk&)> callback) override {
+        bool tool_call = false;
         {
             std::lock_guard lock(log_->mutex);
             log_->requests.push_back(request);
+            tool_call = log_->reply_with_tool_call;
         }
         set_last_usage(core::llm::TokenUsage{
             .prompt_tokens = 2'000,
@@ -46,8 +50,21 @@ public:
             .total_tokens = 2'001,
             .cached_prompt_tokens = 1'900,
         });
-        callback(core::llm::StreamChunk::make_content("ok"));
+        if (tool_call) {
+            core::llm::ToolCall call;
+            call.id = "call_1";
+            call.function.name = "read";
+            call.function.arguments = "{}";
+            callback(core::llm::StreamChunk::make_tools({std::move(call)}));
+        } else {
+            callback(core::llm::StreamChunk::make_content("ok"));
+        }
         callback(core::llm::StreamChunk::make_final());
+    }
+
+    void reply_with_tool_call() {
+        std::lock_guard lock(log_->mutex);
+        log_->reply_with_tool_call = true;
     }
 
     [[nodiscard]] core::llm::PromptCacheProfile prompt_cache_profile(

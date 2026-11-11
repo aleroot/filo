@@ -1658,13 +1658,17 @@ RunResult run(RunOptions opts) {
             .key = core::config::ManagedSettingKey::PromptCacheKeepWarm,
             .category = "Session",
             .label = "Cache Keep-Warm",
-            .description = "At the expiry notice, ask or renew the cache automatically. Auto "
-                           "stops once renewing would cost more than a cold cache, then asks.",
+            .description = "At the expiry notice, ask or act without asking. Auto renews the "
+                           "cache until that would cost more than a cold cache, then asks. "
+                           "Compact writes a summary from the warm cache and uses it only if "
+                           "you come back after the cache has expired.",
             .choices = {
                 SettingsChoice{.value = std::string(core::agent::kPromptCacheKeepWarmAsk),
                                .label = "Ask (Default)"},
                 SettingsChoice{.value = std::string(core::agent::kPromptCacheKeepWarmAuto),
                                .label = "Auto"},
+                SettingsChoice{.value = std::string(core::agent::kPromptCacheKeepWarmCompact),
+                               .label = "Compact while idle"},
             },
         });
         settings_definitions.push_back(SettingsDefinition{
@@ -5154,11 +5158,8 @@ RunResult run(RunOptions opts) {
                                         : std::string(core::config::kPromptCacheNoticeAutomatic);
             }
             case core::config::ManagedSettingKey::PromptCacheKeepWarm:
-                return std::string(
-                    core::agent::prompt_cache_guard_settings(effective).keep_warm
-                            == core::agent::PromptCacheKeepWarm::Auto
-                        ? core::agent::kPromptCacheKeepWarmAuto
-                        : core::agent::kPromptCacheKeepWarmAsk);
+                return std::string(core::agent::prompt_cache_keep_warm_token(
+                    core::agent::prompt_cache_guard_settings(effective).keep_warm));
             case core::config::ManagedSettingKey::SessionRetentionDays:
             case core::config::ManagedSettingKey::RevertHistoryDays: {
                 // User-only: workspace files never decide what is deleted.

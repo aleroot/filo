@@ -74,4 +74,8 @@ struct AutoRenewal {
 /// Transcript line when "Compact, then send" could not compact.
 [[nodiscard]] std::string compaction_skipped_notice();
 
+/// Transcript line when a prompt after the cache expired used the summary
+/// written while the session was idle.
+[[nodiscard]] std::string idle_compaction_used_notice();
+
 } // namespace tui::prompt_cache

@@ -36,6 +36,7 @@ void PromptCacheTracker::record(Exchange exchange) {
     replay_request_ = PromptCacheGuard::can_keep_warm(profile)
         ? std::move(exchange.request)
         : nullptr;
+    replay_history_size_ = replay_request_ ? exchange.history_size : 0;
 }
 
 void PromptCacheTracker::restore(Clock::time_point last_exchange_at,
@@ -75,7 +76,10 @@ std::optional<PromptCacheTracker::Replay> PromptCacheTracker::replay() const {
     if (!replay_request_ || !provider) {
         return std::nullopt;
     }
-    return Replay{.request = replay_request_, .provider = std::move(provider), .model = model_};
+    return Replay{.request = replay_request_,
+                  .provider = std::move(provider),
+                  .model = model_,
+                  .history_size = replay_history_size_};
 }
 
 void PromptCacheTracker::renewed(const std::shared_ptr<const core::llm::ChatRequest>& request,
@@ -92,6 +96,7 @@ void PromptCacheTracker::reset() noexcept {
     model_.clear();
     prompt_tokens_ = 0;
     replay_request_.reset();
+    replay_history_size_ = 0;
 }
 
 std::string PromptCacheTracker::calibration_key() const {

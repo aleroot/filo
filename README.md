@@ -584,7 +584,7 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Steering Mode | `steering_mode` | `default`, `fallback`, `none` |
 | Cold-Cache Guard | `prompt_cache_guard_tokens` | `0` (off), `50000`, `100000` (default), `200000` |
 | Cache Expiry Notice | `prompt_cache_notice_seconds` | `auto` (default: a tenth of the cache lifetime, at least 60 s, so 1 min for a 5-minute cache and 6 min for a 1-hour one), `0` (off), `30`, `60`, `120` |
-| Cache Keep-Warm | `prompt_cache_keep_warm` | `ask` (default), `auto` |
+| Cache Keep-Warm | `prompt_cache_keep_warm` | `ask` (default), `auto`, `compact` (at the notice, writes a summary from the warm cache; your next message uses it only if the cache has expired by then) |
 | Conversation Retention | `session_retention_days` | `0` (keep forever, default), `30`, `90`, `180`, `365`, or any number of days |
 | Revert History | `revert_history_days` | `1`, `7` (default), `30`, `0` (keep with the conversation), or any number of days |
 

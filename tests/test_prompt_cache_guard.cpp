@@ -594,3 +594,124 @@ TEST_CASE("A cache that a replay does not renew is never replayed", "[prompt-cac
     CHECK_FALSE(result.refreshed);
     CHECK_FALSE(result.error.empty());
 }
+
+// ── Idle compaction ─────────────────────────────────────────────────────────
+
+namespace {
+
+bool prepare_idle_compaction(const std::shared_ptr<core::agent::Agent>& agent) {
+    std::promise<bool> finished;
+    auto prepared = finished.get_future();
+    agent->prepare_idle_compaction_async({}, [&finished](bool ok) { finished.set_value(ok); });
+    REQUIRE(prepared.wait_for(5s) == std::future_status::ready);
+    return prepared.get();
+}
+
+} // namespace
+
+TEST_CASE("An idle summary continues the cached request and leaves the history alone",
+          "[prompt-cache][agent][idle-compaction]") {
+    auto provider = std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(1h, true));
+    auto agent = test_support::make_prompt_cache_agent(provider);
+    test_support::send_prompt_and_wait(agent, "hello");
+    const auto history_before = agent->get_history();
+    const auto first_exchange = *agent->prompt_cache_state().last_exchange_at;
+
+    REQUIRE(prepare_idle_compaction(agent));
+    CHECK(agent->has_idle_compaction());
+    CHECK(agent->get_history().size() == history_before.size());
+
+    const auto requests = provider->requests();
+    REQUIRE(requests.size() == 2);
+    const auto& cached = requests[0];
+    const auto& summary = requests[1];
+    // The cached request unchanged, then its answer, then the instruction:
+    // the provider reads the conversation from its cache.
+    REQUIRE(summary.messages.size() == cached.messages.size() + 2);
+    for (std::size_t i = 0; i < cached.messages.size(); ++i) {
+        CHECK(summary.messages[i].role == cached.messages[i].role);
+        CHECK(summary.messages[i].content == cached.messages[i].content);
+    }
+    CHECK(summary.messages[cached.messages.size()].role == "assistant");
+    CHECK(summary.messages[cached.messages.size()].content == "ok");
+    CHECK(summary.messages.back().role == "user");
+    CHECK_THAT(summary.messages.back().content,
+               Catch::Matchers::ContainsSubstring("continuation checkpoint"));
+    CHECK(summary.tools.size() == cached.tools.size());
+    CHECK(summary.prompt_cache_scope == cached.prompt_cache_scope);
+    CHECK(summary.continuation_scope.empty());
+    // Reading the cache renewed it.
+    CHECK(*agent->prompt_cache_state().last_exchange_at >= first_exchange);
+
+    SECTION("it replaces the history only when used") {
+        REQUIRE(agent->use_idle_compaction());
+        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK(agent->get_context_summary().find("ok") != std::string::npos);
+        // A compaction starts a new prefix: nothing is left to track.
+        CHECK_FALSE(agent->prompt_cache_state().last_exchange_at.has_value());
+        CHECK_FALSE(agent->use_idle_compaction());
+    }
+    SECTION("a later turn makes it stale") {
+        test_support::send_prompt_and_wait(agent, "again");
+        CHECK_FALSE(agent->has_idle_compaction());
+        const auto history_after_turn = agent->get_history().size();
+        CHECK_FALSE(agent->use_idle_compaction());
+        CHECK(agent->get_history().size() == history_after_turn);
+    }
+    SECTION("it is written once per idle spell") {
+        CHECK_FALSE(prepare_idle_compaction(agent));
+        CHECK(provider->requests().size() == 2);
+    }
+    SECTION("discarding it keeps the conversation") {
+        agent->discard_idle_compaction();
+        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(agent->use_idle_compaction());
+        CHECK(agent->get_history().size() == history_before.size());
+    }
+}
+
+TEST_CASE("No idle summary is kept when one cannot be written from the cache",
+          "[prompt-cache][agent][idle-compaction]") {
+    SECTION("the cache cannot be replayed") {
+        auto agent = test_support::make_prompt_cache_agent(
+            std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(5min, false)));
+        test_support::send_prompt_and_wait(agent, "hello");
+        CHECK_FALSE(prepare_idle_compaction(agent));
+        CHECK_FALSE(agent->has_idle_compaction());
+    }
+    SECTION("the model calls a tool instead of summarizing") {
+        auto provider = std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(1h, true));
+        auto agent = test_support::make_prompt_cache_agent(provider);
+        test_support::send_prompt_and_wait(agent, "hello");
+        const auto history_before = agent->get_history().size();
+        provider->reply_with_tool_call();
+        CHECK_FALSE(prepare_idle_compaction(agent));
+        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK(agent->get_history().size() == history_before);
+    }
+    SECTION("there was no exchange yet") {
+        auto agent = test_support::make_prompt_cache_agent(
+            std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(1h, true)));
+        CHECK_FALSE(prepare_idle_compaction(agent));
+    }
+}
+
+TEST_CASE("Compact-while-idle needs a replayable cache", "[prompt-cache][guard][idle-compaction]") {
+    using core::agent::PromptCacheKeepWarm;
+    const PromptCacheGuard compact{PromptCacheGuardSettings{.keep_warm = PromptCacheKeepWarm::Compact}};
+    CHECK(compact.should_compact_idle(PromptCacheProfile::documented(1h, true)));
+    CHECK_FALSE(compact.should_compact_idle(PromptCacheProfile::documented(1h, false)));
+    CHECK_FALSE(compact.should_compact_idle(PromptCacheProfile::estimated(5min)));
+    // Compacting is not renewing: no automatic renewal budget applies.
+    CHECK_FALSE(compact.should_keep_warm(PromptCacheProfile::documented(5min, true).with_costs(10, 125), 0));
+    CHECK_FALSE(PromptCacheGuard{PromptCacheGuardSettings{}}.should_compact_idle(
+        PromptCacheProfile::documented(1h, true)));
+
+    core::config::AppConfig config;
+    config.prompt_cache_keep_warm = "compact";
+    CHECK(core::agent::prompt_cache_guard_settings(config).keep_warm == PromptCacheKeepWarm::Compact);
+    for (const auto mode : {PromptCacheKeepWarm::Ask, PromptCacheKeepWarm::Auto, PromptCacheKeepWarm::Compact}) {
+        config.prompt_cache_keep_warm = std::string(core::agent::prompt_cache_keep_warm_token(mode));
+        CHECK(core::agent::prompt_cache_guard_settings(config).keep_warm == mode);
+    }
+}

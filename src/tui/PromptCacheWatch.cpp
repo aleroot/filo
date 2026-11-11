@@ -221,34 +221,84 @@ struct PromptCacheWatch::Shared final : std::enable_shared_from_this<Shared> {
     // the notice was armed, and only a still-idle, still-warm heavy cache
     // deserves the question.
     void on_notice(const ThreadRuntime::Ptr& runtime) {
-        if (runtime->turn_active()) return;  // the turn's end re-arms
-        const auto state = runtime->agent()->prompt_cache_state();
-        const auto policy = guard();
-        const auto deadlines = policy.deadlines(state);
-        if (!deadlines.has_value()) return;
-        const auto now = Clock::now();
-        if (now + std::chrono::seconds{1} < deadlines->notice) {
-            track(runtime);  // the cache was used since: follow its new lifetime
-            return;
-        }
-        const auto assessment = core::agent::PromptCacheGuard::assess(state, now);
-        if (assessment.warmth != core::agent::PromptCacheWarmth::Warm) return;
+        const auto due = due_notice(runtime);
+        if (!due.has_value()) return;
 
         const auto session_id = runtime->session_id();
         // A renewal touches neither the keyboard nor the conversation, so it
         // need not wait for the composer.
-        if (const auto renewal = claim_auto_renewal(session_id, policy, assessment.profile)) {
-            keep_warm(runtime, assessment.profile, renewal);
+        if (const auto renewal = claim_auto_renewal(session_id, due->policy, due->assessment.profile)) {
+            keep_warm(runtime, due->assessment.profile, renewal);
             return;
         }
+        // A summary written for this idle spell already decides what the
+        // next prompt sends; there is nothing left to ask.
+        if (runtime->agent()->has_idle_compaction()) return;
+        if (due->policy.should_compact_idle(due->assessment.profile)) {
+            compact_idle(runtime);
+            return;
+        }
+        offer(runtime);
+    }
+
+    struct DueNotice {
+        core::agent::PromptCacheGuard policy;
+        core::agent::PromptCacheAssessment assessment;
+        core::agent::PromptCacheDeadlines deadlines;
+    };
+
+    /// The notice's inputs when it is still due: the runtime idle, its cache
+    /// warm and heavy, and the notice instant reached.
+    [[nodiscard]] std::optional<DueNotice> due_notice(const ThreadRuntime::Ptr& runtime) {
+        if (runtime->turn_active()) return std::nullopt;  // the turn's end re-arms
+        const auto state = runtime->agent()->prompt_cache_state();
+        const auto policy = guard();
+        const auto deadlines = policy.deadlines(state);
+        if (!deadlines.has_value()) return std::nullopt;
+        const auto now = Clock::now();
+        if (now + std::chrono::seconds{1} < deadlines->notice) {
+            track(runtime);  // the cache was used since: follow its new lifetime
+            return std::nullopt;
+        }
+        const auto assessment = core::agent::PromptCacheGuard::assess(state, now);
+        if (assessment.warmth != core::agent::PromptCacheWarmth::Warm) return std::nullopt;
+        return DueNotice{.policy = policy, .assessment = assessment, .deadlines = *deadlines};
+    }
+
+    /// Writes the summary the next prompt uses if it comes after the cache
+    /// expired. Asks as usual when no summary could be written.
+    void compact_idle(const ThreadRuntime::Ptr& runtime) {
+        runtime->agent()->prepare_idle_compaction_async(
+            guarded(runtime,
+                    [](Shared& self, const ThreadRuntime::Ptr& target, const std::string& status) {
+                        self.notify(target, status);
+                    }),
+            guarded(runtime, [](Shared& self, const ThreadRuntime::Ptr& target, bool prepared) {
+                if (prepared) {
+                    // Writing it renewed the cache: follow the new lifetime.
+                    // Its notice finds the summary and stays silent.
+                    self.track(target);
+                } else {
+                    self.offer(target);
+                }
+            }));
+    }
+
+    /// Puts the expiry question to the user.
+    void offer(const ThreadRuntime::Ptr& runtime) {
+        const auto due = due_notice(runtime);
+        if (!due.has_value()) return;
+        const auto& assessment = due->assessment;
+        const auto now = Clock::now();
+        const auto session_id = runtime->session_id();
         bool typing = false;
         with_dependencies([&](const Dependencies& d) {
             typing = d.composer_in_use && d.composer_in_use(session_id);
         });
         if (typing) {
-            if (now + kComposerRetry < deadlines->expiry) {
+            if (now + kComposerRetry < due->deadlines.expiry) {
                 scheduler.schedule(notice_key(session_id), now + kComposerRetry,
-                                   bind(runtime, &Shared::on_notice));
+                                   bind(runtime, &Shared::offer));
             }
             return;
         }
@@ -366,6 +416,14 @@ prompt_cache::SendChoice PromptCacheWatch::confirm_send(const ThreadRuntime::Ptr
 
     const auto assessment = core::agent::PromptCacheGuard::assess(
         runtime->agent()->prompt_cache_state(), Clock::now());
+    // A summary written while the session idled replaces the conversation
+    // only once its cache is gone; over a warm cache the full conversation
+    // is the cheaper and the better prompt.
+    if (assessment.expired() && runtime->agent()->use_idle_compaction()) {
+        shared_->notify(runtime, prompt_cache::idle_compaction_used_notice());
+        return prompt_cache::SendChoice::Send;
+    }
+    runtime->agent()->discard_idle_compaction();
     if (!shared_->guard().should_confirm_send(assessment)) {
         return prompt_cache::SendChoice::Send;
     }

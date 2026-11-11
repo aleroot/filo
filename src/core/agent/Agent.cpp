@@ -1661,6 +1661,123 @@ void Agent::refresh_prompt_cache_async(std::function<void(PromptCacheRefresh)> d
     }
 }
 
+void Agent::prepare_idle_compaction_async(
+    std::function<void(const std::string&)> status_callback,
+    std::function<void(bool prepared)> finished_callback) {
+    std::optional<PromptCacheTracker::Replay> replay;
+    std::vector<core::llm::Message> answer;
+    HistoryCompactionPlan plan;
+    std::string active_skill_context;
+    std::uint64_t base_revision = 0;
+    {
+        std::lock_guard lock(history_mutex_);
+        replay = prompt_cache_.replay();
+        const bool already_kept = idle_compaction_.has_value()
+            && idle_compaction_->revision == history_revision_;
+        if (replay.has_value() && !already_kept && !idle_compaction_in_flight_
+            && !compaction_in_progress_ && !turn_in_progress_.load(std::memory_order_acquire)
+            && replay->history_size <= history_.size()) {
+            // The history gained only the cached request's answer since, or
+            // the request no longer leads up to it and cannot be continued.
+            answer.assign(history_.begin() + static_cast<std::ptrdiff_t>(replay->history_size),
+                          history_.end());
+            if (std::ranges::all_of(answer, [](const core::llm::Message& message) {
+                    return message.role == "assistant";
+                })) {
+                plan = HistoryCompactionPlanner::plan(
+                    history_, context_summary_, compaction_policy(provider_, active_model_));
+                active_skill_context = collect_active_skill_context(history_);
+                base_revision = history_revision_;
+                idle_compaction_in_flight_ = true;
+            } else {
+                replay.reset();
+            }
+        } else {
+            replay.reset();
+        }
+    }
+    if (!replay.has_value()) {
+        if (finished_callback) finished_callback(false);
+        return;
+    }
+
+    auto self = shared_from_this();
+    auto prepared = std::make_shared<std::atomic<bool>>(false);
+    const auto started_at = std::chrono::system_clock::now();
+    history_compactor_.compact_async(
+        HistoryCompactionRequest{
+            .history = std::move(answer),
+            .provider = replay->provider,
+            .model = replay->model,
+            .reason = HistoryCompactionReason::Idle,
+            .cached_request = replay->request,
+        },
+        HistoryCompactionCallbacks{
+            .on_status = std::move(status_callback),
+            .on_summary =
+                [self, base_revision, prepared, started_at,
+                 request = replay->request,
+                 plan = std::move(plan),
+                 active_skill_context = std::move(active_skill_context)](std::string summary) mutable {
+                std::lock_guard lock(self->history_mutex_);
+                // The summary read the cached prefix, which renewed it.
+                self->prompt_cache_.renewed(request, started_at);
+                if (self->history_revision_ != base_revision) {
+                    return HistoryCompactionApplyStatus::Stale;
+                }
+                self->idle_compaction_ = IdleCompaction{
+                    .revision = base_revision,
+                    .summary = std::move(summary),
+                    .plan = std::move(plan),
+                    .active_skill_context = std::move(active_skill_context),
+                };
+                prepared->store(true, std::memory_order_release);
+                return HistoryCompactionApplyStatus::Applied;
+            },
+            .on_finished = [self, prepared, finished_callback = std::move(finished_callback)]() {
+                {
+                    std::lock_guard lock(self->history_mutex_);
+                    self->idle_compaction_in_flight_ = false;
+                }
+                if (finished_callback) {
+                    finished_callback(prepared->load(std::memory_order_acquire));
+                }
+            },
+        });
+}
+
+bool Agent::has_idle_compaction() const {
+    std::lock_guard lock(history_mutex_);
+    return idle_compaction_.has_value() && idle_compaction_->revision == history_revision_;
+}
+
+bool Agent::use_idle_compaction() {
+    std::shared_ptr<core::llm::LLMProvider> provider;
+    {
+        std::lock_guard lock(history_mutex_);
+        auto kept = std::exchange(idle_compaction_, std::nullopt);
+        if (!kept.has_value() || kept->revision != history_revision_) {
+            return false;
+        }
+        apply_compaction_unlocked(
+            std::move(kept->summary),
+            std::move(kept->plan),
+            std::move(kept->active_skill_context));
+        provider = provider_;
+    }
+    // As after any compaction: transport continuation handles are reset
+    // outside history_mutex_.
+    if (provider) {
+        provider->reset_conversation_state();
+    }
+    return true;
+}
+
+void Agent::discard_idle_compaction() {
+    std::lock_guard lock(history_mutex_);
+    idle_compaction_.reset();
+}
+
 void Agent::undo_last() {
     std::lock_guard lock(history_mutex_);
     if (turn_in_progress_.load(std::memory_order_acquire)) {
@@ -2089,6 +2206,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::string session_state_prompt;
     std::string task_state_prompt;
     std::vector<std::string> request_memory_entry_ids;
+    std::size_t request_history_size = 0;
     bool stale_turn = false;
     {
         std::lock_guard lock(history_mutex_);
@@ -2096,6 +2214,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             stale_turn = true;
         } else {
             request.messages = history_;
+            request_history_size = history_.size();
             request.model = turn_state->model;
             request.effort = effort_level_;
             if (!turn_callbacks.effort_override.empty()) {
@@ -2330,7 +2449,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
          already_stopped, turn_state,
          step_session_context, provider_name_snapshot,
-         shared_request, request_started_at, pending_continuation](
+         shared_request, request_started_at, request_history_size, pending_continuation](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -2552,6 +2671,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     .started_at = request_started_at,
                     .request = shared_request,
                     .usage = usage,
+                    .history_size = request_history_size,
                 });
             }
         }

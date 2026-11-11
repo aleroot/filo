@@ -5,6 +5,7 @@
 #include "../llm/PromptCacheCalibration.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -36,6 +37,9 @@ public:
         Clock::time_point started_at;
         std::shared_ptr<const core::llm::ChatRequest> request;
         core::llm::TokenUsage usage;
+        /// How many history messages the request was built from; what the
+        /// history gained after that is the request's answer.
+        std::size_t history_size = 0;
     };
 
     /// What refresh needs to re-send the last request.
@@ -43,6 +47,7 @@ public:
         std::shared_ptr<const core::llm::ChatRequest> request;
         std::shared_ptr<core::llm::LLMProvider> provider;
         std::string model;
+        std::size_t history_size = 0;
     };
 
     explicit PromptCacheTracker(
@@ -86,6 +91,7 @@ private:
     std::string model_;
     std::int64_t prompt_tokens_ = 0;
     std::shared_ptr<const core::llm::ChatRequest> replay_request_;
+    std::size_t replay_history_size_ = 0;
 };
 
 } // namespace core::agent

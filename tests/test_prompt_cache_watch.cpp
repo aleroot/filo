@@ -5,12 +5,14 @@
 #include "tui/PromptCacheWatch.hpp"
 #include "tui/ThreadModalHost.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <future>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -231,4 +233,81 @@ TEST_CASE("ThreadModalHost withdraws only the dialog it is asked about",
     withdrawn.resolve();
     CHECK_FALSE(host.question_visible("s1"));
     CHECK_FALSE(answer.get().has_value());
+}
+
+namespace {
+
+core::agent::PromptCacheGuardSettings compact_while_idle() {
+    return {
+        .min_context_tokens = 1'000,
+        .notice_lead = 2s,
+        .keep_warm = core::agent::PromptCacheKeepWarm::Compact,
+    };
+}
+
+bool has_note(const FakeTui& fake, std::string_view text) {
+    return std::ranges::any_of(fake.notes_, [&](const std::string& note) {
+        return note.find(text) != std::string::npos;
+    });
+}
+
+} // namespace
+
+TEST_CASE("Compact-while-idle summarizes at the notice and uses it after expiry",
+          "[prompt-cache][watch][idle-compaction]") {
+    auto provider = std::make_shared<test_support::CachingProvider>(
+        PromptCacheProfile::documented(3s, true));
+    auto agent = test_support::make_prompt_cache_agent(provider);
+    test_support::send_prompt_and_wait(agent, "hello");
+    auto runtime = make_runtime(agent);
+
+    FakeTui fake;  // never answers
+    tui::PromptCacheWatch watch(fake.dependencies(compact_while_idle()));
+    watch.track(runtime);
+
+    REQUIRE(fake.wait_until([](const FakeTui& f) { return has_note(f, "Summary ready"); }));
+    CHECK(agent->has_idle_compaction());
+    const auto history_while_idle = agent->get_history().size();
+
+    SECTION("a prompt after expiry uses the summary without asking") {
+        // Writing the summary renewed the 3-second cache; wait it out.
+        const auto deadline = Clock::now() + 8s;
+        while (!core::agent::PromptCacheGuard::assess(agent->prompt_cache_state(), Clock::now()).expired()) {
+            REQUIRE(Clock::now() < deadline);
+            std::this_thread::sleep_for(100ms);
+        }
+        CHECK(watch.confirm_send(runtime) == prompt_cache::SendChoice::Send);
+        CHECK(fake.questions_.empty());
+        CHECK(fake.wait_until([](const FakeTui& f) { return has_note(f, "compacted using the summary"); }));
+        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(agent->get_context_summary().empty());
+    }
+    SECTION("a prompt over the still-warm cache keeps the full conversation") {
+        CHECK(watch.confirm_send(runtime) == prompt_cache::SendChoice::Send);
+        CHECK(fake.questions_.empty());
+        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK(agent->get_history().size() == history_while_idle);
+        CHECK(agent->get_context_summary().empty());
+    }
+    watch.shutdown();
+}
+
+TEST_CASE("Compact-while-idle asks as usual when no summary can be written",
+          "[prompt-cache][watch][idle-compaction]") {
+    auto provider = std::make_shared<test_support::CachingProvider>(
+        PromptCacheProfile::documented(3s, true));
+    auto agent = test_support::make_prompt_cache_agent(provider);
+    test_support::send_prompt_and_wait(agent, "hello");
+    provider->reply_with_tool_call();
+    auto runtime = make_runtime(agent);
+
+    FakeTui fake;  // never answers
+    tui::PromptCacheWatch watch(fake.dependencies(compact_while_idle()));
+    watch.track(runtime);
+
+    REQUIRE(fake.wait_until([](const FakeTui& f) { return !f.questions_.empty(); }));
+    CHECK(fake.questions_.front().header == "Cache expiring");
+    CHECK(has_note(fake, "called a tool"));
+    CHECK_FALSE(agent->has_idle_compaction());
+    watch.shutdown();
 }
