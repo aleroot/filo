@@ -32,15 +32,16 @@ constexpr std::string_view kPromptCachingScopeBeta = "prompt-caching-scope-2026-
 constexpr std::string_view kPerTurnControlBeta = "per-turn-control-2026-07-01";
 constexpr std::string_view kCacheDiagnosisBeta = "cache-diagnosis-2026-04-07";
 
-// Claude Code 2.1.302's main-request list for a model without its own row.
-constexpr std::array<std::string_view, 14> kMainBetas{
+// Claude Code 2.1.322's main-request list for a model without its own row.
+constexpr std::array<std::string_view, 15> kMainBetas{
     kClaudeCodeBeta,
     kOAuthBeta,
     "interleaved-thinking-2025-05-14",
-    "thinking-token-count-2026-05-13",
     "context-management-2025-06-27",
     kPromptCachingScopeBeta,
     "mid-conversation-tool-changes-2026-07-01",
+    "tool-provenance-2026-10-26",
+    "thinking-token-count-2026-05-13",
     "advanced-tool-use-2025-11-20",
     "mid-conversation-system-clear-at-2026-08-21",
     "effort-2025-11-24",
@@ -52,8 +53,8 @@ constexpr std::array<std::string_view, 14> kMainBetas{
 
 // Models whose list carries per-turn-control; Haiku 5.5 also moves
 // claude-code-20250219 behind the prompt-caching scope beta.
-constexpr std::array<std::string_view, 4> kPerTurnControlModels{
-    "fable-5-1", "opus-5-5", "sonnet-5-5", "haiku-5-5"};
+constexpr std::array<std::string_view, 6> kPerTurnControlModels{
+    "fable-5-2", "mythos-5-2", "fable-5-1", "opus-5-5", "sonnet-5-5", "haiku-5-5"};
 constexpr std::string_view kClaudeCodeBetaAfterScopeModel = "haiku-5-5";
 
 constexpr std::string_view kGzipHost = "api.anthropic.com";

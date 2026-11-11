@@ -7,13 +7,13 @@
 #include <string>
 #include <string_view>
 
-/// Claude Code's billing attribution block, as Claude Code 2.1.302 writes it:
+/// Claude Code's billing attribution block, as Claude Code 2.1.322 writes it:
 /// `x-anthropic-billing-header: cc_version=<version>.<suffix>; cc_entrypoint=cli; cch=<token>;`
 /// is the first system block, the suffix is derived from the first user
 /// prompt, and `cch` signs the final request body.
 namespace core::llm::claude {
 
-inline constexpr std::string_view kClaudeCodeVersion = "2.1.302";
+inline constexpr std::string_view kClaudeCodeVersion = "2.1.322";
 inline constexpr std::string_view kBillingEntrypoint = "cli";
 inline constexpr std::string_view kBillingMarker = "x-anthropic-billing-header:";
 

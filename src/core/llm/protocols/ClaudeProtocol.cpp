@@ -993,6 +993,9 @@ cpr::Header ClaudeProtocol::build_headers(const core::auth::AuthInfo& auth) cons
     claude::apply_client_headers(headers);
     // Claude Code carries billing attribution in the first system block only.
     headers.try_emplace("x-claude-code-request-class", "main");
+    // Claude Code 2.1.322 sends this on every main request; `[]` is its value
+    // without account-specific flags.
+    headers.try_emplace("x-claude-code-sandy-plover", "[]");
 
     std::string anthropic_beta;
     const auto append_beta_unique = [&](std::string_view beta) {

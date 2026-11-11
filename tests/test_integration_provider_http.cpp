@@ -1590,9 +1590,9 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
     auto provider = std::make_shared<HttpLLMProvider>(
         std::format("http://127.0.0.1:{}", port),
         core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
-        "fable", std::make_unique<ClaudeProtocol>());
+        "fable-5-1", std::make_unique<ClaudeProtocol>());
 
-    auto request = make_claude_request("fable");
+    auto request = make_claude_request("fable-5-1");
     request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Read the file."});
     core::tools::ToolDefinition definition;
     definition.name = "read";
@@ -1636,7 +1636,7 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
         CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
         CHECK_FALSE(actual.has_header("x-anthropic-billing-header"));
-        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
+        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.322."));
     }
     simdjson::dom::parser parser;
     const auto doc = parser.parse(received.back().body);
@@ -2295,7 +2295,7 @@ TEST_CASE("Claude sends Claude Code's wire identity and resends a rejected gzip 
     }
     for (const auto& s : seen) {
         CHECK(s.beta_param == "true");
-        CHECK(header(s, "User-Agent") == "claude-cli/2.1.302 (external, cli)");
+        CHECK(header(s, "User-Agent") == "claude-cli/2.1.322 (external, cli)");
         CHECK(header(s, "x-app") == "cli");
         CHECK(header(s, "Accept") == "application/json");
         CHECK(header(s, "anthropic-dangerous-direct-browser-access") == "true");

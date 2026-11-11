@@ -8,16 +8,17 @@
 #include <string_view>
 #include <vector>
 
-/// The client identity Claude Code 2.1.302 presents on `POST /v1/messages`,
+/// The client identity Claude Code 2.1.322 presents on `POST /v1/messages`,
 /// apart from its system prompt (Filo keeps its own): HTTP headers, the
 /// `anthropic-beta` list, per-conversation lineage and request-body gzip.
-/// Reference: cortexkit/commons 3ce6295 `claude-oauth-wire` vectors and
-/// cortexkit/anthropic-auth, which reconstruct an interactive 2.1.302 capture.
+/// Reference: cortexkit/commons 3ce6295 `claude-oauth-wire` vectors (2.1.302),
+/// updated from interactive captures of the 2.1.302 and 2.1.322 npm binaries
+/// against a local api.anthropic.com endpoint.
 namespace core::llm::claude {
 
-inline constexpr std::string_view kUserAgent = "claude-cli/2.1.302 (external, cli)";
+inline constexpr std::string_view kUserAgent = "claude-cli/2.1.322 (external, cli)";
 inline constexpr std::string_view kStainlessPackageVersion = "0.128.0";
-inline constexpr std::string_view kStainlessRuntimeVersion = "v26.3.0";
+inline constexpr std::string_view kStainlessRuntimeVersion = "v26.12.1";
 inline constexpr std::string_view kOAuthBeta = "oauth-2025-04-20";
 inline constexpr std::string_view kStructuredOutputsBeta = "structured-outputs-2025-12-15";
 /// Smallest body, in UTF-16 code units, that Claude Code sends gzipped.

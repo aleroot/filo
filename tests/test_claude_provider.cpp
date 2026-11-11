@@ -104,9 +104,10 @@ private:
 };
 
 constexpr std::string_view kPerTurnMainBetas =
-    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,"
     "context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,"
-    "mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20,"
+    "mid-conversation-tool-changes-2026-07-01,tool-provenance-2026-10-26,thinking-token-count-2026-05-13,"
+    "advanced-tool-use-2025-11-20,"
     "mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,thinking-binding-controls-2026-08-01,"
     "thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07";
 
@@ -168,7 +169,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
             // Claude Code carries attribution only in the body's first system block.
             CHECK_FALSE(headers.contains("x-anthropic-billing-header"));
             CHECK(headers.at("x-claude-code-request-class") == "main");
-            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
+            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.322."));
             CHECK(headers.at("Authorization") == "Bearer test-token");
             const auto& beta = headers.at("anthropic-beta");
             const auto binding = std::string(claude::kThinkingBindingBeta);
@@ -2223,8 +2224,9 @@ TEST_CASE("Claude structured outputs share output_config with effort and reject 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Claude Code 2.1.302 billing attribution. Expected values come from
-// cortexkit/commons test-vectors/claude-oauth-wire (anthropic-policy 0.1.2).
+// Claude Code billing attribution. 2.1.302 values come from cortexkit/commons
+// test-vectors/claude-oauth-wire (anthropic-policy 0.1.2); 2.1.322 values were
+// read from requests the 2.1.322 npm binary sent to a local endpoint.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
@@ -2241,7 +2243,7 @@ std::string unsigned_billing_body(std::string body) {
 
 } // namespace
 
-TEST_CASE("Claude billing primitives match the Claude Code 2.1.302 vectors", "[claude][billing]") {
+TEST_CASE("Claude billing primitives match the Claude Code vectors", "[claude][billing]") {
     CHECK(std::format("{:05x}", claude::xxh64("hello world test message", 0x4d659218e32a3268ULL) & 0xFFFFFULL)
           == "cc124");
     const std::pair<std::string_view, std::string_view> suffixes[] = {
@@ -2255,10 +2257,20 @@ TEST_CASE("Claude billing primitives match the Claude Code 2.1.302 vectors", "[c
     };
     for (const auto& [text, suffix] : suffixes) {
         CAPTURE(text);
+        CHECK(claude::version_suffix(text, "2.1.302") == suffix);
+    }
+    const std::pair<std::string_view, std::string_view> current_suffixes[] = {
+        {"Summarise the README in two sentences.", "ae9"},
+        {"Find where the retry limit is configured.", "6a4"},
+        {"Plan the database migration.", "0b8"},
+        {"Rename the helper function and update its callers.", "5bf"},
+    };
+    for (const auto& [text, suffix] : current_suffixes) {
+        CAPTURE(text);
         CHECK(claude::version_suffix(text) == suffix);
     }
     CHECK(claude::billing_block("Summarise the README in two sentences.")
-          == "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch=00000;");
+          == "x-anthropic-billing-header: cc_version=2.1.322.ae9; cc_entrypoint=cli; cch=00000;");
 }
 
 TEST_CASE("Claude body signing reproduces the Claude Code 2.1.302 vectors", "[claude][billing]") {
@@ -2297,7 +2309,7 @@ TEST_CASE("Claude requests carry a signed Claude Code billing block", "[claude][
                     {.role = "user", .content = "Summarise the README in two sentences."}};
     const auto payload = ClaudeSerializer::serialize(req);
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
-        "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch="));
+        "x-anthropic-billing-header: cc_version=2.1.322.ae9; cc_entrypoint=cli; cch="));
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("cch=00000;"));
     const auto token = payload.find("cch=") + 4;
     CHECK(claude::body_signature(unsigned_billing_body(payload)) == payload.substr(token, 5));
@@ -2315,24 +2327,27 @@ TEST_CASE("Claude requests carry a signed Claude Code billing block", "[claude][
 }
 
 
-TEST_CASE("Claude Code beta lists match the 2.1.302 capture per model", "[claude][client][headers]") {
-    // cortexkit/commons 3ce6295 vectors, minus the host's own betas
-    // (fine-grained-tool-streaming, server-side-fallback, fast-mode).
-    for (const auto* model : {"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5",
+TEST_CASE("Claude Code beta lists match the 2.1.322 capture per model", "[claude][client][headers]") {
+    // Interactive 2.1.322 capture against api.anthropic.com, minus the
+    // account- and host-dependent betas (afk-mode, dangerous-tool-use,
+    // fine-grained-tool-streaming, server-side-fallback, fast-mode).
+    for (const auto* model : {"claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1",
+                              "claude-opus-5-5", "claude-sonnet-5-5",
                               "claude-opus-5-5[1m]", "claude-sonnet-5-5-20261001"}) {
         CAPTURE(model);
         CHECK(join_betas(claude::main_request_betas(model, true, false)) == kPerTurnMainBetas);
     }
     CHECK(join_betas(claude::main_request_betas("claude-haiku-5-5", true, false))
-          == "oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+          == "oauth-2025-04-20,interleaved-thinking-2025-05-14,"
              "context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,"
-             "per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20,"
+             "per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,tool-provenance-2026-10-26,"
+             "thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,"
              "mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,thinking-binding-controls-2026-08-01,"
              "thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07");
     CHECK(join_betas(claude::main_request_betas("claude-opus-4-8", true, true))
-          == "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+          == "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,"
              "context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-tool-changes-2026-07-01,"
-             "advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,"
+             "tool-provenance-2026-10-26,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,"
              "thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,"
              "extended-cache-ttl-2025-04-11,structured-outputs-2025-12-15,cache-diagnosis-2026-04-07");
     // Without OAuth only the OAuth beta goes; a near-miss id keeps the default list.
@@ -2355,16 +2370,17 @@ TEST_CASE("Claude requests carry Claude Code's client headers and URL", "[claude
     headers["Accept"] = "text/event-stream"; // What HttpLLMProvider sets before the hook.
     protocol.prepare_headers(headers, request, "https://api.anthropic.com");
 
-    CHECK(headers.at("User-Agent") == "claude-cli/2.1.302 (external, cli)");
+    CHECK(headers.at("User-Agent") == "claude-cli/2.1.322 (external, cli)");
     CHECK(headers.at("x-app") == "cli");
     CHECK(headers.at("anthropic-dangerous-direct-browser-access") == "true");
     CHECK(headers.at("anthropic-version") == "2023-06-01");
     CHECK(headers.at("Accept") == "application/json");
     CHECK(headers.at("x-claude-code-request-class") == "main");
+    CHECK(headers.at("x-claude-code-sandy-plover") == "[]");
     CHECK(headers.at("x-stainless-lang") == "js");
     CHECK(headers.at("x-stainless-package-version") == "0.128.0");
     CHECK(headers.at("x-stainless-runtime") == "node");
-    CHECK(headers.at("x-stainless-runtime-version") == "v26.3.0");
+    CHECK(headers.at("x-stainless-runtime-version") == "v26.12.1");
     CHECK(headers.at("x-stainless-timeout") == "600");
     CHECK(headers.at("x-stainless-os") == claude::stainless_os());
     CHECK(headers.at("x-stainless-arch") == claude::stainless_arch());
@@ -2403,17 +2419,17 @@ TEST_CASE("Claude requests carry Claude Code's client headers and URL", "[claude
           == "https://proxy.example/v1/messages?beta=true");
 }
 
-TEST_CASE("Claude billing lineage follows the Claude Code 2.1.302 vectors", "[claude][billing][lineage]") {
+TEST_CASE("Claude billing lineage follows the Claude Code vectors", "[claude][billing][lineage]") {
     CHECK(claude::billing_block("Summarise the README in two sentences.",
                                 {.prompt_id = "33333333-3333-4333-8333-333333333333", .prompt_index = 1})
-          == "x-anthropic-billing-header: cc_version=2.1.302.f6a; cc_entrypoint=cli; cch=00000; "
+          == "x-anthropic-billing-header: cc_version=2.1.322.ae9; cc_entrypoint=cli; cch=00000; "
              "cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=1; "
              "cc_turn_index=1;");
     CHECK(claude::billing_block("Find where the retry limit is configured.",
                                 {.previous_request_id = "req_PLACEHOLDER0000000000000001",
                                  .prompt_id = "33333333-3333-4333-8333-333333333333",
                                  .prompt_index = 2})
-          == "x-anthropic-billing-header: cc_version=2.1.302.0b6; cc_entrypoint=cli; cch=00000; "
+          == "x-anthropic-billing-header: cc_version=2.1.322.6a4; cc_entrypoint=cli; cch=00000; "
              "cc_prev_req=req_PLACEHOLDER0000000000000001; cc_prompt_id=33333333-3333-4333-8333-333333333333; "
              "cc_turn_origin=human; cc_prompt_index=2; cc_turn_index=2;");
     // An invalid request id is dropped; no prompt id means no prompt fields.

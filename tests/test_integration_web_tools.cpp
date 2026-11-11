@@ -172,7 +172,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
         if (expect_auto) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
         CHECK_FALSE(actual.has_header("x-anthropic-billing-header"));
         CHECK(actual.get_header_value("x-claude-code-request-class") == "main");
-        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.302."));
+        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring("x-anthropic-billing-header: cc_version=2.1.322."));
         CHECK_THAT(actual.body, !Catch::Matchers::ContainsSubstring("cch=00000;"));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("web-search-2025-03-05"));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
@@ -180,7 +180,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
         CHECK(actual.get_header_value("Accept") == "application/json");
         CHECK_THAT(std::string(doc["messages"].at(0)["content"].get_string().value()),
                    Catch::Matchers::ContainsSubstring("Call the web_search tool"));
-        if (i == 0) CHECK(doc["model"].get_string().value() == "claude-fable-5-1");
+        if (i == 0) CHECK(doc["model"].get_string().value() == "claude-fable-5-2");
         if (i == 4) {
             CHECK(doc["model"].get_string().value() == "claude-sonnet-5");
             CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
