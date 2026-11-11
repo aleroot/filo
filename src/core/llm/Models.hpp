@@ -628,6 +628,11 @@ struct ChatRequest {
     std::string effort = {};               ///< Optional effort hint ("low"/"medium"/"high"/"max")
     std::string session_id = {};            ///< Internal session scope for accounting/routing decisions
     std::string transport_turn_id = {};     ///< Short-lived provider transport scope for one agent turn
+    /// Conversation whose requests may continue a server-side thread. Only an
+    /// agent's own step loop sets it; every other request (keep-warm replays,
+    /// side queries, compaction) leaves it empty and is sent unthreaded, so it
+    /// can never consume the conversation's thread.
+    std::string continuation_scope = {};
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
     core::context::PromptPlan prompt_plan = {}; ///< Structured stable-to-dynamic system prompt.

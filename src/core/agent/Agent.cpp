@@ -1603,8 +1603,12 @@ void Agent::refresh_prompt_cache_async(std::function<void(PromptCacheRefresh)> d
         const auto started_at = std::chrono::system_clock::now();
         bool answered = false;
         std::string error;
+        // A replay stopped at its first output must never consume the
+        // conversation's server-side thread, so it is always sent unthreaded.
         try {
-            worker->stream_response(*request, [&](const core::llm::StreamChunk& chunk) {
+            auto unthreaded = *request;
+            unthreaded.continuation_scope.clear();
+            worker->stream_response(unthreaded, [&](const core::llm::StreamChunk& chunk) {
                 if (chunk.is_final) {
                     if (chunk.is_error && !answered) {
                         error = core::utils::str::trim_ascii_copy(chunk.content);
@@ -2111,6 +2115,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
             request.session_id = step_session_context.session_id;
             request.transport_turn_id = turn_state->transport_turn_id;
+            request.continuation_scope = step_session_context.session_id;
             provider = turn_state->provider;
             mode_snapshot = std::string(to_string(current_mode_));
             session_state_prompt = build_session_state_prompt();

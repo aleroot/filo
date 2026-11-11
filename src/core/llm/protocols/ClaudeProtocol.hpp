@@ -1,6 +1,9 @@
 #pragma once
 #include "AnthropicProtocol.hpp"
 #include "../ClaudeCodeClient.hpp"
+#include "ClaudeMessageThreads.hpp"
+
+#include <memory>
 
 namespace core::llm::protocols {
 
@@ -46,16 +49,38 @@ struct ClaudeSerializer {
                                  const ClaudeThinkingConfig& thinking = {},
                                  PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
                                  const claude::RequestLineage* lineage = nullptr);
+
+    /// The body before Claude Code's signature, for callers that reshape it.
+    struct UnsignedBody {
+        std::string payload;
+        bool signs = false; ///< False when the caller supplied its own attribution.
+    };
+    static UnsignedBody serialize_unsigned(const ChatRequest& req,
+                                           int default_max_tokens = kAnthropicDefaultMaxTokens,
+                                           const ClaudeThinkingConfig& thinking = {},
+                                           PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
+                                           const claude::RequestLineage* lineage = nullptr);
 };
 
 class ClaudeProtocol : public AnthropicProtocol {
 public:
+    /// @p threads, when given, lets the agent's conversation use Anthropic
+    /// message threads; every clone shares it. Null sends every request whole.
     explicit ClaudeProtocol(ClaudeThinkingConfig thinking = {}, int default_max_tokens = kAnthropicDefaultMaxTokens,
-                            PromptCacheTtl cache_ttl = PromptCacheTtl::Standard)
-        : AnthropicProtocol(default_max_tokens), thinking_(thinking), cache_ttl_(cache_ttl) {}
+                            PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
+                            std::shared_ptr<claude_threads::ThreadSession> threads = {})
+        : AnthropicProtocol(default_max_tokens), thinking_(thinking), cache_ttl_(cache_ttl),
+          thread_(std::move(threads)) {}
+    /// Also plans the request as a thread create or continue when it may be
+    /// one. Claude overrides neither media nor context preparation, so the
+    /// request is final here.
     void prepare_request(ChatRequest& request) override;
+    /// Walks the thread fallback ladder: continue -> create -> unthreaded.
+    bool rebuilds_after_rejection(const HttpResponse& response) override;
     std::string model_id(std::string_view model) const override;
     bool accepts_legacy_continuation() const noexcept override { return true; }
+    /// The body for the request's current thread plan; the whole request when
+    /// it has none.
     std::string serialize(const ChatRequest& req) const override;
     cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
     /// Claude Code's messages URL carries `?beta=true`.
@@ -95,5 +120,10 @@ private:
     std::string client_request_id_;
     int header_attempts_ = 0;
     RateLimitInfo last_rate_limit_;
+
+    void settle_thread(const ParseResult& result) noexcept;
+
+    /// This request's message thread; its session is shared by every clone.
+    claude_threads::RequestThread thread_;
 };
 } // namespace core::llm::protocols

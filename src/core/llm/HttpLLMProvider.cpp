@@ -966,6 +966,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             transport::RetryController retry_controller(retries);
             // Cleared once the server rejects an encoded body, so it is resent plain.
             bool encode_body = true;
+            // Protocol rebuilds after a rejected request shape; each one moves the
+            // protocol closer to its plain request, and this bounds them anyway.
+            int protocol_rebuilds = 0;
+            constexpr int kMaxProtocolRebuilds = 4;
 
             const auto prepare_retry = [&](const transport::RetrySchedule& retry) {
                 if (!transport::wait_for_retry(
@@ -1241,6 +1245,23 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         "[HTTP] {} rejected the {} request body (HTTP {}); resending it unencoded",
                         protocol->name(), encoded_body->content_encoding, r.status_code);
                     encode_body = false;
+                    continue;
+                }
+
+                if (!output_emitted && r.status_code != 200
+                    && protocol_rebuilds < kMaxProtocolRebuilds
+                    && protocol->rebuilds_after_rejection(http_resp)) {
+                    ++protocol_rebuilds;
+                    core::logging::info(
+                        "[HTTP] {} rebuilt a request the server rejected (HTTP {}); sending it again",
+                        protocol->name(), r.status_code);
+                    protocol->reset_attempt_state();
+                    payload = protocol->serialize(request_metadata);
+                    prepare_http_headers();
+                    if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                        callback(StreamChunk::make_final());
+                        break;
+                    }
                     continue;
                 }
 

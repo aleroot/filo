@@ -79,7 +79,7 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
         for (const auto& [name, provider] : providers->members()) {
             if (!provider.is_object()) throw std::runtime_error("provider must be an object: " + name);
             check(provider, {"api_type", "api_key", "model", "base_url", "auth_type", "reasoning_effort",
-                              "wire_api", "service_tier", "prompt_cache_ttl", "model_path", "chat_template"}, string, "a string");
+                              "wire_api", "service_tier", "prompt_cache_ttl", "message_threads", "model_path", "chat_template"}, string, "a string");
             check(provider, {"stream_usage", "use_mmap", "use_mlock"}, boolean, "a boolean");
             check(provider, {"thinking_budget", "context_window", "top_k", "seed", "context_size", "batch_size",
                               "threads", "threads_batch", "gpu_layers"}, integer, "an integer");

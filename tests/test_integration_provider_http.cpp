@@ -2829,3 +2829,135 @@ TEST_CASE("Codex WebSocket authentication refresh reconnects with replacement cr
     CHECK(sockets == 1);
     CHECK(credentials->refreshes == 1);
 }
+
+namespace {
+[[nodiscard]] std::string claude_thread_reply(std::string_view id, std::string_view text) {
+    return std::format(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{}\",\"usage\":{{\"input_tokens\":10}}}}}}\n\n"
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n"
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{}\"}}}}\n\n"
+        "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n"
+        "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":2}}}}\n\n"
+        "event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+        id, text);
+}
+
+/// Runs one agent-loop request and returns the reply as the agent stores it.
+[[nodiscard]] Message run_thread_turn(HttpLLMProvider& provider, const ChatRequest& request) {
+    Message reply{.role = "assistant"};
+    bool failed = false;
+    provider.stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) failed = true;
+        reply.content += chunk.content;
+        reply.continuation_items.insert(reply.continuation_items.end(), chunk.continuation_items.begin(),
+                                        chunk.continuation_items.end());
+    });
+    CHECK_FALSE(failed);
+    return reply;
+}
+
+[[nodiscard]] ChatRequest thread_turn_request(std::vector<Message> messages) {
+    ChatRequest request = make_claude_request("claude-sonnet-5-5");
+    request.messages = std::move(messages);
+    request.session_id = "thread-ladder";
+    request.continuation_scope = "thread-ladder";
+    request.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::RuntimeInstructions,
+        .stability = core::context::PromptStability::Stable,
+        .name = "runtime",
+        .content = "You are Filo",
+    });
+    // Agent requests carry tools, which also keeps the top-level cache_control
+    // (a fixed field) on from the first request.
+    request.tools.push_back(Tool{.function = {.name = "read", .description = "Read a file"}});
+    return request;
+}
+} // namespace
+
+TEST_CASE("Claude message threads fall back to the plain request on every rejection",
+          "[integration][http][claude][threads]") {
+    struct Seen {
+        std::string body;
+        std::string beta;
+    };
+    httplib::Server server;
+    std::mutex mutex;
+    std::vector<Seen> seen;
+    // How the fake server treats a request that carries `thread`.
+    enum class Mode { lose_threads, refuse_threads } mode = Mode::lose_threads;
+    int replies = 0;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(mutex);
+        const auto body = maybe_gunzip(request.body);
+        seen.push_back({body, request.get_header_value("anthropic-beta")});
+        const bool continues = body.find(R"("type":"continue")") != std::string::npos;
+        const bool threaded = body.find(R"("thread":)") != std::string::npos;
+        if (mode == Mode::lose_threads && continues) {
+            response.status = 404;
+            response.set_content(
+                R"({"type":"error","error":{"type":"not_found_error","message":"thread not found","details":{"error_code":"thread_not_found"}}})",
+                "application/json");
+            return;
+        }
+        if (mode == Mode::refuse_threads && threaded) {
+            response.status = 400;
+            response.set_content(R"({"type":"error","error":{"type":"invalid_request_error","message":"thread: Extra inputs are not permitted"}})",
+                                 "application/json");
+            return;
+        }
+        ++replies;
+        response.set_content(claude_thread_reply(std::format("msg_{}", replies), "ok"), "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port), std::make_shared<RefreshingClaudeCredentials>(),
+        "claude-sonnet-5-5",
+        std::make_unique<ClaudeProtocol>(ClaudeThinkingConfig{}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard,
+                                         std::make_shared<claude_threads::ThreadSession>()));
+    std::vector<Message> history{{.role = "user", .content = "hi"}};
+    const auto take_seen = [&] {
+        std::lock_guard lock(mutex);
+        return std::exchange(seen, {});
+    };
+
+    history.push_back(run_thread_turn(*provider, thread_turn_request(history)));
+    auto first = take_seen();
+    REQUIRE(first.size() == 1);
+    CHECK_THAT(first[0].body, Catch::Matchers::ContainsSubstring(R"("thread":{"type":"create"})"));
+    CHECK_THAT(first[0].beta, Catch::Matchers::ContainsSubstring("message-threads-2026-08-12"));
+
+    SECTION("a lost thread is replayed as a create within the same call") {
+        history.push_back({.role = "user", .content = "more"});
+        history.push_back(run_thread_turn(*provider, thread_turn_request(history)));
+        auto second = take_seen();
+        REQUIRE(second.size() == 2);
+        CHECK_THAT(second[0].body, Catch::Matchers::ContainsSubstring(R"("previous_message_id":"msg_1"})"));
+        CHECK_THAT(second[1].body, Catch::Matchers::ContainsSubstring(R"("thread":{"type":"create"})"));
+        CHECK_THAT(second[1].body, Catch::Matchers::ContainsSubstring(R"("content":"hi")"));
+        CHECK(history.back().content == "ok");
+    }
+    SECTION("a server that refuses threads gets the plain request, then only plain requests") {
+        {
+            std::lock_guard lock(mutex);
+            mode = Mode::refuse_threads;
+        }
+        history.push_back({.role = "user", .content = "more"});
+        history.push_back(run_thread_turn(*provider, thread_turn_request(history)));
+        auto second = take_seen();
+        REQUIRE(second.size() >= 2);
+        CHECK_THAT(second.back().body, !Catch::Matchers::ContainsSubstring(R"("thread")"));
+        CHECK_THAT(second.back().beta, !Catch::Matchers::ContainsSubstring("message-threads"));
+        CHECK(history.back().content == "ok");
+
+        history.push_back({.role = "user", .content = "again"});
+        history.push_back(run_thread_turn(*provider, thread_turn_request(history)));
+        auto third = take_seen();
+        REQUIRE(third.size() == 1);
+        CHECK_THAT(third[0].body, !Catch::Matchers::ContainsSubstring(R"("thread")"));
+    }
+}

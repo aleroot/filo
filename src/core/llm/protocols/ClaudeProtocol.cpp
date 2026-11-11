@@ -19,6 +19,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <array>
+#include <format>
+#include <type_traits>
+#include <variant>
 #include <chrono>
 #include <cstdio>
 #include <cctype>
@@ -737,6 +740,14 @@ std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_
                                         const ClaudeThinkingConfig& thinking,
                                         PromptCacheTtl cache_ttl,
                                         const claude::RequestLineage* lineage) {
+    auto body = serialize_unsigned(req, default_max_tokens, thinking, cache_ttl, lineage);
+    if (body.signs) claude::sign_body(body.payload);
+    return std::move(body.payload);
+}
+
+ClaudeSerializer::UnsignedBody ClaudeSerializer::serialize_unsigned(
+    const ChatRequest& req, int default_max_tokens, const ClaudeThinkingConfig& thinking,
+    PromptCacheTtl cache_ttl, const claude::RequestLineage* lineage) {
     const auto wire_policy = claude_wire_policy(
         req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     AnthropicSerializationOptions options;
@@ -890,9 +901,8 @@ std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_
             payload += '}';
         }
     };
-    auto payload = AnthropicSerializer::serialize(req, default_max_tokens, options);
-    if (!has_attribution) claude::sign_body(payload);
-    return payload;
+    return {.payload = AnthropicSerializer::serialize(req, default_max_tokens, options),
+            .signs = !has_attribution};
 }
 
 std::string ClaudeProtocol::model_id(std::string_view model) const {
@@ -907,20 +917,46 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
     lineage_ = claude::begin_request(conversation_, claude::count_user_prompts(request));
     client_request_id_ = core::utils::random_uuid_v4();
     header_attempts_ = 0;
-    if (request.model.empty()) return;
+    thread_.reset();
 
-    ModelNormalization normalized = normalize_requested_claude_model(request.model);
-    if (!normalized.model.empty()) {
-        request.model = std::move(normalized.model);
+    if (!request.model.empty()) {
+        ModelNormalization normalized = normalize_requested_claude_model(request.model);
+        if (!normalized.model.empty()) {
+            request.model = std::move(normalized.model);
+        }
+        request_uses_context_1m_ = normalized.use_context_1m;
+        last_requested_model_ = request.model;
     }
-    request_uses_context_1m_ = normalized.use_context_1m;
-    last_requested_model_ = request.model;
+
+    // Planned from the body serialize() will rebuild, after every input to it
+    // is settled. Only a signed Claude Code conversation can be threaded.
+    if (lineage_.session_id.empty() || !thread_.available(request.continuation_scope, request.model)) return;
+    try {
+        const auto body = ClaudeSerializer::serialize_unsigned(request, default_max_tokens_, thinking_, cache_ttl_,
+                                                               &lineage_);
+        if (!body.signs) return;
+        thread_.plan(request.continuation_scope, request.model, body.payload,
+                     std::format("1m={};json={}", request_uses_context_1m_, request_structured_output_));
+    } catch (const std::exception& e) {
+        // serialize() reports the same failure; the request is not threaded.
+        core::logging::debug("[threads] {}: not planned: {}", request.continuation_scope, e.what());
+    }
 }
 
 std::string ClaudeProtocol::serialize(const ChatRequest& req) const {
     // Only a prepared request belongs to a conversation.
-    return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_,
-                                       lineage_.session_id.empty() ? nullptr : &lineage_);
+    const auto* lineage = lineage_.session_id.empty() ? nullptr : &lineage_;
+    if (!thread_.threaded()) {
+        return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_, lineage);
+    }
+    auto body = ClaudeSerializer::serialize_unsigned(req, default_max_tokens_, thinking_, cache_ttl_, lineage);
+    auto payload = thread_.body(body.payload).value_or(std::move(body.payload));
+    claude::sign_body(payload);
+    return payload;
+}
+
+bool ClaudeProtocol::rebuilds_after_rejection(const HttpResponse& response) {
+    return thread_.on_rejection(response.status_code, response.body);
 }
 
 std::string ClaudeProtocol::build_url(std::string_view base_url, std::string_view model) const {
@@ -937,10 +973,17 @@ void ClaudeProtocol::prepare_headers(cpr::Header& headers, const ChatRequest&, s
     if (!lineage_.billing.prompt_id.empty()) headers["x-claude-code-prompt-id"] = lineage_.billing.prompt_id;
     headers["x-client-request-id"] = client_request_id_;
     headers["x-stainless-retry-count"] = std::to_string(header_attempts_++);
+    if (thread_.threaded()) {
+        auto& betas = headers["anthropic-beta"];
+        if (!betas.empty()) betas += ',';
+        betas += claude_threads::kBeta;
+    }
 }
 
 ParseResult ClaudeProtocol::parse_event(std::string_view raw_event) {
-    if (!lineage_.session_id.empty() && raw_event.find("message_start") != std::string_view::npos) {
+    const bool threaded = thread_.threaded();
+    if (threaded) thread_.observe_event(raw_event);
+    if ((threaded || !lineage_.session_id.empty()) && raw_event.find("message_start") != std::string_view::npos) {
         sse::ParsedEventView parsed;
         if (sse::parse_event_payload(raw_event, parsed) && !parsed.data.empty()) {
             simdjson::dom::parser parser;
@@ -950,11 +993,27 @@ ParseResult ClaudeProtocol::parse_event(std::string_view raw_event) {
             if (parser.parse(data).get(doc) == simdjson::SUCCESS
                 && doc["type"].get(type) == simdjson::SUCCESS && type == "message_start"
                 && doc["message"]["id"].get(id) == simdjson::SUCCESS) {
-                claude::record_message_id(conversation_, id);
+                if (!lineage_.session_id.empty()) claude::record_message_id(conversation_, id);
+                if (threaded) thread_.observe_response_id(id);
             }
         }
     }
-    return AnthropicProtocol::parse_event(raw_event);
+    auto result = AnthropicProtocol::parse_event(raw_event);
+    if (threaded && result.done) settle_thread(result);
+    return result;
+}
+
+void ClaudeProtocol::settle_thread(const ParseResult& result) noexcept {
+    claude_threads::ReplyOutcome outcome{.stop_reason = result.stop_reason,
+                                         .incomplete_tool_call = result.incomplete_tool_call};
+    for (const auto& chunk : result.chunks) {
+        for (const auto& item : chunk.continuation_items) {
+            if (!outcome.assistant_content && item.provider == "anthropic" && item.kind == "assistant_content") {
+                outcome.assistant_content = item.payload;
+            }
+        }
+    }
+    thread_.settle(outcome);
 }
 
 std::optional<EncodedRequestBody> ClaudeProtocol::encode_request_body(std::string_view payload,
@@ -1062,7 +1121,7 @@ PromptCacheProfile ClaudeProtocol::prompt_cache_profile(std::string_view) const 
 }
 
 std::unique_ptr<ApiProtocolBase> ClaudeProtocol::clone() const {
-    return std::make_unique<ClaudeProtocol>(thinking_, default_max_tokens_, cache_ttl_);
+    return std::make_unique<ClaudeProtocol>(thinking_, default_max_tokens_, cache_ttl_, thread_.session());
 }
 void ClaudeProtocol::reset_state() {
     AnthropicProtocol::reset_state();
@@ -1074,14 +1133,17 @@ void ClaudeProtocol::reset_state() {
     lineage_ = {};
     client_request_id_.clear();
     header_attempts_ = 0;
+    thread_.reset();
 }
 
 void ClaudeProtocol::reset_attempt_state() {
     AnthropicProtocol::reset_state();
     last_rate_limit_ = {};
+    thread_.reset_attempt();
 }
 
 void ClaudeProtocol::on_response(const HttpResponse& response) {
+    if (response.status_code == 200) thread_.on_success();
     if (response.status_code == 200 && !lineage_.session_id.empty()) {
         if (const auto id = find_header_case_insensitive(response.headers, "request-id")) {
             claude::record_request_id(conversation_, *id);

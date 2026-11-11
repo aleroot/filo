@@ -188,6 +188,7 @@ struct LocalModelConfig {
 //   "wire_api": "responses"     → OpenAI wire API ("chat_completions" or "responses")
 //   "service_tier": "priority"  → Responses API service tier override
 //   "prompt_cache_ttl": "1h"    → one-hour prompt cache (Anthropic; "5m" default)
+//   "message_threads": "off"    → never use Anthropic message threads ("auto" default)
 // ---------------------------------------------------------------------------
 struct ProviderConfig {
     ApiType     api_type    = ApiType::Unknown;  ///< Inferred from name when Unknown
@@ -201,6 +202,7 @@ struct ProviderConfig {
     std::string wire_api{};         ///< "chat_completions" / "responses" for OpenAI APIs
     std::string service_tier{};     ///< Responses API service_tier (e.g. "priority", "flex")
     std::string prompt_cache_ttl{}; ///< "" / "5m" or "1h"; honoured where the wire can request it
+    std::string message_threads{};  ///< "" / "auto" or "off"; Anthropic message threads (not ZDR eligible)
     int         context_window    = 0;     ///< Explicit endpoint working limit; 0 uses vendor default
     int         thinking_budget   = 0;     ///< >0 enables extended thinking (Anthropic)
     bool        stream_usage      = false; ///< Append stream_options (OpenAI)

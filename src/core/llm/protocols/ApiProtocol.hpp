@@ -529,6 +529,20 @@ public:
      */
     virtual void prepare_request([[maybe_unused]] ChatRequest& request) {}
 
+    /**
+     * @brief Whether @p response rejected a protocol choice the protocol can undo.
+     *
+     * Called on a non-2xx response before any output was emitted. Returning
+     * true makes the transport rebuild the body with `serialize()` and the
+     * headers, then send again at once; it does not count as a retry. Each
+     * true must move the protocol strictly closer to its plain request, so
+     * the rebuilds end (the transport also caps them). The default never asks
+     * for one, so a protocol that does not override it is unaffected.
+     */
+    [[nodiscard]] virtual bool rebuilds_after_rejection([[maybe_unused]] const HttpResponse& response) {
+        return false;
+    }
+
     /// Legacy opaque state predates provenance. Adapters must opt out where
     /// sharing a wire format does not imply compatible continuation state.
     [[nodiscard]] virtual bool accepts_legacy_continuation() const noexcept { return true; }

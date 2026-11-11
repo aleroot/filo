@@ -320,6 +320,8 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/QwenSubscriptionProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/ClaudeProtocol.cpp
+    src/core/llm/protocols/ClaudeMessageThreads.cpp
+    src/core/llm/continuation/ThreadLedger.cpp
     src/core/llm/ClaudeBilling.cpp
     src/core/llm/ClaudeCodeClient.cpp
     src/core/llm/protocols/MiniMaxProtocol.cpp
@@ -826,6 +828,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_grok_enhanced.cpp
     tests/test_gemini_provider.cpp
     tests/test_claude_provider.cpp
+    tests/test_message_threads.cpp
     tests/test_mistral_provider.cpp
     tests/test_mimo_provider.cpp
     tests/test_minimax_provider.cpp
@@ -1116,6 +1119,7 @@ source_group(
         tests/test_grok_enhanced.cpp
         tests/test_gemini_provider.cpp
         tests/test_claude_provider.cpp
+        tests/test_message_threads.cpp
         tests/test_mistral_provider.cpp
         tests/test_mimo_provider.cpp
         tests/test_minimax_provider.cpp

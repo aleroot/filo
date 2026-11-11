@@ -59,7 +59,7 @@ struct BillingLineage {
 /// Rewrite an unsigned body the way Claude Code sends it, then sign it: the
 /// top-level fields in Claude Code's order (model, messages, system, tools,
 /// tool_choice, metadata, max_tokens, temperature, thinking,
-/// context_management, output_config, diagnostics, stream, speed, then any
+/// context_management, output_config, thread, diagnostics, stream, speed, then any
 /// other), serialized as JSON.stringify would, with the billing block's
 /// `cch=00000;` replaced by the body signature. Bodies without the
 /// placeholder are left unchanged.

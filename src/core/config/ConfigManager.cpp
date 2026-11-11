@@ -295,6 +295,7 @@ ProviderConfig merge_provider(std::string_view name, const ProviderConfig& base,
     if (!overlay.wire_api.empty())         merged.wire_api = overlay.wire_api;
     if (!overlay.service_tier.empty())     merged.service_tier = overlay.service_tier;
     if (!overlay.prompt_cache_ttl.empty()) merged.prompt_cache_ttl = overlay.prompt_cache_ttl;
+    if (!overlay.message_threads.empty())  merged.message_threads = overlay.message_threads;
     if (overlay.context_window > 0) merged.context_window = overlay.context_window;
     if (overlay.thinking_budget > 0)       merged.thinking_budget = overlay.thinking_budget;
     if (overlay.stream_usage)              merged.stream_usage = overlay.stream_usage;
@@ -855,6 +856,9 @@ ProviderConfig parse_provider(simdjson::dom::object provider_obj, ProviderConfig
     }
     if (!provider_obj["prompt_cache_ttl"].get(value)) {
         provider.prompt_cache_ttl = std::string(value);
+    }
+    if (!provider_obj["message_threads"].get(value)) {
+        provider.message_threads = std::string(value);
     }
     int64_t context_window = 0;
     if (!provider_obj["context_window"].get(context_window)) {

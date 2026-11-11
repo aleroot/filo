@@ -107,6 +107,21 @@ std::string resolve_key(
     return cache_ttl.value_or(PromptCacheTtl::Standard);
 }
 
+/// Anthropic message threads unless the provider turns them off. A typo keeps
+/// the default, like prompt_cache_ttl: every failure of a thread request
+/// already falls back to the plain request.
+[[nodiscard]] std::shared_ptr<protocols::claude_threads::ThreadSession> resolve_message_threads(
+    const ProviderConfig& config, std::string_view name) {
+    const auto value = core::utils::str::to_lower_ascii_copy(config.message_threads);
+    if (value == "off" || value == "false" || value == "disabled") return nullptr;
+    if (!value.empty() && value != "auto" && value != "on" && value != "true") {
+        core::logging::warn(
+            "Provider '{}': unknown message_threads '{}'; using \"auto\". Accepted values are \"auto\" and \"off\".",
+            name, config.message_threads);
+    }
+    return std::make_shared<protocols::claude_threads::ThreadSession>();
+}
+
 } // namespace
 
 std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
@@ -448,7 +463,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             protocol = std::make_unique<protocols::ClaudeProtocol>(
                 thinking,
                 protocols::kAnthropicDefaultMaxTokens,
-                resolve_prompt_cache_ttl(config, name));
+                resolve_prompt_cache_ttl(config, name),
+                resolve_message_threads(config, name));
         } else {
             protocol = std::make_unique<protocols::AnthropicProtocol>();
         }

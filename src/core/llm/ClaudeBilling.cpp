@@ -22,9 +22,9 @@ constexpr std::array<std::size_t, 3> kSuffixPositions{4, 7, 20};
 constexpr std::uint64_t kBodySignatureSeed = 0x4d659218e32a3268ULL;
 constexpr std::string_view kUnsignedToken = "cch=00000;";
 /// Claude Code's top-level body order; members it does not know follow.
-constexpr std::array<std::string_view, 14> kBodyFieldOrder{
+constexpr std::array<std::string_view, 15> kBodyFieldOrder{
     "model", "messages", "system", "tools", "tool_choice", "metadata", "max_tokens",
-    "temperature", "thinking", "context_management", "output_config", "diagnostics",
+    "temperature", "thinking", "context_management", "output_config", "thread", "diagnostics",
     "stream", "speed"};
 
 /// UTF-16 code units of @p text, up to @p limit of them. Malformed bytes
