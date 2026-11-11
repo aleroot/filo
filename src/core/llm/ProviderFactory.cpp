@@ -7,6 +7,7 @@
 #include "QwenModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
+#include "QwenSubscription.hpp"
 #include "providers/QwenModelCatalogSelector.hpp"
 #include "providers/QwenProvider.hpp"
 #ifdef FILO_ENABLE_LLAMACPP
@@ -20,6 +21,7 @@
 #include "protocols/KimiProtocol.hpp"
 #include "protocols/GrokProtocol.hpp"
 #include "protocols/DashScopeProtocol.hpp"
+#include "protocols/QwenSubscriptionProtocol.hpp"
 #include "protocols/ClaudeProtocol.hpp"
 #include "providers/MiniMaxProvider.hpp"
 #include "MiniMaxModelTraits.hpp"
@@ -238,6 +240,32 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::logging::debug("Using Gemini Code Assist endpoint: {}", base_url);
     }
 
+    const bool is_qwen_subscription = canonical_type == qwen_subscription::kProviderName;
+    if (is_qwen_subscription) {
+        // The subscription token is minted for one gateway. A configured
+        // base_url must never receive it, so the fixed host always wins.
+        if (!config.base_url.empty()
+            && core::utils::str::trim_trailing_slashes(config.base_url)
+                != qwen_subscription::kBaseUrl) {
+            core::logging::warn(
+                "Ignoring the base_url configured for '{}': Qwen Subscription "
+                "tokens are only sent to {}.", name, qwen_subscription::kBaseUrl);
+        }
+        base_url = std::string(qwen_subscription::kBaseUrl);
+        api_type = ApiType::OpenAI;
+        wire_api = "chat_completions";
+        if (!cred) {
+            // The route has no API key; a provider entry written by hand
+            // without auth_type still means the account session.
+            ProviderConfig oauth_config = config;
+            oauth_config.auth_type = std::string(qwen_subscription::kAuthType);
+            cred = auth_manager.create_credential_source(canonical_type, oauth_config);
+        }
+        if (config.model.empty()) {
+            model_catalog_selector = providers::make_qwen_subscription_model_catalog_selector();
+        }
+    }
+
     const bool qwen_token_plan = canonical_type == "qwen-token-plan"
         || is_qwen_token_plan_endpoint(base_url);
     const bool qwen_coding_plan = canonical_type == "qwen-coding"
@@ -372,6 +400,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     effort, config.stream_usage);
             } else if (canonical_type == "mistral") {
                 protocol = std::make_unique<protocols::MistralProtocol>();
+            } else if (is_qwen_subscription) {
+                protocol = std::make_unique<protocols::QwenSubscriptionProtocol>(
+                    config.reasoning_effort);
             } else if (canonical_type.starts_with("mimo") || is_mimo_endpoint(base_url)) {
                 // Covers every preset prefix (mimo and the three regional
                 // mimo-token-plan gateways) and any user-defined provider

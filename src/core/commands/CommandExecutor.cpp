@@ -21,7 +21,9 @@
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <unistd.h>
 #endif
+#include "core/auth/AuthBrowserLauncher.hpp"
 #include "core/auth/AuthLogin.hpp"
+#include "core/llm/QwenSubscription.hpp"
 #include "core/agent/RepositoryContextMessage.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
@@ -1161,7 +1163,7 @@ public:
         if (!provider.has_value()) {
             ctx.append_history_fn(
                 "\nℹ  Usage: /logout <provider> "
-                "(one of: claude, google, grok, kimi, openai, qwen)\n");
+                "(one of: claude, google, grok, kimi, openai, qwen-subscription)\n");
             return;
         }
         const std::string provider_name(*provider);
@@ -1194,6 +1196,22 @@ public:
         } else {
             ctx.append_history_fn("\n✗  Logout failed: " + error_message + "\n");
         }
+    }
+};
+
+class UpgradeCommand : public Command {
+public:
+    std::string get_name() const override { return "/upgrade"; }
+    std::string get_description() const override {
+        return "Open the Qwen Subscription plans page to upgrade or get more credits";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        const std::string url = core::llm::qwen_subscription::plans_url();
+        core::auth::open_browser(url);
+        // Keep the link visible: the browser may be unavailable (SSH, CI).
+        ctx.append_history_fn("\n\xe2\x84\xb9  Qwen Subscription plans: " + url + "\n");
     }
 };
 
@@ -4058,6 +4076,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<YoloCommand>());
     register_command(std::make_unique<ToolsCommand>());
     register_command(std::make_unique<UsageCommand>());
+    register_command(std::make_unique<UpgradeCommand>());
     register_command(std::make_unique<CopyCommand>());
     register_command(std::make_unique<HistoryCommand>());
     register_command(std::make_unique<ReviewCommand>());

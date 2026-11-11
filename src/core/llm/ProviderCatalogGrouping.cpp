@@ -73,6 +73,10 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     return normalized(provider_name).starts_with("qwen-token-plan");
 }
 
+[[nodiscard]] bool is_qwen_subscription_source(std::string_view provider_name) {
+    return normalized(provider_name).starts_with("qwen-subscription");
+}
+
 [[nodiscard]] bool is_qwen_coding_source(std::string_view provider_name) {
     return normalized(provider_name).starts_with("qwen-coding");
 }
@@ -223,6 +227,11 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
         source.registry_model_filter = gemini_antigravity_filter();
     } else if (group_name == "gemini") {
         source.category_label = "Gemini API.";
+    } else if (group_name == "qwen" && is_qwen_subscription_source(provider_name)) {
+        source.category_label = "Qwen Subscription (Qwen account).";
+        // The account's gateway catalog is authoritative; registry cards
+        // describe API-key endpoints and must not be offered here.
+        source.registry_model_filter = ProviderCatalogModelFilter{.rule = ProviderCatalogModelRule::Include};
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();
@@ -496,6 +505,13 @@ ProviderCatalogGroup provider_catalog_group_for(
 
     if (group.sources.empty() && contains_name(configured_provider_names, provider_name)) {
         group.sources.push_back(source_for_provider(provider_name, group_name));
+    }
+
+    if (group_name == "qwen") {
+        // Qwen Code lists the account subscription's models first.
+        std::ranges::stable_partition(group.sources, [](const ProviderCatalogSource& source) {
+            return is_qwen_subscription_source(source.provider_name);
+        });
     }
 
     return group;

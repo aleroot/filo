@@ -13,6 +13,7 @@
 #include "KimiSessionStore.hpp"
 #include "MimoAuthenticationStrategy.hpp"
 #include "QwenOAuthFlow.hpp"
+#include "QwenSubscriptionAuthenticationStrategy.hpp"
 #include "XaiOAuthFlow.hpp"
 #include "XaiOAuthCredentialSource.hpp"
 #include "OpenAIOAuthFlow.hpp"
@@ -314,7 +315,8 @@ public:
         std::string_view /*config_dir*/) const override {
         throw std::runtime_error(
             "Qwen OAuth was discontinued on 2026-04-15 and does not support OAuth "
-            "for current Qwen Cloud APIs. Run `filo --auth qwen-coding` for Coding Plan, "
+            "for current Qwen Cloud APIs. Run `filo --auth qwen-subscription` for a "
+            "Qwen Plus/Pro subscription, `filo --auth qwen-coding` for Coding Plan, "
             "`filo --auth dashscope` for a DashScope API key, or `filo --auth qwen` "
             "for Token Plan.");
     }
@@ -322,7 +324,8 @@ public:
     std::vector<std::string> login(std::string_view /*config_dir*/) const override {
         throw std::runtime_error(
             "Qwen OAuth was discontinued on 2026-04-15 and does not support "
-            "current Qwen Cloud APIs. Use an API key instead.");
+            "current Qwen Cloud APIs. Use `filo --auth qwen-subscription` for a "
+            "Qwen Plus/Pro subscription, or an API key.");
     }
 };
 
@@ -416,6 +419,8 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     });
     manager.register_strategy(minimax_plan);
     manager.register_strategy(minimax_api);
+    // Qwen Code lists the account subscription first among the Qwen routes.
+    manager.register_strategy(make_qwen_subscription_authentication_strategy());
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         ApiKeyPromptStrategySpec{
             .login_provider = "qwen",

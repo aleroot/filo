@@ -42,11 +42,30 @@ public:
     }
 };
 
+class QwenSubscriptionModelCatalogSelector final : public IModelCatalogSelector {
+public:
+    [[nodiscard]] ModelCatalogSelection select(
+        std::span<const ModelInfo> models) const override {
+        if (models.empty()) {
+            return {
+                .error = "Could not load Qwen Subscription models. Your account is "
+                         "still signed in; try again, or run /auth qwen-subscription.",
+            };
+        }
+        return {.model = models.front().canonical_id};
+    }
+};
+
 } // namespace
 
 std::shared_ptr<const IModelCatalogSelector>
 make_qwen_model_catalog_selector() {
     return std::make_shared<QwenModelCatalogSelector>();
+}
+
+std::shared_ptr<const IModelCatalogSelector>
+make_qwen_subscription_model_catalog_selector() {
+    return std::make_shared<QwenSubscriptionModelCatalogSelector>();
 }
 
 } // namespace core::llm::providers

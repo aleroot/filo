@@ -812,6 +812,13 @@ std::string format_provider_setup_hint(std::string_view provider_name,
                "Alternatively set QWEN_CODING_PLAN_API_KEY. Endpoint: coding.dashscope.aliyuncs.com.\n"
                "This is not the Token Plan or public DashScope key.\n";
     }
+    if (provider_name.starts_with("qwen-subscription")) {
+        // Account sign-in, never an API key.
+        return normalized_auth == "oauth_qwen_subscription"
+            ? std::string{}
+            : "Run `filo --auth qwen-subscription` to sign in with your Qwen account "
+              "(Plus or Pro plan).\n";
+    }
     if ((provider_name == "qwen" || provider_name.starts_with("qwen-"))
         && api_key.empty()) {
         return "Run `filo --auth dashscope` and paste a Qwen API key, or set QWEN_API_KEY.\n"

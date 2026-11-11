@@ -285,6 +285,14 @@ TEST_CASE("Grok setup hint treats OAuth as a usable credential",
     CHECK_THAT(missing, Catch::Matchers::ContainsSubstring("Set XAI_API_KEY"));
 }
 
+TEST_CASE("Qwen Subscription setup hint asks for the account, never an API key",
+          "[tui][authentication][qwen][subscription]") {
+    CHECK(format_provider_setup_hint("qwen-subscription", "", "oauth_qwen_subscription").empty());
+    const auto missing = format_provider_setup_hint("qwen-subscription", "", "");
+    CHECK_THAT(missing, Catch::Matchers::ContainsSubstring("filo --auth qwen-subscription"));
+    CHECK_THAT(missing, !Catch::Matchers::ContainsSubstring("API key"));
+}
+
 TEST_CASE("Qwen setup hints distinguish Coding Plan, DashScope, and Token Plan",
           "[tui][authentication][qwen]") {
     const auto token_plan = format_provider_setup_hint("qwen-token-plan", "", "");

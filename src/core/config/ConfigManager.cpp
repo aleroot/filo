@@ -410,6 +410,16 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .default_model = "",
         };
     }
+    if (normalized == "qwen-subscription") {
+        // Reached with the strategy's canonical name (its aliases resolve in
+        // AuthenticationManager). The model is the gateway catalog's first
+        // entry, chosen by the provider's catalog selector.
+        return LoginProfileMapping{
+            .provider_name = "qwen-subscription",
+            .auth_type = "oauth_qwen_subscription",
+            .default_model = "",
+        };
+    }
     if (normalized == "qwen-coding" || normalized == "qwen_coding"
         || normalized == "qwencoding" || normalized == "qwen-coding-plan"
         || normalized == "coding-plan" || normalized == "codingplan"

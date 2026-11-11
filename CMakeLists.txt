@@ -275,6 +275,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/AntigravityUsageClient.cpp
     src/core/llm/CodexUsageClient.cpp
     src/core/llm/QwenModelTraits.cpp
+    src/core/llm/QwenSubscription.cpp
     src/core/llm/ZaiModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
     src/core/llm/transport/StreamResilience.cpp
@@ -295,6 +296,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/catalog/OllamaModelCatalogProvider.cpp
     src/core/llm/catalog/OpenAICompatibleModelCatalogProvider.cpp
     src/core/llm/catalog/QwenModelCatalogProvider.cpp
+    src/core/llm/catalog/QwenSubscriptionModelCatalogProvider.cpp
     src/core/llm/catalog/XaiModelCatalogProvider.cpp
     src/core/llm/MimoModelTraits.cpp
     src/core/llm/ModelRegistry.cpp
@@ -315,6 +317,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/GrokImage.cpp
     src/core/llm/protocols/GrokProtocol.cpp
     src/core/llm/protocols/DashScopeProtocol.cpp
+    src/core/llm/protocols/QwenSubscriptionProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/ClaudeProtocol.cpp
     src/core/llm/ClaudeBilling.cpp
@@ -364,6 +367,8 @@ set(FILO_CORE_SOURCES
     src/core/auth/KimiSessionStore.cpp
     src/core/auth/MimoOAuthFlow.cpp
     src/core/auth/MimoAuthenticationStrategy.cpp
+    src/core/auth/QwenSubscriptionAuthenticationStrategy.cpp
+    src/core/auth/QwenSubscriptionOAuthFlow.cpp
     src/core/auth/QwenOAuthFlow.cpp
     src/core/auth/XaiOAuthFlow.cpp
     src/core/auth/OAuthTokenManager.cpp
@@ -513,6 +518,8 @@ set(FILO_CORE_SOURCES
     src/core/tools/KimiWebSearchBackend.cpp
     src/core/tools/MiniMaxWebSearchBackend.cpp
     src/core/tools/MimoWebSearchBackend.cpp
+    src/core/tools/McpHttpToolCall.cpp
+    src/core/tools/QwenSubscriptionWebSearchBackend.cpp
     src/core/tools/OpenAIWebSearchBackend.cpp
     src/core/tools/GrokWebSearchBackend.cpp
     src/core/tools/ZaiWebBackend.cpp
@@ -827,6 +834,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
+    tests/test_qwen_subscription.cpp
     tests/test_xai_oauth.cpp
     tests/test_zai_provider.cpp
     tests/test_ollama_provider.cpp
@@ -900,6 +908,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_main_exit.cpp
     tests/test_prompter_mode.cpp
     tests/test_mcp_client_session.cpp
+    tests/test_mcp_http_tool_call.cpp
     tests/test_mcp_oauth.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
@@ -1115,6 +1124,7 @@ source_group(
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp
         tests/test_qwen_oauth.cpp
+        tests/test_qwen_subscription.cpp
         tests/test_zai_provider.cpp
         tests/test_ollama_provider.cpp
         tests/test_llamacpp_provider.cpp
@@ -1172,6 +1182,7 @@ source_group(
         tests/test_main_exit.cpp
         tests/test_prompter_mode.cpp
         tests/test_mcp_client_session.cpp
+        tests/test_mcp_http_tool_call.cpp
     tests/test_mcp_oauth.cpp
         tests/test_integration_daemon_reliability.cpp
         tests/test_integration_mcp_client_session.cpp

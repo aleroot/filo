@@ -452,6 +452,26 @@ TEST_CASE("Qwen catalog preserves separate subscription identities for shared mo
     CHECK_FALSE(coding->includes_api_model("qwen-image-2.0"));
 }
 
+TEST_CASE("Qwen Subscription is listed first and offers only its gateway's models",
+          "[llm][provider-catalog][qwen][subscription]") {
+    const std::vector<std::string> providers{"qwen", "qwen-token-plan", "qwen-subscription"};
+    const auto group = core::llm::provider_catalog_group_for("qwen", providers);
+
+    REQUIRE(group.sources.size() == 3);
+    CHECK(group.sources[0].provider_name == "qwen-subscription");
+    CHECK(group.sources[1].provider_name == "qwen");
+    CHECK(group.sources[2].provider_name == "qwen-token-plan");
+
+    const auto* account = group.find_source("qwen-subscription");
+    REQUIRE(account != nullptr);
+    CHECK(account->category_label == "Qwen Subscription (Qwen account).");
+    for (const auto& model : core::llm::ModelRegistry::instance().get_by_provider("qwen")) {
+        CAPTURE(model.canonical_id);
+        CHECK_FALSE(account->includes_registry_model(model.canonical_id));
+    }
+    CHECK(account->includes_api_model("qwen4-plus"));
+}
+
 TEST_CASE("Provider catalog grouping lists Gemini API and Antigravity under one Gemini",
           "[llm][provider-catalog]") {
     const std::vector<std::string> providers{"claude", "gemini", "gemini-oauth", "gemini-pro"};

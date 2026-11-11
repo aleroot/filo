@@ -2,6 +2,7 @@
 
 #include "../auth/ICredentialSource.hpp"
 #include "MiniMaxEndpoints.hpp"
+#include "QwenSubscription.hpp"
 #include "core/config/ConfigManager.hpp"
 
 #include <algorithm>
@@ -136,6 +137,19 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         { "QWEN_CODING_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
         core::auth::BillingKind::Subscription,
+    },
+    // Qwen Account with a Plus/Pro subscription: OAuth only, fixed gateway
+    // (QwenSubscription.hpp). Its own registry key keeps API-key Qwen models
+    // out of a catalog the gateway did not list.
+    BuiltinProviderDefinition{
+        qwen_subscription::kProviderName, qwen_subscription::kProviderName, "qwen",
+        config::ApiType::OpenAI,
+        qwen_subscription::kBaseUrl,
+        {},
+        ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
+        {},
+        qwen_subscription::kDisplayName,
     },
     BuiltinProviderDefinition{
         "grok", "grok", "grok", config::ApiType::OpenAI,

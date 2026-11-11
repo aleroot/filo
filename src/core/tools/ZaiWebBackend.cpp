@@ -1,5 +1,6 @@
 #include "WebBackendAdapters.hpp"
 
+#include "McpHttpToolCall.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
 #include "WebBackendSupport.hpp"
@@ -8,17 +9,12 @@
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
-#include "core/version/Version.hpp"
-
-#include <cpr/cpr.h>
 #include <simdjson.h>
 
 #include <algorithm>
 #include <array>
 #include <expected>
-#include <format>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -37,25 +33,6 @@ constexpr std::string_view kMcpProtocolVersion = "2024-11-05";
     }
     return metadata.api_type == core::config::ApiType::OpenAI
         || metadata.api_type == core::config::ApiType::Anthropic;
-}
-
-void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
-    for (const auto& [key, value] : auth.headers) {
-        headers[key] = value;
-    }
-}
-
-[[nodiscard]] cpr::Header zai_mcp_headers(const core::auth::AuthInfo& auth,
-                                          std::string_view session_id = {}) {
-    cpr::Header headers{
-        {"Content-Type", "application/json"},
-        {"Accept", "application/json, text/event-stream"},
-    };
-    add_auth_headers(headers, auth);
-    if (!session_id.empty()) {
-        headers["Mcp-Session-Id"] = std::string(session_id);
-    }
-    return headers;
 }
 
 [[nodiscard]] std::expected<void, std::string> validate_fetch_target(std::string_view url) {
@@ -91,147 +68,34 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     return base_url + "/api/mcp/" + std::string(server) + "/mcp";
 }
 
-[[nodiscard]] std::string mcp_initialize_payload() {
-    return std::format(
-        R"({{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","capabilities":{{}},"clientInfo":{{"name":"filo","version":"{}"}}}}}})",
-        kMcpProtocolVersion,
-        core::version::value);
-}
-
-[[nodiscard]] std::string mcp_initialized_payload() {
-    return R"({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})";
-}
-
-[[nodiscard]] std::string mcp_search_payload(const SearchRequest& request) {
-    core::utils::JsonWriter writer(512);
+/// `web_search_prime` arguments.
+[[nodiscard]] std::string mcp_search_arguments(const SearchRequest& request) {
+    core::utils::JsonWriter writer(256);
     {
-        auto _root = writer.object();
-        writer.kv_str("jsonrpc", "2.0").comma()
-              .kv_num("id", 3).comma()
-              .kv_str("method", "tools/call").comma()
-              .key("params");
-        {
-            auto _params = writer.object();
-            writer.kv_str("name", "web_search_prime").comma()
-                  .key("arguments");
-            {
-                auto _args = writer.object();
-                writer.kv_str("search_query", request.query).comma()
-                      .kv_str("content_size", request.limit > 10 ? "high" : "medium").comma()
-                      .kv_str("location", "us");
-                if (!request.domains.allowed_domains.empty()) {
-                    writer.comma().kv_str(
-                        "search_domain_filter",
-                        request.domains.allowed_domains.front());
-                }
-            }
+        auto _args = writer.object();
+        writer.kv_str("search_query", request.query).comma()
+              .kv_str("content_size", request.limit > 10 ? "high" : "medium").comma()
+              .kv_str("location", "us");
+        if (!request.domains.allowed_domains.empty()) {
+            writer.comma().kv_str(
+                "search_domain_filter",
+                request.domains.allowed_domains.front());
         }
     }
     return std::move(writer).take();
 }
 
-[[nodiscard]] std::string mcp_reader_payload(const FetchRequest& request) {
-    core::utils::JsonWriter writer(512);
+/// `webReader` arguments.
+[[nodiscard]] std::string mcp_reader_arguments(const FetchRequest& request) {
+    core::utils::JsonWriter writer(256);
     {
-        auto _root = writer.object();
-        writer.kv_str("jsonrpc", "2.0").comma()
-              .kv_num("id", 3).comma()
-              .kv_str("method", "tools/call").comma()
-              .key("params");
-        {
-            auto _params = writer.object();
-            writer.kv_str("name", "webReader").comma()
-                  .key("arguments");
-            {
-                auto _args = writer.object();
-                writer.kv_str("url", request.url).comma()
-                      .kv_num("timeout", 20).comma()
-                      .kv_str("return_format", "markdown").comma()
-                      .kv_bool("retain_images", false);
-            }
-        }
+        auto _args = writer.object();
+        writer.kv_str("url", request.url).comma()
+              .kv_num("timeout", 20).comma()
+              .kv_str("return_format", "markdown").comma()
+              .kv_bool("retain_images", false);
     }
     return std::move(writer).take();
-}
-
-[[nodiscard]] std::optional<std::string_view>
-find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
-    for (const auto& [name, value] : headers) {
-        if (core::utils::ascii::iequals(name, key)) return value;
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] std::expected<std::string, std::string>
-extract_mcp_text_payload(std::string_view body) {
-    std::string data_payload;
-    std::size_t pos = 0;
-    while (pos < body.size()) {
-        const std::size_t line_end = body.find('\n', pos);
-        std::string_view line = body.substr(
-            pos,
-            line_end == std::string_view::npos ? body.size() - pos : line_end - pos);
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-        if (line.starts_with("data:")) {
-            std::string_view data = line.substr(5);
-            data = core::utils::str::trim_ascii_view(data);
-            if (!data.empty()) {
-                if (!data_payload.empty()) data_payload.push_back('\n');
-                data_payload.append(data.data(), data.size());
-            }
-        }
-        if (line_end == std::string_view::npos) break;
-        pos = line_end + 1;
-    }
-    if (data_payload.empty()) {
-        data_payload.assign(body.data(), body.size());
-    }
-
-    simdjson::dom::parser parser;
-    simdjson::padded_string padded(data_payload);
-    simdjson::dom::element doc;
-    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
-        return std::unexpected("Z.ai MCP response was not valid JSON-RPC.");
-    }
-
-    simdjson::dom::object error;
-    if (doc["error"].get_object().get(error) == simdjson::SUCCESS) {
-        std::string_view message;
-        if (error["message"].get(message) == simdjson::SUCCESS) {
-            return std::unexpected(std::string(message));
-        }
-        return std::unexpected("Z.ai MCP tool call failed.");
-    }
-
-    simdjson::dom::object result;
-    if (doc["result"].get_object().get(result) != simdjson::SUCCESS) {
-        return std::unexpected("Z.ai MCP response did not contain a result.");
-    }
-
-    bool is_error = false;
-    [[maybe_unused]] auto _ = result["isError"].get(is_error);
-
-    std::string text;
-    simdjson::dom::array content;
-    if (result["content"].get_array().get(content) == simdjson::SUCCESS) {
-        for (auto element : content) {
-            simdjson::dom::object item;
-            if (element.get_object().get(item) != simdjson::SUCCESS) continue;
-            std::string_view item_text;
-            if (item["text"].get(item_text) == simdjson::SUCCESS && !item_text.empty()) {
-                if (!text.empty()) text += "\n\n";
-                text.append(item_text.data(), item_text.size());
-            }
-        }
-    }
-
-    if (is_error) {
-        return std::unexpected(text.empty() ? "Z.ai MCP tool call failed." : text);
-    }
-    if (text.empty()) {
-        return std::unexpected("Z.ai MCP response did not contain text content.");
-    }
-    return text;
 }
 
 [[nodiscard]] std::string unwrap_json_string_literal(std::string text) {
@@ -252,61 +116,26 @@ extract_mcp_text_payload(std::string_view body) {
 }
 
 [[nodiscard]] std::expected<std::string, std::string>
-call_zai_mcp_tool(const core::auth::AuthInfo& auth,
-                  std::string_view url,
-                  std::string_view call_payload,
-                  std::string_view tool_label) {
-    const cpr::Response init = cpr::Post(
-        cpr::Url{std::string(url)},
-        zai_mcp_headers(auth),
-        cpr::Body{mcp_initialize_payload()},
-        cpr::Timeout{kZaiWebTimeoutMs});
-    if (init.error.code != cpr::ErrorCode::OK) {
-        return std::unexpected(std::format(
-            "Z.ai {} MCP initialize request failed: {}",
-            tool_label,
-            init.error.message));
+call_zai_mcp_tool(const ToolInvocationContext& context,
+                  core::auth::ICredentialSource& credentials,
+                  std::string url,
+                  std::string tool,
+                  std::string arguments,
+                  std::string_view service) {
+    auto text = detail::call_mcp_http_tool({
+        .url = std::move(url),
+        .tool = std::move(tool),
+        .arguments_json = std::move(arguments),
+        .protocol_version = kMcpProtocolVersion,
+        .credentials = &credentials,
+        .timeout_ms = kZaiWebTimeoutMs,
+        .cancelled = context.cancellation_requested,
+    });
+    if (!text) return std::unexpected(detail::describe_mcp_failure(text.error(), service));
+    if (text->empty()) {
+        return std::unexpected(std::string(service) + " response did not contain text content.");
     }
-    if (init.status_code < 200 || init.status_code >= 300) {
-        return std::unexpected(std::format(
-            "Z.ai {} MCP initialize failed with HTTP {}: {}",
-            tool_label,
-            init.status_code,
-            init.text.substr(0, 1000)));
-    }
-
-    const auto session_id = find_header_case_insensitive(init.header, "mcp-session-id");
-    if (!session_id.has_value() || session_id->empty()) {
-        return std::unexpected(std::format(
-            "Z.ai {} MCP initialize response did not include mcp-session-id.",
-            tool_label));
-    }
-
-    (void)cpr::Post(
-        cpr::Url{std::string(url)},
-        zai_mcp_headers(auth, *session_id),
-        cpr::Body{mcp_initialized_payload()},
-        cpr::Timeout{kZaiWebTimeoutMs});
-
-    const cpr::Response response = cpr::Post(
-        cpr::Url{std::string(url)},
-        zai_mcp_headers(auth, *session_id),
-        cpr::Body{std::string(call_payload)},
-        cpr::Timeout{kZaiWebTimeoutMs});
-    if (response.error.code != cpr::ErrorCode::OK) {
-        return std::unexpected(std::format(
-            "Z.ai {} MCP tool request failed: {}",
-            tool_label,
-            response.error.message));
-    }
-    if (response.status_code < 200 || response.status_code >= 300) {
-        return std::unexpected(std::format(
-            "Z.ai {} MCP tool failed with HTTP {}: {}",
-            tool_label,
-            response.status_code,
-            response.text.substr(0, 1000)));
-    }
-    return extract_mcp_text_payload(response.text);
+    return std::move(*text);
 }
 
 void parse_text_content(SearchResponse& response, std::string_view text) {
@@ -522,12 +351,10 @@ public:
                 "Remove the filter or use an Anthropic/Claude provider for domain-filtered search.");
         }
 
-        const auto auth = metadata->credential_source->get_auth();
         const auto mcp_text = call_zai_mcp_tool(
-            auth,
-            mcp_api_url(metadata->base_url, "web_search_prime"),
-            mcp_search_payload(request),
-            "web search");
+            context, *metadata->credential_source,
+            mcp_api_url(metadata->base_url, "web_search_prime"), "web_search_prime",
+            mcp_search_arguments(request), "Z.ai web search");
         if (!mcp_text.has_value()) return std::unexpected(mcp_text.error());
 
         simdjson::dom::parser parser;
@@ -572,12 +399,10 @@ public:
             return std::unexpected("Z.ai URL reader requires an active Z.ai provider with credentials.");
         }
 
-        const auto auth = metadata->credential_source->get_auth();
         const auto mcp_text = call_zai_mcp_tool(
-            auth,
-            mcp_api_url(metadata->base_url, "web_reader"),
-            mcp_reader_payload(request),
-            "URL reader");
+            context, *metadata->credential_source,
+            mcp_api_url(metadata->base_url, "web_reader"), "webReader",
+            mcp_reader_arguments(request), "Z.ai URL reader");
         if (!mcp_text.has_value()) return std::unexpected(mcp_text.error());
 
         simdjson::dom::parser parser;

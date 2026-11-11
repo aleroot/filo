@@ -23,6 +23,16 @@ struct DashScopeWebSearchOptions {
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_dashscope_web_search_backend(
     DashScopeWebSearchOptions options = {});
 
+// Qwen Subscription search: the gateway's MCP `web_search` tool, called with
+// the account session (Qwen Code tools/web-search-subscription.ts). The URL is
+// injectable for tests only; production always targets the official host.
+struct QwenSubscriptionWebSearchOptions {
+    std::string search_url = {};
+    int timeout_ms = 30000;
+};
+[[nodiscard]] std::shared_ptr<IWebSearchBackend> make_qwen_subscription_web_search_backend(
+    QwenSubscriptionWebSearchOptions options = {});
+
 // Shared by GrokWebSearchBackend and its tests. xAI web search is a Responses
 // API turn whose only tool is `web_search`. `model` is the session model
 // (grok-4.7 searches as grok-4.7); this is not a hosted tool on the main turn.
