@@ -18,6 +18,7 @@
 #include "core/llm/protocols/QwenSubscriptionProtocol.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <filesystem>
@@ -25,6 +26,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 #include <thread>
 
 using namespace core::llm;
@@ -342,7 +344,7 @@ TEST_CASE("filo --auth offers the Qwen account sign-in with its own session stor
     TempDir config;
     const auto manager = core::auth::AuthenticationManager::create_with_defaults(config.path().string());
     const auto providers = manager.available_login_providers();
-    CHECK(std::ranges::find(providers, "qwen-subscription") != providers.end());
+    CHECK(std::ranges::find(providers, std::string_view{"qwen-subscription"}) != providers.end());
     const auto described = manager.describe_provider("qwen-account");
     REQUIRE(described);
     CHECK(described->login_provider == "qwen-subscription");

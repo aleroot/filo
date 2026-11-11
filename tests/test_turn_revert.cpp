@@ -671,8 +671,20 @@ TEST_CASE("Recovery refuses a live recorded process group and a corrupted origin
     put(file, "changed\n");
     // A group ID is never used to kill a process after restart: even PID reuse
     // must cause a conservative refusal instead of signalling an unrelated job.
-    recovery.process_group(::getpgrp());
+    // A child leads the live group: the test's own group may be 1 (PID 1 in a
+    // container), which recovery rightly ignores.
+    const pid_t group = ::fork();
+    REQUIRE(group >= 0);
+    if (group == 0) {
+        ::setpgid(0, 0);
+        ::pause();
+        ::_exit(0);
+    }
+    ::setpgid(group, group);
+    recovery.process_group(group);
     CHECK_FALSE(core::changes::TurnRecovery::reconcile(checkpoint, dir.path, mutations));
+    ::kill(group, SIGKILL);
+    ::waitpid(group, nullptr, 0);
     recovery.after(paths);
     recovery.finish();
     for (const auto& blob : fs::directory_iterator(checkpoint.parent_path() / "objects")) put(blob.path(), "corrupted");

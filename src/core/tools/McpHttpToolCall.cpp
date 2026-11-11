@@ -182,7 +182,7 @@ private:
     }
     if (simdjson::dom::object error; root["error"].get(error) == simdjson::SUCCESS) {
         std::string_view text;
-        (void)error["message"].get(text);
+        if (error["message"].get(text) != simdjson::SUCCESS) text = {};
         return std::unexpected(McpHttpFailure{.kind = Kind::Rpc, .stage = kStage,
                                               .detail = std::string(text)});
     }
@@ -193,8 +193,8 @@ private:
     std::string text;
     if (simdjson::dom::array content; result["content"].get(content) == simdjson::SUCCESS) {
         for (const auto block : content) {
-            std::string_view type = "text";
-            (void)block["type"].get(type);
+            std::string_view type;
+            if (block["type"].get(type) != simdjson::SUCCESS) type = "text";
             std::string_view item;
             if (type != "text" || block["text"].get(item) != simdjson::SUCCESS || item.empty()) {
                 continue;
