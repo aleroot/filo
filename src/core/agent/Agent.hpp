@@ -21,6 +21,7 @@
 #include "AutoTurnCoordinator.hpp"
 #include "HistoryCompactionPlanner.hpp"
 #include "HistoryCompactor.hpp"
+#include "IdleSummary.hpp"
 #include "PermissionGate.hpp"
 #include "PromptCacheGuard.hpp"
 #include "PromptCacheTracker.hpp"
@@ -297,23 +298,22 @@ public:
 
     /// Writes a compaction summary as a continuation of the last request,
     /// so it re-reads the warm prompt cache, and keeps it aside without
-    /// touching the history: use_idle_compaction() applies it later, and
-    /// any change to the conversation makes it stale. The request renews the
+    /// touching the history: use_idle_summary() applies it later, and any
+    /// change to the conversation makes it stale. The request renews the
     /// cache the way a keep-warm replay does. Needs a replayable cache
     /// (PromptCacheGuard::can_keep_warm); `finished` runs once, on a worker
     /// thread unless nothing could start, with whether a summary is now kept.
-    void prepare_idle_compaction_async(
-        std::function<void(const std::string&)> status_callback,
-        std::function<void(bool prepared)> finished_callback);
-    /// True while a summary from prepare_idle_compaction_async still
-    /// describes the conversation.
-    [[nodiscard]] bool has_idle_compaction() const;
+    void summarize_idle_async(std::function<void(const std::string&)> status_callback,
+                              std::function<void(bool kept)> finished_callback);
+    /// True while a summary from summarize_idle_async still describes the
+    /// conversation.
+    [[nodiscard]] bool has_idle_summary() const;
     /// Replaces the history with the kept summary, as a compaction would,
     /// when it still describes the conversation; true when it did. The kept
     /// summary is gone afterwards either way.
-    bool use_idle_compaction();
+    bool use_idle_summary();
     /// Drops the kept summary, if any.
-    void discard_idle_compaction();
+    void drop_idle_summary();
     void undo_last();
     std::string last_user_message();
     [[nodiscard]] bool has_user_turn() const;
@@ -692,16 +692,8 @@ private:
     std::uint64_t history_revision_ = 0;
     std::uint64_t conversation_generation_ = 0;
     bool compaction_in_progress_ = false;
-    /// A summary written ahead while the conversation idled, for the history
-    /// revision it describes. Guarded by history_mutex_.
-    struct IdleCompaction {
-        std::uint64_t revision = 0;
-        std::string summary;
-        HistoryCompactionPlan plan;
-        std::string active_skill_context;
-    };
-    std::optional<IdleCompaction> idle_compaction_;
-    bool idle_compaction_in_flight_ = false;
+    // Guarded by history_mutex_.
+    IdleSummary idle_summary_;
     // Guarded by history_mutex_.
     PromptCacheTracker prompt_cache_;
     AgentMode current_mode_ = AgentMode::Build;

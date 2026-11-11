@@ -233,7 +233,7 @@ struct PromptCacheWatch::Shared final : std::enable_shared_from_this<Shared> {
         }
         // A summary written for this idle spell already decides what the
         // next prompt sends; there is nothing left to ask.
-        if (runtime->agent()->has_idle_compaction()) return;
+        if (runtime->agent()->has_idle_summary()) return;
         if (due->policy.should_compact_idle(due->assessment.profile)) {
             compact_idle(runtime);
             return;
@@ -268,7 +268,7 @@ struct PromptCacheWatch::Shared final : std::enable_shared_from_this<Shared> {
     /// Writes the summary the next prompt uses if it comes after the cache
     /// expired. Asks as usual when no summary could be written.
     void compact_idle(const ThreadRuntime::Ptr& runtime) {
-        runtime->agent()->prepare_idle_compaction_async(
+        runtime->agent()->summarize_idle_async(
             guarded(runtime,
                     [](Shared& self, const ThreadRuntime::Ptr& target, const std::string& status) {
                         self.notify(target, status);
@@ -419,11 +419,11 @@ prompt_cache::SendChoice PromptCacheWatch::confirm_send(const ThreadRuntime::Ptr
     // A summary written while the session idled replaces the conversation
     // only once its cache is gone; over a warm cache the full conversation
     // is the cheaper and the better prompt.
-    if (assessment.expired() && runtime->agent()->use_idle_compaction()) {
+    if (assessment.expired() && runtime->agent()->use_idle_summary()) {
         shared_->notify(runtime, prompt_cache::idle_compaction_used_notice());
         return prompt_cache::SendChoice::Send;
     }
-    runtime->agent()->discard_idle_compaction();
+    runtime->agent()->drop_idle_summary();
     if (!shared_->guard().should_confirm_send(assessment)) {
         return prompt_cache::SendChoice::Send;
     }

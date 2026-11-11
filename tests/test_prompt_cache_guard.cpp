@@ -599,15 +599,42 @@ TEST_CASE("A cache that a replay does not renew is never replayed", "[prompt-cac
 
 namespace {
 
-bool prepare_idle_compaction(const std::shared_ptr<core::agent::Agent>& agent) {
+bool summarize_idle(const std::shared_ptr<core::agent::Agent>& agent) {
     std::promise<bool> finished;
     auto prepared = finished.get_future();
-    agent->prepare_idle_compaction_async({}, [&finished](bool ok) { finished.set_value(ok); });
+    agent->summarize_idle_async({}, [&finished](bool ok) { finished.set_value(ok); });
     REQUIRE(prepared.wait_for(5s) == std::future_status::ready);
     return prepared.get();
 }
 
 } // namespace
+
+TEST_CASE("IdleSummary hands out a summary only for the revision it describes",
+          "[prompt-cache][idle-compaction]") {
+    core::agent::IdleSummary slot;
+    REQUIRE(slot.begin(7));
+    CHECK_FALSE(slot.begin(7));  // one write at a time
+    slot.keep(7, {.text = "summary"});
+    slot.finish();
+    CHECK(slot.holds(7));
+    CHECK_FALSE(slot.begin(7));  // already kept for this revision
+    CHECK_FALSE(slot.holds(8));
+
+    SECTION("a stale take empties the slot") {
+        CHECK_FALSE(slot.take(8).has_value());
+        CHECK_FALSE(slot.holds(7));
+    }
+    SECTION("a current take hands it over once") {
+        const auto summary = slot.take(7);
+        REQUIRE(summary.has_value());
+        CHECK(summary->text == "summary");
+        CHECK_FALSE(slot.take(7).has_value());
+    }
+    SECTION("a new revision starts a new write") {
+        CHECK(slot.begin(8));
+        CHECK_FALSE(slot.holds(7));
+    }
+}
 
 TEST_CASE("An idle summary continues the cached request and leaves the history alone",
           "[prompt-cache][agent][idle-compaction]") {
@@ -617,8 +644,8 @@ TEST_CASE("An idle summary continues the cached request and leaves the history a
     const auto history_before = agent->get_history();
     const auto first_exchange = *agent->prompt_cache_state().last_exchange_at;
 
-    REQUIRE(prepare_idle_compaction(agent));
-    CHECK(agent->has_idle_compaction());
+    REQUIRE(summarize_idle(agent));
+    CHECK(agent->has_idle_summary());
     CHECK(agent->get_history().size() == history_before.size());
 
     const auto requests = provider->requests();
@@ -644,28 +671,28 @@ TEST_CASE("An idle summary continues the cached request and leaves the history a
     CHECK(*agent->prompt_cache_state().last_exchange_at >= first_exchange);
 
     SECTION("it replaces the history only when used") {
-        REQUIRE(agent->use_idle_compaction());
-        CHECK_FALSE(agent->has_idle_compaction());
+        REQUIRE(agent->use_idle_summary());
+        CHECK_FALSE(agent->has_idle_summary());
         CHECK(agent->get_context_summary().find("ok") != std::string::npos);
         // A compaction starts a new prefix: nothing is left to track.
         CHECK_FALSE(agent->prompt_cache_state().last_exchange_at.has_value());
-        CHECK_FALSE(agent->use_idle_compaction());
+        CHECK_FALSE(agent->use_idle_summary());
     }
     SECTION("a later turn makes it stale") {
         test_support::send_prompt_and_wait(agent, "again");
-        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(agent->has_idle_summary());
         const auto history_after_turn = agent->get_history().size();
-        CHECK_FALSE(agent->use_idle_compaction());
+        CHECK_FALSE(agent->use_idle_summary());
         CHECK(agent->get_history().size() == history_after_turn);
     }
     SECTION("it is written once per idle spell") {
-        CHECK_FALSE(prepare_idle_compaction(agent));
+        CHECK_FALSE(summarize_idle(agent));
         CHECK(provider->requests().size() == 2);
     }
-    SECTION("discarding it keeps the conversation") {
-        agent->discard_idle_compaction();
-        CHECK_FALSE(agent->has_idle_compaction());
-        CHECK_FALSE(agent->use_idle_compaction());
+    SECTION("dropping it keeps the conversation") {
+        agent->drop_idle_summary();
+        CHECK_FALSE(agent->has_idle_summary());
+        CHECK_FALSE(agent->use_idle_summary());
         CHECK(agent->get_history().size() == history_before.size());
     }
 }
@@ -676,8 +703,8 @@ TEST_CASE("No idle summary is kept when one cannot be written from the cache",
         auto agent = test_support::make_prompt_cache_agent(
             std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(5min, false)));
         test_support::send_prompt_and_wait(agent, "hello");
-        CHECK_FALSE(prepare_idle_compaction(agent));
-        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(summarize_idle(agent));
+        CHECK_FALSE(agent->has_idle_summary());
     }
     SECTION("the model calls a tool instead of summarizing") {
         auto provider = std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(1h, true));
@@ -685,14 +712,14 @@ TEST_CASE("No idle summary is kept when one cannot be written from the cache",
         test_support::send_prompt_and_wait(agent, "hello");
         const auto history_before = agent->get_history().size();
         provider->reply_with_tool_call();
-        CHECK_FALSE(prepare_idle_compaction(agent));
-        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(summarize_idle(agent));
+        CHECK_FALSE(agent->has_idle_summary());
         CHECK(agent->get_history().size() == history_before);
     }
     SECTION("there was no exchange yet") {
         auto agent = test_support::make_prompt_cache_agent(
             std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(1h, true)));
-        CHECK_FALSE(prepare_idle_compaction(agent));
+        CHECK_FALSE(summarize_idle(agent));
     }
 }
 

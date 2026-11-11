@@ -590,13 +590,6 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 
 `--steering` on the command line overrides the saved `steering_mode` for that run only.
 
-The cache settings watch the provider's prompt cache. Claude's cache lives 5
-minutes, except that with a Claude subscription (`oauth_claude`) your own
-conversation asks for the 1-hour cache, as Claude Code does within plan
-usage. Subagents, reviews, compaction and other short-lived requests keep the
-5-minute cache. Set `"prompt_cache_ttl": "5m"` or `"1h"` on a provider to use
-one lifetime for every request.
-
 The two **Storage** settings are read from the user `settings.json` only, so a
 repository's `.filo/settings.json` can never decide what is deleted. They are
 applied in the background each time the interactive app starts:

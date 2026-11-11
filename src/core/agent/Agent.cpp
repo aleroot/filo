@@ -1661,52 +1661,62 @@ void Agent::refresh_prompt_cache_async(std::function<void(PromptCacheRefresh)> d
     }
 }
 
-void Agent::prepare_idle_compaction_async(
-    std::function<void(const std::string&)> status_callback,
-    std::function<void(bool prepared)> finished_callback) {
+namespace {
+
+/// The messages the history gained after a cached request of
+/// `request_size` messages, when they are only its final answer, so a
+/// further user message can continue that request. Empty otherwise: an
+/// unanswered request, a pending tool call, or a request that no longer
+/// leads up to the history.
+[[nodiscard]] std::optional<std::vector<core::llm::Message>> final_answer_after(
+    const std::vector<core::llm::Message>& history, std::size_t request_size) {
+    if (request_size >= history.size()) return std::nullopt;
+    std::vector<core::llm::Message> answer(
+        history.begin() + static_cast<std::ptrdiff_t>(request_size), history.end());
+    const bool final_text = std::ranges::all_of(answer, [](const core::llm::Message& message) {
+        return message.role == "assistant" && message.tool_calls.empty();
+    });
+    if (!final_text) return std::nullopt;
+    return answer;
+}
+
+} // namespace
+
+void Agent::summarize_idle_async(std::function<void(const std::string&)> status_callback,
+                                 std::function<void(bool kept)> finished_callback) {
     std::optional<PromptCacheTracker::Replay> replay;
-    std::vector<core::llm::Message> answer;
-    HistoryCompactionPlan plan;
-    std::string active_skill_context;
+    std::optional<std::vector<core::llm::Message>> answer;
+    IdleSummary::Summary draft;
     std::uint64_t base_revision = 0;
     {
         std::lock_guard lock(history_mutex_);
         replay = prompt_cache_.replay();
-        const bool already_kept = idle_compaction_.has_value()
-            && idle_compaction_->revision == history_revision_;
-        if (replay.has_value() && !already_kept && !idle_compaction_in_flight_
-            && !compaction_in_progress_ && !turn_in_progress_.load(std::memory_order_acquire)
-            && replay->history_size <= history_.size()) {
-            // The history gained only the cached request's answer since, or
-            // the request no longer leads up to it and cannot be continued.
-            answer.assign(history_.begin() + static_cast<std::ptrdiff_t>(replay->history_size),
-                          history_.end());
-            if (std::ranges::all_of(answer, [](const core::llm::Message& message) {
-                    return message.role == "assistant";
-                })) {
-                plan = HistoryCompactionPlanner::plan(
-                    history_, context_summary_, compaction_policy(provider_, active_model_));
-                active_skill_context = collect_active_skill_context(history_);
-                base_revision = history_revision_;
-                idle_compaction_in_flight_ = true;
-            } else {
-                replay.reset();
-            }
-        } else {
-            replay.reset();
+        if (replay.has_value() && !compaction_in_progress_
+            && !turn_in_progress_.load(std::memory_order_acquire)) {
+            answer = final_answer_after(history_, replay->history_size);
+        }
+        if (answer.has_value()) {
+            draft.plan = HistoryCompactionPlanner::plan(
+                history_, context_summary_, compaction_policy(provider_, active_model_));
+            draft.active_skill_context = collect_active_skill_context(history_);
+            base_revision = history_revision_;
+        }
+        // Claimed last, so nothing that throws can leave the write claimed.
+        if (answer.has_value() && !idle_summary_.begin(history_revision_)) {
+            answer.reset();
         }
     }
-    if (!replay.has_value()) {
+    if (!answer.has_value()) {
         if (finished_callback) finished_callback(false);
         return;
     }
 
     auto self = shared_from_this();
-    auto prepared = std::make_shared<std::atomic<bool>>(false);
+    auto kept = std::make_shared<std::atomic<bool>>(false);
     const auto started_at = std::chrono::system_clock::now();
     history_compactor_.compact_async(
         HistoryCompactionRequest{
-            .history = std::move(answer),
+            .history = std::move(*answer),
             .provider = replay->provider,
             .model = replay->model,
             .reason = HistoryCompactionReason::Idle,
@@ -1715,54 +1725,45 @@ void Agent::prepare_idle_compaction_async(
         HistoryCompactionCallbacks{
             .on_status = std::move(status_callback),
             .on_summary =
-                [self, base_revision, prepared, started_at,
-                 request = replay->request,
-                 plan = std::move(plan),
-                 active_skill_context = std::move(active_skill_context)](std::string summary) mutable {
+                [self, base_revision, kept, started_at, request = replay->request,
+                 draft = std::move(draft)](std::string text) mutable {
                 std::lock_guard lock(self->history_mutex_);
                 // The summary read the cached prefix, which renewed it.
                 self->prompt_cache_.renewed(request, started_at);
                 if (self->history_revision_ != base_revision) {
                     return HistoryCompactionApplyStatus::Stale;
                 }
-                self->idle_compaction_ = IdleCompaction{
-                    .revision = base_revision,
-                    .summary = std::move(summary),
-                    .plan = std::move(plan),
-                    .active_skill_context = std::move(active_skill_context),
-                };
-                prepared->store(true, std::memory_order_release);
+                draft.text = std::move(text);
+                self->idle_summary_.keep(base_revision, std::move(draft));
+                kept->store(true, std::memory_order_release);
                 return HistoryCompactionApplyStatus::Applied;
             },
-            .on_finished = [self, prepared, finished_callback = std::move(finished_callback)]() {
+            .on_finished = [self, kept, finished_callback = std::move(finished_callback)]() {
                 {
                     std::lock_guard lock(self->history_mutex_);
-                    self->idle_compaction_in_flight_ = false;
+                    self->idle_summary_.finish();
                 }
                 if (finished_callback) {
-                    finished_callback(prepared->load(std::memory_order_acquire));
+                    finished_callback(kept->load(std::memory_order_acquire));
                 }
             },
         });
 }
 
-bool Agent::has_idle_compaction() const {
+bool Agent::has_idle_summary() const {
     std::lock_guard lock(history_mutex_);
-    return idle_compaction_.has_value() && idle_compaction_->revision == history_revision_;
+    return idle_summary_.holds(history_revision_);
 }
 
-bool Agent::use_idle_compaction() {
+bool Agent::use_idle_summary() {
     std::shared_ptr<core::llm::LLMProvider> provider;
     {
         std::lock_guard lock(history_mutex_);
-        auto kept = std::exchange(idle_compaction_, std::nullopt);
-        if (!kept.has_value() || kept->revision != history_revision_) {
-            return false;
-        }
-        apply_compaction_unlocked(
-            std::move(kept->summary),
-            std::move(kept->plan),
-            std::move(kept->active_skill_context));
+        auto summary = idle_summary_.take(history_revision_);
+        if (!summary.has_value()) return false;
+        apply_compaction_unlocked(std::move(summary->text),
+                                  std::move(summary->plan),
+                                  std::move(summary->active_skill_context));
         provider = provider_;
     }
     // As after any compaction: transport continuation handles are reset
@@ -1773,9 +1774,9 @@ bool Agent::use_idle_compaction() {
     return true;
 }
 
-void Agent::discard_idle_compaction() {
+void Agent::drop_idle_summary() {
     std::lock_guard lock(history_mutex_);
-    idle_compaction_.reset();
+    idle_summary_.clear();
 }
 
 void Agent::undo_last() {

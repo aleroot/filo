@@ -266,7 +266,7 @@ TEST_CASE("Compact-while-idle summarizes at the notice and uses it after expiry"
     watch.track(runtime);
 
     REQUIRE(fake.wait_until([](const FakeTui& f) { return has_note(f, "Summary ready"); }));
-    CHECK(agent->has_idle_compaction());
+    CHECK(agent->has_idle_summary());
     const auto history_while_idle = agent->get_history().size();
 
     SECTION("a prompt after expiry uses the summary without asking") {
@@ -279,13 +279,13 @@ TEST_CASE("Compact-while-idle summarizes at the notice and uses it after expiry"
         CHECK(watch.confirm_send(runtime) == prompt_cache::SendChoice::Send);
         CHECK(fake.questions_.empty());
         CHECK(fake.wait_until([](const FakeTui& f) { return has_note(f, "compacted using the summary"); }));
-        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(agent->has_idle_summary());
         CHECK_FALSE(agent->get_context_summary().empty());
     }
     SECTION("a prompt over the still-warm cache keeps the full conversation") {
         CHECK(watch.confirm_send(runtime) == prompt_cache::SendChoice::Send);
         CHECK(fake.questions_.empty());
-        CHECK_FALSE(agent->has_idle_compaction());
+        CHECK_FALSE(agent->has_idle_summary());
         CHECK(agent->get_history().size() == history_while_idle);
         CHECK(agent->get_context_summary().empty());
     }
@@ -308,6 +308,6 @@ TEST_CASE("Compact-while-idle asks as usual when no summary can be written",
     REQUIRE(fake.wait_until([](const FakeTui& f) { return !f.questions_.empty(); }));
     CHECK(fake.questions_.front().header == "Cache expiring");
     CHECK(has_note(fake, "called a tool"));
-    CHECK_FALSE(agent->has_idle_compaction());
+    CHECK_FALSE(agent->has_idle_summary());
     watch.shutdown();
 }
