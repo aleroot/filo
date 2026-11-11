@@ -1,4 +1,5 @@
 #include "ConfigDocument.hpp"
+#include "ConfigManager.hpp"
 #include "ConfigSource.hpp"
 #include "core/utils/StringUtils.hpp"
 
@@ -26,10 +27,12 @@ JsonValue canonical_document(JsonValue document) {
 
 JsonValue settings_values(const JsonValue& settings) {
     auto values = settings;
-    // settings.json writes managed numbers as strings.
+    // settings.json writes managed numbers as strings; a word such as the
+    // automatic notice lead stays a string.
     for (const std::string_view key :
          {"auto_compact_threshold", "prompt_cache_guard_tokens", "prompt_cache_notice_seconds"}) {
-        if (const auto* number = settings.find(key); number && number->is_string()) {
+        if (const auto* number = settings.find(key);
+            number && number->is_string() && number->as_string() != kPromptCacheNoticeAutomatic) {
             values.set(std::string(key), JsonValue::integer(std::stoll(std::string(number->as_string()))));
         }
     }
@@ -68,12 +71,16 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
                  "default_router_policy", "session_retention_days", "revert_history_days"}, string, "a string");
     check(root, {"tool_recovery", "strict_tool_schemas"}, boolean, "a boolean");
     check(root, {"tool_output_token_limit"}, integer, "an integer");
-    check(root, {"auto_compact_threshold", "prompt_cache_guard_tokens", "prompt_cache_notice_seconds"},
-          [&](const JsonValue& v) {
+    const auto managed_count = [&](const JsonValue& v) {
         // settings.json writes this managed preference as a string.
         return integer(v) || (v.is_string() && !v.as_string().empty()
             && v.as_string().find_first_not_of("0123456789") == std::string_view::npos);
-    }, "an integer or a numeric settings string");
+    };
+    check(root, {"auto_compact_threshold", "prompt_cache_guard_tokens"}, managed_count,
+          "an integer or a numeric settings string");
+    check(root, {"prompt_cache_notice_seconds"}, [&](const JsonValue& v) {
+        return managed_count(v) || (v.is_string() && v.as_string() == kPromptCacheNoticeAutomatic);
+    }, "an integer, a numeric settings string or \"auto\"");
     check(root, {"providers", "subagents", "tools", "tool_policies", "hooks", "router", "profiles"}, object, "an object");
     if (const auto* providers = root.find("providers")) {
         for (const auto& [name, provider] : providers->members()) {

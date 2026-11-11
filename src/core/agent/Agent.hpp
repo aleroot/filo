@@ -694,6 +694,10 @@ private:
     std::string active_provider_name_;
     std::string active_model_;
     std::string effort_level_;
+    /// Whether this agent holds the user's conversation, whose prompt prefix
+    /// is worth the longest cache retention; false for an isolated (review or
+    /// exploration) agent. Delegated workers are recognised by their depth.
+    bool holds_user_conversation_ = true;
     std::string context_summary_;
     std::optional<core::session::SessionGoal> session_goal_;
     std::function<std::string()> goal_graph_context_fn_;

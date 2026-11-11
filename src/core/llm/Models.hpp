@@ -23,6 +23,7 @@
 #include "../utils/Base64.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/MimeUtils.hpp"
+#include "PromptCacheProfile.hpp"
 #include "ResponseFormat.hpp"
 #include "ReasoningCapabilities.hpp"
 
@@ -633,6 +634,10 @@ struct ChatRequest {
     /// side queries, compaction) leaves it empty and is sent unthreaded, so it
     /// can never consume the conversation's thread.
     std::string continuation_scope = {};
+    /// Which retention the request's prompt prefix is worth (see
+    /// PromptCacheTtlPolicy). Only an agent's own top-level step loop marks
+    /// its requests Conversation; a keep-warm replay copies the mark.
+    PromptCacheScope prompt_cache_scope = PromptCacheScope::Auxiliary;
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
     core::context::PromptPlan prompt_plan = {}; ///< Structured stable-to-dynamic system prompt.

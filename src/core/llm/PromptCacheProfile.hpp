@@ -21,6 +21,32 @@ enum class PromptCacheTtl : std::uint8_t {
 [[nodiscard]] std::optional<PromptCacheTtl> parse_prompt_cache_ttl(
     std::string_view value) noexcept;
 
+/// Whose prompt prefix a request caches. Only the user's own conversation is
+/// revisited after long pauses, so it is the only prefix worth a longer, and
+/// dearer, retention.
+enum class PromptCacheScope : std::uint8_t {
+    /// Short-lived work: subagents, reviews, compaction, titles, side queries.
+    Auxiliary,
+    /// The user's conversation, keep-warm replays of it included.
+    Conversation,
+};
+
+/// The lifetime a protocol asks for, per scope.
+struct PromptCacheTtlPolicy {
+    PromptCacheTtl conversation = PromptCacheTtl::Standard;
+    PromptCacheTtl auxiliary = PromptCacheTtl::Standard;
+
+    [[nodiscard]] static constexpr PromptCacheTtlPolicy uniform(PromptCacheTtl ttl) noexcept {
+        return {.conversation = ttl, .auxiliary = ttl};
+    }
+
+    [[nodiscard]] constexpr PromptCacheTtl for_scope(PromptCacheScope scope) const noexcept {
+        return scope == PromptCacheScope::Conversation ? conversation : auxiliary;
+    }
+
+    bool operator==(const PromptCacheTtlPolicy&) const = default;
+};
+
 /// Where a profile's lifetime comes from. The wording shown to the user
 /// follows it: a documented lifetime "has expired", an estimated one "has
 /// likely expired".

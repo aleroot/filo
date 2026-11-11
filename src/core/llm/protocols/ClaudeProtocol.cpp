@@ -932,8 +932,8 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
     // is settled. Only a signed Claude Code conversation can be threaded.
     if (lineage_.session_id.empty() || !thread_.available(request.continuation_scope, request.model)) return;
     try {
-        const auto body = ClaudeSerializer::serialize_unsigned(request, default_max_tokens_, thinking_, cache_ttl_,
-                                                               &lineage_);
+        const auto body = ClaudeSerializer::serialize_unsigned(
+            request, default_max_tokens_, thinking_, cache_ttl_.for_scope(request.prompt_cache_scope), &lineage_);
         if (!body.signs) return;
         thread_.plan(request.continuation_scope, request.model, body.payload,
                      std::format("1m={};json={}", request_uses_context_1m_, request_structured_output_));
@@ -946,10 +946,11 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
 std::string ClaudeProtocol::serialize(const ChatRequest& req) const {
     // Only a prepared request belongs to a conversation.
     const auto* lineage = lineage_.session_id.empty() ? nullptr : &lineage_;
+    const auto cache_ttl = cache_ttl_.for_scope(req.prompt_cache_scope);
     if (!thread_.threaded()) {
-        return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl_, lineage);
+        return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl, lineage);
     }
-    auto body = ClaudeSerializer::serialize_unsigned(req, default_max_tokens_, thinking_, cache_ttl_, lineage);
+    auto body = ClaudeSerializer::serialize_unsigned(req, default_max_tokens_, thinking_, cache_ttl, lineage);
     auto payload = thread_.body(body.payload).value_or(std::move(body.payload));
     claude::sign_body(payload);
     return payload;
@@ -1114,7 +1115,7 @@ PromptCacheProfile ClaudeProtocol::prompt_cache_profile(std::string_view) const 
     using namespace std::chrono_literals;
     // Anthropic prices a cache read at 0.1x input and a write at 1.25x (5 min)
     // or 2x (1 h).
-    const bool extended = cache_ttl_ == PromptCacheTtl::Extended;
+    const bool extended = cache_ttl_.conversation == PromptCacheTtl::Extended;
     return PromptCacheProfile::documented(extended ? std::chrono::seconds{1h} : std::chrono::seconds{5min},
                                           /*replay_renews=*/true)
         .with_costs(/*read_percent=*/10, /*write_percent=*/extended ? 200 : 125);

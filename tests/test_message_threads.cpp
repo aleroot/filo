@@ -389,7 +389,7 @@ struct ProtocolRun {
 } // namespace
 
 TEST_CASE("ClaudeProtocol creates a thread, then sends only the new messages", "[threads][claude][protocol]") {
-    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard,
+    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{},
                               std::make_shared<claude_threads::ThreadSession>());
     std::vector<Message> history{{.role = "user", .content = "hi"}};
 
@@ -425,7 +425,7 @@ TEST_CASE("ClaudeProtocol sends whole requests when threads cannot apply", "[thr
         (void)plain_of(base, agent_request(history));
     }
     SECTION("a request outside the agent loop") {
-        const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard,
+        const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{},
                                   std::make_shared<claude_threads::ThreadSession>());
         auto request = agent_request(history);
         request.continuation_scope.clear();
@@ -434,11 +434,11 @@ TEST_CASE("ClaudeProtocol sends whole requests when threads cannot apply", "[thr
     SECTION("a model the server refused threads for") {
         auto session = std::make_shared<claude_threads::ThreadSession>();
         session->suspend("claude-sonnet-5-5");
-        const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard, session);
+        const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{}, session);
         (void)plain_of(base, agent_request(history));
     }
     SECTION("the unthreaded body is the ordinary one") {
-        const ClaudeProtocol threaded({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard,
+        const ClaudeProtocol threaded({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{},
                                       std::make_shared<claude_threads::ThreadSession>());
         auto request = agent_request(history);
         request.continuation_scope.clear();
@@ -451,7 +451,7 @@ TEST_CASE("ClaudeProtocol sends whole requests when threads cannot apply", "[thr
 
 TEST_CASE("ClaudeProtocol abandons a thread whose reply must not be continued", "[threads][claude][protocol]") {
     auto session = std::make_shared<claude_threads::ThreadSession>();
-    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard, session);
+    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{}, session);
     std::vector<Message> history{{.role = "user", .content = "hi"}};
     auto first = send(base, agent_request(history));
     history.push_back(stream_reply(static_cast<ClaudeProtocol&>(*first.protocol), "msg_1", "no", "refusal"));
@@ -463,7 +463,7 @@ TEST_CASE("ClaudeProtocol abandons a thread whose reply must not be continued", 
 
 TEST_CASE("ClaudeProtocol walks the fallback ladder down to the plain request", "[threads][claude][protocol]") {
     auto session = std::make_shared<claude_threads::ThreadSession>();
-    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard, session);
+    const ClaudeProtocol base({}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{}, session);
     std::vector<Message> history{{.role = "user", .content = "hi"}};
     auto first = send(base, agent_request(history));
     history.push_back(stream_reply(static_cast<ClaudeProtocol&>(*first.protocol), "msg_1", "hello"));

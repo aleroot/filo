@@ -1642,11 +1642,15 @@ RunResult run(RunOptions opts) {
             .category = "Session",
             .label = "Cache Expiry Notice",
             .description = "How long before an idle session's cache expires Filo offers to "
-                           "keep it warm or compact. 0 = no notice.",
+                           "keep it warm or compact. Automatic: a tenth of the cache "
+                           "lifetime, at least 1 min (1 min for 5 min, 6 min for 1 h). "
+                           "0 = no notice.",
             .choices = {
+                SettingsChoice{.value = std::string(core::config::kPromptCacheNoticeAutomatic),
+                               .label = "Automatic (Default)"},
                 SettingsChoice{.value = "0",   .label = "Disabled"},
                 SettingsChoice{.value = "30",  .label = "30 s before"},
-                SettingsChoice{.value = "60",  .label = "1 min before (Default)"},
+                SettingsChoice{.value = "60",  .label = "1 min before"},
                 SettingsChoice{.value = "120", .label = "2 min before"},
             },
         });
@@ -5144,9 +5148,11 @@ RunResult run(RunOptions opts) {
             case core::config::ManagedSettingKey::PromptCacheGuardTokens:
                 return std::to_string(
                     core::agent::prompt_cache_guard_settings(effective).min_context_tokens);
-            case core::config::ManagedSettingKey::PromptCacheNoticeSeconds:
-                return std::to_string(
-                    core::agent::prompt_cache_guard_settings(effective).notice_lead.count());
+            case core::config::ManagedSettingKey::PromptCacheNoticeSeconds: {
+                const auto lead = core::agent::prompt_cache_guard_settings(effective).notice_lead;
+                return lead.has_value() ? std::to_string(lead->count())
+                                        : std::string(core::config::kPromptCacheNoticeAutomatic);
+            }
             case core::config::ManagedSettingKey::PromptCacheKeepWarm:
                 return std::string(
                     core::agent::prompt_cache_guard_settings(effective).keep_warm

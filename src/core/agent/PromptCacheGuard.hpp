@@ -2,6 +2,7 @@
 
 #include "../llm/PromptCacheProfile.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -26,6 +27,10 @@ enum class PromptCacheKeepWarm : std::uint8_t {
 inline constexpr std::string_view kPromptCacheKeepWarmAsk = "ask";
 inline constexpr std::string_view kPromptCacheKeepWarmAuto = "auto";
 
+/// The shortest automatic notice lead: a minute is about what a user needs to
+/// read the notice and answer it before the cache is gone.
+inline constexpr std::chrono::seconds kMinAutomaticNoticeLead{std::chrono::minutes{1}};
+
 /// User-tunable thresholds for cold-cache protection. Pure data: the policy
 /// below never reads configuration or clocks on its own.
 struct PromptCacheGuardSettings {
@@ -33,13 +38,25 @@ struct PromptCacheGuardSettings {
     /// every cold-cache prompt off.
     std::int64_t min_context_tokens = 100'000;
     /// How long before expiry an idle heavy session is offered to keep its
-    /// cache warm or compact. Zero turns the expiry notice off.
-    std::chrono::seconds notice_lead{std::chrono::minutes{1}};
+    /// cache warm or compact. Zero turns the expiry notice off; unset scales
+    /// it with the cache lifetime (notice_lead_for).
+    std::optional<std::chrono::seconds> notice_lead;
     /// Applies at the notice instant, so a zero notice_lead turns it off too.
     PromptCacheKeepWarm keep_warm = PromptCacheKeepWarm::Ask;
 
     [[nodiscard]] constexpr bool enabled() const noexcept {
         return min_context_tokens > 0;
+    }
+
+    /// The lead before a cache living @p ttl expires: the configured one, or
+    /// else a tenth of the lifetime and at least kMinAutomaticNoticeLead. That
+    /// keeps the minute a 5-minute cache always had, and gives a 1-hour cache
+    /// its notice at 54 minutes idle, where Claude Code compacts idle
+    /// conversations (90% of the lifetime).
+    [[nodiscard]] constexpr std::chrono::seconds notice_lead_for(
+        std::chrono::seconds ttl) const noexcept {
+        if (notice_lead.has_value()) return *notice_lead;
+        return std::max(kMinAutomaticNoticeLead, ttl / 10);
     }
 };
 

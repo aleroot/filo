@@ -2917,7 +2917,7 @@ TEST_CASE("Claude message threads fall back to the plain request on every reject
     auto provider = std::make_shared<HttpLLMProvider>(
         std::format("http://127.0.0.1:{}", port), std::make_shared<RefreshingClaudeCredentials>(),
         "claude-sonnet-5-5",
-        std::make_unique<ClaudeProtocol>(ClaudeThinkingConfig{}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Standard,
+        std::make_unique<ClaudeProtocol>(ClaudeThinkingConfig{}, kAnthropicDefaultMaxTokens, PromptCacheTtlPolicy{},
                                          std::make_shared<claude_threads::ThreadSession>()));
     std::vector<Message> history{{.role = "user", .content = "hi"}};
     const auto take_seen = [&] {

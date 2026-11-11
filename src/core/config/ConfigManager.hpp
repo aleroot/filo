@@ -44,6 +44,10 @@ enum class ManagedSettingKey {
     RevertHistoryDays,
 };
 
+/// The managed `prompt_cache_notice_seconds` value that selects the lead
+/// scaled with the cache lifetime, overriding a number in a lower layer.
+inline constexpr std::string_view kPromptCacheNoticeAutomatic = "auto";
+
 /// Settings about Filo's own storage rather than a project. They are read
 /// from the user's settings.json only: a workspace file, which a cloned
 /// repository may supply, must not decide what gets deleted. They are not
@@ -311,7 +315,8 @@ struct AppConfig {
     // core::agent::PromptCacheGuardSettings. Zero turns each part off.
     //   prompt_cache_guard_tokens   — context size from which an expired
     //                                 cache asks before a prompt is sent
-    //   prompt_cache_notice_seconds — lead before expiry for the notice
+    //   prompt_cache_notice_seconds — lead before expiry for the notice;
+    //                                 unset scales it with the cache lifetime
     //   prompt_cache_keep_warm      — "ask" (empty) or "auto" at that notice
     std::optional<std::int64_t> prompt_cache_guard_tokens;
     std::optional<std::int64_t> prompt_cache_notice_seconds;

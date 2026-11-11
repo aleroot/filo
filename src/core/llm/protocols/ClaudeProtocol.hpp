@@ -67,7 +67,7 @@ public:
     /// @p threads, when given, lets the agent's conversation use Anthropic
     /// message threads; every clone shares it. Null sends every request whole.
     explicit ClaudeProtocol(ClaudeThinkingConfig thinking = {}, int default_max_tokens = kAnthropicDefaultMaxTokens,
-                            PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
+                            PromptCacheTtlPolicy cache_ttl = {},
                             std::shared_ptr<claude_threads::ThreadSession> threads = {})
         : AnthropicProtocol(default_max_tokens), thinking_(thinking), cache_ttl_(cache_ttl),
           thread_(std::move(threads)) {}
@@ -94,7 +94,8 @@ public:
     ReasoningCapabilities reasoning_capabilities(std::string_view model) const noexcept override;
     /// Anthropic documents the lifetime it is asked for (5 min, or 1 h with
     /// `"ttl":"1h"`), renews it on every hit, and keeps no server-side
-    /// conversation state, so re-sending the last request keeps it warm.
+    /// conversation state, so re-sending the last request keeps it warm. The
+    /// profile is the conversation's: only its cache is watched while idle.
     PromptCacheProfile prompt_cache_profile(std::string_view model) const noexcept override;
     std::unique_ptr<ApiProtocolBase> clone() const override;
     void reset_state() override;
@@ -109,7 +110,7 @@ public:
     bool is_retryable(const HttpResponse& response) const noexcept override;
 private:
     ClaudeThinkingConfig thinking_;
-    PromptCacheTtl cache_ttl_ = PromptCacheTtl::Standard;
+    PromptCacheTtlPolicy cache_ttl_;
     bool request_uses_context_1m_ = false;
     bool request_structured_output_ = false;
     std::string last_requested_model_;

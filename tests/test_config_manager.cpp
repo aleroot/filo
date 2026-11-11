@@ -1614,6 +1614,39 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("An automatic cache notice in the workspace overrides a user's fixed lead",
+          "[config][managed-settings][prompt-cache]") {
+    const fs::path sandbox = make_temp_dir("filo_managed_notice_auto");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    fs::create_directories(project_dir);
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    std::string error;
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+                                            std::string("60"), project_dir, &error));
+    REQUIRE(manager.get_config().prompt_cache_notice_seconds == 60);
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                            core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+                                            std::string(core::config::kPromptCacheNoticeAutomatic),
+                                            project_dir, &error));
+    REQUIRE(error.empty());
+    CHECK_FALSE(manager.get_config().prompt_cache_notice_seconds.has_value());
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                            core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+                                            std::nullopt, project_dir, &error));
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::PromptCacheNoticeSeconds,
+                                            std::nullopt, project_dir, &error));
+    manager.load(project_dir);
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager parses flat top-level llama.cpp fields (README format)", "[config][llamacpp]") {
     const fs::path sandbox = make_temp_dir("filo_config_llamacpp_flat");
     const fs::path xdg_home = sandbox / "xdg";

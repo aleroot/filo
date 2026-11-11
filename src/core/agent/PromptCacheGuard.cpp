@@ -53,14 +53,16 @@ std::optional<PromptCacheDeadlines> PromptCacheGuard::deadlines(
     const PromptCacheState& state) const noexcept {
     if (!state.profile.remote()
         || !state.last_exchange_at.has_value()
-        || !is_heavy(state.context_tokens)
-        || settings_.notice_lead <= std::chrono::seconds::zero()
-        || settings_.notice_lead >= state.profile.ttl) {
+        || !is_heavy(state.context_tokens)) {
+        return std::nullopt;
+    }
+    const auto lead = settings_.notice_lead_for(state.profile.ttl);
+    if (lead <= std::chrono::seconds::zero() || lead >= state.profile.ttl) {
         return std::nullopt;
     }
     const auto expiry = *state.last_exchange_at + state.profile.ttl;
     return PromptCacheDeadlines{
-        .notice = expiry - settings_.notice_lead,
+        .notice = expiry - lead,
         .expiry = expiry,
     };
 }

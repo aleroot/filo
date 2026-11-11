@@ -107,6 +107,18 @@ std::string resolve_key(
     return cache_ttl.value_or(PromptCacheTtl::Standard);
 }
 
+/// Claude's lifetime per request scope. A configured `prompt_cache_ttl` applies
+/// to every request. Otherwise a subscription (OAuth) conversation asks for
+/// the hour Claude Code asks for within plan usage, while its short-lived
+/// requests and every API-key request keep the cheaper 5-minute write.
+[[nodiscard]] PromptCacheTtlPolicy resolve_claude_prompt_cache_ttl(
+    const ProviderConfig& config, std::string_view name, bool subscription) {
+    if (!config.prompt_cache_ttl.empty() || !subscription) {
+        return PromptCacheTtlPolicy::uniform(resolve_prompt_cache_ttl(config, name));
+    }
+    return {.conversation = PromptCacheTtl::Extended, .auxiliary = PromptCacheTtl::Standard};
+}
+
 /// Anthropic message threads unless the provider turns them off. A typo keeps
 /// the default, like prompt_cache_ttl: every failure of a thread request
 /// already falls back to the plain request.
@@ -463,7 +475,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             protocol = std::make_unique<protocols::ClaudeProtocol>(
                 thinking,
                 protocols::kAnthropicDefaultMaxTokens,
-                resolve_prompt_cache_ttl(config, name),
+                resolve_claude_prompt_cache_ttl(config, name, normalized_auth_type == "oauth_claude"),
                 resolve_message_threads(config, name));
         } else {
             protocol = std::make_unique<protocols::AnthropicProtocol>();

@@ -197,7 +197,12 @@ void apply_managed_setting_value(ManagedSettingKey key,
             if (const auto count = managed_count(value)) config.prompt_cache_guard_tokens = count;
             break;
         case ManagedSettingKey::PromptCacheNoticeSeconds:
-            if (const auto count = managed_count(value)) config.prompt_cache_notice_seconds = count;
+            // "auto" restores the lifetime-scaled default over a lower layer.
+            if (value == kPromptCacheNoticeAutomatic) {
+                config.prompt_cache_notice_seconds.reset();
+            } else if (const auto count = managed_count(value)) {
+                config.prompt_cache_notice_seconds = count;
+            }
             break;
         case ManagedSettingKey::PromptCacheKeepWarm:
             config.prompt_cache_keep_warm = value;

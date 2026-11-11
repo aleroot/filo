@@ -136,6 +136,27 @@ TEST_CASE("PromptCacheGuard places the expiry notice inside the cache lifetime",
     }
 }
 
+TEST_CASE("An unset notice lead scales with the cache lifetime", "[prompt-cache][guard]") {
+    const PromptCacheGuard automatic{PromptCacheGuardSettings{}};
+    REQUIRE_FALSE(automatic.settings().notice_lead.has_value());
+
+    // A 5-minute cache keeps the minute it always had.
+    const auto five_minutes = automatic.deadlines(heavy_state());
+    REQUIRE(five_minutes.has_value());
+    CHECK(five_minutes->notice == kT0 + 4min);
+
+    // A 1-hour cache is noticed at 54 minutes idle (90% of its lifetime).
+    const auto one_hour = automatic.deadlines(heavy_state(PromptCacheProfile::documented(1h, true)));
+    REQUIRE(one_hour.has_value());
+    CHECK(one_hour->notice == kT0 + 54min);
+    CHECK(one_hour->expiry == kT0 + 1h);
+
+    // A configured lead is taken as is, whatever the lifetime.
+    const PromptCacheGuard fixed{PromptCacheGuardSettings{.notice_lead = 30s}};
+    CHECK(fixed.deadlines(heavy_state(PromptCacheProfile::documented(1h, true)))->notice
+          == kT0 + 1h - 30s);
+}
+
 TEST_CASE("Only a replay-renewable cache can be kept warm", "[prompt-cache][guard]") {
     CHECK(PromptCacheGuard::can_keep_warm(PromptCacheProfile::documented(5min, true)));
     CHECK_FALSE(PromptCacheGuard::can_keep_warm(PromptCacheProfile::documented(5min, false)));
@@ -170,6 +191,7 @@ TEST_CASE("Prompt cache guard settings come from the configuration", "[prompt-ca
     const auto defaults = core::agent::prompt_cache_guard_settings(config);
     CHECK(defaults.min_context_tokens == PromptCacheGuardSettings{}.min_context_tokens);
     CHECK(defaults.notice_lead == PromptCacheGuardSettings{}.notice_lead);
+    CHECK_FALSE(defaults.notice_lead.has_value());
     CHECK(defaults.keep_warm == core::agent::PromptCacheKeepWarm::Ask);
 
     config.prompt_cache_guard_tokens = 0;
@@ -238,16 +260,23 @@ TEST_CASE("prompt_cache_ttl accepts the documented spellings", "[prompt-cache][c
 TEST_CASE("Each protocol reports the cache it asks for", "[prompt-cache][protocol]") {
     using namespace core::llm::protocols;
     using core::llm::PromptCacheTtl;
+    using core::llm::PromptCacheTtlPolicy;
 
     const auto claude = ClaudeProtocol{}.prompt_cache_profile("claude-sonnet-4-6");
     CHECK(claude == PromptCacheProfile::documented(5min, true).with_costs(10, 125));
 
-    const auto claude_1h = ClaudeProtocol{{}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Extended}
+    const auto extended = PromptCacheTtlPolicy::uniform(PromptCacheTtl::Extended);
+    const auto claude_1h = ClaudeProtocol{{}, kAnthropicDefaultMaxTokens, extended}
         .prompt_cache_profile("claude-sonnet-4-6");
     CHECK(claude_1h == PromptCacheProfile::documented(1h, true).with_costs(10, 200));
     // The lifetime survives the per-request clone.
-    const auto cloned = ClaudeProtocol{{}, kAnthropicDefaultMaxTokens, PromptCacheTtl::Extended}.clone();
+    const auto cloned = ClaudeProtocol{{}, kAnthropicDefaultMaxTokens, extended}.clone();
     CHECK(cloned->prompt_cache_profile("claude-sonnet-4-6") == claude_1h);
+    // The profile is the conversation's, whatever short-lived requests use.
+    const auto subscription = PromptCacheTtlPolicy{
+        .conversation = PromptCacheTtl::Extended, .auxiliary = PromptCacheTtl::Standard};
+    CHECK(ClaudeProtocol{{}, kAnthropicDefaultMaxTokens, subscription}
+              .prompt_cache_profile("claude-sonnet-4-6") == claude_1h);
 
     // OpenAI documents no fixed lifetime, and a Responses replay would chain
     // the conversation onto itself through previous_response_id: estimated,
@@ -284,6 +313,37 @@ TEST_CASE("The one-hour Claude cache marks every breakpoint with the same lifeti
     CHECK(count_of(extended, R"("cache_control":{"type":"ephemeral"})") == 0);
     CHECK(count_of(extended, R"("cache_control":{"type":"ephemeral","ttl":"1h"})")
           == count_of(standard, R"("cache_control":{"type":"ephemeral"})"));
+}
+
+TEST_CASE("A subscription conversation asks for the hour; its short-lived requests do not",
+          "[prompt-cache][protocol][claude]") {
+    using namespace core::llm::protocols;
+    using core::llm::PromptCacheScope;
+    using core::llm::PromptCacheTtl;
+    const ClaudeProtocol protocol{
+        {}, kAnthropicDefaultMaxTokens,
+        core::llm::PromptCacheTtlPolicy{.conversation = PromptCacheTtl::Extended,
+                                        .auxiliary = PromptCacheTtl::Standard}};
+    core::llm::ChatRequest request;
+    request.model = "claude-sonnet-4-6";
+    request.messages = {
+        {.role = "system", .content = "You are helpful."},
+        {.role = "user", .content = "first"},
+        {.role = "assistant", .content = "reply"},
+        {.role = "user", .content = "second"},
+    };
+    request.tools.push_back(core::llm::Tool{.function = {.name = "read", .description = "Read"}});
+
+    // Unmarked requests (subagents, compaction, titles) are Auxiliary.
+    CHECK(request.prompt_cache_scope == PromptCacheScope::Auxiliary);
+    const auto auxiliary = protocol.serialize(request);
+    CHECK(count_of(auxiliary, R"("ttl":"1h")") == 0);
+    CHECK(count_of(auxiliary, R"("cache_control":{"type":"ephemeral"})") > 0);
+
+    request.prompt_cache_scope = PromptCacheScope::Conversation;
+    const auto conversation = protocol.serialize(request);
+    CHECK(count_of(conversation, R"("cache_control":{"type":"ephemeral"})") == 0);
+    CHECK(count_of(conversation, R"("cache_control":{"type":"ephemeral","ttl":"1h"})") > 0);
 }
 
 TEST_CASE("Cache hits are read from every usage dialect", "[prompt-cache][usage]") {

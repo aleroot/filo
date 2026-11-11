@@ -538,6 +538,7 @@ std::shared_ptr<Agent> Agent::make_isolated_agent(
     isolated->set_active_provider_name(std::move(provider_name));
     isolated->set_active_model(std::move(model));
     isolated->set_mode(mode);
+    isolated->holds_user_conversation_ = false;
     return isolated;
 }
 
@@ -2116,6 +2117,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.session_id = step_session_context.session_id;
             request.transport_turn_id = turn_state->transport_turn_id;
             request.continuation_scope = step_session_context.session_id;
+            request.prompt_cache_scope =
+                holds_user_conversation_ && step_session_context.delegation_depth == 0
+                ? core::llm::PromptCacheScope::Conversation
+                : core::llm::PromptCacheScope::Auxiliary;
             provider = turn_state->provider;
             mode_snapshot = std::string(to_string(current_mode_));
             session_state_prompt = build_session_state_prompt();

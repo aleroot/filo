@@ -583,12 +583,19 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
 | Steering Mode | `steering_mode` | `default`, `fallback`, `none` |
 | Cold-Cache Guard | `prompt_cache_guard_tokens` | `0` (off), `50000`, `100000` (default), `200000` |
-| Cache Expiry Notice | `prompt_cache_notice_seconds` | `0` (off), `30`, `60` (default), `120` |
+| Cache Expiry Notice | `prompt_cache_notice_seconds` | `auto` (default: a tenth of the cache lifetime, at least 60 s, so 1 min for a 5-minute cache and 6 min for a 1-hour one), `0` (off), `30`, `60`, `120` |
 | Cache Keep-Warm | `prompt_cache_keep_warm` | `ask` (default), `auto` |
 | Conversation Retention | `session_retention_days` | `0` (keep forever, default), `30`, `90`, `180`, `365`, or any number of days |
 | Revert History | `revert_history_days` | `1`, `7` (default), `30`, `0` (keep with the conversation), or any number of days |
 
 `--steering` on the command line overrides the saved `steering_mode` for that run only.
+
+The cache settings watch the provider's prompt cache. Claude's cache lives 5
+minutes, except that with a Claude subscription (`oauth_claude`) your own
+conversation asks for the 1-hour cache, as Claude Code does within plan
+usage. Subagents, reviews, compaction and other short-lived requests keep the
+5-minute cache. Set `"prompt_cache_ttl": "5m"` or `"1h"` on a provider to use
+one lifetime for every request.
 
 The two **Storage** settings are read from the user `settings.json` only, so a
 repository's `.filo/settings.json` can never decide what is deleted. They are
