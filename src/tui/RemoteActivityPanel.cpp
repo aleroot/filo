@@ -38,7 +38,11 @@ class CenteredFooter final : public Node {
 public:
     CenteredFooter(Element left, Element middle, Element right)
         : left_(std::move(left)), middle_(std::move(middle)), right_(std::move(right)),
-          fallback_(hbox({left_, filler(), middle_, filler(), right_})) {
+          // Too narrow even for this, the left items give way first (see
+          // ComputeShrinkEasy in FTXUI's box_helper): the pill and the right
+          // items are short, and an un-flexed overflow clips every item.
+          fallback_(hbox({left_ | xflex_shrink, text(std::string(kGap, ' ')), filler(),
+                          middle_, filler(), right_})) {
         children_ = {fallback_};
     }
 
@@ -53,12 +57,12 @@ public:
         const int left_width = left_->requirement().min_x;
         const int middle_width = middle_->requirement().min_x;
         const int right_width = right_->requirement().min_x;
-        fallback_active_ = width < left_width + middle_width + right_width;
+        fallback_active_ = width < left_width + kGap + middle_width + right_width;
         fallback_->SetBox(box);
         if (fallback_active_) return;
         const int middle_x = std::clamp(
             box.x_min + (width - middle_width) / 2,
-            box.x_min + left_width, box.x_max - right_width - middle_width + 1);
+            box.x_min + left_width + kGap, box.x_max - right_width - middle_width + 1);
         left_->SetBox({box.x_min, box.x_min + left_width - 1, box.y_min, box.y_max});
         middle_->SetBox({middle_x, middle_x + middle_width - 1, box.y_min, box.y_max});
         right_->SetBox({box.x_max - right_width + 1, box.x_max, box.y_min, box.y_max});
@@ -75,6 +79,11 @@ public:
     }
 
 private:
+    // The pill has no leading padding and the left items end on a glyph, so
+    // keep one blank cell between them. The pill's own trailing blank already
+    // separates it from the right items.
+    static constexpr int kGap = 1;
+
     Element left_, middle_, right_, fallback_;
     bool fallback_active_{false};
 };
@@ -336,7 +345,8 @@ RemoteFooterStatus format_remote_footer_status(
     };
 }
 
-Element render_remote_footer_status(const RemoteFooterStatus& status) {
+Element render_remote_footer_status(const RemoteFooterStatus& status,
+                                   RemoteFooterDetail detail) {
     if (status.label.empty()) return text("");
 
     Color foreground = ColorTextSecondary;
@@ -360,7 +370,14 @@ Element render_remote_footer_status(const RemoteFooterStatus& status) {
     // The pill carries no leading padding: separation is supplied by the
     // centered layout that hosts it, and padding here would offset it from
     // the middle of the status bar.
-    return text("⚡ " + status.label + " ") | color(foreground);
+    std::string_view label = status.label;
+    if (detail == RemoteFooterDetail::subject) {
+        label = label.substr(0, label.find(" · "));
+    } else if (detail == RemoteFooterDetail::glyph) {
+        label = {};
+    }
+    return text(label.empty() ? std::string("⚡ ") : std::format("⚡ {} ", label))
+        | color(foreground);
 }
 
 Element render_centered_footer(Element left, Element middle, Element right) {

@@ -18,6 +18,13 @@ enum class RemoteFooterTone {
     error,
 };
 
+/// How much of the footer status a narrow status bar can afford.
+enum class RemoteFooterDetail {
+    full,     ///< "⚡ Lampo · seen 6m ago"
+    subject,  ///< "⚡ Lampo": the text before the first " · "
+    glyph,    ///< "⚡": the tone colour alone carries the state
+};
+
 struct RemoteFooterStatus {
     std::string label;
     RemoteFooterTone tone{RemoteFooterTone::neutral};
@@ -33,7 +40,8 @@ struct RemoteFooterStatus {
 /// it from the middle. Tone is communicated with foreground color only so the
 /// persistent status remains visually lightweight.
 [[nodiscard]] ftxui::Element render_remote_footer_status(
-    const RemoteFooterStatus& status);
+    const RemoteFooterStatus& status,
+    RemoteFooterDetail detail = RemoteFooterDetail::full);
 
 /// Center the middle item in the footer, yielding to the side items when
 /// space is too narrow to keep it centered without overlap.

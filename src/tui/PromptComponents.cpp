@@ -771,10 +771,10 @@ std::string format_runtime_status_summary(std::string_view provider_name,
 std::string format_model_status_badge(std::string_view provider_name,
                                       std::string_view model_name,
                                       std::string_view effort_level) {
-    std::string label = std::format(
-        "{} · {}",
-        provider_name,
-        model_name.empty() ? "<provider default>" : model_name);
+    std::string label(model_name.empty() ? "<provider default>" : model_name);
+    if (!provider_name.empty()) {
+        label = std::format("{} · {}", provider_name, label);
+    }
     if (!effort_level.empty()) {
         // `/effort off` is stored as `none` for the wire layer; show the user-
         // facing command name so the footer matches what they typed.

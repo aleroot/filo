@@ -31,6 +31,7 @@
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
+#include "StatusFooterLayout.hpp"
 #include "UsageDetailsPanel.hpp"
 #include "WorkspaceDetailsPanel.hpp"
 #include "AnchoredPopover.hpp"
@@ -10973,48 +10974,61 @@ RunResult run(RunOptions opts) {
             }
         };
 
-        // Build right side of status bar: current folder + context left
+        // Build right side of status bar: current folder + context left.
+        // How much of it is spelled out depends on the footer density, which
+        // is picked once the width is known (see first_that_fits below).
         workspace_status_box = {0, -1, 0, -1};
         security_status_box = {0, -1, 0, -1};
-        Element right_el;
-        if (quit_confirm_active()) {
-            right_el = text(" Press " + quit_confirm_key + " again to quit ")
-                | color(ColorTextMuted);
-        } else {
-            Elements right_items;
+        Element security_el;
+        std::string cwd_str;
+        std::string workspace_suffix;
+        if (!quit_confirm_active()) {
             const bool policy_active = static_cast<bool>(core::policy::active_policy());
             const bool sandbox_active = core::landrun::LandrunSettings::instance().enabled();
             const auto security_label = format_security_status_label(sandbox_active, policy_active);
             if (!security_label.empty()) {
-                right_items.push_back(
+                security_el =
                     text(security_label)
                     | color(workspace_panel_snapshot.active && workspace_panel_snapshot.security
                                 ? Color(ColorYellowBright) : ColorTextSecondary)
-                    | reflect(security_status_box));
+                    | reflect(security_status_box);
             }
-            std::string cwd_str = format_cwd();
-            if (!cwd_str.empty()) {
-                const auto workspace_count = workspace_details_workspace_count(
-                    visible_workspace.snapshot());
-                if (workspace_count > 1) {
-                    cwd_str += std::format(" (+{})", workspace_count - 1);
-                }
+            cwd_str = format_cwd();
+            const auto workspace_count = workspace_details_workspace_count(
+                visible_workspace.snapshot());
+            if (workspace_count > 1) {
+                workspace_suffix = std::format(" (+{})", workspace_count - 1);
+            }
+        }
+        const auto render_right = [&](const StatusFooterDensity& density) -> Element {
+            if (quit_confirm_active()) {
+                return text(" Press " + quit_confirm_key + " again to quit ")
+                    | color(ColorTextMuted);
+            }
+            Elements right_items;
+            if (security_el) {
+                right_items.push_back(security_el);
+            }
+            if (!cwd_str.empty() && density.show_workspace) {
                 right_items.push_back(
-                    text(format_workspace_status_label(cwd_str))
+                    text(format_workspace_status_label(
+                        elide_workspace_path(cwd_str, density.workspace_kept_components)
+                        + workspace_suffix))
                     | color(workspace_panel_snapshot.active && !workspace_panel_snapshot.security
                                 ? Color(ColorYellowBright) : ColorTextSecondary)
                     | reflect(workspace_status_box));
             }
             // Context left percentage
             if (ui_show_context_usage && ctx_pct >= 0) {
-                right_items.push_back(text(std::format(" {}% Context Left ", ctx_pct)) | color(ctx_color));
+                right_items.push_back(
+                    text(format_context_left_label(ctx_pct, density.context_label))
+                    | color(ctx_color));
             }
             if (right_items.empty()) {
-                right_el = text("");
-            } else {
-                right_el = hbox(std::move(right_items));
+                return text("");
             }
-        }
+            return hbox(std::move(right_items));
+        };
 
         // For subscription users: show token counts but hide the dollar cost
         // (window utilization replaces it in rate_limit_el).
@@ -11160,44 +11174,20 @@ RunResult run(RunOptions opts) {
                 | color(Color::Black);
         }
         
-        Elements left_items;
-        left_items.push_back(
+        const Element mode_el =
             text(std::string(" ") + modes[current_mode_idx].first + " ")
-                | ftxui::bold | bgcolor(modes[current_mode_idx].second) | color(Color::White));
-        if (ui_show_model_info) {
-            left_items.push_back(
-                text(format_model_status_badge(
-                    core::llm::provider_display_name(active_provider_name),
-                    active_model_name,
-                    session_effort_value))
-                    | bgcolor(FillYellowDark) | color(Color::Black));
-        }
-        left_items.push_back(usage_dashboard_el);
-        left_items.push_back(budget_el);
-        left_items.push_back(rate_limit_el);
-        left_items.push_back(render_turn_activity_indicator(
+                | ftxui::bold | bgcolor(modes[current_mode_idx].second) | color(Color::White);
+        const Element turn_activity_el = render_turn_activity_indicator(
             turn_activity_state(response_in_progress,
                                 current_runtime->completion_status()),
             ui_show_spinner.load(std::memory_order_relaxed),
-            tick));
+            tick);
         // The inbound MCP server status is a standalone affordance: instead of
         // stacking it after the turn indicators, it gets its own centered slot
         // in the status bar (composed below).
-        bool remote_mcp_status_visible = false;
-        Element remote_mcp_status_el = text("");
-        if (opts.remote_mcp_server_enabled) {
-            const auto remote_status = format_remote_footer_status(
-                remote_activity_snapshot);
-            if (!remote_status.label.empty()) {
-                remote_mcp_status_visible = true;
-                remote_mcp_status_el =
-                    render_remote_footer_status(remote_status)
-                    | reflect(remote_activity_pill_box);
-            }
-        }
-        left_items.push_back(guardrail_el);
-        left_items.push_back(queued_steering_el);
-        left_items.push_back(review_activity_el);
+        const RemoteFooterStatus remote_mcp_status = opts.remote_mcp_server_enabled
+            ? format_remote_footer_status(remote_activity_snapshot)
+            : RemoteFooterStatus{};
         const bool show_status_footer =
             ui_show_footer
             || usage_panel_visible
@@ -11206,22 +11196,60 @@ RunResult run(RunOptions opts) {
             || review_activity_active
             || opts.remote_mcp_server_enabled
             || queued_steering_count > 0;
-        auto left_el = show_status_footer
-            ? hbox(std::move(left_items))
-            : text("");
+
+        // One complete status bar per density, richest first; first_that_fits
+        // draws the first one the terminal is wide enough for. Elements that
+        // never change with the density are shared between the candidates.
+        const auto render_status = [&](const StatusFooterDensity& density) -> Element {
+            Element left_el = text("");
+            if (show_status_footer) {
+                Elements left_items;
+                left_items.push_back(mode_el);
+                if (ui_show_model_info) {
+                    left_items.push_back(
+                        text(format_model_status_badge(
+                            density.show_provider
+                                ? core::llm::provider_display_name(active_provider_name)
+                                : std::string_view{},
+                            active_model_name,
+                            density.show_effort ? std::string_view(session_effort_value)
+                                                : std::string_view{}))
+                            | bgcolor(FillYellowDark) | color(Color::Black)
+                            | xflex_shrink);
+                }
+                left_items.push_back(usage_dashboard_el);
+                left_items.push_back(density.show_usage_totals ? budget_el : text(""));
+                // Below the most compact density nothing is left to give up,
+                // so the model and the rate windows (xflex_shrink) are cut
+                // before the mode, the activity glyph and the warnings.
+                left_items.push_back(rate_limit_el | xflex_shrink);
+                left_items.push_back(turn_activity_el);
+                left_items.push_back(guardrail_el);
+                left_items.push_back(queued_steering_el);
+                left_items.push_back(review_activity_el);
+                left_el = hbox(std::move(left_items));
+            }
+            if (!remote_mcp_status.label.empty()) {
+                return render_centered_footer(
+                    std::move(left_el),
+                    render_remote_footer_status(remote_mcp_status, density.remote_detail)
+                        | reflect(remote_activity_pill_box),
+                    render_right(density));
+            }
+            return hbox({
+                std::move(left_el) | xflex,
+                render_right(density),
+            });
+        };
 
         auto status_el = text("");
         if (show_status_footer || quit_confirm_active()) {
-            if (remote_mcp_status_visible) {
-                status_el = render_centered_footer(
-                    std::move(left_el), std::move(remote_mcp_status_el),
-                    std::move(right_el)) | xflex;
-            } else {
-                status_el = hbox({
-                    left_el | xflex,
-                    right_el,
-                }) | xflex;
+            Elements candidates;
+            for (const auto& density :
+                 status_footer_densities(workspace_path_components(cwd_str))) {
+                candidates.push_back(render_status(density));
             }
+            status_el = first_that_fits(std::move(candidates)) | xflex;
         }
 
         Elements window_rows;

@@ -251,6 +251,7 @@ set(FILO_CORE_SOURCES
     src/tui/RewindActions.cpp
     src/tui/RewindPicker.cpp
     src/tui/RemoteActivityPanel.cpp
+    src/tui/StatusFooterLayout.cpp
     src/tui/ReviewCard.cpp
     src/tui/UsageDetailsPanel.cpp
     src/tui/WorkspaceDetailsPanel.cpp
@@ -844,6 +845,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_llamacpp_provider.cpp
     tests/test_mcp_server.cpp
     tests/test_remote_activity.cpp
+    tests/test_status_footer_layout.cpp
     tests/test_mcp_tasks.cpp
     tests/test_mcp_connection_manager.cpp
     tests/test_oauth.cpp

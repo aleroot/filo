@@ -115,7 +115,8 @@ enum class ReviewPickerMode {
 /// Compact footer badge for the active provider/model, optionally including a
 /// non-default effort level. Empty `effort_level` means auto/provider default
 /// and is omitted so the badge stays `provider · model`. Internal value
-/// `none` is shown as `off` to match the `/effort` command language.
+/// `none` is shown as `off` to match the `/effort` command language. An empty
+/// `provider_name` leaves the provider out (narrow status bars).
 [[nodiscard]] std::string format_model_status_badge(
     std::string_view provider_name,
     std::string_view model_name,

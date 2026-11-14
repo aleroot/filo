@@ -245,7 +245,8 @@ TEST_CASE("remote footer is centered in the window while avoiding side items",
             text(std::move(right)) | reflect(right_box));
         auto screen = Screen::Create(Dimension::Fixed(width), Dimension::Fixed(1));
         Render(screen, footer);
-        CHECK(left_box.x_max < middle_box.x_min);
+        // At least one blank cell separates the left items from the pill.
+        CHECK(left_box.x_max + 1 < middle_box.x_min);
         CHECK(middle_box.x_max < right_box.x_min);
         return middle_box.x_min;
     };
@@ -255,7 +256,7 @@ TEST_CASE("remote footer is centered in the window while avoiding side items",
     // When an edge is too large for true centering, the item moves just
     // enough to avoid overlapping it.
     CHECK(check(40, "LEFT", "A very long right hand side") == 7);
-    CHECK(check(16, "LEFT", "RIGHT!") == 4);
+    CHECK(check(17, "LEFT", "RIGHT!") == 5);
 }
 
 TEST_CASE("remote activity summaries use the available terminal width",
