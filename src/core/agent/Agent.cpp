@@ -2825,15 +2825,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         // Accumulate actual response content
-        if (!chunk.content.empty()) {
-            if (chunk.transport_cut) {
-                // A transport notice, not the answer. The turn continues from
-                // what arrived, so the notice never becomes part of it; when
-                // the turn cannot continue, the final handler shows it.
-            } else {
-                *assistant_response += chunk.content;
-                text_callback(chunk.content);
-            }
+        if (!chunk.content.empty() && !chunk.transport_cut) {
+            // A transport notice is not the answer: the turn continues from
+            // what arrived, so the notice never becomes part of it. When the
+            // turn cannot continue, the final handler shows it.
+            *assistant_response += chunk.content;
+            text_callback(chunk.content);
         }
         
         // Accumulate provider reasoning separately from visible answer text.
@@ -3069,18 +3066,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return;
         }
 
-        if (!chunk.is_error
-            && asst_msg.tool_calls.empty()
-            && should_recover_truncated_turn(chunk.stop_reason, chunk.incomplete_tool_call)
-            && turn_state->max_output_recovery_count < kMaxOutputRecoveryLimit
-            && !self->is_stop_requested()) {
-            ++turn_state->max_output_recovery_count;
-
-            const auto status = std::format(
-                "\n[{} hit an output limit; continuing automatically ({}/{}).]\n",
-                provider_notice_subject(provider_name_snapshot),
-                turn_state->max_output_recovery_count,
-                kMaxOutputRecoveryLimit);
+        // Resume a turn whose answer was cut short: the partial answer stays
+        // in the history, the model is asked to continue from it, and the
+        // turn carries on with a fresh request. Shared by the two ways an
+        // answer can end early — the output limit and the transport.
+        const auto resume_after_cut = [&](std::string status,
+                                          std::string_view prompt) {
             if (turn_callbacks.on_status_log) {
                 turn_callbacks.on_status_log(status);
             } else {
@@ -3097,7 +3088,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         }
                         history.push_back(core::llm::Message{
                             .role = "user",
-                            .content = std::string(kMaxOutputRecoveryPrompt),
+                            .content = std::string(prompt),
                             .synthetic = true,
                         });
                     })) {
@@ -3109,6 +3100,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                                turn_callbacks, turn_state] {
                 self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
             });
+        };
+
+        if (!chunk.is_error
+            && asst_msg.tool_calls.empty()
+            && should_recover_truncated_turn(chunk.stop_reason, chunk.incomplete_tool_call)
+            && turn_state->max_output_recovery_count < kMaxOutputRecoveryLimit
+            && !self->is_stop_requested()) {
+            ++turn_state->max_output_recovery_count;
+
+            resume_after_cut(
+                std::format(
+                    "\n[{} hit an output limit; continuing automatically ({}/{}).]\n",
+                    provider_notice_subject(provider_name_snapshot),
+                    turn_state->max_output_recovery_count,
+                    kMaxOutputRecoveryLimit),
+                kMaxOutputRecoveryPrompt);
             return;
         }
 
@@ -3125,35 +3132,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             && !self->is_stop_requested()) {
             ++turn_state->transport_cut_recovery_count;
 
-            const auto status = std::format(
-                "\n[{} lost the connection before the answer finished; continuing automatically ({}/{}).]\n",
-                provider_notice_subject(provider_name_snapshot),
-                turn_state->transport_cut_recovery_count,
-                kMaxTransportCutRecoveryLimit);
-            if (turn_callbacks.on_status_log) {
-                turn_callbacks.on_status_log(status);
-            } else {
-                text_callback(status);
-            }
-
-            if (!self->apply_to_history_if_turn_current(
-                    turn_state,
-                    [&](std::vector<core::llm::Message>& history) {
-                        history.push_back(asst_msg);
-                        history.push_back(core::llm::Message{
-                            .role = "user",
-                            .content = std::string(kTransportCutRecoveryPrompt),
-                            .synthetic = true,
-                        });
-                    })) {
-                done_callback();
-                return;
-            }
-
-            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
-                                               turn_callbacks, turn_state] {
-                self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
-            });
+            resume_after_cut(
+                std::format(
+                    "\n[{} lost the connection before the answer finished; continuing automatically ({}/{}).]\n",
+                    provider_notice_subject(provider_name_snapshot),
+                    turn_state->transport_cut_recovery_count,
+                    kMaxTransportCutRecoveryLimit),
+                kTransportCutRecoveryPrompt);
             return;
         }
 
@@ -3163,6 +3148,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // arrived, and the notice says so.
             asst_msg.content += chunk.content;
             text_callback(chunk.content);
+            self->turn_failed_.store(true, std::memory_order_release);
         }
 
         if (!chunk.is_error && asst_msg.tool_calls.empty()) {
@@ -3205,8 +3191,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         if (chunk.is_error) {
-            // A cut the turn could not continue is a failed turn.
-            self->turn_failed_.store(true, std::memory_order_release);
             done_callback();
             return;
         }

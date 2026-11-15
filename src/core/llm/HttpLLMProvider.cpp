@@ -1166,6 +1166,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 // model's thinking on an attempt reset, but not answer text.
                 transport::StreamOutputState output_state =
                     transport::StreamOutputState::None;
+                // The reason the provider closed the attempt with, empty while
+                // the attempt is still running.
+                std::string attempt_finish_reason;
                 const bool requires_terminal_event =
                     protocol->requires_terminal_event();
                 transport::StreamWatchdog watchdog(timeouts);
@@ -1258,6 +1261,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     }
 
                     stream_started = stream_started || result.stream_started;
+                    if (!result.stop_reason.empty()) {
+                        // The provider closed the attempt with this reason: a
+                        // stream that ends after it lost its terminal event,
+                        // not its answer.
+                        attempt_finish_reason = result.stop_reason;
+                    }
                     if (result.stream_error) {
                         stream_error_seen = true;
                         stream_error_retryable = result.retryable_stream_error;
@@ -1477,8 +1486,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     // be holding back what it only releases at that event, so
                     // the turn ends with the failure the transport saw, and
                     // there is nothing to continue.
-                    const bool answer_closed =
-                        !protocol->attempt_finish_reason().empty();
+                    const bool answer_closed = !attempt_finish_reason.empty();
 
                     const bool retryable_stream_failure =
                         !transport::retry_vetoed(r.header)

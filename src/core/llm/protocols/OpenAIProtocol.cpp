@@ -202,8 +202,19 @@ parse_openai_sse_chunk(std::string_view json_str) {
     std::string              content_str;
     std::vector<ToolCall>    tools;
     std::string              reasoning;
+    std::string              finish_reason;
 
     for (simdjson::dom::element choice : choices) {
+        // The provider states the finish reason with the chunk that closes
+        // the attempt. Read it before the delta: the closing chunk often
+        // carries an empty delta.
+        std::string_view reason;
+        if (finish_reason.empty()
+            && choice["finish_reason"].get(reason) == simdjson::SUCCESS
+            && !reason.empty()) {
+            finish_reason = std::string(reason);
+        }
+
         simdjson::dom::object delta;
         if (choice["delta"].get(delta) != simdjson::SUCCESS) {
             continue;
@@ -250,7 +261,8 @@ parse_openai_sse_chunk(std::string_view json_str) {
         }
     }
 
-    return {std::move(content_str), std::move(tools), std::move(reasoning)};
+    return {std::move(content_str), std::move(tools), std::move(reasoning),
+            std::move(finish_reason)};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,24 +274,6 @@ std::string map_openai_finish_reason(std::string_view reason) {
     if (reason == "tool_calls") return "tool_use";
     if (reason == "content_filter") return "refusal";
     return std::string(reason);
-}
-
-std::string_view parse_openai_finish_reason(std::string_view json_str) {
-    if (json_str.empty()) return {};
-
-    thread_local simdjson::dom::parser parser;
-    const core::utils::json::ParserRetentionGuard parser_guard{parser};
-    simdjson::padded_string ps(json_str);
-    simdjson::dom::element doc;
-    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return {};
-    simdjson::dom::array choices;
-    if (doc["choices"].get(choices) != simdjson::SUCCESS) return {};
-    for (const auto choice : choices) {
-        std::string_view reason;
-        if (choice["finish_reason"].get(reason) != simdjson::SUCCESS) continue;
-        if (!reason.empty()) return reason;
-    }
-    return {};
 }
 
 std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
@@ -369,14 +363,14 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
         }
     }
 
-    auto [content, tools, reasoning] = parse_openai_sse_chunk(json_sv);
-    // Remember the finish reason as soon as the provider states it: a stream
-    // that ends after this lost its terminal event, not its answer.
-    if (attempt_finish_reason_.empty()) {
-        if (const std::string_view reason = parse_openai_finish_reason(json_sv);
-            !reason.empty()) {
-            attempt_finish_reason_ = map_openai_finish_reason(reason);
-        }
+    auto [content, tools, reasoning, finish_reason] =
+        parse_openai_sse_chunk(json_sv);
+    // The provider states the finish reason with the chunk that closes the
+    // attempt. It travels on the same channel Anthropic already uses, so the
+    // transport can tell a stream that lost its terminal event from one that
+    // lost its answer — for every provider that reports the reason.
+    if (!finish_reason.empty() && result.stop_reason.empty()) {
+        result.stop_reason = map_openai_finish_reason(finish_reason);
     }
     if (!content.empty() || !tools.empty() || !reasoning.empty()) {
         // Combine content, tool calls, and reasoning into a single chunk. The

@@ -938,7 +938,6 @@ RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
 void DashScopeTokenPlanProtocol::reset_state() { delegate_->reset_state(); }
 
 void DashScopeProtocol::reset_state() {
-    OpenAIProtocol::reset_state();
     stop_reason_.clear();
     pending_tool_calls_.clear();
     stream_rate_limit_seen_ = false;

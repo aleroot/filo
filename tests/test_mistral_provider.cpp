@@ -142,7 +142,7 @@ TEST_CASE("Mistral serializer - tool definition uses OpenAI parameters format",
 
 TEST_CASE("Mistral SSE - text content extracted via OpenAI parser", "[mistral][sse]") {
     // The Mistral streaming API returns the same SSE format as OpenAI.
-    auto [content, tools, reasoning] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning, finish_reason] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"content":"Hello from Mistral"},"index":0}]})");
     REQUIRE(content == "Hello from Mistral");
     REQUIRE(tools.empty());
@@ -177,7 +177,7 @@ TEST_CASE("Mistral SSE - direct reasoning content is preserved",
 }
 
 TEST_CASE("Mistral SSE - tool call extracted via OpenAI parser", "[mistral][sse][tools]") {
-    auto [content, tools, reasoning] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning, finish_reason] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_m1","type":"function","function":{"name":"search","arguments":""}}]},"index":0}]})");
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].id   == "call_m1");
@@ -185,7 +185,7 @@ TEST_CASE("Mistral SSE - tool call extracted via OpenAI parser", "[mistral][sse]
 }
 
 TEST_CASE("Mistral SSE - finish_reason chunk is ignored", "[mistral][sse]") {
-    auto [content, tools, reasoning] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning, finish_reason] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{},"finish_reason":"stop","index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());

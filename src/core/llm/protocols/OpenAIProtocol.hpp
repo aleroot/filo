@@ -37,16 +37,19 @@ namespace core::llm::protocols {
  * OpenAI Chat Completions wire format.  Pure function — no side effects.
  *
  * @param json_str  The JSON string after stripping the leading `"data: "` prefix.
- * @return `{content, tool_calls, reasoning_content}`. Reasoning captures the
- *         `delta.reasoning_content` field emitted by OpenAI-compatible thinking
- *         models (e.g. DeepSeek-R1, Qwen-thinking via OpenRouter) so the TUI can
- *         surface it in the reasoning disclosure. All fields empty on malformed
- *         or no-op input.
+ * @return `{content, tool_calls, reasoning_content, finish_reason}`.
+ * Reasoning captures the `delta.reasoning_content` field emitted by
+ * OpenAI-compatible thinking models (e.g. DeepSeek-R1, Qwen-thinking via
+ * OpenRouter) so the TUI can surface it in the reasoning disclosure. The
+ * finish reason is the provider's own statement that the attempt closed; it
+ * travels with the chunk so the transport learns it from the same parse.
+ * All fields empty on malformed or no-op input.
  */
 struct OpenAIChatChunk {
     std::string              content;
     std::vector<ToolCall>    tool_calls;
     std::string              reasoning_content;
+    std::string              finish_reason;
 };
 
 [[nodiscard]] OpenAIChatChunk parse_openai_sse_chunk(std::string_view json_str);
@@ -59,14 +62,6 @@ struct OpenAIChatChunk {
  * named it.
  */
 [[nodiscard]] std::string map_openai_finish_reason(std::string_view reason);
-
-/**
- * The first non-empty finish reason carried by a chat-completions chunk.
- *
- * Empty while the attempt has not closed with an answer. A stream that ends
- * after this appeared lost its terminal event, not its answer.
- */
-[[nodiscard]] std::string_view parse_openai_finish_reason(std::string_view json_str);
 
 /** OpenAI-native model reasoning policy shared by both OpenAI wire APIs. */
 [[nodiscard]] ReasoningCapabilities openai_reasoning_capabilities(
@@ -137,10 +132,6 @@ public:
         std::string_view model) const noexcept override {
         return openai_reasoning_capabilities(model);
     }
-    // The finish reason this attempt closed with, if it closed with one.
-    [[nodiscard]] std::string_view attempt_finish_reason() const noexcept override {
-        return attempt_finish_reason_;
-    }
 
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] bool is_retryable(
@@ -150,8 +141,6 @@ public:
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<OpenAIProtocol>(stream_usage_, system_prompt_layout_);
     }
-
-    void reset_state() override { attempt_finish_reason_.clear(); }
 
 protected:
     /**
@@ -172,9 +161,6 @@ protected:
 private:
     Serializer::SystemPromptLayout system_prompt_layout_;
     RateLimitInfo last_rate_limit_;
-    // The finish reason the attempt closed with, empty while it is still
-    // running. Reset with the attempt.
-    std::string attempt_finish_reason_;
 };
 
 } // namespace core::llm::protocols
