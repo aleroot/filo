@@ -2,6 +2,8 @@
 
 #include "AsciiUtils.hpp"
 
+#include "core/version/Version.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -205,6 +207,20 @@ const ClientPlatform& client_platform() {
 
 std::string terminal_token() {
     return detect_terminal_token();
+}
+
+const std::string& client_user_agent() {
+    // The shape the Codex CLI reports (login/src/auth/default_client.rs):
+    // "{product}/{version} ({os} {os_version}; {architecture})".
+    static const std::string value = [] {
+        const auto& platform = client_platform();
+        std::string agent = std::string(core::version::product_name) + "/"
+            + std::string(core::version::value);
+        agent += " (" + platform.os + " " + platform.version + "; "
+            + platform.architecture + ")";
+        return agent;
+    }();
+    return value;
 }
 
 } // namespace core::utils

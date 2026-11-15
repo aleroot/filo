@@ -8,6 +8,7 @@
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
+#include "core/utils/ClientPlatform.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <algorithm>
 #include <array>
@@ -460,7 +461,11 @@ cpr::Header DashScopeProtocol::build_headers(const core::auth::AuthInfo& auth) c
     // Activate server-side prompt caching transparently for all requests.
     headers["X-DashScope-CacheControl"] = "enable";
     // Client identification used by DashScope for debugging and telemetry.
-    headers["X-DashScope-UserAgent"]    = "filo/0.1 (compatible-mode)";
+    // Qwen Code sends the same value in both headers, so the endpoint can
+    // tell which client it is serving; Filo names itself and the platform it
+    // runs on rather than borrowing another product's identity.
+    headers["User-Agent"] = core::utils::client_user_agent();
+    headers["X-DashScope-UserAgent"] = core::utils::client_user_agent();
     headers["X-DashScope-AuthType"]     = "openai";
     return headers;
 }

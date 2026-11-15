@@ -279,6 +279,21 @@ TEST_CASE("Tiered Qwen models disable thinking with reasoning_effort",
     CHECK_THAT(legacy, !Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
 }
 
+TEST_CASE("DashScope names the client the way the endpoint expects",
+          "[qwen][headers][identity]") {
+    DashScopeProtocol protocol;
+    const auto headers = protocol.build_headers({});
+    // Qwen Code sends the same identity in both headers, so the endpoint can
+    // tell which client it is serving. Filo names itself and the platform it
+    // runs on.
+    const auto& agent = headers.at("User-Agent");
+    CHECK(agent == headers.at("X-DashScope-UserAgent"));
+    CHECK_THAT(agent, Catch::Matchers::StartsWith("filo/"));
+    CHECK_THAT(agent, Catch::Matchers::ContainsSubstring("; "));
+    CHECK(headers.at("X-DashScope-CacheControl") == "enable");
+    CHECK(headers.at("X-DashScope-AuthType") == "openai");
+}
+
 TEST_CASE("Qwen budgets include schemas and media and respect endpoint limits",
           "[qwen][regression][context]") {
     using core::llm::providers::QwenRequestBudget;

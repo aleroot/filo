@@ -32,4 +32,10 @@ struct ClientPlatform {
 /// requests of the same process.
 [[nodiscard]] std::string terminal_token();
 
+/// Filo's own User-Agent: the product and its version, then the platform the
+/// client runs on — the shape the Codex CLI uses, without the terminal token
+/// (a provider that only wants to know which client it is serving has no
+/// use for it).
+[[nodiscard]] const std::string& client_user_agent();
+
 } // namespace core::utils
