@@ -197,6 +197,16 @@ void apply_live_catalog_metadata(ChatRequest& request,
         live->supports_reasoning_effort_updates;
 }
 
+/// The endpoint named the routing token of the turn: the next request of the
+/// same turn carries it back. The protocol that understands the token decides
+/// where it lives; the provider only carries it.
+void carry_turn_state(protocols::ApiProtocolBase& protocol,
+                      const ChatRequest& request,
+                      const protocols::ParseResult& parsed) {
+    if (parsed.turn_state.empty()) return;
+    protocol.observe_turn_state(request, parsed.turn_state);
+}
+
 }
 
 HttpLLMProvider::HttpLLMProvider(std::string                                    base_url,
@@ -937,13 +947,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     return true;
                                 };
                                 auto parsed = protocol->parse_event(event);
-                                if (!parsed.turn_state.empty()) {
-                                    // The endpoint named the routing token of
-                                    // the turn: the next request of the turn
-                                    // carries it back.
-                                    protocol->observe_turn_state(
-                                        request_metadata, parsed.turn_state);
-                                }
+                                carry_turn_state(*protocol, request_metadata, parsed);
                                 const bool answered = parsed.interrupt_outcome
                                     != protocols::InterruptOutcome::None;
                                 if (answered) {
@@ -1235,11 +1239,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     if (event_payload.empty()) return;
                     if (response_status >= 400) return;
                     protocols::ParseResult result = protocol->parse_event(event_payload);
-                    if (!result.turn_state.empty()) {
-                        // The endpoint named the routing token of the turn:
-                        // the next request of the turn carries it back.
-                        protocol->observe_turn_state(request_metadata, result.turn_state);
-                    }
+                    carry_turn_state(*protocol, request_metadata, result);
                     if (!result.response_id.empty()) {
                         // The endpoint's handle for the response it is
                         // serving: a cancel can name it.
