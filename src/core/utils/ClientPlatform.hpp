@@ -24,8 +24,12 @@ struct ClientPlatform {
 [[nodiscard]] const ClientPlatform& client_platform();
 
 /// The terminal this process runs in, named the way the Codex CLI names it:
-/// the value of TERM_PROGRAM (with its version when there is one), else the
-/// value of TERM. Empty when the environment names no terminal.
-[[nodiscard]] std::string_view terminal_token();
+/// the program the terminal sets (with its version), else the TERM
+/// capability string, else the name the terminal is known by.
+///
+/// The environment is read on every call: the User-Agent that carries the
+/// token is built once, so the token itself never changes between two
+/// requests of the same process.
+[[nodiscard]] std::string terminal_token();
 
 } // namespace core::utils

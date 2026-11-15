@@ -1,7 +1,11 @@
 #include "ClientPlatform.hpp"
 
+#include "AsciiUtils.hpp"
+
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <string>
 
 #if defined(__APPLE__)
@@ -73,6 +77,99 @@ namespace {
 }
 #endif
 
+/// The environment value, when it is set and not only white space.
+[[nodiscard]] std::optional<std::string> env_value(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw) return std::nullopt;
+    std::string value(raw);
+    const bool blank = std::ranges::all_of(value, [](unsigned char ch) {
+        return ascii::is_space(ch);
+    });
+    if (blank) return std::nullopt;
+    return value;
+}
+
+/// Whether the environment names the variable at all, empty or not.
+[[nodiscard]] bool env_present(const char* name) {
+    return std::getenv(name) != nullptr;
+}
+
+/// The characters a header value may carry (codex-rs terminal-detection
+/// sanitize_header_value).
+[[nodiscard]] bool is_header_value_char(char ch) noexcept {
+    return ascii::is_alnum(static_cast<unsigned char>(ch))
+        || ch == '-' || ch == '_' || ch == '.' || ch == '/';
+}
+
+[[nodiscard]] std::string sanitize_header_value(std::string value) {
+    for (char& ch : value) {
+        if (!is_header_value_char(ch)) ch = '_';
+    }
+    return value;
+}
+
+/// A terminal that names itself in the environment, with its version when the
+/// environment names one.
+struct NamedTerminal {
+    std::string name;
+    std::string version;
+};
+
+/// codex-rs terminal-detection detect_terminal_identity_from_env: a terminal
+/// that names itself wins over the TERM capability string. The probes read
+/// the environment only: they never run a helper, so an untrusted PATH cannot
+/// decide what Filo reports.
+[[nodiscard]] NamedTerminal detect_named_terminal() {
+    const auto term = env_value("TERM");
+    if (env_present("GHOSTTY_RESOURCES_DIR")) return {"Ghostty", {}};
+    if (env_present("WEZTERM_VERSION")) {
+        return {"WezTerm", env_value("WEZTERM_VERSION").value_or({})};
+    }
+    if (env_present("ITERM_SESSION_ID") || env_present("ITERM_PROFILE")
+        || env_present("ITERM_PROFILE_NAME")) {
+        return {"iTerm.app", {}};
+    }
+    if (env_present("KITTY_WINDOW_ID")
+        || (term && term->find("kitty") != std::string::npos)) {
+        return {"kitty", {}};
+    }
+    if (env_present("ALACRITTY_SOCKET")
+        || (term && *term == "alacritty")) {
+        return {"Alacritty", {}};
+    }
+    if (env_present("KONSOLE_VERSION")) {
+        return {"Konsole", env_value("KONSOLE_VERSION").value_or({})};
+    }
+    if (env_present("GNOME_TERMINAL_SCREEN")) return {"gnome-terminal", {}};
+    if (env_present("VTE_VERSION")) {
+        return {"VTE", env_value("VTE_VERSION").value_or({})};
+    }
+    if (env_present("WT_SESSION")) return {"WindowsTerminal", {}};
+    return {};
+}
+
+/// codex-rs terminal-detection user_agent_token: the program the terminal
+/// sets (with its version), else the TERM capability string, else the name
+/// the terminal is known by.
+[[nodiscard]] std::string detect_terminal_token() {
+    if (const auto program = env_value("TERM_PROGRAM");
+        program && !ascii::iequals(*program, "tmux")) {
+        const auto version = env_value("TERM_PROGRAM_VERSION");
+        return sanitize_header_value(
+            version ? *program + "/" + *version : *program);
+    }
+
+    const auto named = detect_named_terminal();
+    if (!named.name.empty()) {
+        return sanitize_header_value(
+            named.version.empty() ? named.name : named.name + "/" + named.version);
+    }
+    if (const auto term = env_value("TERM")) {
+        return sanitize_header_value(*term);
+    }
+    return "unknown";
+}
+
 [[nodiscard]] ClientPlatform detect_platform() {
     ClientPlatform platform;
     platform.architecture = std::string(build_architecture());
@@ -106,23 +203,8 @@ const ClientPlatform& client_platform() {
     return platform;
 }
 
-std::string_view terminal_token() {
-    static const std::string token = [] {
-        const char* program = std::getenv("TERM_PROGRAM");
-        if (program && *program) {
-            std::string value(program);
-            const char* version = std::getenv("TERM_PROGRAM_VERSION");
-            if (version && *version) {
-                value += '/';
-                value += version;
-            }
-            return value;
-        }
-        const char* term = std::getenv("TERM");
-        if (term && *term) return std::string(term);
-        return std::string();
-    }();
-    return token;
+std::string terminal_token() {
+    return detect_terminal_token();
 }
 
 } // namespace core::utils
