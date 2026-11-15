@@ -266,9 +266,20 @@ void append_function_call_output_item(std::string& payload,
     const std::vector<Message>& messages,
     bool include_system_messages = false,
     bool namespaced = false,
-    std::string_view image_detail = {}) {
+    std::string_view image_detail = {},
+    bool include_reasoning_effort_updates = false) {
     std::vector<std::string> items;
     std::size_t fallback_idx = 0;
+
+    // A durable effort change is a provider control item: it is replayed
+    // only by a wire that accepts one, and only where the change happened.
+    const auto is_replayable_control =
+        [](const ContinuationItem& continuation, bool effort_updates) {
+            if (continuation.provider != "openai") return false;
+            if (continuation.kind == kCheckpointContinuationKind) return true;
+            return effort_updates
+                && continuation.kind == kReasoningEffortContinuationKind;
+        };
 
     for (const auto& msg : messages) {
         if (msg.role == "system" && !include_system_messages) continue;
@@ -281,7 +292,9 @@ void append_function_call_output_item(std::string& payload,
             for (const auto& continuation : msg.continuation_items) {
                 if ((continuation.provider.empty() || continuation.provider == "openai")
                     && continuation.kind != "assistant_content"
-                    && has_valid_continuation_payload(continuation)) {
+                    && has_valid_continuation_payload(continuation)
+                    && (continuation.kind != kReasoningEffortContinuationKind
+                        || include_reasoning_effort_updates)) {
                     items.push_back(continuation.payload);
                 }
             }
@@ -303,11 +316,11 @@ void append_function_call_output_item(std::string& payload,
 
         // A provider checkpoint follows the user message it rides on, the
         // position codex-rs gives its compaction item after the retained user
-        // messages (compact_pending_input.rs insert_summary).
+        // messages (compact_pending_input.rs insert_summary). A durable
+        // effort change rides on the message where the user selected it.
         if (msg.role != "assistant") {
             for (const auto& continuation : msg.continuation_items) {
-                if (continuation.provider == "openai"
-                    && continuation.kind == kCheckpointContinuationKind
+                if (is_replayable_control(continuation, include_reasoning_effort_updates)
                     && has_valid_continuation_payload(continuation)) {
                     items.push_back(continuation.payload);
                 }
@@ -417,13 +430,36 @@ void append_function_call_output_item(std::string& payload,
     return item;
 }
 
+// codex-rs core/src/client.rs build_responses_request: consecutive effort
+// updates collapse to the latest one, because only the last selection is in
+// effect. The prefix test is exact: the item is produced by this protocol.
+[[nodiscard]] bool is_effort_update_item(std::string_view item) {
+    return item.starts_with(R"({"type":"configuration_update")");
+}
+
+void collapse_adjacent_effort_updates(std::vector<std::string>& items) {
+    std::vector<std::string> collapsed;
+    collapsed.reserve(items.size());
+    for (auto& item : items) {
+        if (is_effort_update_item(item)
+            && !collapsed.empty()
+            && is_effort_update_item(collapsed.back())) {
+            collapsed.back() = std::move(item);
+            continue;
+        }
+        collapsed.push_back(std::move(item));
+    }
+    items = std::move(collapsed);
+}
+
 // The ChatGPT backend rejects `instructions`. The official client sends the
 // same stable prompt as a developer message at the front of `input`.
 [[nodiscard]] std::vector<std::string> codex_input_items(const ChatRequest& request) {
     // codex-rs protocol/src/models.rs DEFAULT_IMAGE_DETAIL is `high`;
     // client_common.rs normalize_image_detail clears it for Responses Lite.
     auto items = build_input_items(request.messages, false, responses_lite(request),
-                                   responses_lite(request) ? std::string_view{} : "high");
+                                   responses_lite(request) ? std::string_view{} : "high",
+                                   request.catalog_supports_reasoning_effort_updates);
     const std::string instructions = collect_instructions(request);
     if (!instructions.empty()) {
         Message developer;
@@ -440,6 +476,7 @@ void append_function_call_output_item(std::string& payload,
     // codex-rs compact_remote_v2_attempt.rs: a compaction request is the
     // conversation followed by a `compaction_trigger` control item.
     if (request.native_compaction) items.emplace_back(R"({"type":"compaction_trigger"})");
+    collapse_adjacent_effort_updates(items);
     return items;
 }
 
@@ -1151,6 +1188,43 @@ void OpenAIResponsesProtocol::reset_attempt_state() {
     last_rate_limit_ = {};
 }
 
+OpenAIResponsesProtocol::ResolvedReasoning
+OpenAIResponsesProtocol::resolve_request_reasoning(
+    const ChatRequest& request,
+    std::optional<std::string_view> effort_override) const {
+    const auto* catalog = uses_provider_reasoning_catalog() && request.catalog_reasoning
+        ? &*request.catalog_reasoning : nullptr;
+    const auto capabilities = catalog && catalog->complete
+        ? catalog->effort
+        : reasoning_capabilities(request.model);
+    std::string_view requested_effort = request.effort;
+    if (requested_effort.empty() && catalog && catalog->catalog_default_effort) {
+        requested_effort = *catalog->catalog_default_effort;
+    }
+
+    std::string effort = effort_override.has_value()
+        ? std::string(*effort_override)
+        : capabilities.supports_effort()
+            ? normalize_openai_reasoning_effort(requested_effort, capabilities)
+            : std::string{};
+    if (!effort_override && catalog && !catalog->supported_efforts.empty()) {
+        const auto& levels = catalog->supported_efforts;
+        if (requested_effort == "ultra") {
+            if (auto ultra = catalog_ultra_effort(*catalog)) effort = std::move(*ultra);
+        } else if (std::ranges::find(levels, requested_effort) != levels.end()) {
+            effort = requested_effort;
+        }
+        if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
+            // An authoritative catalog may expose only a subset of the usual
+            // low/medium/high ladder. Its default is always safer than sending
+            // a level the deployment does not accept.
+            effort = catalog->catalog_default_effort.value_or("");
+            if (std::ranges::find(levels, effort) == levels.end()) effort.clear();
+        }
+    }
+    return {.capabilities = capabilities, .effort = std::move(effort)};
+}
+
 std::string OpenAIResponsesProtocol::serialize_with_input_items(
     const ChatRequest& req,
     const std::vector<std::string>& input_items,
@@ -1213,40 +1287,15 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
     }
-    const auto* catalog = uses_provider_reasoning_catalog() && req.catalog_reasoning
-        ? &*req.catalog_reasoning : nullptr;
-    const auto reasoning = catalog && catalog->complete
-        ? catalog->effort : reasoning_capabilities(req.model);
-    std::string_view requested_effort = req.effort;
-    if (requested_effort.empty() && catalog && catalog->catalog_default_effort) {
-        requested_effort = *catalog->catalog_default_effort;
-    }
+    const auto resolved = resolve_request_reasoning(req, options.reasoning_effort_override);
+    const auto& reasoning = resolved.capabilities;
     if (options.include_reasoning_summary
         || options.reasoning_effort_override.has_value()
         || options.tools_in_input
         || reasoning.supports_effort()) {
         // Public OpenAI/Grok/DashScope send effort only. Codex defaults to
         // `summary: auto` unless its catalog specifies otherwise.
-        std::string effort = options.reasoning_effort_override.has_value()
-            ? std::string(*options.reasoning_effort_override)
-            : reasoning.supports_effort()
-                ? normalize_openai_reasoning_effort(requested_effort, reasoning)
-                : std::string{};
-        if (!options.reasoning_effort_override && catalog && !catalog->supported_efforts.empty()) {
-            const auto& levels = catalog->supported_efforts;
-            if (requested_effort == "ultra") {
-                if (auto ultra = catalog_ultra_effort(*catalog)) effort = std::move(*ultra);
-            } else if (std::ranges::find(levels, requested_effort) != levels.end()) {
-                effort = requested_effort;
-            }
-            if (!effort.empty() && std::ranges::find(levels, effort) == levels.end()) {
-                // An authoritative catalog may expose only a subset of the
-                // usual low/medium/high ladder. Its default is always safer
-                // than sending a level the deployment does not accept.
-                effort = catalog->catalog_default_effort.value_or("");
-                if (std::ranges::find(levels, effort) == levels.end()) effort.clear();
-            }
-        }
+        const std::string& effort = resolved.effort;
         if (!effort.empty() || options.include_reasoning_summary || options.tools_in_input) {
             payload += R"(,"reasoning":{)";
             bool first = true;
@@ -1396,6 +1445,25 @@ std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const 
 std::unique_ptr<core::llm::ModelCatalogProvider>
 CodexResponsesProtocol::model_catalog(std::string_view provider_name) const {
     return std::make_unique<CodexModelCatalogProvider>(std::string(provider_name));
+}
+
+std::vector<ContinuationItem> CodexResponsesProtocol::conversation_control_items(
+    const ChatRequest& request) const {
+    // codex-rs ModelInfo::supports_reasoning_effort_updates gates the whole
+    // feature: a model that does not accept the item keeps its effort on the
+    // request parameter alone.
+    if (!request.catalog_supports_reasoning_effort_updates) return {};
+    const auto resolved = resolve_request_reasoning(request);
+    if (resolved.effort.empty()) return {};
+
+    std::string payload = R"({"type":"configuration_update","reasoning":{"effort":")";
+    payload += core::utils::escape_json_string(resolved.effort);
+    payload += R"("}})";
+    return {ContinuationItem{
+        .provider = "openai",
+        .kind = std::string(kReasoningEffortContinuationKind),
+        .payload = std::move(payload),
+    }};
 }
 
 std::string CodexResponsesProtocol::serialize_codex_with_input_items(

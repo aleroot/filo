@@ -436,6 +436,7 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
           "default_verbosity": "low",
           "default_service_tier": null,
           "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}],
+          "supports_reasoning_effort_updates": true,
           "context_window": 1000000
         },
         {
@@ -483,6 +484,10 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(*result.models[1].service_tiers == std::vector<std::string>{"priority"});
     CHECK(result.models[1].default_service_tier.empty());
     CHECK_FALSE(codex.service_tiers.has_value());
+    // codex-rs ModelInfo::supports_reasoning_effort_updates: the model that
+    // accepts a durable effort change says so, the others say nothing.
+    CHECK(result.models[1].supports_reasoning_effort_updates);
+    CHECK_FALSE(codex.supports_reasoning_effort_updates);
     CHECK(result.models[2].canonical_id == "internal-chatgpt-only");
 }
 

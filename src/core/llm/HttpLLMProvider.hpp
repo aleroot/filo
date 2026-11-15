@@ -99,6 +99,8 @@ public:
     [[nodiscard]] std::string get_last_model() const override;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
+    [[nodiscard]] std::vector<ContinuationItem>
+    conversation_control_items(const ChatRequest& request) const override;
     [[nodiscard]] std::shared_ptr<LLMProvider> fork_for_parallel_request() const override;
     [[nodiscard]] std::optional<ProviderMetadata> metadata() const override;
 
@@ -177,6 +179,17 @@ private:
         std::string_view model) const;
     [[nodiscard]] std::optional<ModelReasoningProfile> resolved_reasoning_profile(
         std::string_view model) const;
+    /// The model a request is served by: the one it names, else the
+    /// endpoint's default, in the form the catalog is keyed by.
+    [[nodiscard]] std::string request_model(const ChatRequest& request) const;
+    /// The identity of this provider and endpoint. A continuation item
+    /// belongs to it, so another provider or endpoint never replays it.
+    [[nodiscard]] std::string continuation_service() const;
+    /// Project this endpoint's live catalog onto a request: the fields the
+    /// serializers read, and the reasoning profile they resolve the effort
+    /// with. Shared by the request path and the control-item path so both
+    /// see exactly the same metadata.
+    void project_live_catalog(ChatRequest& request, std::string_view model) const;
 
     struct WebSocketTransportState {
         WebSocketTransportState();

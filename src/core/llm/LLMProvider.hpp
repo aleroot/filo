@@ -88,6 +88,24 @@ public:
     [[nodiscard]] virtual ProviderCapabilities capabilities() const { return {}; }
 
     /**
+     * @brief The conversation control items this provider wants recorded for
+     *        a request.
+     *
+     * Some backends change how the next answer is produced with an item in
+     * the conversation rather than only with the request parameter (a durable
+     * reasoning-effort change, for example). The provider owns the item's
+     * wire shape and decides whether its model accepts one; the caller only
+     * records where the change happened, so the change survives in the
+     * history and keeps the prompt cache intact.
+     *
+     * Empty when the provider has nothing to record.
+     */
+    [[nodiscard]] virtual std::vector<ContinuationItem>
+    conversation_control_items([[maybe_unused]] const ChatRequest& request) const {
+        return {};
+    }
+
+    /**
      * Create an independent provider instance for a concurrent request.
      * Providers may return null when they are internally serialized instead.
      */

@@ -670,6 +670,15 @@ public:
     /// replay such an item in place of the history it condenses.
     [[nodiscard]] virtual bool supports_native_compaction() const noexcept { return false; }
 
+    /// The conversation control items this wire wants recorded for a request
+    /// (a durable reasoning-effort change, for example). The protocol owns
+    /// their wire shape and returns none when the model does not accept one.
+    /// The conversation only records where the change belongs.
+    [[nodiscard]] virtual std::vector<ContinuationItem>
+    conversation_control_items([[maybe_unused]] const ChatRequest& request) const {
+        return {};
+    }
+
     [[nodiscard]] virtual std::string build_websocket_url(
         [[maybe_unused]] std::string_view base_url,
         [[maybe_unused]] std::string_view model) const {

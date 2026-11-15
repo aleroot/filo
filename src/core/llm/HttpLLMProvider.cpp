@@ -161,6 +161,15 @@ namespace {
             });
     }
 
+    /// A continuation item belongs to the model and the endpoint that
+    /// produced it: another model or another service must never replay it.
+    void stamp_continuation_origin(ContinuationItem& item,
+                                   std::string_view model,
+                                   std::string_view service) {
+        item.origin_model = std::string(model);
+        item.origin_service = std::string(service);
+    }
+
 /// Project the endpoint's own live catalog card onto the request.
 ///
 /// Model discovery is intentionally provider-scoped: a model ID exposed by one
@@ -184,6 +193,8 @@ void apply_live_catalog_metadata(ChatRequest& request,
         request.catalog_service_tiers = live->service_tiers;
         request.catalog_default_service_tier = live->default_service_tier;
     }
+    request.catalog_supports_reasoning_effort_updates =
+        live->supports_reasoning_effort_updates;
 }
 
 }
@@ -215,6 +226,17 @@ HttpLLMProvider::~HttpLLMProvider() = default;
 std::string_view HttpLLMProvider::catalog_id() const noexcept {
     return service_id_.empty() ? std::string_view{provider_name_}
                                : std::string_view{service_id_};
+}
+
+std::string HttpLLMProvider::request_model(const ChatRequest& request) const {
+    const std::string model = request.model.empty()
+        ? resolve_default_model()
+        : request.model;
+    return normalize_metadata_model(model, protocol_.get());
+}
+
+std::string HttpLLMProvider::continuation_service() const {
+    return provider_name_ + "|" + base_url_;
 }
 
 void HttpLLMProvider::cancel() {
@@ -402,6 +424,47 @@ std::optional<ProviderMetadata> HttpLLMProvider::metadata() const {
         .credential_source = cred_source_,
         .client_identity_source = client_identity_source_,
     };
+}
+
+void HttpLLMProvider::project_live_catalog(
+    ChatRequest& request,
+    std::string_view model) const {
+    // The endpoint's own catalog is the only authority for what it serves,
+    // so both the request path and the control-item path ask for it here.
+    ensure_model_metadata(model);
+    apply_live_catalog_metadata(request, provider_model_info(model));
+    if (request.catalog_reasoning.has_value()) return;
+    // Same reasoning as max_tokens: a model this endpoint serves but the
+    // global registry has never seen still has to reach the serializer.
+    const auto profile = resolved_reasoning_profile(model);
+    if (!profile.has_value()) return;
+    if (profile->complete
+        || profile->catalog_default_effort.has_value()
+        || profile->summary_supported.has_value()
+        || profile->default_summary.has_value()
+        || profile->ultra.has_value()) {
+        request.catalog_reasoning = profile;
+    }
+}
+
+std::vector<ContinuationItem> HttpLLMProvider::conversation_control_items(
+    const ChatRequest& request) const {
+    if (!protocol_) return {};
+    const std::string model = request_model(request);
+    if (model.empty()) return {};
+
+    // Only the controls the wire reads are needed: copying the conversation
+    // would duplicate megabytes of history for one item.
+    ChatRequest effective;
+    effective.model = model;
+    effective.effort = request.effort;
+    project_live_catalog(effective, model);
+
+    auto items = protocol_->conversation_control_items(effective);
+    for (auto& item : items) {
+        stamp_continuation_origin(item, model, continuation_service());
+    }
+    return items;
 }
 
 std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& request) const {
@@ -624,22 +687,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             effective_request.model = effective_default_model;
         }
 
-        const std::string metadata_model = normalize_metadata_model(
-            effective_request.model.empty()
-                ? std::string_view(effective_default_model)
-                : std::string_view(effective_request.model),
-            protocol_.get());
-        const std::string continuation_service = provider_name_ + "|" + base_url_;
+        const std::string metadata_model = request_model(effective_request);
+        const std::string service = continuation_service();
         for (auto& message : effective_request.messages) {
             std::erase_if(message.continuation_items, [&](const auto& item) {
                 if (item.origin_model.empty() || item.origin_service.empty()) return !protocol_->accepts_legacy_continuation();
-                return item.origin_model != metadata_model || item.origin_service != continuation_service;
+                return item.origin_model != metadata_model || item.origin_service != service;
             });
         }
-        ensure_model_metadata(metadata_model);
+        project_live_catalog(effective_request, metadata_model);
         const auto metadata_info = resolved_model_info(metadata_model);
-        apply_live_catalog_metadata(
-            effective_request, provider_model_info(metadata_model));
         // Same reasoning as the projections above: copy this endpoint's concrete
         // output limit onto the request, so serializers that require or honor
         // max_tokens do not fall back to their generic, often much smaller,
@@ -650,19 +707,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 effective_request.max_tokens = max_output_tokens;
             }
         }
-        // Same reasoning as max_tokens: a model this endpoint serves but the
-        // global registry has never seen still has to reach the serializer.
-        const auto reasoning_profile = resolved_reasoning_profile(metadata_model);
-        if (!effective_request.catalog_reasoning.has_value()
-            && reasoning_profile.has_value()
-            && (reasoning_profile->complete
-                || reasoning_profile->catalog_default_effort
-                       .has_value()
-                || reasoning_profile->summary_supported.has_value()
-                || reasoning_profile->default_summary.has_value()
-                || reasoning_profile->ultra.has_value())) {
-            effective_request.catalog_reasoning = reasoning_profile;
-        }
+        // Media this model does not accept is degraded to a placeholder
+        // instead of being sent.
         if (metadata_info.has_value()
             && metadata_info->capabilities != 0) {
             degrade_historical_media_inputs(
@@ -717,15 +763,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         return;
     }
 
-    const std::string continuation_service = provider_name_ + "|" + base_url_;
+    const std::string service = continuation_service();
     const std::string continuation_model = prepared.model;
     auto downstream = std::move(callback);
-    callback = [downstream = std::move(downstream), continuation_service, continuation_model](const StreamChunk& chunk) {
+    callback = [downstream = std::move(downstream), service, continuation_model](const StreamChunk& chunk) {
         if (chunk.continuation_items.empty()) { downstream(chunk); return; }
         auto scoped = chunk;
         for (auto& item : scoped.continuation_items) {
-            item.origin_model = continuation_model;
-            item.origin_service = continuation_service;
+            stamp_continuation_origin(item, continuation_model, service);
         }
         downstream(scoped);
     };

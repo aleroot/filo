@@ -484,9 +484,16 @@ struct InlineDataUrl {
 /// reads Filo's portable text summary instead.
 inline constexpr std::string_view kCheckpointContinuationKind = "checkpoint";
 
+/// ContinuationItem kind of a durable reasoning-effort change. The provider
+/// owns the wire shape (codex-rs `configuration_update`); the conversation
+/// only remembers that the selection changed, and the provider replays it
+/// where the change happened.
+inline constexpr std::string_view kReasoningEffortContinuationKind =
+    "reasoning_effort";
+
 struct ContinuationItem {
     std::string provider = {}; ///< Wire-protocol owner (for example "openai" or "anthropic").
-    std::string kind = {};     ///< Provider item/block type; informational and forward-compatible.
+    std::string kind = {};     ///< Kind of the provider item (for example "checkpoint"); informational and forward-compatible.
     std::string payload = {};  ///< Complete provider JSON item, replayed without interpretation.
     std::string origin_model = {}; ///< Canonical producer model; empty in legacy sessions.
     std::string origin_service = {}; ///< Configured provider and endpoint; never a credential.
@@ -683,6 +690,11 @@ struct ChatRequest {
     std::optional<std::vector<std::string>> catalog_service_tiers = {};
     /// The live catalog's tier for a request that configures none.
     std::string catalog_default_service_tier = {};
+    /// The live catalog says this model accepts durable reasoning-effort
+    /// updates (codex-rs `supports_reasoning_effort_updates`). Copied for the
+    /// same reason as the other catalog fields: discovery is provider-scoped
+    /// and never reaches the global registry.
+    bool catalog_supports_reasoning_effort_updates = false;
     /// A provider-side advisor: the provider runs a second model inside this
     /// turn, on its own credential. Only the provider's wire knows how to
     /// declare one, so the request carries the specification and the

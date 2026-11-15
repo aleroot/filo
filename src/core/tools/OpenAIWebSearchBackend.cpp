@@ -82,7 +82,8 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
 [[nodiscard]] cpr::Header openai_headers(
     const core::auth::AuthInfo& auth,
     const core::llm::ProviderMetadata& metadata,
-    const ToolInvocationContext& context) {
+    const ToolInvocationContext& context,
+    std::string_view model) {
     cpr::Header headers{
         {"Content-Type", "application/json"},
         {"Accept", "application/json"},
@@ -101,6 +102,8 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
         headers = protocol.build_headers(auth);
         core::llm::ChatRequest request;
         request.session_id = request_id_for(context);
+        // The routing hint names the model that serves the request.
+        request.model = model;
         protocol.prepare_headers(headers, request, metadata.base_url);
     }
 
@@ -407,7 +410,7 @@ public:
             body.clear();
             return cpr::Post(
                 cpr::Url{responses_url(metadata->base_url)},
-                openai_headers(auth, *metadata, context),
+                openai_headers(auth, *metadata, context, model),
                 cpr::Body{search_payload(request, model, codex)},
                 cpr::Timeout{codex ? 300000 : kSearchTimeoutMs},
                 cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {

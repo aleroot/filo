@@ -599,6 +599,16 @@ private:
         const TurnCallbacks& turn_callbacks,
         std::span<const core::llm::Message> conversation);
 
+    /// Records the conversation control items the provider asked for, and
+    /// rides them on the message where the change happened. The provider
+    /// owns the items' wire shape; this only remembers where they belong.
+    /// Returns false when the conversation was replaced under the turn, which
+    /// ends the turn.
+    bool record_conversation_control_items(
+        const std::shared_ptr<TurnState>& turn_state,
+        core::llm::ChatRequest& request,
+        const std::shared_ptr<core::llm::LLMProvider>& provider);
+
     /// The advisor this turn declares. A turn declares one advisor for all of
     /// its steps: the request's tool list must not change under a turn.
     core::llm::AdvisorPlan advisor_plan_for_turn(

@@ -160,6 +160,12 @@ namespace {
             info.service_tiers = std::move(ids);
         }
         (void)model.string("default_service_tier", info.default_service_tier);
+        // codex-rs ModelInfo::supports_reasoning_effort_updates: the model
+        // accepts durable `configuration_update` items, so an effort change
+        // can be recorded in the conversation instead of only on the request.
+        info.supports_reasoning_effort_updates =
+            model.optional_boolean("supports_reasoning_effort_updates")
+                .value_or(false);
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

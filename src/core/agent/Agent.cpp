@@ -1827,6 +1827,25 @@ namespace {
     return answer;
 }
 
+/// The latest recorded control item with the same provider, kind, model and
+/// endpoint. Only the last one is in effect, so it is the one a new item is
+/// compared against.
+[[nodiscard]] const core::llm::ContinuationItem* latest_control_item(
+    const std::vector<core::llm::Message>& history,
+    const core::llm::ContinuationItem& item) {
+    for (auto message = history.rbegin(); message != history.rend(); ++message) {
+        for (auto recorded = message->continuation_items.rbegin();
+             recorded != message->continuation_items.rend(); ++recorded) {
+            if (recorded->kind != item.kind) continue;
+            if (recorded->provider != item.provider) continue;
+            if (recorded->origin_model != item.origin_model) continue;
+            if (recorded->origin_service != item.origin_service) continue;
+            return &*recorded;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 void Agent::summarize_idle_async(std::function<void(const std::string&)> status_callback,
@@ -2297,6 +2316,68 @@ void Agent::send_message(core::llm::Message user_message,
 // Core agentic loop step
 // ---------------------------------------------------------------------------
 
+bool Agent::record_conversation_control_items(
+    const std::shared_ptr<TurnState>& turn_state,
+    core::llm::ChatRequest& request,
+    const std::shared_ptr<core::llm::LLMProvider>& provider) {
+    if (!provider) return true;
+
+    std::vector<core::llm::ContinuationItem> items;
+    try {
+        items = provider->conversation_control_items(request);
+    } catch (const std::exception& e) {
+        // A control item is an addition to the request parameters, never a
+        // requirement: a provider that cannot build one still sends the
+        // request it always sent.
+        core::logging::warn(
+            "[conversation] Control items unavailable: {}", e.what());
+        return true;
+    } catch (...) {
+        core::logging::warn("[conversation] Control items unavailable");
+        return true;
+    }
+    if (items.empty()) return true;
+
+    std::vector<core::llm::ContinuationItem> pending;
+    const bool current = apply_to_history_if_turn_current(
+        turn_state, [&](std::vector<core::llm::Message>& history) {
+            for (const auto& item : items) {
+                const auto* recorded = latest_control_item(history, item);
+                if (recorded && recorded->payload == item.payload) continue;
+                pending.push_back(item);
+            }
+            if (pending.empty()) return;
+            // The change rides on the message the selection was made for, the
+            // way codex-rs records it after the accepted input.
+            auto last_user = std::ranges::find_if(
+                history.rbegin(), history.rend(),
+                [](const core::llm::Message& message) { return message.role == "user"; });
+            if (last_user == history.rend()) {
+                core::logging::warn(
+                    "[conversation] No user message to carry the provider's control "
+                    "items; keeping the request parameters only");
+                pending.clear();
+                return;
+            }
+            for (const auto& item : pending) {
+                last_user->continuation_items.push_back(item);
+            }
+        });
+    if (!current) return false;
+    if (pending.empty()) return true;
+
+    // The request carries a copy of the history: it needs the same items.
+    auto last_user = std::ranges::find_if(
+        request.messages.rbegin(), request.messages.rend(),
+        [](const core::llm::Message& message) { return message.role == "user"; });
+    if (last_user != request.messages.rend()) {
+        for (const auto& item : pending) {
+            last_user->continuation_items.push_back(item);
+        }
+    }
+    return true;
+}
+
 void Agent::step(std::function<void(const std::string&)> text_callback,
                  std::function<void(const std::string&, const std::string&)> tool_callback,
                  std::function<void()> done_callback,
@@ -2443,6 +2524,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
     }
     if (stale_turn) {
+        done_callback();
+        return;
+    }
+    // A provider that records how the next answer is produced in the
+    // conversation needs those items recorded where the change happened,
+    // before the request goes out.
+    if (!record_conversation_control_items(turn_state, request, provider)) {
         done_callback();
         return;
     }

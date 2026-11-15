@@ -309,6 +309,53 @@ private:
     std::vector<core::llm::ChatRequest> requests_;
 };
 
+// A provider that changes the reasoning effort with a durable item in the
+// conversation, the way the ChatGPT Codex subscription does.
+class EffortUpdateProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+        callback(core::llm::StreamChunk::make_content("ok"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] std::vector<core::llm::ContinuationItem>
+    conversation_control_items(const core::llm::ChatRequest& request) const override {
+        return {core::llm::ContinuationItem{
+            .provider = "openai",
+            .kind = std::string(core::llm::kReasoningEffortContinuationKind),
+            .payload = std::string(R"({"type":"configuration_update","reasoning":{"effort":")")
+                + request.effort + R"("}})",
+            .origin_model = "gpt-6.1-sol",
+            .origin_service = "openai-codex|https://chatgpt.com/backend-api/codex",
+        }};
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+};
+
+[[nodiscard]] std::size_t control_items_in(const core::llm::ChatRequest& request) {
+    std::size_t count = 0;
+    for (const auto& message : request.messages) {
+        for (const auto& item : message.continuation_items) {
+            if (item.kind == core::llm::kReasoningEffortContinuationKind) ++count;
+        }
+    }
+    return count;
+}
+
 class MemoryFailureProvider final : public core::llm::LLMProvider {
 public:
     explicit MemoryFailureProvider(bool correct, bool unsolicited = false,
@@ -2991,6 +3038,45 @@ TEST_CASE("Review comments are kept with the turn they belong to",
     // A turn the conversation no longer has, or one saved before turns had an id.
     CHECK_FALSE(agent.set_turn_annotations("turn-2", comments));
     CHECK_FALSE(agent.set_turn_annotations("", comments));
+}
+
+TEST_CASE("Agent records the provider's conversation control items once per change",
+          "[agent][effort][continuity]") {
+    auto provider = std::make_shared<EffortUpdateProvider>();
+    core::tools::ToolManager tools;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tools, test_support::make_workspace_session_context());
+    agent->set_effort_level("high");
+
+    send_and_wait(agent, "first question");
+    send_and_wait(agent, "second question");
+
+    auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    // The first turn records the selection once.
+    CHECK(control_items_in(requests[0]) == 1);
+    // The second turn keeps the recorded item instead of repeating it.
+    CHECK(control_items_in(requests[1]) == 1);
+
+    // A new selection is recorded where it happened.
+    agent->set_effort_level("low");
+    send_and_wait(agent, "third question");
+    requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 3);
+    CHECK(control_items_in(requests[2]) == 2);
+
+    // The durable history carries the change, not only the request.
+    const auto history = agent->get_history();
+    std::vector<std::string> efforts;
+    for (const auto& message : history) {
+        for (const auto& item : message.continuation_items) {
+            if (item.kind != core::llm::kReasoningEffortContinuationKind) continue;
+            efforts.push_back(item.payload);
+        }
+    }
+    REQUIRE(efforts.size() == 2);
+    CHECK(efforts[0].contains(R"("effort":"high")"));
+    CHECK(efforts[1].contains(R"("effort":"low")"));
 }
 
 TEST_CASE("A delegated worker records into the tracker it inherited and publishes nothing",

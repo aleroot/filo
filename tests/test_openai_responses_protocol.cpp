@@ -1584,6 +1584,82 @@ TEST_CASE("Codex resolves the service tier against the catalog and hints routing
     CHECK(tier_of(public_openai.serialize(req)) == "priority");
 }
 
+TEST_CASE("Codex records a durable reasoning-effort update when the model accepts one",
+          "[openai][responses][codex][effort]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-6.1-sol";
+    req.effort = "high";
+    req.catalog_supports_reasoning_effort_updates = true;
+
+    // codex-rs protocol/src/models/configuration_update_tests.rs: the item
+    // carries the effort and nothing else.
+    const auto items = protocol.conversation_control_items(req);
+    REQUIRE(items.size() == 1);
+    CHECK(items[0].provider == "openai");
+    CHECK(items[0].kind == kReasoningEffortContinuationKind);
+    CHECK(items[0].payload
+          == R"({"type":"configuration_update","reasoning":{"effort":"high"}})");
+
+    // The public API has no such item.
+    CHECK(OpenAIResponsesProtocol{}.conversation_control_items(req).empty());
+
+    // A model that does not accept the item keeps its effort on the request.
+    req.catalog_supports_reasoning_effort_updates = false;
+    CHECK(protocol.conversation_control_items(req).empty());
+
+    // The catalog resolves the effort, so the update and the request agree.
+    req.catalog_supports_reasoning_effort_updates = true;
+    req.effort = "ultra";
+    req.catalog_reasoning = ModelReasoningProfile{};
+    req.catalog_reasoning->complete = true;
+    req.catalog_reasoning->effort = ReasoningCapabilities{ReasoningCapability::Effort}
+        | ReasoningCapability::MaxEffort;
+    req.catalog_reasoning->supported_efforts = {"low", "medium", "high", "xhigh", "max"};
+    req.catalog_reasoning->catalog_default_effort = "medium";
+    const auto ultra = protocol.conversation_control_items(req);
+    REQUIRE(ultra.size() == 1);
+    CHECK(ultra[0].payload
+          == R"({"type":"configuration_update","reasoning":{"effort":"max"}})");
+}
+
+TEST_CASE("Codex replays a durable effort update where the change happened",
+          "[openai][responses][codex][effort][continuity]") {
+    CodexResponsesProtocol protocol;
+    const auto effort_item = [](std::string_view effort) {
+        return ContinuationItem{
+            .provider = "openai",
+            .kind = std::string(kReasoningEffortContinuationKind),
+            .payload = std::string(R"({"type":"configuration_update","reasoning":{"effort":")")
+                + std::string(effort) + R"("}})",
+        };
+    };
+
+    ChatRequest req;
+    req.model = "gpt-6.1-sol";
+    req.catalog_supports_reasoning_effort_updates = true;
+    Message user{.role = "user", .content = "hello"};
+    user.continuation_items.push_back(effort_item("high"));
+    req.messages.push_back(user);
+
+    // The item follows the message it rides on.
+    CHECK_THAT(protocol.serialize(req), Catch::Matchers::ContainsSubstring(
+        R"("text":"hello"}]},{"type":"configuration_update","reasoning":{"effort":"high"}})"));
+
+    // A model that does not accept the item does not replay it.
+    req.catalog_supports_reasoning_effort_updates = false;
+    CHECK_THAT(protocol.serialize(req),
+        !Catch::Matchers::ContainsSubstring("configuration_update"));
+
+    // codex-rs core/src/client.rs build_responses_request: consecutive
+    // updates collapse to the last one.
+    req.catalog_supports_reasoning_effort_updates = true;
+    req.messages.front().continuation_items.push_back(effort_item("max"));
+    const std::string collapsed = protocol.serialize(req);
+    CHECK_THAT(collapsed, !Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
+    CHECK_THAT(collapsed, Catch::Matchers::ContainsSubstring(R"("effort":"max")"));
+}
+
 TEST_CASE("Responses retry reset preserves other session continuity and permanent quota failures",
           "[openai][responses][regression][retry][continuity]") {
     OpenAIResponsesProtocol owner;

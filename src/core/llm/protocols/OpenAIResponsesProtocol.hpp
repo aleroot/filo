@@ -98,6 +98,20 @@ protected:
         return request.service_tier.empty() ? default_service_tier_ : request.service_tier;
     }
 
+    /// The reasoning controls a request resolves to: what the model accepts
+    /// and the effort to send. The wire value is resolved once, so the
+    /// request parameter and a durable effort update always agree.
+    struct ResolvedReasoning {
+        ReasoningCapabilities capabilities;
+        std::string effort;
+    };
+
+    /// Resolve the reasoning controls for a request. `effort_override` is the
+    /// provider's own forced value, which the catalog never narrows.
+    [[nodiscard]] ResolvedReasoning resolve_request_reasoning(
+        const ChatRequest& request,
+        std::optional<std::string_view> effort_override = std::nullopt) const;
+
     struct SerializationOptions {
         bool include_store = true;
         bool include_prompt_cache_key = true;
@@ -218,6 +232,12 @@ public:
     /// conversation plus a `compaction_trigger` answers with one encrypted
     /// `compaction` item, the ChatGPT backend's own checkpoint.
     [[nodiscard]] bool supports_native_compaction() const noexcept override { return true; }
+    /// codex-rs core/src/session/reasoning_effort.rs: a model that accepts
+    /// reasoning-effort updates records the change in the conversation as a
+    /// `configuration_update` item, so it survives in the history and keeps
+    /// the prompt cache intact.
+    [[nodiscard]] std::vector<ContinuationItem>
+    conversation_control_items(const ChatRequest& request) const override;
     [[nodiscard]] std::string build_websocket_url(std::string_view base_url,
                                                   std::string_view model) const override;
     void prepare_websocket_headers(cpr::Header& headers,

@@ -295,6 +295,11 @@ struct ModelInfo {
     /// Tier the live catalog applies when the user configured none (Codex
     /// `default_service_tier`). Empty means omit. Provider-scoped.
     std::string default_service_tier = {};
+    /// The live catalog says this model accepts durable reasoning-effort
+    /// updates (Codex `supports_reasoning_effort_updates`). Provider-scoped
+    /// like `service_tiers`: a refresh must not publish one deployment's
+    /// answer as a fact about every later lookup of that id.
+    bool supports_reasoning_effort_updates = false;
     /// Provider-advertised automatic compaction threshold, when supplied.
     std::optional<int32_t> auto_compact_token_limit = {};
     
