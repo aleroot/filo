@@ -61,6 +61,11 @@ void Logger::use_sink() noexcept {
     sink_ = Sink::Null;
 }
 
+bool Logger::writes_to_file() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return sink_ == Sink::File && file_sink_ != nullptr;
+}
+
 bool Logger::use_file(const std::filesystem::path& path) {
     std::error_code ec;
     if (const auto parent = path.parent_path(); !parent.empty()) {

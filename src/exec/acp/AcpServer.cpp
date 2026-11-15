@@ -661,7 +661,12 @@ namespace {
 } // namespace
 
 int run(const HostOptions& options) {
-    core::logging::Logger::get_instance().use_stderr();
+    // The protocol owns stdout, so the logs go to stderr — unless the user
+    // named a file for them.
+    auto& logger = core::logging::Logger::get_instance();
+    if (!logger.writes_to_file()) {
+        logger.use_stderr();
+    }
     StdioTransport transport(std::getenv("FILO_ACP_TRACE"));
     const auto catalog = make_store_catalog(core::session::SessionStore::default_sessions_dir());
     return serve(

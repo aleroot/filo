@@ -33,6 +33,8 @@ public:
 
     void use_stderr() noexcept;
     bool use_file(const std::filesystem::path& path);
+    /// Whether the logs go to a file the user named.
+    [[nodiscard]] bool writes_to_file() const noexcept;
     void use_callback_sink(std::function<void(Level, std::string)> callback) noexcept;
     void clear_callback_sink() noexcept;
     void disable() noexcept;
