@@ -507,6 +507,45 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         && std::equal(prefix.begin(), prefix.end(), values.begin());
 }
 
+/// Whether the endpoint's copy of an item and the conversation's copy are the
+/// same item. The conversation names the namespace its tools live in, while
+/// the endpoint's echo of the call does not, so the two copies of a tool call
+/// differ by that one member. codex-rs compares the items themselves and
+/// ignores the metadata it adds (responses_request_properties_mismatch and
+/// response_items_equal_ignoring_internal_metadata).
+[[nodiscard]] bool same_input_item(std::string_view left, std::string_view right) {
+    if (left == right) return true;
+
+    simdjson::dom::parser left_parser;
+    simdjson::dom::parser right_parser;
+    simdjson::dom::element left_doc;
+    simdjson::dom::element right_doc;
+    const simdjson::padded_string left_padded{std::string(left)};
+    const simdjson::padded_string right_padded{std::string(right)};
+    if (left_parser.parse(left_padded).get(left_doc) != simdjson::SUCCESS) return false;
+    if (right_parser.parse(right_padded).get(right_doc) != simdjson::SUCCESS) return false;
+    if (!left_doc.is_object() || !right_doc.is_object()) return false;
+
+    std::string_view left_type;
+    std::string_view right_type;
+    if (left_doc["type"].get(left_type) != simdjson::SUCCESS) return false;
+    if (right_doc["type"].get(right_type) != simdjson::SUCCESS) return false;
+    if (left_type != "function_call" || right_type != "function_call") return false;
+
+    const auto same_field = [](const simdjson::dom::element& first,
+                                const simdjson::dom::element& second,
+                                const char* key) {
+        std::string_view first_value;
+        std::string_view second_value;
+        if (first[key].get(first_value) != simdjson::SUCCESS) return false;
+        if (second[key].get(second_value) != simdjson::SUCCESS) return false;
+        return first_value == second_value;
+    };
+    return same_field(left_doc, right_doc, "call_id")
+        && same_field(left_doc, right_doc, "name")
+        && same_field(left_doc, right_doc, "arguments");
+}
+
 [[nodiscard]] std::string serialize_assistant_output_item(simdjson::dom::object item) {
     std::string_view item_type;
     if (item["type"].get(item_type) != simdjson::SUCCESS) return {};
@@ -1862,13 +1901,14 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
             if (full_input_items.size() >= baseline_size
                 && has_prefix(full_input_items, previous.request_input_items)
                 && std::equal(previous.response_items_added.begin(), previous.response_items_added.end(),
-                    full_input_items.begin() + static_cast<std::ptrdiff_t>(previous.request_input_items.size()))
+                    full_input_items.begin() + static_cast<std::ptrdiff_t>(previous.request_input_items.size()),
+                    same_input_item)
                 && (full_input_items.size() > baseline_size
-                    || last->second.from_prewarm)) {
+                    || previous.from_prewarm)) {
                 incremental_input_items = std::vector<std::string>{
                     full_input_items.begin() + static_cast<std::ptrdiff_t>(baseline_size),
                     full_input_items.end()};
-                incremental_previous_response_id = last->second.response_id;
+                incremental_previous_response_id = previous.response_id;
             }
         }
 

@@ -767,6 +767,66 @@ TEST_CASE("Codex continues a conversation across turns on one websocket",
     CHECK_THAT(beside_frame, !Catch::Matchers::ContainsSubstring("previous_response_id"));
 }
 
+TEST_CASE("Codex continues a conversation after a tool call",
+          "[openai][responses][codex][websocket][continuity]") {
+    // codex-rs core/src/client.rs get_incremental_items: the turn that
+    // carries a tool result continues the previous response, so only the
+    // result is new. The endpoint's copy of the call and the conversation's
+    // copy differ by the tool namespace, which the comparison ignores.
+    CodexResponsesProtocol protocol;
+    const std::string url = "wss://chatgpt.com/backend-api/codex/responses";
+    const cpr::Header headers{{"Authorization", "Bearer token"}};
+
+    ChatRequest first;
+    first.model = "gpt-6.1-sol";
+    first.session_id = "thread-tools";
+    first.continuation_scope = "thread-tools";
+    first.transport_turn_id = "thread-tools:0";
+    first.catalog_wire_protocol = "responses_lite";
+    first.messages.push_back(Message{.role = "user", .content = "run the lookup"});
+    protocol.prepare_request(first);
+    const auto first_key = protocol.websocket_connection_key(url, headers, first);
+
+    // The socket is warmed up, then the turn runs for real.
+    const auto prewarm = protocol.initial_websocket_request_frame(first);
+    REQUIRE(prewarm.suppress_output);
+    REQUIRE(protocol.parse_event(
+        R"({"type":"response.completed","response":{"id":"resp_prewarm"}})").done);
+    const auto real = protocol.next_websocket_request_frame(first, prewarm);
+    REQUIRE_THAT(real.payload,
+                 Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_prewarm")"));
+
+    // The endpoint answers with a tool call.
+    (void)protocol.parse_event(
+        R"({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}})");
+    REQUIRE(protocol.parse_event(
+        R"({"type":"response.completed","response":{"id":"resp_tool"}})").done);
+
+    // The conversation carries the call and its result.
+    ToolCall call;
+    call.id = "call_1";
+    call.function.name = "lookup";
+    call.function.arguments = "{}";
+    ChatRequest second = first;
+    second.transport_turn_id = "thread-tools:1";
+    second.messages.push_back(Message{.role = "assistant", .tool_calls = {call}});
+    second.messages.push_back(
+        Message{.role = "tool", .content = "result", .tool_call_id = "call_1"});
+    protocol.prepare_request(second);
+
+    // Same socket, and the turn continues the previous response: only the
+    // tool result is new.
+    CHECK(protocol.websocket_connection_key(url, headers, second) == first_key);
+    const auto next_turn = protocol.initial_websocket_request_frame(second);
+    CHECK_FALSE(next_turn.suppress_output);
+    CHECK_THAT(next_turn.payload,
+               Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_tool")"));
+    CHECK_THAT(next_turn.payload,
+               Catch::Matchers::ContainsSubstring(R"("type":"function_call_output")"));
+    CHECK_THAT(next_turn.payload,
+               !Catch::Matchers::ContainsSubstring(R"("type":"function_call")"));
+}
+
 TEST_CASE("Codex compacts natively with a compaction_trigger and replays the checkpoint",
           "[openai][responses][codex][native-checkpoint]") {
     CodexResponsesProtocol protocol;
