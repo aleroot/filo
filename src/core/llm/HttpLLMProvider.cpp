@@ -1085,8 +1085,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         // A failed warmup or unsupported handshake can go directly
                         // to HTTP. No generated model output has been committed.
                         if (!frame.suppress_output && result.request_sent) {
+                            // A WebSocket response is committed server-side: the
+                            // endpoint keeps serving it after the socket drops,
+                            // so any delivered output blocks a restart here.
                             const auto retry = websocket_retries.schedule(
-                                !veto && (!stream_error || retryable), output_emitted,
+                                !veto && (!stream_error || retryable),
+                                output_emitted
+                                    ? transport::StreamOutputState::Visible
+                                    : transport::StreamOutputState::None,
                                 std::chrono::seconds(retry_after));
                             if (retry) {
                                 emit_retry_reset(*retry, "a WebSocket failure");
@@ -1156,6 +1162,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 std::string stream_error_type;
                 std::string stream_error_message;
                 bool        output_emitted = false;
+                // Tracks what the attempt delivered: the agent can retract the
+                // model's thinking on an attempt reset, but not answer text.
+                transport::StreamOutputState output_state =
+                    transport::StreamOutputState::None;
                 const bool requires_terminal_event =
                     protocol->requires_terminal_event();
                 transport::StreamWatchdog watchdog(timeouts);
@@ -1265,6 +1275,19 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             || !chunk.reasoning_content.empty()
                             || !chunk.tools.empty()) {
                             output_emitted = true;
+                        }
+                        // Answer text and tool calls cannot be taken back, so a
+                        // retry would duplicate them. The model's thinking can:
+                        // the attempt reset drops it. A cut stream during the
+                        // thinking phase is therefore replayable, exactly as
+                        // Qwen Code replays it when a gateway closes a
+                        // long-lived SSE connection mid-thinking.
+                        if (!chunk.content.empty() || !chunk.tools.empty()) {
+                            output_state = transport::StreamOutputState::Visible;
+                        } else if (!chunk.reasoning_content.empty()
+                                   && output_state
+                                          == transport::StreamOutputState::None) {
+                            output_state = transport::StreamOutputState::ThinkingOnly;
                         }
                         callback(chunk);
                         if (chunk.is_final) has_terminal_chunk = true;
@@ -1454,7 +1477,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     const auto rate_limit_info = protocol->last_rate_limit();
                     const auto retry = retry_controller.schedule(
                         retryable_stream_failure,
-                        output_emitted,
+                        output_state,
                         std::chrono::seconds(std::max(rate_limit_info.retry_after, stream_retry_after)));
                     if (retry.has_value()) {
                         core::logging::warn(
@@ -1503,7 +1526,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 const bool transport_failed =
                     r.error.code != cpr::ErrorCode::OK && !done_signalled;
                 const auto transport_retry = retry_controller.schedule(
-                    transport_failed && !transport::retry_vetoed(r.header), output_emitted);
+                    transport_failed && !transport::retry_vetoed(r.header), output_state);
                 if (transport_retry.has_value()) {
                     const std::string_view timeout_label =
                         transport::timeout_log_label(watchdog.timeout_kind());
@@ -1565,7 +1588,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 const auto retry_rate_limit = protocol->last_rate_limit();
                 const auto http_retry = retry_controller.schedule(
                     protocol->is_retryable(http_resp),
-                    output_emitted,
+                    output_state,
                     std::chrono::seconds(retry_rate_limit.retry_after));
                 if (http_retry.has_value()) {
                     emit_retry_reset(

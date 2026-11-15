@@ -86,10 +86,14 @@ RetryController::RetryController(RetryPolicy policy) noexcept
 
 std::optional<RetrySchedule> RetryController::schedule(
     bool classified_retryable,
-    bool output_emitted,
+    StreamOutputState output,
     std::chrono::seconds server_delay) {
+    // Thinking-only output is retractable: the attempt reset drops it, so a
+    // replay cannot duplicate anything the caller kept. Visible output cannot
+    // be taken back, so it stays terminal under the generic policy.
+    const bool visible_output = output == StreamOutputState::Visible;
     if (!classified_retryable
-        || (policy_.retry_only_before_output && output_emitted)
+        || (policy_.retry_only_before_output && visible_output)
         || retries_completed_ >= policy_.max_retries) {
         return std::nullopt;
     }

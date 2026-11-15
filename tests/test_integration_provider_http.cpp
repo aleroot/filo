@@ -2178,7 +2178,9 @@ TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", 
         {"malformed tool", 200, tool_start + "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\n", true},
         {"committed tool", 200, tool_start + "event: content_block_stop\ndata: {\"index\":0}\n\n" + claude_overload, false},
         {"visible text", 200, "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial\"}}\n\n" + claude_overload, false},
-        {"reasoning", 200, thought + "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Partial\"}}\n\n" + claude_overload, false},
+        // A thinking-only attempt persists nothing the caller kept, so the
+        // request is replayed and the partial thinking is dropped.
+        {"reasoning", 200, thought + "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Partial\"}}\n\n" + claude_overload, true},
         {"opaque reasoning is cleared on retry", 200, thought + "event: content_block_stop\ndata: {\"index\":0}\n\n" + claude_overload, true},
         {"server error", 500, "{}", true},
         {"overloaded HTTP", 529, "{}", true},

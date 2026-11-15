@@ -7,6 +7,7 @@
 using namespace std::chrono_literals;
 using core::llm::transport::RetryController;
 using core::llm::transport::RetryPolicy;
+using core::llm::transport::StreamOutputState;
 using core::llm::transport::StreamTimeoutKind;
 using core::llm::transport::StreamTimeoutPolicy;
 using core::llm::transport::StreamWatchdog;
@@ -14,7 +15,7 @@ using core::llm::transport::StreamWatchdog;
 TEST_CASE("Retry jitter never shortens the server retry deadline", "[http][resilience][retry]") {
     for (int i = 0; i < 100; ++i) {
         RetryController retries(RetryPolicy{.server_delay_padding = 0ms, .jitter_ratio = 0.99});
-        const auto retry = retries.schedule(true, false, 10s);
+        const auto retry = retries.schedule(true, StreamOutputState::None, 10s);
         REQUIRE(retry);
         CHECK(retry->delay >= 10s);
     }
@@ -67,24 +68,47 @@ TEST_CASE("RetryController centralizes retry safety and exponential backoff",
         .jitter_ratio = 0.0,
     });
 
-    CHECK_FALSE(retries.schedule(false, false).has_value());
-    CHECK_FALSE(retries.schedule(true, true).has_value());
+    CHECK_FALSE(retries.schedule(false, StreamOutputState::None).has_value());
+    CHECK_FALSE(retries.schedule(true, StreamOutputState::Visible).has_value());
 
-    const auto first = retries.schedule(true, false);
+    const auto first = retries.schedule(true, StreamOutputState::None);
     REQUIRE(first.has_value());
     CHECK(first->attempt == 1);
     CHECK(first->delay == 500ms);
 
-    const auto second = retries.schedule(true, false);
+    const auto second = retries.schedule(true, StreamOutputState::None);
     REQUIRE(second.has_value());
     CHECK(second->attempt == 2);
     CHECK(second->delay == 1000ms);
 
-    const auto third = retries.schedule(true, false, 3s);
+    const auto third = retries.schedule(true, StreamOutputState::None, 3s);
     REQUIRE(third.has_value());
     CHECK(third->attempt == 3);
     CHECK(third->delay == 3100ms);
-    CHECK_FALSE(retries.schedule(true, false).has_value());
+    CHECK_FALSE(retries.schedule(true, StreamOutputState::None).has_value());
+}
+
+TEST_CASE("RetryController replays a stream cut during the thinking phase",
+          "[http][resilience][retry]") {
+    RetryController retries(RetryPolicy{
+        .max_retries = 2,
+        .initial_backoff = 500ms,
+        .maximum_backoff = 30s,
+        .minimum_delay = 0ms,
+        .server_delay_padding = 100ms,
+        .jitter_ratio = 0.0,
+    });
+
+    // The model's thinking is retractable: the attempt reset drops it, so a
+    // replay cannot duplicate anything the caller kept. A gateway that closes
+    // a long-lived SSE connection mid-thinking costs the turn otherwise.
+    const auto first = retries.schedule(true, StreamOutputState::ThinkingOnly);
+    REQUIRE(first.has_value());
+    CHECK(first->attempt == 1);
+    const auto second = retries.schedule(true, StreamOutputState::ThinkingOnly);
+    REQUIRE(second.has_value());
+    CHECK(second->attempt == 2);
+    CHECK_FALSE(retries.schedule(true, StreamOutputState::ThinkingOnly).has_value());
 }
 
 TEST_CASE("RetryController can restart after streamed output",
@@ -98,11 +122,11 @@ TEST_CASE("RetryController can restart after streamed output",
         .jitter_ratio = 0.0,
         .retry_only_before_output = false,
     });
-    const auto first = after_output.schedule(true, true);
+    const auto first = after_output.schedule(true, StreamOutputState::Visible);
     REQUIRE(first.has_value());
     CHECK(first->attempt == 1);
-    CHECK(after_output.schedule(true, true).has_value());
-    CHECK_FALSE(after_output.schedule(true, true).has_value());
+    CHECK(after_output.schedule(true, StreamOutputState::Visible).has_value());
+    CHECK_FALSE(after_output.schedule(true, StreamOutputState::Visible).has_value());
 }
 
 TEST_CASE("Terminal-event requirements are protocol capabilities",

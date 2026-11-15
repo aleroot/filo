@@ -152,6 +152,49 @@ TEST_CASE("Qwen HTTP preserves truncation and usage but rejects a premature EOF"
     CHECK(count == 2);
 }
 
+TEST_CASE("Qwen replays a stream cut during the thinking phase",
+          "[integration][qwen][regression][http][retry]") {
+    QwenServer fixture;
+    std::atomic<int> count{0};
+    fixture.server.Post("/compatible-mode/v1/chat/completions", [&](const auto&, auto& response) {
+        if (++count == 1) {
+            // The gateway closed the connection after the thinking phase and
+            // never sent the terminal event. The attempt delivered nothing the
+            // caller kept, so it is replayed instead of failing the turn.
+            response.set_content(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking hard\"}}]}\n\n",
+                "text/event-stream");
+            return;
+        }
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered\"}}]}\n\n"
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n"
+            "data: [DONE]\n\n",
+            "text/event-stream");
+    });
+    auto provider = make_provider(fixture);
+    core::llm::ChatRequest request;
+    request.model = "qwen3.7-plus";
+    request.messages = {{.role = "user", .content = "Continue"}};
+    std::string text;
+    bool failed = false;
+    bool reset = false;
+    provider->stream_response(request, [&](const auto& chunk) {
+        failed = failed || chunk.is_error;
+        if (chunk.reset_attempt) {
+            // The retry notice rides on the reset chunk; it is a status line,
+            // not answer text.
+            reset = true;
+            return;
+        }
+        text += chunk.content;
+    });
+    CHECK_FALSE(failed);
+    CHECK(reset);
+    CHECK(count == 2);
+    CHECK(text == "Recovered");
+}
+
 TEST_CASE("Coding Plan quota SSE is an error and is never shown as answer text",
           "[integration][qwen][regression][http][quota]") {
     QwenServer fixture;
