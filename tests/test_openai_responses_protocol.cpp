@@ -5,6 +5,7 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/CodexUsageClient.hpp"
 #include "core/llm/Models.hpp"
+#include "core/utils/ClientPlatform.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -382,7 +383,14 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
     REQUIRE(headers.at("version") == "0.169.0");
-    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.169.0");
+    // codex-rs get_codex_user_agent: the originator and version, then the
+    // platform the client runs on.
+    const auto& agent = headers.at("User-Agent");
+    REQUIRE_THAT(agent, Catch::Matchers::StartsWith("codex_cli_rs/0.169.0 ("));
+    REQUIRE_THAT(agent, Catch::Matchers::ContainsSubstring(
+                            core::utils::client_platform().architecture));
+    REQUIRE_THAT(agent, Catch::Matchers::ContainsSubstring(
+                            core::utils::client_platform().os));
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));

@@ -414,6 +414,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
+    src/core/utils/ClientPlatform.cpp
     src/core/utils/DetachedWorkTracker.cpp
     src/core/utils/Gzip.cpp
     src/core/utils/Crypto.cpp
@@ -791,6 +792,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
     tests/test_gzip.cpp
+    tests/test_client_platform.cpp
     tests/test_mime_utils.cpp
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
@@ -1097,6 +1099,7 @@ source_group(
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp
         tests/test_gzip.cpp
+        tests/test_client_platform.cpp
         tests/test_crypto.cpp
         tests/test_mime_utils.cpp
         tests/test_uri_utils.cpp
