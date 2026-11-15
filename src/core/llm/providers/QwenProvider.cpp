@@ -34,6 +34,27 @@ std::optional<ModelInfo> cached_model_info(std::string_view catalog, std::string
     }
     return resolve_model_metadata(model, snapshot.models, fallback).model;
 }
+
+// A 400 that says the endpoint refuses a request with thinking disabled.
+//
+// The legacy hybrid family names `enable_thinking` ("enable_thinking must be
+// true"); the tiered family names `reasoning_effort` and rejects the "none"
+// disable. Both mean the same thing to the caller: turn thinking back on at
+// the lowest budget.
+[[nodiscard]] bool rejects_disabled_thinking(std::string_view message) {
+    const bool names_knob = message.find("enable_thinking") != std::string_view::npos
+        || message.find("reasoning_effort") != std::string_view::npos;
+    if (!names_knob) return false;
+    if (message.find("must be true") != std::string_view::npos
+        || message.find("restricted to true") != std::string_view::npos) {
+        return true;
+    }
+    if (message.find("reasoning_effort") == std::string_view::npos) return false;
+    return message.find("must be") != std::string_view::npos
+        || message.find("not support") != std::string_view::npos
+        || message.find("unsupported") != std::string_view::npos
+        || message.find("invalid") != std::string_view::npos;
+}
 } // namespace
 
 QwenProvider::QwenProvider(Options options)
@@ -171,9 +192,7 @@ bool QwenProvider::repair_request(ChatRequest& request) {
     }
     if (is_reasoning_off_effort(request.effort.empty() ? options_.default_effort : request.effort)
         && !HttpLLMProvider::reasoning_capabilities(request.model).supports(ReasoningCapability::Required)
-        && message.find("enable_thinking") != std::string::npos
-        && (message.find("must be true") != std::string::npos
-            || message.find("restricted to true") != std::string::npos)) {
+        && rejects_disabled_thinking(message)) {
         std::lock_guard lock(state_->mutex);
         state_->required_thinking_models.insert(request.model);
         request.effort = "low";

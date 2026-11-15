@@ -553,14 +553,21 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
     const std::string effort = normalize_dashscope_effort(
         req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort), policy);
     if (policy.mode != ThinkingMode::None) {
-        if (effort == "none") {
-            payload += R"(,"enable_thinking":false)";
-        } else if (policy.mode == ThinkingMode::QwenEffort) {
-            if (req.effort.empty() && thinking_budget_ > 0) {
+        if (policy.mode == ThinkingMode::QwenEffort) {
+            // The tiered Qwen family (qwen3.8-max/flash, qwen4*, the
+            // latest-series previews) reads `reasoning_effort`; `enable_thinking`
+            // is not its switch. Qwen Code turns an explicit disable into
+            // `reasoning_effort:"none"` and drops `enable_thinking` for these
+            // models, so sending the toggle leaves thinking on.
+            if (effort == "none") {
+                payload += R"(,"reasoning_effort":"none")";
+            } else if (req.effort.empty() && thinking_budget_ > 0) {
                 payload += R"(,"enable_thinking":true,"thinking_budget":)" + std::to_string(thinking_budget_);
             } else if (!effort.empty()) {
                 payload += R"(,"reasoning_effort":")" + effort + '"';
             }
+        } else if (effort == "none") {
+            payload += R"(,"enable_thinking":false)";
         } else {
             if (!effort.empty() || thinking_budget_ > 0 || mandatory) {
                 payload += R"(,"enable_thinking":true)";

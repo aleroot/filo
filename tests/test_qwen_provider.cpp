@@ -256,6 +256,29 @@ TEST_CASE("DashScope uses vendor thinking fields without forwarding Qwen metadat
     CHECK(resolve_reasoning_effort("max", protocol.reasoning_capabilities("qwen3.8-max")).effective == "xhigh");
 }
 
+TEST_CASE("Tiered Qwen models disable thinking with reasoning_effort",
+          "[qwen][regression][thinking][tiered]") {
+    DashScopeProtocol protocol;
+    ChatRequest request;
+    request.model = "qwen4-max-preview";
+    request.effort = "off";
+    const auto disabled = protocol.serialize(request);
+    // The tiered family reads reasoning_effort; enable_thinking is not its
+    // switch, so the toggle would leave thinking on.
+    CHECK_THAT(disabled, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+    CHECK_THAT(disabled, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    request.effort = "high";
+    const auto enabled = protocol.serialize(request);
+    CHECK_THAT(enabled, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"xhigh")"));
+    CHECK_THAT(enabled, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    // The legacy hybrid family keeps the on/off toggle.
+    request.model = "qwen3.7-plus";
+    request.effort = "off";
+    const auto legacy = protocol.serialize(request);
+    CHECK_THAT(legacy, Catch::Matchers::ContainsSubstring(R"("enable_thinking":false)"));
+    CHECK_THAT(legacy, !Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+}
+
 TEST_CASE("Qwen budgets include schemas and media and respect endpoint limits",
           "[qwen][regression][context]") {
     using core::llm::providers::QwenRequestBudget;
@@ -1003,8 +1026,10 @@ TEST_CASE("Token Plan normalizes Qwen 3.8 effort for aliases and Flash",
     auto flash = make_simple_request("qwen3.8-flash");
     flash.effort = "none";
     const auto payload = DashScopeTokenPlanProtocol{}.serialize(flash);
-    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":false)"));
-    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    // The tiered family reads reasoning_effort, so "none" is its disable and
+    // the on/off toggle is not sent at all.
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
 }
 
 TEST_CASE("Qwen 4 and latest-series previews take the tiered effort contract at 1M",

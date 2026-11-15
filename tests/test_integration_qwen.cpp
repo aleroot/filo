@@ -276,14 +276,15 @@ TEST_CASE("Qwen learns a required-thinking rejection and retries exactly once",
             response.status = 400;
             response.set_content(R"({"error":{"message":"enable_thinking must\u0020be true"}})", "application/json");
         } else {
-            CHECK(request.body.find(count == 4 ? "\"reasoning_effort\":\"xhigh\""
-                                               : "\"reasoning_effort\":\"low\"") != std::string::npos);
+            CHECK(request.body.find("\"enable_thinking\":true") != std::string::npos);
             response.set_content("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "text/event-stream");
         }
     });
     auto provider = make_provider(fixture);
     core::llm::ChatRequest request;
-    request.model = "qwen3.8-flash";
+    // The legacy hybrid family sends the on/off toggle, so the endpoint can
+    // reject a disabled request and the provider can turn thinking back on.
+    request.model = "qwen3.7-plus";
     request.effort = "none";
     for (int i = 0; i < 2; ++i) {
         std::string text;
@@ -297,6 +298,33 @@ TEST_CASE("Qwen learns a required-thinking rejection and retries exactly once",
     request.effort = "high";
     provider->stream_response(request, [](const auto& chunk) { CHECK_FALSE(chunk.is_error); });
     CHECK(count == 4);
+}
+
+TEST_CASE("Qwen recovers when a tiered endpoint rejects the disabled effort",
+          "[integration][qwen][regression][http][thinking][tiered]") {
+    QwenServer fixture;
+    std::atomic<int> count{0};
+    fixture.server.Post("/compatible-mode/v1/chat/completions", [&](const auto& request, auto& response) {
+        ++count;
+        if (request.body.find("\"reasoning_effort\":\"none\"") != std::string::npos) {
+            response.status = 400;
+            response.set_content(R"({"error":{"message":"reasoning_effort must\u0020be one of low, medium, xhigh"}})", "application/json");
+        } else {
+            CHECK(request.body.find("\"reasoning_effort\":\"low\"") != std::string::npos);
+            response.set_content("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "text/event-stream");
+        }
+    });
+    auto provider = make_provider(fixture);
+    core::llm::ChatRequest request;
+    request.model = "qwen3.8-flash";
+    request.effort = "none";
+    std::string text;
+    provider->stream_response(request, [&](const auto& chunk) {
+        CHECK_FALSE(chunk.is_error);
+        text += chunk.content;
+    });
+    CHECK(text == "OK");
+    CHECK(count == 2);
 }
 
 TEST_CASE("Qwen search retries an unsearched answer and consumes fragmented SSE",
