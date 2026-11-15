@@ -3612,23 +3612,73 @@ TEST_CASE("get_workspace_config reports attached files apart from directories",
         std::format(R"("attached_files":["{}"])", escaped(shot))));
 }
 
-TEST_CASE("OpenAI subscription web search uses streaming array input and requires completion",
+TEST_CASE("OpenAI subscription web search posts Codex alpha/search instead of hosted web_search",
           "[tools][web][openai][regression]") {
     core::tools::web::SearchRequest request;
     request.query = "Filo release notes";
-    const auto body = core::tools::web::openai_web_search_request_json(request, "gpt-5.6-sol", true);
+    request.domains.allowed_domains = {"https://example.com/docs"};
+    request.domains.blocked_domains = {"spam.test"};
+    const auto body = core::tools::web::openai_web_search_request_json(
+        request, "gpt-6.1-sol", true, "session-1");
     simdjson::dom::parser parser;
     const auto doc = parser.parse(body);
-    CHECK(bool(doc["stream"]));
-    CHECK_FALSE(bool(doc["store"]));
-    CHECK(doc["input"].is_array());
-    CHECK(doc["input"].at(0)["content"].is_array());
-    CHECK(std::string_view(doc["reasoning"]["summary"]) == "auto");
-    const auto public_body = core::tools::web::openai_web_search_request_json(request, "gpt-5.6-sol", false);
+    CHECK(std::string_view(doc["id"]) == "session-1");
+    CHECK(std::string_view(doc["model"]) == "gpt-6.1-sol");
+    CHECK_FALSE(doc["stream"].error() == simdjson::SUCCESS);
+    CHECK_FALSE(doc["tools"].error() == simdjson::SUCCESS);
+    CHECK_FALSE(doc["tool_choice"].error() == simdjson::SUCCESS);
+    CHECK_FALSE(doc["reasoning"].error() == simdjson::SUCCESS);
+    CHECK(std::string_view(doc["commands"]["search_query"].at(0)["q"]) == "Filo release notes");
+    CHECK(std::string_view(doc["commands"]["search_query"].at(0)["domains"].at(0))
+          == "example.com");
+    CHECK(std::string_view(doc["settings"]["search_context_size"]) == "medium");
+    CHECK(bool(doc["settings"]["external_web_access"]));
+    CHECK(std::string_view(doc["settings"]["allowed_callers"].at(0)) == "direct");
+    CHECK(std::string_view(doc["settings"]["filters"]["allowed_domains"].at(0))
+          == "example.com");
+    CHECK(std::string_view(doc["settings"]["filters"]["blocked_domains"].at(0))
+          == "spam.test");
+    CHECK(core::tools::web::openai_codex_search_url(
+              "https://chatgpt.com/backend-api/codex")
+          == "https://chatgpt.com/backend-api/codex/alpha/search");
+    CHECK(core::tools::web::openai_codex_search_url(
+              "https://chatgpt.com/backend-api/codex/responses")
+          == "https://chatgpt.com/backend-api/codex/alpha/search");
+
+    core::tools::web::SearchRequest legacy;
+    legacy.query = "Filo release notes";
+    const auto legacy_body = core::tools::web::openai_web_search_request_json(
+        legacy, "gpt-5.5", true, "session-1");
+    simdjson::dom::parser legacy_parser;
+    const auto legacy_doc = legacy_parser.parse(legacy_body);
+    CHECK(bool(legacy_doc["stream"]));
+    CHECK_FALSE(bool(legacy_doc["store"]));
+    CHECK(legacy_doc["input"].is_array());
+    CHECK(std::string_view(legacy_doc["reasoning"]["summary"]) == "auto");
+    CHECK(std::string_view(legacy_doc["tools"].at(0)["type"]) == "web_search");
+    CHECK_FALSE(legacy_doc["commands"].error() == simdjson::SUCCESS);
+
+    const auto public_body = core::tools::web::openai_web_search_request_json(
+        request, "gpt-5.6-sol", false);
     simdjson::dom::parser public_parser;
     const auto public_doc = public_parser.parse(public_body);
     CHECK_FALSE(bool(public_doc["stream"]));
     CHECK(public_doc["input"].is_string());
+    CHECK(std::string_view(public_doc["tools"].at(0)["type"]) == "web_search");
+
+    const auto found = core::tools::web::parse_openai_codex_search_response(
+        R"({"output":"Found it.","results":[{"url":"https://example.com/source","title":"Source"}]})",
+        5);
+    REQUIRE(found);
+    CHECK(found->answer == "Found it.");
+    REQUIRE(found->results.size() == 1);
+    CHECK(found->results[0].url == "https://example.com/source");
+    CHECK(found->results[0].title == "Source");
+    CHECK_FALSE(core::tools::web::parse_openai_codex_search_response(
+        R"({"error":{"message":"overloaded"}})", 5));
+    CHECK_FALSE(core::tools::web::parse_openai_codex_search_response(
+        R"({"output":"","results":[]})", 5));
+
     const std::string complete =
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\r\n\r\n"
         "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":["

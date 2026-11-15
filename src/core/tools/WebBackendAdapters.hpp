@@ -11,9 +11,17 @@ namespace core::tools::web {
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_anthropic_web_search_backend();
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_openai_web_search_backend();
 [[nodiscard]] std::string openai_web_search_request_json(
-    const SearchRequest& request, std::string_view model, bool codex);
+    const SearchRequest& request,
+    std::string_view model,
+    bool codex,
+    std::string_view session_id = {});
+// ChatGPT Codex base, with or without a trailing /responses, joined the way
+// codex-rs Provider::url_for_path joins "alpha/search".
+[[nodiscard]] std::string openai_codex_search_url(std::string_view base_url);
 [[nodiscard]] std::expected<SearchResponse, std::string> parse_openai_web_search_response(
     std::string_view body, int limit, bool streaming);
+[[nodiscard]] std::expected<SearchResponse, std::string> parse_openai_codex_search_response(
+    std::string_view body, int limit);
 [[nodiscard]] std::shared_ptr<IWebSearchBackend> make_grok_web_search_backend();
 struct DashScopeWebSearchOptions {
     std::string model = {}; // Empty selects qwen3.8-flash; explicit models can opt Coding Plan in.

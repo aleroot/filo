@@ -63,6 +63,19 @@ constexpr std::size_t kMaxDomainFilters = 100;
     return base + "/responses";
 }
 
+[[nodiscard]] std::string codex_search_url(std::string_view base_url) {
+    std::string base = core::utils::str::trim_trailing_slashes(base_url);
+    const std::string lower = core::utils::str::to_lower_ascii_copy(base);
+    constexpr std::string_view responses = "/responses";
+    constexpr std::string_view search = "/alpha/search";
+    if (lower.ends_with(search)) return base;
+    if (lower.ends_with(responses)) {
+        base.resize(base.size() - responses.size());
+        base = core::utils::str::trim_trailing_slashes(base);
+    }
+    return base + "/alpha/search";
+}
+
 void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     for (const auto& [key, value] : auth.headers) {
         headers[key] = value;
@@ -157,9 +170,68 @@ void write_domain_filters(core::utils::JsonWriter& writer,
     return prompt;
 }
 
+// gpt-6 and gpt-5.6 on the ChatGPT backend are Responses Lite
+// (codex-rs models.json use_responses_lite). The static registry does not
+// keep that flag, so the family is the signal. Those models reject a hosted
+// web_search tool; Codex posts their search to alpha/search
+// (codex-rs/codex-api/src/endpoint/search.rs). Older Codex models stay on
+// the hosted Responses tool.
+[[nodiscard]] bool responses_lite_model(std::string_view model) {
+    const std::string id = core::utils::str::to_lower_ascii_copy(model);
+    return id.starts_with("gpt-5.6") || id.starts_with("gpt-6");
+}
+
+[[nodiscard]] std::string codex_search_payload(const SearchRequest& request,
+                                               std::string_view model,
+                                               std::string_view session_id) {
+    const auto allowed = normalized_domains(request.domains.allowed_domains);
+    core::utils::JsonWriter writer(1024);
+    {
+        auto _root = writer.object();
+        writer.kv_str("id", session_id.empty() ? "filo" : session_id).comma()
+              .kv_str("model", model).comma().key("commands");
+        {
+            auto _commands = writer.object();
+            writer.key("search_query");
+            {
+                auto _queries = writer.array();
+                {
+                    auto _query = writer.object();
+                    writer.kv_str("q", request.query);
+                    if (!allowed.empty()) {
+                        writer.comma();
+                        detail::write_string_array(writer, "domains", allowed);
+                    }
+                }
+            }
+        }
+        writer.comma().key("settings");
+        {
+            auto _settings = writer.object();
+            writer.kv_str("search_context_size",
+                          request.include_page_content ? "high" : "medium")
+                  .comma()
+                  .kv_bool("external_web_access", true)
+                  .comma()
+                  .key("allowed_callers");
+            {
+                auto _callers = writer.array();
+                writer.str("direct");
+            }
+            write_domain_filters(writer, request);
+        }
+    }
+    return std::move(writer).take();
+}
+
 [[nodiscard]] std::string search_payload(const SearchRequest& request,
                                          std::string_view model,
-                                         bool codex) {
+                                         bool codex,
+                                         std::string_view session_id) {
+    if (codex && responses_lite_model(model)) {
+        return codex_search_payload(request, model, session_id);
+    }
+
     core::utils::JsonWriter writer(2048);
     {
         auto _root = writer.object();
@@ -404,14 +476,21 @@ public:
         }
 
         const bool codex = is_codex_backend(metadata->base_url);
+        const bool standalone = codex && responses_lite_model(model);
         auto auth = metadata->credential_source->get_auth();
         std::string body;
         const auto perform = [&] {
             body.clear();
+            auto headers = openai_headers(auth, *metadata, context, model);
+            // alpha/search returns one JSON document. The Codex responses
+            // headers otherwise ask for an event stream.
+            if (standalone) headers["Accept"] = "application/json";
             return cpr::Post(
-                cpr::Url{responses_url(metadata->base_url)},
-                openai_headers(auth, *metadata, context, model),
-                cpr::Body{search_payload(request, model, codex)},
+                cpr::Url{standalone ? codex_search_url(metadata->base_url)
+                                    : responses_url(metadata->base_url)},
+                headers,
+                cpr::Body{search_payload(
+                    request, model, codex, request_id_for(context))},
                 cpr::Timeout{codex ? 300000 : kSearchTimeoutMs},
                 cpr::WriteCallback{[&](std::string_view bytes, intptr_t) {
                     constexpr std::size_t max_bytes = 16 * 1024 * 1024;
@@ -437,15 +516,24 @@ public:
                 "OpenAI web search failed with HTTP {}: {}",
                 response.status_code, body.substr(0, 1000)));
         }
-        return parse_openai_web_search_response(body, request.limit, codex);
+        return standalone
+            ? parse_openai_codex_search_response(body, request.limit)
+            : parse_openai_web_search_response(body, request.limit, codex);
     }
 };
 
 } // namespace
 
+std::string openai_codex_search_url(std::string_view base_url) {
+    return codex_search_url(base_url);
+}
+
 std::string openai_web_search_request_json(
-    const SearchRequest& request, std::string_view model, bool codex) {
-    return search_payload(request, model, codex);
+    const SearchRequest& request,
+    std::string_view model,
+    bool codex,
+    std::string_view session_id) {
+    return search_payload(request, model, codex, session_id);
 }
 
 std::expected<SearchResponse, std::string> parse_openai_web_search_response(
@@ -493,6 +581,37 @@ std::expected<SearchResponse, std::string> parse_openai_web_search_response(
         }
     }
     return std::unexpected("OpenAI web search stream ended before response.completed.");
+}
+
+std::expected<SearchResponse, std::string> parse_openai_codex_search_response(
+    std::string_view body, int limit) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(body);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        return std::unexpected("OpenAI web search response was not valid JSON.");
+    }
+    if (const auto error = read_error_message(doc); !error.empty()) {
+        return std::unexpected(error);
+    }
+
+    SearchResponse out{.backend = "openai-codex-search"};
+    std::string_view output;
+    if (doc["output"].get(output) == simdjson::SUCCESS && !output.empty()) {
+        out.answer = std::string(output);
+    }
+    simdjson::dom::array results;
+    if (doc["results"].get_array().get(results) == simdjson::SUCCESS) {
+        parse_source_array(out, results);
+    }
+    if (limit > 0 && out.results.size() > static_cast<std::size_t>(limit)) {
+        out.results.resize(static_cast<std::size_t>(limit));
+    }
+    if (out.answer.empty() && out.results.empty()) {
+        return std::unexpected(
+            "OpenAI web search response did not contain output text or citations.");
+    }
+    return out;
 }
 
 std::shared_ptr<IWebSearchBackend> make_openai_web_search_backend() {
