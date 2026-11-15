@@ -80,6 +80,11 @@ public:
      * @param default_model  Model used when `ChatRequest::model` is empty.
      * @param protocol       Wire-protocol implementation.  Cloned once per
      *                       `stream_response()` call to isolate per-session state.
+     * @param context_window_limit  Configured working limit for the context
+     *                       window. It replaces the window the model card
+     *                       publishes and is capped by the ceiling that card
+     *                       publishes (codex-rs `with_config_overrides`).
+     *                       Unset: the model card decides.
      */
     HttpLLMProvider(std::string                                    base_url,
                     std::shared_ptr<core::auth::ICredentialSource> cred_source,
@@ -90,7 +95,8 @@ public:
                     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {},
                     std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector = {},
                     std::string                                    service_id = {},
-                    HttpStreamTransportOptions                     transport_options = {});
+                    HttpStreamTransportOptions                     transport_options = {},
+                    std::optional<int32_t>                         context_window_limit = {});
     ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
@@ -177,6 +183,10 @@ private:
     void ensure_model_metadata(std::string_view model) const;
     [[nodiscard]] std::optional<ModelInfo> resolved_model_info(
         std::string_view model) const;
+    /// The model card as this endpoint serves it: the catalog's, narrowed to
+    /// the configured working limit and to the ceiling the card publishes.
+    [[nodiscard]] std::optional<ModelInfo> effective_model_info(
+        std::optional<ModelInfo> info) const;
     [[nodiscard]] std::optional<ModelReasoningProfile> resolved_reasoning_profile(
         std::string_view model) const;
     /// The model a request is served by: the one it names, else the
@@ -218,6 +228,7 @@ private:
     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
     std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector_;
     HttpStreamTransportOptions                      transport_options_;
+    std::optional<int32_t>                          context_window_limit_;
     WebSocketTransportState                        websocket_;
     std::atomic_bool                               cancel_requested_{false};
 };

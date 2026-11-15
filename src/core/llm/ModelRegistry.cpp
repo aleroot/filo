@@ -162,6 +162,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // OpenAI GPT Models
     // -----------------------------------------------------------------------
+    { "gpt-6",             272000 },
     { "gpt-5.6",          1050000 },
     { "gpt-5.4",           200000 },
     { "gpt-5",             400000 },
@@ -530,9 +531,94 @@ std::vector<ModelInfo> build_anthropic_catalog() {
     };
 }
 
+// The GPT-6 generation, as the Codex CLI bundles it (codex-rs
+// models-manager/models.json, revision ee344ca). Upstream publishes the
+// window and the ceiling a configuration may ask for and the effort ladder;
+// it publishes neither an output limit nor a price, so Filo leaves both
+// unset rather than invent them.
+//
+// Only model facts live on a curated card. The deployment facts upstream
+// bundles with them (Responses Lite, the default verbosity, the service
+// tiers, `supports_reasoning_effort_updates`) belong to the serving
+// endpoint, and the live catalog publishes them there.
+constexpr int32_t kCodexGpt6ContextWindow = 272'000;
+constexpr int32_t kCodexGpt6MaxContextWindow = 872'000;
+
+[[nodiscard]] ModelInfo make_gpt6_model(
+    std::string canonical_id,
+    std::vector<std::string> aliases,
+    std::string display_name,
+    int32_t context_window,
+    std::string default_effort,
+    bool offers_ultra) {
+    ReasoningCapabilities efforts = ReasoningCapability::Effort
+        | ReasoningCapability::XHighEffort
+        | ReasoningCapability::MaxEffort;
+    std::vector<std::string> supported_efforts = {
+        "low", "medium", "high", "xhigh", "max"};
+    if (offers_ultra) {
+        efforts = efforts | ReasoningCapability::UltraEffort;
+        supported_efforts.emplace_back("ultra");
+    }
+    return ModelInfo{
+        .canonical_id = std::move(canonical_id),
+        .aliases = std::move(aliases),
+        .display_name = std::move(display_name),
+        .provider = "openai",
+        .context_window = context_window,
+        .max_context_window = kCodexGpt6MaxContextWindow,
+        .capabilities = CAP_FULL |
+            static_cast<uint32_t>(ModelCapability::Reasoning) |
+            static_cast<uint32_t>(ModelCapability::PromptCaching),
+        .reasoning = ModelReasoningProfile{
+            .effort = efforts,
+            .complete = true,
+            .catalog_default_effort = std::move(default_effort),
+            .supported_efforts = std::move(supported_efforts),
+        },
+        .tier = ModelTier::Reasoning,
+        .constraints = kStandardConstraints,
+    };
+}
+
 // OpenAI models (updated July 2026)
 std::vector<ModelInfo> build_openai_catalog() {
     return {
+        make_gpt6_model(
+            "gpt-6.1-sol",
+            {"gpt-6.1"},
+            "GPT-6.1 Sol",
+            kCodexGpt6ContextWindow,
+            "low",
+            /*offers_ultra=*/true),
+        make_gpt6_model(
+            "gpt-6.1-terra",
+            {},
+            "GPT-6.1 Terra",
+            500'000,
+            "low",
+            /*offers_ultra=*/true),
+        make_gpt6_model(
+            "gpt-6-astra",
+            {},
+            "GPT-6 Astra",
+            kCodexGpt6ContextWindow,
+            "low",
+            /*offers_ultra=*/true),
+        make_gpt6_model(
+            "gpt-6-sol",
+            {},
+            "GPT-6 Sol",
+            kCodexGpt6ContextWindow,
+            "medium",
+            /*offers_ultra=*/false),
+        make_gpt6_model(
+            "gpt-6-luna",
+            {},
+            "GPT-6 Luna",
+            kCodexGpt6ContextWindow,
+            "medium",
+            /*offers_ultra=*/false),
         make_gpt56_model(
             "gpt-5.6-sol",
             {"gpt-5.6", "gpt5"},
@@ -2105,6 +2191,13 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
         }
         get_json_string(model_obj, "provider", info.provider);
         get_json_int(model_obj, "context_window", info.context_window);
+        {
+            int32_t ceiling = 0;
+            if (get_json_int(model_obj, "max_context_window", ceiling)
+                && ceiling > 0) {
+                info.max_context_window = ceiling;
+            }
+        }
         get_json_int(model_obj, "max_output_tokens", info.max_output_tokens);
         get_json_int(model_obj, "max_reasoning_tokens", info.max_reasoning_tokens);
         get_json_string(model_obj, "knowledge_cutoff", info.knowledge_cutoff);
@@ -2289,6 +2382,10 @@ std::string ModelRegistry::export_to_json() const {
                 writer.comma();
 
                 writer.kv_num("context_window", info.context_window).comma();
+                if (info.max_context_window.has_value()) {
+                    writer.kv_num(
+                        "max_context_window", *info.max_context_window).comma();
+                }
                 writer.kv_num("max_output_tokens", info.max_output_tokens).comma();
                 if (info.max_reasoning_tokens > 0) {
                     writer.kv_num("max_reasoning_tokens", info.max_reasoning_tokens).comma();

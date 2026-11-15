@@ -208,7 +208,8 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
                                  std::shared_ptr<IProviderClientIdentitySource>  client_identity_source,
                                  std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector,
                                  std::string                                    service_id,
-                                 HttpStreamTransportOptions                     transport_options)
+                                 HttpStreamTransportOptions                     transport_options,
+                                 std::optional<int32_t>                         context_window_limit)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
@@ -219,6 +220,7 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
     , client_identity_source_(std::move(client_identity_source))
     , model_catalog_selector_(std::move(model_catalog_selector))
     , transport_options_(transport_options)
+    , context_window_limit_(context_window_limit)
 {}
 
 HttpLLMProvider::~HttpLLMProvider() = default;
@@ -267,8 +269,8 @@ int HttpLLMProvider::max_context_size() const noexcept {
     const std::string model =
         normalize_metadata_model(default_model_, protocol_.get());
     if (const auto info = resolved_model_info(model);
-        info && info->context_window > 0) {
-        return info->context_window;
+        info && info->resolved_context_window() > 0) {
+        return info->resolved_context_window();
     }
     return core::llm::get_max_context_size(model);
 }
@@ -389,12 +391,24 @@ std::optional<ModelInfo> HttpLLMProvider::resolved_model_info(
         model,
         snapshot.models,
         ModelRegistry::instance().lookup(model));
-    return resolved.model;
+    return effective_model_info(resolved.model);
+}
+
+std::optional<ModelInfo> HttpLLMProvider::effective_model_info(
+    std::optional<ModelInfo> info) const {
+    if (!info || !context_window_limit_) return info;
+    // codex-rs with_config_overrides: a configured window replaces the one
+    // the model card publishes, and the card's own ceiling caps it.
+    const int32_t configured = *context_window_limit_;
+    const int32_t ceiling = info->max_context_window.value_or(configured);
+    info->context_window = std::min(configured, ceiling);
+    return info;
 }
 
 std::optional<ModelInfo> HttpLLMProvider::provider_model_info(std::string_view model) const {
     const auto snapshot = ModelCatalogAvailability::instance().snapshot(catalog_id());
-    return resolve_model_metadata(model, snapshot.models, nullptr).model;
+    return effective_model_info(
+        resolve_model_metadata(model, snapshot.models, nullptr).model);
 }
 
 std::optional<ModelReasoningProfile> HttpLLMProvider::resolved_reasoning_profile(
@@ -643,7 +657,8 @@ std::shared_ptr<LLMProvider> HttpLLMProvider::fork_for_parallel_request() const 
         client_identity_source_,
         model_catalog_selector_,
         service_id_,
-        transport_options_);
+        transport_options_,
+        context_window_limit_);
 }
 
 void HttpLLMProvider::reset_conversation_state() {

@@ -90,9 +90,11 @@ constexpr int kMinimumGpt4oSnapshot = 2024'08'06;
 }
 
 [[nodiscard]] bool openai_model_supports_strict(std::string_view model) {
-    // Families that support Structured Outputs across every snapshot.
+    // Families that support Structured Outputs across every snapshot. The
+    // GPT-6 generation is newer than GPT-5, which documents the feature for
+    // every snapshot.
     constexpr std::array kFamilies = std::to_array<std::string_view>({
-        "gpt-4.1", "gpt-4o-mini", "gpt-5", "o3", "o4", "o5",
+        "gpt-4.1", "gpt-4o-mini", "gpt-5", "gpt-6", "o3", "o4", "o5",
     });
     if (std::ranges::any_of(kFamilies, [model](std::string_view family) {
             return model.starts_with(family);

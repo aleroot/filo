@@ -376,7 +376,9 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            .default_model = "gpt-5.6-sol",
+            // The ChatGPT backend's default model, as the Codex CLI selects
+            // it (codex-rs models-manager: the first model by priority).
+            .default_model = "gpt-6.1-sol",
         };
     }
     if (normalized == "grok" || normalized == "xai" || normalized == "x.ai") {
@@ -392,7 +394,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            .default_model = "gpt-5.6-sol",
+            .default_model = "gpt-6.1-sol",
         };
     }
     if (normalized == "google" || normalized == "gemini") {

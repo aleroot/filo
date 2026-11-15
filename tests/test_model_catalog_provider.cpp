@@ -460,6 +460,10 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(codex.display_name == "GPT-5.5 Codex");
     CHECK(codex.provider == "openai-codex");
     CHECK(codex.context_window == 272000);
+    // codex-rs ModelInfo::max_context_window: the ceiling a configuration may
+    // ask for, kept apart from the window the model serves by default.
+    CHECK(codex.max_context_window == 400000);
+    CHECK(codex.resolved_context_window() == 272000);
     CHECK(codex.max_output_tokens == 100000);
     CHECK(codex.max_reasoning_tokens == 25000);
     CHECK(codex.reasoning.summary_supported == false);
@@ -489,6 +493,38 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(result.models[1].supports_reasoning_effort_updates);
     CHECK_FALSE(codex.supports_reasoning_effort_updates);
     CHECK(result.models[2].canonical_id == "internal-chatgpt-only");
+}
+
+TEST_CASE("Codex catalog keeps the ceiling apart from the served window",
+          "[llm][model-catalog][openai][codex]") {
+    CodexModelCatalogProvider catalog;
+
+    const auto result = catalog.parse_models_response(R"JSON({
+      "models": [
+        {
+          "slug": "ceiling-only",
+          "visibility": "list",
+          "max_context_window": 872000
+        },
+        {
+          "slug": "window-only",
+          "visibility": "list",
+          "context_window": 272000
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+
+    // A row that publishes only the ceiling still serves that window.
+    CHECK(result.models[0].context_window == 872000);
+    CHECK(result.models[0].max_context_window == 872000);
+    CHECK(result.models[0].resolved_context_window() == 872000);
+
+    CHECK(result.models[1].context_window == 272000);
+    CHECK_FALSE(result.models[1].max_context_window.has_value());
+    CHECK(result.models[1].resolved_context_window() == 272000);
 }
 
 TEST_CASE("xAI catalog loads callable language models, limits, aliases, and pricing",

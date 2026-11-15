@@ -266,6 +266,11 @@ struct ModelInfo {
     // Token Limits
     // ------------------------------------------------------------------------
     int32_t context_window = 0;                  ///< Total context window (input + output)
+    /// Ceiling a configuration may ask this model for (codex-rs
+    /// `max_context_window`). A model can serve more than `context_window`
+    /// when the user configures it, but never more than this. Unset: the
+    /// model's own window is the only limit.
+    std::optional<int32_t> max_context_window = {};
     int32_t max_output_tokens = 0;               ///< Max tokens to generate
     int32_t max_reasoning_tokens = 0;            ///< For reasoning models (0 = not reasoning)
     
@@ -357,6 +362,16 @@ struct ModelInfo {
      */
     [[nodiscard]] int32_t effective_max_tokens() const noexcept {
         return max_output_tokens > 0 ? max_output_tokens : context_window;
+    }
+
+    /**
+     * @brief The window the model actually serves.
+     *
+     * codex-rs `ModelInfo::resolved_context_window`: the model's own window,
+     * or the ceiling when the model publishes only that.
+     */
+    [[nodiscard]] int32_t resolved_context_window() const noexcept {
+        return context_window > 0 ? context_window : max_context_window.value_or(0);
     }
 };
 

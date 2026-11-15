@@ -129,7 +129,17 @@ namespace {
         catalog::compatible_advertised_capabilities(info.canonical_id, model)
         | codex_capabilities(info.canonical_id, model);
     info.context_window = model.first_integer(
-        {"context_window", "max_context_window", "context_length"});
+        {"context_window", "context_length"});
+    // codex-rs ModelInfo::max_context_window: the ceiling a configuration may
+    // ask this model for. A row that publishes only the ceiling still serves
+    // that window.
+    if (const auto ceiling = model.integer("max_context_window");
+        ceiling > 0) {
+        info.max_context_window = ceiling;
+        if (info.context_window == 0) {
+            info.context_window = ceiling;
+        }
+    }
     info.max_output_tokens = model.first_integer(
         {"max_output_tokens", "max_tokens"});
     info.max_reasoning_tokens = model.first_integer(

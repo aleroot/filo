@@ -545,7 +545,11 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         std::string(name),
         std::move(client_identity_source),
         std::move(model_catalog_selector),
-        std::move(service_id));
+        std::move(service_id),
+        HttpStreamTransportOptions{},
+        config.context_window > 0
+            ? std::optional<int32_t>(config.context_window)
+            : std::nullopt);
 }
 
 } // namespace core::llm

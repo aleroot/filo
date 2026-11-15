@@ -7,7 +7,10 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -1017,4 +1020,82 @@ TEST_CASE("Claude 5.5 wire policies and tiered prices survive registry persisten
     REQUIRE(sonnet);
     CHECK(sonnet->wire.between_tools_thinking);
     CHECK(sonnet->wire.forced_tool_choice_rejected);
+}
+
+TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
+          "[llm][registry][openai][codex]") {
+    const auto& registry = ModelRegistry::instance();
+
+    // codex-rs models-manager/models.json: the workhorse serves a 272k
+    // window and may be configured up to 872k.
+    const auto sol = registry.lookup("gpt-6.1-sol");
+    REQUIRE(sol);
+    CHECK(sol->canonical_id == "gpt-6.1-sol");
+    CHECK(sol->context_window == 272000);
+    CHECK(sol->max_context_window == 872000);
+    CHECK(sol->resolved_context_window() == 272000);
+    CHECK(sol->tier == ModelTier::Reasoning);
+    CHECK(sol->supports(ModelCapability::Vision));
+    CHECK(sol->supports(ModelCapability::Reasoning));
+    CHECK(sol->supports(ModelCapability::PromptCaching));
+
+    // The effort ladder ends at ultra for the 6.1 family.
+    REQUIRE(sol->reasoning.complete);
+    CHECK(sol->reasoning.catalog_default_effort == "low");
+    CHECK(sol->reasoning.effort.supports(ReasoningCapability::XHighEffort));
+    CHECK(sol->reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(sol->reasoning.effort.supports(ReasoningCapability::UltraEffort));
+    CHECK(std::ranges::find(
+              sol->reasoning.supported_efforts, "ultra")
+          != sol->reasoning.supported_efforts.end());
+
+    // The long-context member of the family.
+    const auto terra = registry.lookup("gpt-6.1-terra");
+    REQUIRE(terra);
+    CHECK(terra->context_window == 500000);
+    CHECK(terra->max_context_window == 872000);
+
+    // The previous generation stops at max and defaults to medium.
+    const auto previous = registry.lookup("gpt-6-sol");
+    REQUIRE(previous);
+    CHECK(previous->context_window == 272000);
+    CHECK(previous->reasoning.catalog_default_effort == "medium");
+    CHECK_FALSE(
+        previous->reasoning.effort.supports(ReasoningCapability::UltraEffort));
+
+    // The alias names the same card.
+    const auto alias = registry.lookup("gpt-6.1");
+    REQUIRE(alias);
+    CHECK(alias->canonical_id == "gpt-6.1-sol");
+
+    CHECK(get_max_context_size("gpt-6.1-sol") == 272000);
+    // An id the catalog has not published yet still gets the family's window.
+    CHECK(get_max_context_size("gpt-6.9-preview") == 272000);
+}
+
+TEST_CASE("A configured context window replaces the model's and is capped by its ceiling",
+          "[llm][provider][registry][codex]") {
+    auto creds = core::auth::ApiKeyCredentialSource::as_bearer("test-key");
+
+    const auto provider = [&creds](std::optional<int32_t> limit) {
+        return std::make_shared<HttpLLMProvider>(
+            "https://chatgpt.com/backend-api/codex",
+            creds,
+            "gpt-6.1-sol",
+            std::make_unique<protocols::OpenAIProtocol>(),
+            core::config::ApiType::OpenAI,
+            "openai",
+            nullptr,
+            nullptr,
+            "openai-codex-window-test",
+            HttpStreamTransportOptions{},
+            limit);
+    };
+
+    // Without a configured limit the model card decides.
+    CHECK(provider(std::nullopt)->max_context_size() == 272000);
+    // A narrower configuration replaces the window the card publishes.
+    CHECK(provider(std::optional<int32_t>(100000))->max_context_size() == 100000);
+    // A wider one is capped by the ceiling the model publishes.
+    CHECK(provider(std::optional<int32_t>(1000000))->max_context_size() == 872000);
 }

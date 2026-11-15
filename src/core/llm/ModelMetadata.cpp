@@ -36,6 +36,11 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
     if (discovered.context_window > 0) {
         baseline.context_window = discovered.context_window;
     }
+    // The ceiling a configuration may ask for travels with the model: a live
+    // catalog that publishes one replaces the curated card's.
+    if (discovered.max_context_window.has_value()) {
+        baseline.max_context_window = discovered.max_context_window;
+    }
     if (discovered.max_output_tokens > 0) {
         baseline.max_output_tokens = discovered.max_output_tokens;
     }
