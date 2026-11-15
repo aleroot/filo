@@ -223,6 +223,19 @@ TEST_CASE("Anthropic advisor accepts the pairings Anthropic documents",
         // A model Anthropic does not document has no advisor.
         Case{"claude-3-5-sonnet-20241022", "claude-fable-5-2", false},
         Case{"claude-opus-5-5", "claude-3-5-sonnet-20241022", false},
+        // The executor arrives as the id the session runs, which may be the
+        // alias the user typed. It names the same generation as the canonical
+        // id, so it accepts the same advisors.
+        Case{"opus-5-5", "claude-fable-5-2", true},
+        Case{"opus-5-5", "claude-opus-5-5", true},
+        Case{"opus", "claude-fable-5-2", true},
+        Case{"opus-5.5", "claude-fable-5-2", true},
+        Case{"fable", "claude-fable-5-2", true},
+        Case{"sonnet-5-5", "claude-fable-5-2", true},
+        Case{"haiku-4-5", "claude-haiku-5-5", true},
+        // A model of another provider is not one Anthropic can advise with.
+        Case{"gpt-5", "claude-fable-5-2", false},
+        Case{"qwen3-coder", "claude-fable-5-2", false},
     };
 
     AnthropicAdvisorSupport support;

@@ -114,13 +114,19 @@ inline constexpr std::array<PairingRow, 11> kPairingRows{{
     std::string_view model) {
     if (model.empty()) return std::nullopt;
     constexpr std::string_view kClaudePrefix = "claude-";
-    const std::string normalized = claude::normalized_claude_id(model);
-    const std::string_view normalized_view{normalized};
-    std::string_view tail;
-    if (normalized_view.starts_with(kClaudePrefix)) tail = normalized_view.substr(kClaudePrefix.size());
+    // The table speaks canonical Claude ids. A family alias the user typed
+    // ("opus", "fable") resolves to the generation it names, and an id that
+    // already carries its family ("opus-5-5") keeps it: the family is what
+    // the table keys on, and the prefix is only how a canonical id spells it.
+    const std::string canonical = resolve_advisor_model(model);
+    if (canonical.empty()) return std::nullopt;
+    const std::string_view canonical_view{canonical};
+    const auto tail = canonical_view.starts_with(kClaudePrefix)
+        ? canonical_view.substr(kClaudePrefix.size())
+        : canonical_view;
     for (const auto family : kAdvisorFamilies) {
         if (!tail.starts_with(family)) continue;
-        const auto version = claude::detail::version_after(normalized, family);
+        const auto version = claude::detail::version_after(canonical, family);
         if (!version) continue;
         return FamilyGeneration{
             .family = family,

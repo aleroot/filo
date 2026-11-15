@@ -291,6 +291,44 @@ TEST_CASE("prompter text mode streams response", "[prompter][text]") {
     REQUIRE_FALSE(diag.session_id.empty());
 }
 
+TEST_CASE("prompter reports the advisor's work on stderr", "[prompter][advisor]") {
+    auto provider = std::make_shared<MockProvider>();
+    provider->on_stream = [](const auto&, auto callback) {
+        callback(core::llm::StreamChunk::make_advisor_event(core::llm::AdvisorEvent{
+            .state = core::llm::AdvisorCallState::Pending,
+            .advisor_model = "claude-fable-5-2",
+        }));
+        callback(core::llm::StreamChunk::make_advisor_event(core::llm::AdvisorEvent{
+            .state = core::llm::AdvisorCallState::Reviewed,
+            .advisor_model = "claude-fable-5-2",
+        }));
+        callback(core::llm::StreamChunk::make_content("hello"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "Say hi";
+    opts.prompt_was_provided = true;
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    TempDir tmp{"filo_prompter_advisor_test"};
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    // The advisor runs inside the provider's turn, so the notice goes to
+    // stderr and the answer on stdout stays exactly what the caller asked
+    // for.
+    REQUIRE_THAT(err.str(), ContainsSubstring("[advisor] consulting claude-fable-5-2."));
+    REQUIRE_THAT(err.str(), ContainsSubstring("[advisor] claude-fable-5-2 answered."));
+    REQUIRE_THAT(out.str(), ContainsSubstring("hello"));
+    REQUIRE_THAT(out.str(), !ContainsSubstring("advisor"));
+}
+
 TEST_CASE("prompter exposes and uses project .filo Agent Skills",
           "[prompter][agent_skills]") {
     TempDir project{"filo_prompter_agent_skills_project"};

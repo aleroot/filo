@@ -826,6 +826,10 @@ RunDiagnostics run_for_test(const RunOptions& options,
     std::mutex state_mutex;
     std::string streamed_text;
 
+    // The advisor notice and the tool events are written from the agent's
+    // thread, so they take the same lock.
+    std::mutex advisor_notice_mutex;
+
     std::mutex done_mutex;
     std::condition_variable done_cv;
     bool done = false;
@@ -900,6 +904,35 @@ RunDiagnostics run_for_test(const RunOptions& options,
                 }
             },
             .advisor_override = startup_advisor.value_or(std::string{}),
+            .on_advisor_event = [&](const core::llm::AdvisorEvent& event) {
+                // The advisor runs inside the provider's turn: the client only
+                // learns that it happened. The notice goes to stderr, so the
+                // answer on stdout stays exactly what the caller asked for.
+                const std::string label = event.advisor_model.empty()
+                    ? std::string("the advisor")
+                    : event.advisor_model;
+                std::lock_guard lock(advisor_notice_mutex);
+                switch (event.state) {
+                    case core::llm::AdvisorCallState::Pending:
+                        err << "[advisor] consulting " << label << ".\n";
+                        break;
+                    case core::llm::AdvisorCallState::Reviewed:
+                        err << "[advisor] " << label << " answered.\n";
+                        break;
+                    case core::llm::AdvisorCallState::Unavailable:
+                        err << "[advisor] the consultation failed";
+                        if (!event.error_code.empty()) {
+                            err << " (" << event.error_code << ")";
+                        }
+                        err << ".\n";
+                        break;
+                    case core::llm::AdvisorCallState::Refused:
+                        err << "[advisor] the provider refused to run the advisor";
+                        if (!event.detail.empty()) err << ": " << event.detail;
+                        err << ".\n";
+                        break;
+                }
+            },
         });
 
     {
