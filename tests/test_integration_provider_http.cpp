@@ -1483,6 +1483,62 @@ TEST_CASE("HttpLLMProvider - Codex Responses transport headers are scoped to Cod
     CHECK(regular_installation_id.empty());
 }
 
+TEST_CASE("Codex replays the routing token the endpoint names",
+          "[integration][openai][responses][codex][turn-state]") {
+    httplib::Server server;
+    std::mutex mutex;
+    std::vector<httplib::Request> received;
+
+    server.Post("/backend-api/codex/responses", [&](const httplib::Request& req,
+                                                    httplib::Response& res) {
+        {
+            std::scoped_lock lock(mutex);
+            received.push_back(req);
+        }
+        // codex-rs responses_websocket.rs: the endpoint names the routing token
+        // of the turn in a metadata event.
+        res.set_content(
+            "event: response.metadata\n"
+            "data: {\"type\":\"response.metadata\",\"headers\":"
+            "{\"x-codex-turn-state\":\"token-1\"}}\n\n"
+            "event: response.completed\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/backend-api/codex", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "gpt-turn-state",
+        std::make_unique<CodexResponsesProtocol>(),
+        core::config::ApiType::OpenAI,
+        "openai-turn-state");
+
+    ChatRequest req;
+    req.model = "gpt-turn-state";
+    req.session_id = "session-turn-state";
+    req.transport_turn_id = "session-turn-state:1";
+    req.messages.push_back(Message{.role = "user", .content = "Where does the turn run?"});
+
+    provider->stream_response(req, [](const StreamChunk&) {});
+    // The next request of the same turn carries the token back, so the turn
+    // stays on the machine that serves it.
+    provider->stream_response(req, [](const StreamChunk&) {});
+
+    std::scoped_lock lock(mutex);
+    REQUIRE(received.size() == 2);
+    CHECK(received[0].get_header_value("x-codex-turn-state").empty());
+    CHECK(received[1].get_header_value("x-codex-turn-state") == "token-1");
+}
+
 TEST_CASE("Codex ultra reaches the wire as the catalog's level plus proactive delegation",
           "[integration][openai][responses][codex][ultra]") {
     httplib::Server server;

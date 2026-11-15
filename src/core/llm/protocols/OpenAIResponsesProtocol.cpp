@@ -15,6 +15,7 @@
 #include "../StrictToolPolicy.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/JsonWriter.hpp"
+#include "../../utils/AsciiUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
 #include "core/version/Version.hpp"
 #include <simdjson.h>
@@ -879,6 +880,31 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     std::string_view id;
     if (doc["response_id"].get(id) == simdjson::SUCCESS && !id.empty()) {
         return std::string(id);
+    }
+    return {};
+}
+
+/// The routing token a metadata event names (codex-rs
+/// header_turn_state_value_from_json). The event carries the response headers
+/// as a JSON object, and the value may be a string or a list of them.
+[[nodiscard]] std::string parse_metadata_turn_state(simdjson::dom::element doc) {
+    simdjson::dom::object headers;
+    if (doc["headers"].get(headers) != simdjson::SUCCESS) return {};
+
+    for (auto header : headers) {
+        if (!core::utils::ascii::iequals(header.key, "x-codex-turn-state")) continue;
+        std::string_view value;
+        if (header.value.get(value) == simdjson::SUCCESS && !value.empty()) {
+            return std::string(value);
+        }
+        simdjson::dom::array values;
+        if (header.value.get(values) == simdjson::SUCCESS) {
+            for (auto first : values) {
+                if (first.get(value) == simdjson::SUCCESS && !value.empty()) {
+                    return std::string(value);
+                }
+            }
+        }
     }
     return {};
 }
@@ -2112,17 +2138,25 @@ std::string CodexResponsesProtocol::websocket_connection_key(
 void CodexResponsesProtocol::observe_response_headers(const cpr::Header& headers,
                                                       const ChatRequest& request) {
     OpenAIResponsesProtocol::observe_response_headers(headers, request);
-    if (request.transport_turn_id.empty()) {
-        return;
+    const auto turn_state = transport::find_header(headers, "x-codex-turn-state");
+    if (turn_state.has_value()) {
+        remember_turn_state(request, *turn_state);
     }
+}
 
-    auto turn_state = transport::find_header(headers, "x-codex-turn-state");
-    if (!turn_state.has_value() || turn_state->empty()) {
+void CodexResponsesProtocol::observe_turn_state(const ChatRequest& request,
+                                                std::string_view turn_state) {
+    remember_turn_state(request, turn_state);
+}
+
+void CodexResponsesProtocol::remember_turn_state(const ChatRequest& request,
+                                                 std::string_view turn_state) {
+    if (request.transport_turn_id.empty() || turn_state.empty()) {
         return;
     }
 
     std::lock_guard lock(transport_state_->mutex);
-    transport_state_->turn_states[request.transport_turn_id] = *turn_state;
+    transport_state_->turn_states[request.transport_turn_id] = std::string(turn_state);
     while (transport_state_->turn_states.size() > 32) {
         transport_state_->turn_states.erase(transport_state_->turn_states.begin());
     }
@@ -2263,6 +2297,15 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         // wants it stopped asks for it by name.
         result.response_id = in_progress_response_id_;
         result.stream_started = true;
+        return result;
+    }
+
+    // codex-rs responses_websocket.rs: the endpoint names the routing token
+    // of the turn in a metadata event, so the next request of the turn stays
+    // on the machine that serves it.
+    if (event_type == "response.metadata"
+        || event_type == "codex.response.metadata") {
+        result.turn_state = parse_metadata_turn_state(doc);
         return result;
     }
 

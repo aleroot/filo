@@ -1769,6 +1769,58 @@ TEST_CASE("Codex client metadata is a well formed object whatever it carries",
     CHECK(field("x-codex-window-id") == "worker:task_1:0");
 }
 
+TEST_CASE("Codex keeps the routing token the endpoint names",
+          "[openai][responses][codex][turn-state]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.transport_turn_id = "turn-1";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    // codex-rs responses_websocket.rs: the endpoint names the routing token
+    // of the turn in a metadata event.
+    const auto parsed = codex.parse_event(
+        R"({"type":"response.metadata","headers":{"x-codex-turn-state":"token-1"}})");
+    CHECK(parsed.turn_state == "token-1");
+
+    // The next request of the same turn carries it back, so the turn stays on
+    // the machine that serves it.
+    codex.observe_turn_state(request, parsed.turn_state);
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-codex-turn-state") == "token-1");
+
+    // Another turn does not carry it: the token belongs to the turn that
+    // earned it.
+    ChatRequest other = request;
+    other.transport_turn_id = "turn-2";
+    cpr::Header other_headers;
+    codex.prepare_headers(other_headers, other, "https://chatgpt.com/backend-api/codex");
+    CHECK(other_headers.count("x-codex-turn-state") == 0);
+}
+
+TEST_CASE("Codex reads the routing token from either metadata event",
+          "[openai][responses][codex][turn-state]") {
+    CodexResponsesProtocol codex;
+    // The websocket names it in its own metadata event.
+    CHECK(codex.parse_event(
+              R"({"type":"codex.response.metadata","headers":{"x-codex-turn-state":"token-2"}})")
+              .turn_state == "token-2");
+    // The header name is matched the way a header is matched.
+    CHECK(codex.parse_event(
+              R"({"type":"response.metadata","headers":{"X-Codex-Turn-State":"token-3"}})")
+              .turn_state == "token-3");
+    // A header value may be a list of values.
+    CHECK(codex.parse_event(
+              R"({"type":"response.metadata","headers":{"x-codex-turn-state":["token-4"]}})")
+              .turn_state == "token-4");
+    // An event that names no token says nothing about one.
+    CHECK(codex.parse_event(
+              R"({"type":"response.metadata","headers":{"x-models-etag":"etag-1"}})")
+              .turn_state.empty());
+    CHECK(codex.parse_event(R"({"type":"response.metadata"})").turn_state.empty());
+}
+
 TEST_CASE("Codex resolves the service tier against the catalog and hints routing",
           "[openai][responses][codex][service-tier]") {
     const auto tier_of = [](const std::string& payload) -> std::string {

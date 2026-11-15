@@ -283,6 +283,10 @@ struct ParseResult {
     std::string stop_reason = {};                ///< Provider terminal reason, when reported.
     bool incomplete_tool_call = false;      ///< True when a stream ended mid-tool-use block.
     std::string response_id = {};                  ///< Provider response handle, when reported (Antigravity echoes it as `labels.last_execution_id`).
+    /// The routing token the endpoint named for this turn (codex-rs
+    /// `x-codex-turn-state`). The next request of the same turn carries it
+    /// back, so the turn stays on the machine that serves it.
+    std::string turn_state = {};
     InterruptOutcome interrupt_outcome = InterruptOutcome::None; ///< The endpoint's answer to an interrupt.
 };
 
@@ -646,6 +650,18 @@ public:
      */
     virtual void observe_response_headers([[maybe_unused]] const cpr::Header& headers,
                                           [[maybe_unused]] const ChatRequest& request) {}
+
+    /**
+     * @brief Observe the routing token the endpoint named for this turn.
+     *
+     * Some endpoints name a token that the next request of the same turn must
+     * carry back, so the turn stays on the machine that serves it (codex-rs
+     * `x-codex-turn-state`). The endpoint may name it in the response headers
+     * or in a stream event; the protocol that understands the token decides
+     * where it lives, and the provider only carries it.
+     */
+    virtual void observe_turn_state([[maybe_unused]] const ChatRequest& request,
+                                    [[maybe_unused]] std::string_view turn_state) {}
 
     /**
      * @brief Wire bytes for an HTTP request body the protocol sends encoded.

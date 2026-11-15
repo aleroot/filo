@@ -248,6 +248,11 @@ public:
                          std::string_view base_url) override;
     void observe_response_headers(const cpr::Header& headers,
                                   const ChatRequest& request) override;
+    /// codex-rs `x-codex-turn-state`: the endpoint names the routing token of
+    /// the turn in a metadata event, and the next request of the turn carries
+    /// it back.
+    void observe_turn_state(const ChatRequest& request,
+                            std::string_view turn_state) override;
     [[nodiscard]] bool supports_websocket_transport() const noexcept override { return true; }
     [[nodiscard]] bool supports_mid_turn_compaction() const noexcept override { return true; }
     /// codex-rs remote compaction v2 (core/src/compact_remote_v2*.rs): the
@@ -340,6 +345,9 @@ private:
     };
 
     [[nodiscard]] std::string installation_id() const;
+    /// Keeps the routing token of a turn, so the next request of the same
+    /// turn carries it back.
+    void remember_turn_state(const ChatRequest& request, std::string_view turn_state);
     /// The request body without the client metadata: the model's controls and
     /// the given input items. The shape of a request, free of the fields that
     /// name the turn it belongs to.
