@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,11 +34,19 @@ struct HistoryCompactionRequest {
     /// instruction. The summary then re-reads the warm cache instead of
     /// sending the conversation again under a new prefix.
     std::shared_ptr<const core::llm::ChatRequest> cached_request;
+    /// The conversation exactly as `provider` reads it: its last request
+    /// followed by the messages that answered it. When set and the provider
+    /// supports native compaction, its own checkpoint of this conversation is
+    /// requested beside the summary (see ChatRequest::native_compaction).
+    std::shared_ptr<const core::llm::ChatRequest> native_request;
 };
 
 struct HistoryCompactionCallbacks {
     std::function<void(const std::string&)> on_status;
-    std::function<HistoryCompactionApplyStatus(std::string)> on_summary;
+    /// The portable summary, and the provider's own checkpoint when one was
+    /// requested and produced. A checkpoint never arrives without a summary.
+    std::function<HistoryCompactionApplyStatus(
+        std::string, std::optional<core::llm::ContinuationItem>)> on_summary;
     std::function<void()> on_finished;
 };
 

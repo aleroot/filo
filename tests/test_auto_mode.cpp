@@ -709,7 +709,7 @@ TEST_CASE("Compaction excludes retry metadata and abandoned output", "[agent][co
   core::agent::HistoryCompactor{}.compact_async(
       {.history = {{.role = "user", .content = "Summarize this"}},
        .provider = std::make_shared<RetryingProvider>(), .model = "test-model"},
-      {.on_summary = [result](std::string summary) {
+      {.on_summary = [result](std::string summary, std::optional<core::llm::ContinuationItem>) {
         result->set_value(std::move(summary));
         return core::agent::HistoryCompactionApplyStatus::Applied;
       }});

@@ -555,6 +555,122 @@ TEST_CASE("Compact-then continues either way and leaves no cache to track",
     CHECK_FALSE(agent->prompt_cache_state().last_exchange_at.has_value());
 }
 
+namespace {
+
+/// A provider that compacts natively when asked: a native_compaction request
+/// answers with one opaque checkpoint item, anything else with "ok".
+class CheckpointingProvider final : public core::llm::LLMProvider {
+public:
+    struct Log {
+        std::mutex mutex;
+        std::vector<core::llm::ChatRequest> requests;
+    };
+
+    explicit CheckpointingProvider(bool native, std::shared_ptr<Log> log = std::make_shared<Log>())
+        : native_(native), log_(std::move(log)) {}
+
+    void stream_response(const core::llm::ChatRequest& request,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(log_->mutex);
+            log_->requests.push_back(request);
+        }
+        if (request.native_compaction) {
+            core::llm::StreamChunk chunk;
+            chunk.continuation_items.push_back({
+                .provider = "openai",
+                .kind = std::string(core::llm::kCheckpointContinuationKind),
+                .payload = R"({"type":"compaction","encrypted_content":"opaque"})",
+            });
+            callback(chunk);
+        } else {
+            callback(core::llm::StreamChunk::make_content("ok"));
+        }
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
+        return {.supports_parallel_requests = true, .supports_native_compaction = native_};
+    }
+    [[nodiscard]] PromptCacheProfile prompt_cache_profile(std::string_view) const noexcept override {
+        return PromptCacheProfile::documented(5min, true);
+    }
+    [[nodiscard]] std::shared_ptr<core::llm::LLMProvider> fork_for_parallel_request() const override {
+        return std::make_shared<CheckpointingProvider>(native_, log_);
+    }
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests() const {
+        std::lock_guard lock(log_->mutex);
+        return log_->requests;
+    }
+
+private:
+    bool native_;
+    std::shared_ptr<Log> log_;
+};
+
+[[nodiscard]] std::size_t checkpoints_in(const std::vector<core::llm::Message>& messages) {
+    std::size_t count = 0;
+    for (const auto& message : messages) {
+        for (const auto& item : message.continuation_items) {
+            count += item.kind == core::llm::kCheckpointContinuationKind;
+        }
+    }
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("Compaction keeps the provider's own checkpoint beside the portable summary",
+          "[agent][compaction][native-checkpoint]") {
+    bool native = true;
+    SECTION("provider compacts natively") {}
+    SECTION("provider cannot compact natively") { native = false; }
+    auto provider = std::make_shared<CheckpointingProvider>(native);
+    auto agent = test_support::make_prompt_cache_agent(provider);
+    test_support::send_prompt_and_wait(agent, "hello");
+
+    std::promise<bool> finished;
+    auto compacted = finished.get_future();
+    agent->compact_history_then({}, [&finished](bool applied) { finished.set_value(applied); });
+    REQUIRE(compacted.wait_for(5s) == std::future_status::ready);
+    REQUIRE(compacted.get());
+
+    auto requests = provider->requests();
+    const auto native_requests = std::ranges::count_if(requests, [](const auto& request) {
+        return request.native_compaction;
+    });
+    const auto history = agent->get_history();
+    if (!native) {
+        CHECK(native_requests == 0);
+        CHECK(checkpoints_in(history) == 0);
+        return;
+    }
+
+    // The conversation exactly as the provider read it, plus its answer,
+    // sent beside the conversation.
+    REQUIRE(native_requests == 1);
+    const auto native_request = *std::ranges::find_if(requests, [](const auto& request) {
+        return request.native_compaction;
+    });
+    CHECK(native_request.continuation_scope.empty());
+    REQUIRE(native_request.messages.size() >= 2);
+    CHECK(native_request.messages.back().role == "assistant");
+    CHECK(native_request.messages.back().content == "ok");
+
+    // The checkpoint rides on the last retained user message, and the next
+    // request carries it there.
+    CHECK(checkpoints_in(history) == 1);
+    const auto last_user = std::ranges::find_if(history.rbegin(), history.rend(),
+        [](const auto& message) { return message.role == "user"; });
+    REQUIRE(last_user != history.rend());
+    CHECK(checkpoints_in({*last_user}) == 1);
+
+    test_support::send_prompt_and_wait(agent, "next");
+    requests = provider->requests();
+    CHECK_FALSE(requests.back().native_compaction);
+    CHECK(checkpoints_in(requests.back().messages) == 1);
+}
+
 TEST_CASE("Keeping the cache warm replays the last request beside the conversation",
           "[prompt-cache][agent]") {
     auto provider = std::make_shared<test_support::CachingProvider>(PromptCacheProfile::documented(5min, true));

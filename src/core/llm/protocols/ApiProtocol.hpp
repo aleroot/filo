@@ -665,6 +665,10 @@ public:
         return false;
     }
     [[nodiscard]] virtual bool supports_mid_turn_compaction() const noexcept { return false; }
+    /// Whether this wire can answer a ChatRequest::native_compaction request
+    /// with one ContinuationItem of kind kCheckpointContinuationKind, and
+    /// replay such an item in place of the history it condenses.
+    [[nodiscard]] virtual bool supports_native_compaction() const noexcept { return false; }
 
     [[nodiscard]] virtual std::string build_websocket_url(
         [[maybe_unused]] std::string_view base_url,

@@ -287,6 +287,14 @@ struct ModelInfo {
     /// send (Codex: `default_verbosity` when `support_verbosity`). Empty means
     /// omit the field. Provider-scoped like wire_protocol.
     std::string default_verbosity = {};
+    /// `service_tier` ids the serving endpoint's live catalog accepts for this
+    /// model (Codex `service_tiers[].id`, e.g. `priority` = Fast). nullopt when
+    /// the catalog does not say; an empty list means no optional tier.
+    /// Provider-scoped like wire_protocol.
+    std::optional<std::vector<std::string>> service_tiers = {};
+    /// Tier the live catalog applies when the user configured none (Codex
+    /// `default_service_tier`). Empty means omit. Provider-scoped.
+    std::string default_service_tier = {};
     /// Provider-advertised automatic compaction threshold, when supplied.
     std::optional<int32_t> auto_compact_token_limit = {};
     

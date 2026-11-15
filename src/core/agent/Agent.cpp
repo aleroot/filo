@@ -1478,7 +1478,8 @@ void Agent::compact_history(std::string summary) {
 void Agent::apply_compaction_unlocked(
     std::string summary,
     HistoryCompactionPlan plan,
-    std::string active_skill_context) {
+    std::string active_skill_context,
+    std::optional<core::llm::ContinuationItem> checkpoint) {
     if (execution_journal_) {
         core::utils::JsonWriter event;
         {
@@ -1522,7 +1523,33 @@ void Agent::apply_compaction_unlocked(
         history_.end(),
         std::make_move_iterator(plan.retained_history.begin()),
         std::make_move_iterator(plan.retained_history.end()));
+    // The provider's own checkpoint rides on the last retained user message:
+    // the model and endpoint that produced it read it there in place of the
+    // condensed history; any other provider drops it and reads the summary.
+    if (checkpoint.has_value()) {
+        const auto last_user = std::ranges::find_if(history_.rbegin(), history_.rend(),
+            [](const core::llm::Message& message) { return message.role == "user"; });
+        if (last_user != history_.rend()) {
+            last_user->continuation_items.push_back(std::move(*checkpoint));
+        } else {
+            core::logging::warn("[compaction] No retained user message to carry the native checkpoint; "
+                                "keeping the summary only");
+        }
+    }
     refresh_context_window_snapshot_unlocked();
+}
+
+std::shared_ptr<const core::llm::ChatRequest> Agent::native_compaction_request_unlocked() const {
+    if (!provider_ || !provider_->capabilities().supports_native_compaction) return {};
+    const auto replay = prompt_cache_.replay();
+    if (!replay.has_value() || replay->provider != provider_ || replay->model != active_model_
+        || replay->history_size > history_.size()) {
+        return {};
+    }
+    auto request = std::make_shared<core::llm::ChatRequest>(*replay->request);
+    request->messages.insert(request->messages.end(),
+        history_.begin() + static_cast<std::ptrdiff_t>(replay->history_size), history_.end());
+    return request;
 }
 
 void Agent::compact_history_async(
@@ -1551,6 +1578,7 @@ void Agent::start_manual_compaction(
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string active_skill_context;
     std::string model;
+    std::shared_ptr<const core::llm::ChatRequest> native_request;
     std::uint64_t base_revision = 0;
     bool already_compacting = false;
     {
@@ -1563,6 +1591,7 @@ void Agent::start_manual_compaction(
                 compaction_policy(provider_, active_model_));
             provider = provider_;
             model = active_model_;
+            native_request = native_compaction_request_unlocked();
             active_skill_context = collect_active_skill_context(history_);
             base_revision = history_revision_;
             compaction_in_progress_ = true;
@@ -1588,7 +1617,8 @@ void Agent::start_manual_compaction(
         reason,
         std::move(text_callback),
         std::move(done_callback),
-        std::move(finished_callback));
+        std::move(finished_callback),
+        std::move(native_request));
 }
 
 void Agent::launch_compaction_transaction(
@@ -1600,7 +1630,8 @@ void Agent::launch_compaction_transaction(
     HistoryCompactionReason reason,
     std::function<void(const std::string&)> status_log_callback,
     std::function<void()> done_callback,
-    std::function<void(bool compacted)> finished_callback) {
+    std::function<void(bool compacted)> finished_callback,
+    std::shared_ptr<const core::llm::ChatRequest> native_request) {
     auto self = shared_from_this();
     auto summary_history = plan.summary_history;
     auto applied_flag = std::make_shared<std::atomic<bool>>(false);
@@ -1610,6 +1641,7 @@ void Agent::launch_compaction_transaction(
             .provider = std::move(provider),
             .model = std::move(model),
             .reason = reason,
+            .native_request = std::move(native_request),
         },
         HistoryCompactionCallbacks{
             .on_status = std::move(status_log_callback),
@@ -1619,7 +1651,9 @@ void Agent::launch_compaction_transaction(
                  applied_flag,
                  plan = std::move(plan),
                  active_skill_context = std::move(active_skill_context),
-                 done_callback = std::move(done_callback)](std::string summary) mutable {
+                 done_callback = std::move(done_callback)](
+                    std::string summary,
+                    std::optional<core::llm::ContinuationItem> checkpoint) mutable {
                 bool applied = false;
                 std::shared_ptr<core::llm::LLMProvider> provider_to_reset;
                 {
@@ -1628,7 +1662,8 @@ void Agent::launch_compaction_transaction(
                         self->apply_compaction_unlocked(
                             std::move(summary),
                             std::move(plan),
-                            std::move(active_skill_context));
+                            std::move(active_skill_context),
+                            std::move(checkpoint));
                         provider_to_reset = self->provider_;
                         applied = true;
                     }
@@ -1799,6 +1834,7 @@ void Agent::summarize_idle_async(std::function<void(const std::string&)> status_
     std::optional<PromptCacheTracker::Replay> replay;
     std::optional<std::vector<core::llm::Message>> answer;
     IdleSummary::Summary draft;
+    std::shared_ptr<const core::llm::ChatRequest> native_request;
     std::uint64_t base_revision = 0;
     {
         std::lock_guard lock(history_mutex_);
@@ -1811,6 +1847,7 @@ void Agent::summarize_idle_async(std::function<void(const std::string&)> status_
             draft.plan = HistoryCompactionPlanner::plan(
                 history_, context_summary_, compaction_policy(provider_, active_model_));
             draft.active_skill_context = collect_active_skill_context(history_);
+            native_request = native_compaction_request_unlocked();
             base_revision = history_revision_;
         }
         // Claimed last, so nothing that throws can leave the write claimed.
@@ -1833,12 +1870,15 @@ void Agent::summarize_idle_async(std::function<void(const std::string&)> status_
             .model = replay->model,
             .reason = HistoryCompactionReason::Idle,
             .cached_request = replay->request,
+            .native_request = std::move(native_request),
         },
         HistoryCompactionCallbacks{
             .on_status = std::move(status_callback),
             .on_summary =
                 [self, base_revision, kept, started_at, request = replay->request,
-                 draft = std::move(draft)](std::string text) mutable {
+                 draft = std::move(draft)](
+                    std::string text,
+                    std::optional<core::llm::ContinuationItem> checkpoint) mutable {
                 std::lock_guard lock(self->history_mutex_);
                 // The summary read the cached prefix, which renewed it.
                 self->prompt_cache_.renewed(request, started_at);
@@ -1846,6 +1886,7 @@ void Agent::summarize_idle_async(std::function<void(const std::string&)> status_
                     return HistoryCompactionApplyStatus::Stale;
                 }
                 draft.text = std::move(text);
+                draft.checkpoint = std::move(checkpoint);
                 self->idle_summary_.keep(base_revision, std::move(draft));
                 kept->store(true, std::memory_order_release);
                 return HistoryCompactionApplyStatus::Applied;
@@ -1875,7 +1916,8 @@ bool Agent::use_idle_summary() {
         if (!summary.has_value()) return false;
         apply_compaction_unlocked(std::move(summary->text),
                                   std::move(summary->plan),
-                                  std::move(summary->active_skill_context));
+                                  std::move(summary->active_skill_context),
+                                  std::move(summary->checkpoint));
         provider = provider_;
     }
     // As after any compaction: transport continuation handles are reset
@@ -4322,6 +4364,7 @@ bool Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string active_skill_context;
     std::string model;
+    std::shared_ptr<const core::llm::ChatRequest> native_request;
     std::uint64_t base_revision = 0;
     core::context::CompactionDecision compaction;
     {
@@ -4347,6 +4390,7 @@ bool Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
                 context_summary_,
                 compaction_policy(provider_, active_model_));
             active_skill_context = collect_active_skill_context(history_);
+            native_request = native_compaction_request_unlocked();
             base_revision = history_revision_;
             compaction_in_progress_ = true;
         }
@@ -4364,7 +4408,8 @@ bool Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
         std::move(provider),
         std::move(model),
         HistoryCompactionReason::Auto,
-        std::move(status_log_callback), {}, std::move(finished_callback));
+        std::move(status_log_callback), {}, std::move(finished_callback),
+        std::move(native_request));
     return true;
 }
 

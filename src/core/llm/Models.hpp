@@ -477,6 +477,13 @@ struct InlineDataUrl {
 // ---------------------------------------------------------------------------
 // StreamChunk — represents a single chunk from an LLM streaming response.
 // ---------------------------------------------------------------------------
+/// ContinuationItem kind of a provider's own opaque checkpoint of a
+/// conversation (see ChatRequest::native_compaction). It rides on the last
+/// user message a compaction retains; the producing model and endpoint replay
+/// it in place of the history it condenses, every other one ignores it and
+/// reads Filo's portable text summary instead.
+inline constexpr std::string_view kCheckpointContinuationKind = "checkpoint";
+
 struct ContinuationItem {
     std::string provider = {}; ///< Wire-protocol owner (for example "openai" or "anthropic").
     std::string kind = {};     ///< Provider item/block type; informational and forward-compatible.
@@ -644,6 +651,10 @@ struct ChatRequest {
     /// side queries, compaction) leaves it empty and is sent unthreaded, so it
     /// can never consume the conversation's thread.
     std::string continuation_scope = {};
+    /// Ask for the provider's own checkpoint of `messages` instead of a reply
+    /// (only when ProviderCapabilities::supports_native_compaction). The
+    /// answer carries one ContinuationItem of kind kCheckpointContinuationKind.
+    bool native_compaction = false;
     /// Which retention the request's prompt prefix is worth (see
     /// PromptCacheTtlPolicy). Only an agent's own top-level step loop marks
     /// its requests Conversation; a keep-warm replay copies the mark.
@@ -667,6 +678,11 @@ struct ChatRequest {
     /// Output verbosity the serving endpoint's live catalog prescribes for
     /// `model`, sent as `text.verbosity`. Copied for the same reason.
     std::optional<std::string> catalog_verbosity = {};
+    /// `service_tier` ids the live catalog accepts for `model`; nullopt when it
+    /// does not say. Copied for the same reason.
+    std::optional<std::vector<std::string>> catalog_service_tiers = {};
+    /// The live catalog's tier for a request that configures none.
+    std::string catalog_default_service_tier = {};
     /// A provider-side advisor: the provider runs a second model inside this
     /// turn, on its own credential. Only the provider's wire knows how to
     /// declare one, so the request carries the specification and the

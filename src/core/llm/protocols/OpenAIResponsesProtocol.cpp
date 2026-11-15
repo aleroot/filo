@@ -22,6 +22,7 @@
 #include <cmath>
 #include <climits>
 #include <cstdint>
+#include <ctime>
 #include <format>
 #include <random>
 #include <set>
@@ -125,7 +126,8 @@ void append_tool_schema(
 
 void append_message_item(std::string& payload,
                          const Message& msg,
-                         std::string_view phase = {}) {
+                         std::string_view phase = {},
+                         std::string_view image_detail = {}) {
     payload += R"({"type":"message","role":")";
     payload += core::utils::escape_json_string(msg.role);
     payload += '"';
@@ -164,6 +166,10 @@ void append_message_item(std::string& payload,
                 append_part_sep();
                 payload += R"({"type":"input_image","image_url":")";
                 payload += core::utils::escape_json_string(encoded->data_url());
+                if (!image_detail.empty()) {
+                    payload += R"(","detail":")";
+                    payload += core::utils::escape_json_string(image_detail);
+                }
                 payload += R"("})";
             } else {
                 append_text_part(unavailable_media_attachment_text(part.type, media_reference(part)));
@@ -259,7 +265,8 @@ void append_function_call_output_item(std::string& payload,
 [[nodiscard]] std::vector<std::string> build_input_items(
     const std::vector<Message>& messages,
     bool include_system_messages = false,
-    bool namespaced = false) {
+    bool namespaced = false,
+    std::string_view image_detail = {}) {
     std::vector<std::string> items;
     std::size_t fallback_idx = 0;
 
@@ -290,8 +297,21 @@ void append_function_call_output_item(std::string& payload,
 
         if (!msg.content.empty() || !msg.content_parts.empty()) {
             std::string item;
-            append_message_item(item, msg);
+            append_message_item(item, msg, {}, image_detail);
             items.push_back(std::move(item));
+        }
+
+        // A provider checkpoint follows the user message it rides on, the
+        // position codex-rs gives its compaction item after the retained user
+        // messages (compact_pending_input.rs insert_summary).
+        if (msg.role != "assistant") {
+            for (const auto& continuation : msg.continuation_items) {
+                if (continuation.provider == "openai"
+                    && continuation.kind == kCheckpointContinuationKind
+                    && has_valid_continuation_payload(continuation)) {
+                    items.push_back(continuation.payload);
+                }
+            }
         }
 
         if (msg.role == "assistant" && !msg.tool_calls.empty()) {
@@ -309,6 +329,21 @@ void append_function_call_output_item(std::string& payload,
 
 [[nodiscard]] bool responses_lite(const ChatRequest& request) {
     return request.catalog_wire_protocol == "responses_lite";
+}
+
+/// The WebSocket continuation a request extends, empty for none. An agent's
+/// own step loop continues its conversation across turns on one socket, the
+/// way codex-rs keeps one websocket session (connection, last request, last
+/// response) for the whole thread and lets each new turn send only the new
+/// items with previous_response_id (core/src/client.rs: ModelClient::
+/// new_session takes the cached session, ModelClientSession's Drop stores it
+/// back). Requests sent beside the conversation (keep-warm replays, side
+/// queries, compaction) clear continuation_scope and stay scoped to their
+/// transport turn, so they never consume the conversation's continuation.
+[[nodiscard]] std::string websocket_continuation(const ChatRequest& request) {
+    if (request.transport_turn_id.empty()) return {};
+    if (!request.continuation_scope.empty()) return "conversation:" + request.continuation_scope;
+    return "turn:" + request.transport_turn_id;
 }
 
 // ── `ultra` ────────────────────────────────────────────────────────────────
@@ -385,7 +420,10 @@ void append_function_call_output_item(std::string& payload,
 // The ChatGPT backend rejects `instructions`. The official client sends the
 // same stable prompt as a developer message at the front of `input`.
 [[nodiscard]] std::vector<std::string> codex_input_items(const ChatRequest& request) {
-    auto items = build_input_items(request.messages, false, responses_lite(request));
+    // codex-rs protocol/src/models.rs DEFAULT_IMAGE_DETAIL is `high`;
+    // client_common.rs normalize_image_detail clears it for Responses Lite.
+    auto items = build_input_items(request.messages, false, responses_lite(request),
+                                   responses_lite(request) ? std::string_view{} : "high");
     const std::string instructions = collect_instructions(request);
     if (!instructions.empty()) {
         Message developer;
@@ -399,6 +437,9 @@ void append_function_call_output_item(std::string& payload,
         if (auto tools = lite_tools_item(request); !tools.empty())
             items.insert(items.begin(), std::move(tools));
     }
+    // codex-rs compact_remote_v2_attempt.rs: a compaction request is the
+    // conversation followed by a `compaction_trigger` control item.
+    if (request.native_compaction) items.emplace_back(R"({"type":"compaction_trigger"})");
     return items;
 }
 
@@ -836,6 +877,133 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return {};
 }
 
+// ── ChatGPT plan limits ─────────────────────────────────────────────────────
+// The ChatGPT backend names a plan limit in `error.type`, not `error.code`
+// (codex-rs codex-api/src/api_bridge.rs, UsageErrorBody). It arrives as an
+// HTTP 429 body or, over the WebSocket, as an `error` event wrapping the same
+// object. The wording is codex-rs protocol/src/error.rs: UsageLimitReachedError
+// and UsageNotIncluded.
+
+/// Plan or billing exhaustion: a retry cannot succeed until the user acts.
+/// codex-rs maps these to UsageLimitReached, UsageNotIncluded or QuotaExceeded.
+[[nodiscard]] bool is_quota_error(std::string_view value) noexcept {
+    return value == "usage_limit_reached" || value == "usage_not_included"
+        || value == "insufficient_quota" || value == "credit_balance_exhausted"
+        || value == "organization_spend_limit_exceeded"
+        || value == "project_spend_limit_exceeded"
+        || value == "organization_usage_limit_exceeded"
+        || value == "billing_hard_limit_reached";
+}
+
+[[nodiscard]] std::string_view trim_ascii(std::string_view value) noexcept {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
+    return value;
+}
+
+/// codex-rs format_retry_timestamp: local clock time today, else a dated time.
+[[nodiscard]] std::string codex_reset_time(int64_t resets_at, std::time_t now) {
+    const auto reset = static_cast<std::time_t>(resets_at);
+    std::tm reset_tm{};
+    std::tm now_tm{};
+    if (localtime_r(&reset, &reset_tm) == nullptr || localtime_r(&now, &now_tm) == nullptr) return {};
+    char clock[16];
+    if (std::strftime(clock, sizeof clock, "%I:%M %p", &reset_tm) == 0) return {};
+    std::string_view time(clock);
+    if (time.starts_with('0')) time.remove_prefix(1);
+    if (reset_tm.tm_year == now_tm.tm_year && reset_tm.tm_yday == now_tm.tm_yday) {
+        return std::string(time);
+    }
+    char month[8];
+    if (std::strftime(month, sizeof month, "%b", &reset_tm) == 0) return {};
+    const int day = reset_tm.tm_mday;
+    const std::string_view suffix = day >= 11 && day <= 13 ? "th"
+        : day % 10 == 1 ? "st" : day % 10 == 2 ? "nd" : day % 10 == 3 ? "rd" : "th";
+    return std::format("{} {}{}, {} {}", month, day, suffix, reset_tm.tm_year + 1900, time);
+}
+
+/// codex-rs retry_suffix (`after_or == false`) and retry_suffix_after_or.
+[[nodiscard]] std::string codex_retry_suffix(int64_t resets_at, bool after_or) {
+    const std::string at = resets_at > 0 ? codex_reset_time(resets_at, std::time(nullptr)) : std::string{};
+    if (after_or) return at.empty() ? " or try again later." : " or try again at " + at + ".";
+    return at.empty() ? " Try again later." : " Try again at " + at + ".";
+}
+
+/// The user-facing text of a ChatGPT plan-limit error, or nullopt when the
+/// error is not one. `headers` are the response (or wrapped event) headers.
+[[nodiscard]] std::optional<std::string> codex_usage_error_message(
+    simdjson::dom::element doc, const cpr::Header& headers) {
+    simdjson::dom::object error;
+    if (doc["error"].get(error) != simdjson::SUCCESS) return std::nullopt;
+    std::string_view type;
+    if (error["type"].get(type) != simdjson::SUCCESS) return std::nullopt;
+    if (type == "usage_not_included") {
+        return std::string(
+            "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.");
+    }
+    if (type != "usage_limit_reached") return std::nullopt;
+
+    int64_t resets_at = 0;
+    core::utils::json::ignore_error(error["resets_at"].get_int64().get(resets_at));
+    std::string_view plan;
+    core::utils::json::ignore_error(error["plan_type"].get_string().get(plan));
+
+    // The limit the server reports as active, named by x-<limit>-limit-name.
+    std::string limit = "codex";
+    if (const auto active = transport::find_header(headers, "x-codex-active-limit")) {
+        if (const auto trimmed = trim_ascii(*active); !trimmed.empty()) limit = lower_ascii(trimmed);
+    }
+    std::ranges::replace(limit, '_', '-');
+    if (const auto name = transport::find_header(headers, "x-" + limit + "-limit-name")) {
+        const auto trimmed = trim_ascii(*name);
+        const std::string lowered = lower_ascii(trimmed);
+        if (!trimmed.empty() && lowered != "codex" && lowered != "gpt-reserve") {
+            return std::format("You’ve hit your usage limit for {}. Switch to another model now,{}",
+                               trimmed, codex_retry_suffix(resets_at, true));
+        }
+    }
+
+    if (const auto reached = transport::find_header(headers, "x-codex-rate-limit-reached-type")) {
+        if (*reached == "workspace_owner_credits_depleted")
+            return std::string("Your workspace is out of credits. Add credits to continue.");
+        if (*reached == "workspace_member_credits_depleted")
+            return std::string("Your workspace is out of credits. Ask your workspace owner to refill in order to continue.");
+        if (*reached == "workspace_owner_usage_limit_reached")
+            return std::string("You hit your spend cap set in your workspace. Increase your spend cap to continue.");
+        if (*reached == "workspace_member_usage_limit_reached")
+            return std::string("You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.");
+    }
+
+    if (const auto promo = transport::find_header(headers, "x-codex-promo-message")) {
+        return std::format("You’ve hit your usage limit. {},{}", *promo, codex_retry_suffix(resets_at, true));
+    }
+
+    // PlanType deserializes the lowercase serde names (aliases hc, education).
+    const auto in = [&](std::initializer_list<std::string_view> plans) {
+        return std::ranges::find(plans, plan) != plans.end();
+    };
+    if (in({"plus"})) {
+        return "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), "
+               "visit https://chatgpt.com/settings/usage to purchase more credits"
+            + codex_retry_suffix(resets_at, true);
+    }
+    if (in({"team", "self_serve_business_prolite", "self_serve_business_usage_based", "business",
+            "ent26", "enterprise_cbp_automation", "enterprise_cbp_usage_based", "sci", "sci_plus"})) {
+        return "You’ve hit your usage limit. To get more access now, send a request to your admin"
+            + codex_retry_suffix(resets_at, true);
+    }
+    if (in({"free", "go"})) {
+        return "You’ve hit your usage limit. Upgrade to Plus to continue using Codex "
+               "(https://chatgpt.com/explore/plus),"
+            + codex_retry_suffix(resets_at, true);
+    }
+    if (in({"pro", "prolite", "promax"})) {
+        return "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits"
+            + codex_retry_suffix(resets_at, true);
+    }
+    return "You’ve hit your usage limit." + codex_retry_suffix(resets_at, false);
+}
+
 } // namespace
 
 class CodexResponsesProtocol::RateLimitState {
@@ -1014,6 +1182,14 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     }
     payload += R"(,"stream":)";
     payload += req.stream ? "true" : "false";
+    // Routing fields precede the potentially multi-megabyte input: gateways may
+    // inspect a body incrementally (codex-rs codex-api/src/common.rs
+    // ResponsesApiRequest field order).
+    if (const std::string service_tier = request_service_tier(req); !service_tier.empty()) {
+        payload += R"(,"service_tier":")";
+        payload += core::utils::escape_json_string(service_tier);
+        payload += '"';
+    }
     if (options.include_store) {
         payload += R"(,"store":false)";
     }
@@ -1112,15 +1288,6 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     if (options.include_prompt_cache_key && !req.prompt_cache_key.empty()) {
         payload += R"(,"prompt_cache_key":")";
         payload += core::utils::escape_json_string(req.prompt_cache_key);
-        payload += '"';
-    }
-
-    const std::string_view service_tier = req.service_tier.empty()
-        ? std::string_view{default_service_tier_}
-        : std::string_view{req.service_tier};
-    if (!service_tier.empty()) {
-        payload += R"(,"service_tier":")";
-        payload += core::utils::escape_json_string(service_tier);
         payload += '"';
     }
 
@@ -1270,6 +1437,24 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     return payload;
 }
 
+std::string CodexResponsesProtocol::request_service_tier(const ChatRequest& request) const {
+    std::string configured = request.service_tier.empty()
+        ? default_service_tier_ : request.service_tier;
+    if (configured == "flex") return configured;
+    if (!request.catalog_service_tiers.has_value()) {
+        // No catalog evidence: send what the user configured, except the
+        // explicit `default`, which is never a request value.
+        return configured == "default" ? std::string{} : configured;
+    }
+    const auto& offered = *request.catalog_service_tiers;
+    if (configured.empty()) configured = request.catalog_default_service_tier;
+    if (configured.empty() || configured == "default"
+        || std::ranges::find(offered, configured) == offered.end()) {
+        return {};
+    }
+    return configured;
+}
+
 void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
                                              const ChatRequest& request,
                                              [[maybe_unused]] std::string_view base_url) {
@@ -1302,6 +1487,13 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["session-id"] = thread_id;
     headers["thread-id"] = thread_id;
     headers["User-Agent"] = core::auth::codex_cli::user_agent();
+    // codex-rs client.rs build_routing_hint_header, sent with ChatGPT auth on
+    // HTTP requests and WebSocket handshakes.
+    if (const std::string tier = request_service_tier(request); !tier.empty()) {
+        headers["x-codex-routing-hint"] = "model=" + request.model + ";tier=" + tier;
+    } else {
+        headers["x-codex-routing-hint"] = "model=" + request.model;
+    }
     if (!turn_state.empty()) {
         headers["x-codex-turn-state"] = turn_state;
     } else {
@@ -1331,12 +1523,15 @@ std::string CodexResponsesProtocol::serialize_websocket_request(
 
 std::string CodexResponsesProtocol::serialize_websocket_prewarm_request(
     const ChatRequest& request) const {
-    if (request.transport_turn_id.empty()) {
+    const std::string continuation = websocket_continuation(request);
+    // A compaction request ends with a control item that must reach the model
+    // in the request that generates: never split it into prewarm + delta.
+    if (continuation.empty() || request.native_compaction) {
         return {};
     }
     {
         std::lock_guard lock(transport_state_->mutex);
-        if (transport_state_->last_ws_requests.contains(request.transport_turn_id)) {
+        if (transport_state_->last_ws_requests.contains(continuation)) {
             return {};
         }
     }
@@ -1395,9 +1590,13 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
 
     std::string incremental_previous_response_id;
     std::vector<std::string> incremental_input_items;
-    if (!request.transport_turn_id.empty()) {
+    // A compaction request neither continues nor becomes a baseline: its
+    // trigger is a request control, not a durable conversation item.
+    const std::string continuation = request.native_compaction
+        ? std::string{} : websocket_continuation(request);
+    if (!continuation.empty()) {
         std::lock_guard lock(transport_state_->mutex);
-        if (auto last = transport_state_->last_ws_requests.find(request.transport_turn_id);
+        if (auto last = transport_state_->last_ws_requests.find(continuation);
             last != transport_state_->last_ws_requests.end()
             && last->second.request_signature == request_signature
             && !last->second.response_id.empty()) {
@@ -1417,7 +1616,7 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
             }
         }
 
-        transport_state_->pending_ws_requests[request.transport_turn_id] =
+        transport_state_->pending_ws_requests[continuation] =
             TransportState::PendingWebSocketRequest{
                 .request_signature = request_signature,
                 .request_input_items = full_input_items,
@@ -1435,7 +1634,7 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
         append_member_before_object_end(payload, R"("generate":false)");
     }
 
-    active_transport_turn_id_ = request.transport_turn_id;
+    active_continuation_ = continuation;
     active_response_items_.clear();
 
     if (payload.empty() || payload.front() != '{') {
@@ -1446,15 +1645,16 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
 }
 
 void CodexResponsesProtocol::abandon_websocket_request(const ChatRequest& request) {
-    if (request.transport_turn_id.empty()) {
+    const std::string continuation = websocket_continuation(request);
+    if (continuation.empty()) {
         return;
     }
 
     std::lock_guard lock(transport_state_->mutex);
-    transport_state_->pending_ws_requests.erase(request.transport_turn_id);
-    transport_state_->last_ws_requests.erase(request.transport_turn_id);
-    if (active_transport_turn_id_ == request.transport_turn_id) {
-        active_transport_turn_id_.clear();
+    transport_state_->pending_ws_requests.erase(continuation);
+    transport_state_->last_ws_requests.erase(continuation);
+    if (active_continuation_ == continuation) {
+        active_continuation_.clear();
         active_response_items_.clear();
     }
 }
@@ -1465,6 +1665,7 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
     std::string event_type;
     std::string serialized_output_item;
     std::optional<CodexRateLimitUpdate> rate_limit_update;
+    std::optional<std::string> usage_error;
 
     if (sse::parse_event_payload(raw_event, parsed, data_scratch)) {
         event_type = std::string(parsed.event);
@@ -1488,6 +1689,31 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     }
                 } else if (event_type == "codex.rate_limits") {
                     rate_limit_update = parse_codex_rate_limit_event(doc);
+                } else if (event_type == "error") {
+                    // The WebSocket wraps an HTTP failure as {"type":"error",
+                    // "status":429,"error":{...},"headers":{...}}.
+                    cpr::Header headers;
+                    simdjson::dom::object wrapped;
+                    if (doc["headers"].get(wrapped) == simdjson::SUCCESS) {
+                        // codex-rs json_header_value: strings, numbers and booleans.
+                        for (const auto field : wrapped) {
+                            std::string_view text;
+                            int64_t integer = 0;
+                            double number = 0.0;
+                            bool flag = false;
+                            std::string value;
+                            if (field.value.get(text) == simdjson::SUCCESS) value = std::string(text);
+                            else if (field.value.get(integer) == simdjson::SUCCESS) value = std::to_string(integer);
+                            else if (field.value.get(number) == simdjson::SUCCESS) value = std::format("{}", number);
+                            else if (field.value.get(flag) == simdjson::SUCCESS) value = flag ? "true" : "false";
+                            else continue;
+                            headers[std::string(field.key)] = std::move(value);
+                        }
+                    }
+                    usage_error = codex_usage_error_message(doc, headers);
+                    if (usage_error) {
+                        rate_limit_update = parse_codex_rate_limit_headers(headers);
+                    }
                 }
             }
         }
@@ -1497,7 +1723,18 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (rate_limit_update.has_value()) {
         rate_limit_state_->apply_event(*rate_limit_update);
+        const int32_t retry_after = result.rate_limit.retry_after;
         result.rate_limit = last_rate_limit();
+        result.rate_limit.retry_after = retry_after;
+    }
+
+    if (usage_error.has_value() && result.stream_error) {
+        // A plan limit lifts only when the user acts or the window resets.
+        result.retryable_stream_error = false;
+        result.stream_error_message = *usage_error;
+        for (auto& chunk : result.chunks) {
+            if (chunk.is_error) chunk.content = "\n[" + *usage_error + "]";
+        }
     }
 
     if (!serialized_output_item.empty()) {
@@ -1506,12 +1743,12 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (result.done
         && event_type == "response.completed"
-        && !active_transport_turn_id_.empty()
+        && !active_continuation_.empty()
         && !last_response_id().empty()) {
         std::lock_guard lock(transport_state_->mutex);
-        if (auto pending = transport_state_->pending_ws_requests.find(active_transport_turn_id_);
+        if (auto pending = transport_state_->pending_ws_requests.find(active_continuation_);
             pending != transport_state_->pending_ws_requests.end()) {
-            transport_state_->last_ws_requests[active_transport_turn_id_] =
+            transport_state_->last_ws_requests[active_continuation_] =
                 TransportState::LastWebSocketRequest{
                     .response_id = last_response_id(),
                     .request_signature = std::move(pending->second.request_signature),
@@ -1520,20 +1757,20 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     .from_prewarm = pending->second.prewarm,
                 };
             transport_state_->pending_ws_requests.erase(pending);
-            // The transport owns one socket. Old turns cannot continue on it;
-            // retaining 32 complete histories here needlessly multiplies RAM.
+            // The transport owns one socket, and only its latest response can
+            // be continued; retaining other complete histories wastes RAM.
             std::erase_if(transport_state_->last_ws_requests, [&](const auto& entry) {
-                return entry.first != active_transport_turn_id_;
+                return entry.first != active_continuation_;
             });
         }
-        active_transport_turn_id_.clear();
+        active_continuation_.clear();
         active_response_items_.clear();
     }
 
-    if (result.done && !active_transport_turn_id_.empty()) {
+    if (result.done && !active_continuation_.empty()) {
         std::lock_guard lock(transport_state_->mutex);
-        transport_state_->pending_ws_requests.erase(active_transport_turn_id_);
-        active_transport_turn_id_.clear();
+        transport_state_->pending_ws_requests.erase(active_continuation_);
+        active_continuation_.clear();
         active_response_items_.clear();
     }
 
@@ -1547,8 +1784,8 @@ std::string CodexResponsesProtocol::websocket_connection_key(
     std::string key(url);
     key += "\nsession=";
     key += request.session_id;
-    key += "\nturn=";
-    key += request.transport_turn_id;
+    key += "\ncontinuation=";
+    key += websocket_continuation(request);
 
     for (std::string_view name : {
              std::string_view{"Authorization"},
@@ -1592,7 +1829,7 @@ void CodexResponsesProtocol::reset_state() {
     transport_state_->last_ws_requests.clear();
     transport_state_->pending_ws_requests.clear();
     active_response_items_.clear();
-    active_transport_turn_id_.clear();
+    active_continuation_.clear();
 }
 
 std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
@@ -1695,6 +1932,39 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
         if (event_type == "response.output_item.added") {
             if (item_type == "message") saw_text_delta_ = false;
+            return result;
+        }
+
+        // The answer to a `compaction_trigger`: codex-rs ResponseItem::
+        // Compaction {id, encrypted_content}, alias `compaction_summary`.
+        // codex-rs replays a prefixed id and drops a bare one
+        // (client.rs prepare_response_items_for_request).
+        if (item_type == "compaction" || item_type == "compaction_summary") {
+            std::string_view encrypted;
+            if (item["encrypted_content"].get(encrypted) != simdjson::SUCCESS || encrypted.empty()) {
+                return result;
+            }
+            std::string payload = R"({"type":"compaction")";
+            std::string_view id;
+            if (item["id"].get(id) == simdjson::SUCCESS) {
+                const auto separator = id.find('_');
+                if (separator != std::string_view::npos && separator > 0
+                    && separator + 1 < id.size()) {
+                    payload += R"(,"id":")";
+                    payload += core::utils::escape_json_string(id);
+                    payload += '"';
+                }
+            }
+            payload += R"(,"encrypted_content":")";
+            payload += core::utils::escape_json_string(encrypted);
+            payload += R"("})";
+            StreamChunk chunk;
+            chunk.continuation_items.push_back(ContinuationItem{
+                .provider = "openai",
+                .kind = std::string(kCheckpointContinuationKind),
+                .payload = std::move(payload),
+            });
+            result.chunks.push_back(std::move(chunk));
             return result;
         }
 
@@ -1909,6 +2179,21 @@ RateLimitInfo CodexResponsesProtocol::last_rate_limit() const noexcept {
     }
 }
 
+std::string CodexResponsesProtocol::format_error_message(
+    const HttpResponse& response) const {
+    if (!response.body.empty()) {
+        simdjson::dom::parser parser;
+        const simdjson::padded_string body(response.body);
+        simdjson::dom::element doc;
+        if (parser.parse(body).get(doc) == simdjson::SUCCESS) {
+            if (auto message = codex_usage_error_message(doc, response.headers)) {
+                return "[" + *message + "]";
+            }
+        }
+    }
+    return OpenAIResponsesProtocol::format_error_message(response);
+}
+
 bool OpenAIResponsesProtocol::is_retryable(
     const HttpResponse& response) const noexcept {
     if (stream_retry_vetoed_ || transport::retry_vetoed(response.headers)) return false;
@@ -1918,10 +2203,11 @@ bool OpenAIResponsesProtocol::is_retryable(
             simdjson::padded_string body(response.body);
             simdjson::dom::element doc;
             std::string_view code;
+            std::string_view type;
             if (parser.parse(body).get(doc) == simdjson::SUCCESS
-                && doc["error"]["code"].get(code) == simdjson::SUCCESS
-                && (code == "insufficient_quota" || code == "usage_limit_reached"
-                    || code == "billing_hard_limit_reached")) return false;
+                && ((doc["error"]["code"].get(code) == simdjson::SUCCESS && is_quota_error(code))
+                    || (doc["error"]["type"].get(type) == simdjson::SUCCESS
+                        && is_quota_error(type)))) return false;
         } catch (...) {}
     }
     return is_openai_retryable_status(response.status_code);

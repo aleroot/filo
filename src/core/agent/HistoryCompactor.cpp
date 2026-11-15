@@ -1,9 +1,11 @@
 #include "HistoryCompactor.hpp"
+#include "../logging/Logger.hpp"
 #include "../utils/DetachedWorkTracker.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <atomic>
 #include <format>
+#include <future>
 #include <thread>
 
 namespace core::agent {
@@ -86,6 +88,42 @@ constexpr std::string_view kCheckpointInstruction =
     "the next concrete action. Distinguish verified facts from assumptions. "
     "Do not claim tests passed unless the transcript records that result.";
 
+/// The provider's own checkpoint of `request`, or nullopt. Best effort: the
+/// portable summary is the compaction; this only lets the producing model
+/// resume from its own state instead of from the summary.
+[[nodiscard]] std::optional<core::llm::ContinuationItem> request_native_checkpoint(
+    core::llm::LLMProvider& provider, core::llm::ChatRequest request) noexcept {
+    try {
+        request.native_compaction = true;
+        // Sent beside the conversation: it must not consume its continuation.
+        request.continuation_scope.clear();
+        std::vector<core::llm::ContinuationItem> checkpoints;
+        bool completed = false;
+        bool failed = false;
+        provider.stream_response(request, [&](const core::llm::StreamChunk& chunk) {
+            if (chunk.reset_attempt) {
+                checkpoints.clear();
+                return;
+            }
+            for (const auto& item : chunk.continuation_items) {
+                if (item.kind == core::llm::kCheckpointContinuationKind) checkpoints.push_back(item);
+            }
+            if (!chunk.is_final) return;
+            completed = true;
+            failed = chunk.is_error;
+        });
+        // codex-rs compact_remote_v2.rs accepts exactly one checkpoint.
+        if (completed && !failed && checkpoints.size() == 1) return std::move(checkpoints.front());
+        core::logging::warn("[compaction] Native checkpoint unavailable (completed={}, failed={}, items={}); "
+                            "keeping the summary only", completed, failed, checkpoints.size());
+    } catch (const std::exception& e) {
+        core::logging::warn("[compaction] Native checkpoint failed: {}", e.what());
+    } catch (...) {
+        core::logging::warn("[compaction] Native checkpoint failed");
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 void HistoryCompactor::compact_async(HistoryCompactionRequest request,
@@ -104,6 +142,23 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
         }
 
         auto provider = request.provider;
+        // The native checkpoint runs beside the summary on its own fork, so a
+        // compaction takes as long as the slower of the two requests.
+        std::future<std::optional<core::llm::ContinuationItem>> native_checkpoint;
+        if (request.native_request && provider->capabilities().supports_native_compaction) {
+            if (auto checkpoint_provider = provider->fork_for_parallel_request()) {
+                try {
+                    native_checkpoint = std::async(
+                        std::launch::async,
+                        [checkpoint_provider = std::move(checkpoint_provider),
+                         native_request = *request.native_request]() mutable {
+                            return request_native_checkpoint(*checkpoint_provider, std::move(native_request));
+                        });
+                } catch (const std::exception& e) {
+                    core::logging::warn("[compaction] Native checkpoint could not start: {}", e.what());
+                }
+            }
+        }
         if (auto isolated = provider->fork_for_parallel_request()) {
             provider = std::move(isolated);
         }
@@ -152,8 +207,10 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
                 return;
             }
 
+            std::optional<core::llm::ContinuationItem> checkpoint;
+            if (native_checkpoint.valid()) checkpoint = native_checkpoint.get();
             const auto status = callbacks.on_summary
-                ? callbacks.on_summary(compacted)
+                ? callbacks.on_summary(compacted, std::move(checkpoint))
                 : HistoryCompactionApplyStatus::Applied;
             emit(
                 callbacks,

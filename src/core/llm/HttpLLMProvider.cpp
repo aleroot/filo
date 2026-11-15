@@ -180,6 +180,10 @@ void apply_live_catalog_metadata(ChatRequest& request,
     if (!live->default_verbosity.empty()) {
         request.catalog_verbosity = live->default_verbosity;
     }
+    if (live->service_tiers.has_value()) {
+        request.catalog_service_tiers = live->service_tiers;
+        request.catalog_default_service_tier = live->default_service_tier;
+    }
 }
 
 }
@@ -559,6 +563,7 @@ ProviderCapabilities HttpLLMProvider::capabilities() const {
         .is_local = is_ollama && looks_like_loopback_base_url(base_url_),
         .supports_parallel_requests = true,
         .supports_mid_turn_compaction = protocol_ && protocol_->supports_mid_turn_compaction(),
+        .supports_native_compaction = protocol_ && protocol_->supports_native_compaction(),
     };
 }
 
@@ -795,6 +800,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
             if (self->websocket_.available() && protocol->supports_websocket_transport()) {
                 transport::RetryController websocket_retries(retries);
+                // A socket kept open between requests may have been closed by
+                // the server meanwhile. codex-rs checks is_closed() and opens a
+                // new one before sending (client.rs websocket_connection); a
+                // close that only surfaces on use gets the same single fresh
+                // connection here, without spending a retry.
+                bool reconnected_stale_socket = false;
                 while (true) {
                     std::optional<PreparedWebSocketStreamRequest> ws;
                     try {
@@ -815,11 +826,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         bool retryable = false;
                         int32_t retry_after = 0;
                         std::string error_message;
+                        bool received_event = false;
                         self->set_last_usage(0, 0);
                         const auto result = self->websocket_.client->stream_text(
                             ws->websocket_url, ws->websocket_connection_key,
                             ws->websocket_headers, frame.payload,
                             [&](std::string_view event) {
+                                received_event = true;
                                 // A failed generation leaves the socket in an unknown
                                 // state, so it is dropped here, while this stream still
                                 // owns the transport. The reset makes stream_text()
@@ -907,6 +920,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             return;
                         }
                         abandon_websocket();
+                        if (result.connection_reused && !received_event && !stream_error
+                            && result.status == transport::WebSocketStreamResult::Status::StreamFailed
+                            && !reconnected_stale_socket) {
+                            core::logging::debug("[WebSocket] Reused connection failed before any event ({}); reconnecting",
+                                                 result.message);
+                            reconnected_stale_socket = true;
+                            protocol = protocol->clone();
+                            retry_connection = true;
+                            break;
+                        }
                         if (result.http_status == 401 && !attempted_auth_recovery && self->cred_source_) {
                             attempted_auth_recovery = true;
                             if (self->cred_source_->refresh_on_auth_failure()) {

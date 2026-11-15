@@ -26,6 +26,10 @@ struct ProviderCapabilities {
     bool is_local = false;
     bool supports_parallel_requests = false;
     bool supports_mid_turn_compaction = false;
+    /// The provider can condense a conversation into its own opaque
+    /// checkpoint (a ContinuationItem of kind kCheckpointContinuationKind)
+    /// when a request sets ChatRequest::native_compaction.
+    bool supports_native_compaction = false;
 };
 
 struct ProviderMetadata {

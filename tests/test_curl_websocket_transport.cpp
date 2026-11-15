@@ -625,6 +625,87 @@ TEST_CASE("Codex WebSocket retries discard provisional output and rewarm a new c
 #endif
 }
 
+TEST_CASE("Codex continues the next turn on the open socket and quietly replaces a closed one",
+          "[transport][websocket][codex][continuity]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    bool server_closes_between_turns = false;
+    SECTION("socket stays open") {}
+    SECTION("server closed the idle socket") { server_closes_between_turns = true; }
+    std::vector<std::vector<std::string>> groups{
+        {R"({"type":"response.completed","response":{"id":"warm_1"}})"},
+        {R"({"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer one"}]}})",
+         R"({"type":"response.completed","response":{"id":"resp_1"}})"},
+    };
+    if (server_closes_between_turns) {
+        groups.push_back({R"({"type":"response.completed","response":{"id":"warm_2"}})"});
+    }
+    groups.push_back({R"({"type":"response.output_text.delta","delta":"answer two"})",
+                      R"({"type":"response.completed","response":{"id":"resp_2"}})"});
+    LoopbackWebSocketServer server(groups, server_closes_between_turns
+        ? std::vector<std::size_t>{1} : std::vector<std::size_t>{});
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "");
+
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-turns";
+    request.continuation_scope = "ws-turns";
+    request.transport_turn_id = "ws-turns:0";
+    request.messages = {{.role = "user", .content = "first question"}};
+    core::llm::Message answer{.role = "assistant"};
+    provider->stream_response(request, [&](const core::llm::StreamChunk& chunk) {
+        REQUIRE_FALSE(chunk.is_error);
+        answer.content += chunk.content;
+        answer.continuation_items.insert(answer.continuation_items.end(),
+            chunk.continuation_items.begin(), chunk.continuation_items.end());
+    });
+    REQUIRE(answer.content == "answer one");
+
+    if (server_closes_between_turns) {
+        // Let the server's close reach the client before the next turn.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    request.transport_turn_id = "ws-turns:1";
+    request.messages.push_back(answer);
+    request.messages.push_back({.role = "user", .content = "second question"});
+    std::string text;
+    int resets = 0;
+    bool error = false;
+    provider->stream_response(request, [&](const core::llm::StreamChunk& chunk) {
+        resets += chunk.reset_attempt;
+        error |= chunk.is_error;
+        text += chunk.content;
+    });
+    CHECK_FALSE(error);
+    CHECK(resets == 0);
+    CHECK(text == "answer two");
+
+    const auto payloads = server.received_payloads();
+    const auto& last = payloads.back();
+    if (server_closes_between_turns) {
+        // A fresh socket cannot continue resp_1: rewarm with the whole history.
+        REQUIRE(payloads.size() == 4);
+        CHECK(payloads[2].find("\"generate\":false") != std::string::npos);
+        CHECK(payloads[2].find("first question") != std::string::npos);
+        CHECK(last.find("\"previous_response_id\":\"warm_2\"") != std::string::npos);
+    } else {
+        // codex-rs: the next turn sends only its new items.
+        REQUIRE(payloads.size() == 3);
+        CHECK(last.find("\"previous_response_id\":\"resp_1\"") != std::string::npos);
+        CHECK(last.find("second question") != std::string::npos);
+        CHECK(last.find("first question") == std::string::npos);
+        CHECK(last.find("\"generate\":false") == std::string::npos);
+    }
+#endif
+}
+
 TEST_CASE("WebSocket cancellation interrupts a waiting receive and invalidates the socket",
           "[transport][websocket][regression][cancel]") {
 #if defined(_WIN32)
@@ -822,7 +903,7 @@ TEST_CASE("HistoryCompactor over WebSocket forks the provider and resets convers
             .reason = core::agent::HistoryCompactionReason::Auto,
         },
         core::agent::HistoryCompactionCallbacks{
-            .on_summary = [&](std::string summary) {
+            .on_summary = [&](std::string summary, std::optional<core::llm::ContinuationItem>) {
                 {
                     std::lock_guard lock(history_mutex);
                     applied_summary = std::move(summary);

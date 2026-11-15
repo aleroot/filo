@@ -92,6 +92,12 @@ protected:
         return true;
     }
 
+    /// `service_tier` to send, empty to omit: the request's, else the
+    /// endpoint's configured tier.
+    [[nodiscard]] virtual std::string request_service_tier(const ChatRequest& request) const {
+        return request.service_tier.empty() ? default_service_tier_ : request.service_tier;
+    }
+
     struct SerializationOptions {
         bool include_store = true;
         bool include_prompt_cache_key = true;
@@ -195,6 +201,10 @@ public:
                            const cpr::Header& request_headers,
                            const HttpResponse& response) override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override;
+    /// ChatGPT plan limits (`error.type` usage_limit_reached /
+    /// usage_not_included) in the official client's wording.
+    [[nodiscard]] std::string format_error_message(
+        const HttpResponse& response) const override;
 
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
     void prepare_headers(cpr::Header& headers,
@@ -204,6 +214,10 @@ public:
                                   const ChatRequest& request) override;
     [[nodiscard]] bool supports_websocket_transport() const noexcept override { return true; }
     [[nodiscard]] bool supports_mid_turn_compaction() const noexcept override { return true; }
+    /// codex-rs remote compaction v2 (core/src/compact_remote_v2*.rs): the
+    /// conversation plus a `compaction_trigger` answers with one encrypted
+    /// `compaction` item, the ChatGPT backend's own checkpoint.
+    [[nodiscard]] bool supports_native_compaction() const noexcept override { return true; }
     [[nodiscard]] std::string build_websocket_url(std::string_view base_url,
                                                   std::string_view model) const override;
     void prepare_websocket_headers(cpr::Header& headers,
@@ -241,6 +255,11 @@ protected:
         // HTTP 400, so the stable prompt travels in `input`.
         return true;
     }
+    /// codex-rs tui service_tier_resolution.rs effective_service_tier and
+    /// ModelInfo::service_tier_for_request: a tier the live catalog does not
+    /// offer for this model is dropped, `default` opts out of the catalog's
+    /// default tier, and `flex` is always accepted.
+    [[nodiscard]] std::string request_service_tier(const ChatRequest& request) const override;
 
 private:
     class RateLimitState;
@@ -284,7 +303,7 @@ private:
     std::shared_ptr<TransportState> transport_state_ = std::make_shared<TransportState>();
     std::shared_ptr<RateLimitState> rate_limit_state_;
     mutable std::vector<std::string> active_response_items_;
-    mutable std::string active_transport_turn_id_;
+    mutable std::string active_continuation_;
 };
 
 } // namespace core::llm::protocols

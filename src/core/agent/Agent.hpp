@@ -670,7 +670,13 @@ private:
     void apply_compaction_unlocked(
         std::string summary,
         HistoryCompactionPlan plan,
-        std::string active_skill_context);
+        std::string active_skill_context,
+        std::optional<core::llm::ContinuationItem> checkpoint = std::nullopt);
+    /// The conversation as the active provider last read it plus what has
+    /// answered it since, for a native compaction; null when the provider
+    /// cannot compact natively or did not serve the last request.
+    [[nodiscard]] std::shared_ptr<const core::llm::ChatRequest>
+    native_compaction_request_unlocked() const;
     void launch_compaction_transaction(
         HistoryCompactionPlan plan,
         std::uint64_t base_revision,
@@ -680,7 +686,8 @@ private:
         HistoryCompactionReason reason,
         std::function<void(const std::string&)> status_log_callback,
         std::function<void()> done_callback = {},
-        std::function<void(bool compacted)> finished_callback = {});
+        std::function<void(bool compacted)> finished_callback = {},
+        std::shared_ptr<const core::llm::ChatRequest> native_request = {});
     void start_manual_compaction(
         std::function<void(const std::string&)> status_callback,
         std::function<void()> done_callback,

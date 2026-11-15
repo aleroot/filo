@@ -434,6 +434,8 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
           ],
           "support_verbosity": true,
           "default_verbosity": "low",
+          "default_service_tier": null,
+          "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}],
           "context_window": 1000000
         },
         {
@@ -476,6 +478,11 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(result.models[1].reasoning.effort.supports(ReasoningCapability::MaxEffort));
     CHECK(result.models[1].default_verbosity == "low");
     CHECK(codex.default_verbosity.empty());
+    // codex-rs ModelInfo::service_tiers; a catalog that omits them says nothing.
+    REQUIRE(result.models[1].service_tiers.has_value());
+    CHECK(*result.models[1].service_tiers == std::vector<std::string>{"priority"});
+    CHECK(result.models[1].default_service_tier.empty());
+    CHECK_FALSE(codex.service_tiers.has_value());
     CHECK(result.models[2].canonical_id == "internal-chatgpt-only");
 }
 
@@ -1387,7 +1394,7 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     REQUIRE(chatgpt != nullptr);
     CHECK(dynamic_cast<CodexModelCatalogProvider*>(chatgpt.get()) != nullptr);
     CHECK(chatgpt->provider_name() == "openai");
-    CHECK(chatgpt->model_list_path() == "/models?client_version=0.166.0");
+    CHECK(chatgpt->model_list_path() == "/models?client_version=0.169.0");
 
     core::llm::protocols::OpenAIResponsesProtocol public_openai;
     CHECK(public_openai.model_catalog("openai") == nullptr);

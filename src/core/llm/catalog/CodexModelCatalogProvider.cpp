@@ -146,6 +146,20 @@ namespace {
             info.auto_compact_token_limit = limit;
         }
         info.reasoning.ultra = codex_ultra_profile(model, info.reasoning);
+        // codex-rs ModelInfo::service_tiers / default_service_tier: the
+        // optional tiers (`priority` = Fast) this model accepts.
+        simdjson::dom::array tiers;
+        if (model.raw()["service_tiers"].get(tiers) == simdjson::SUCCESS) {
+            std::vector<std::string> ids;
+            for (simdjson::dom::element tier : tiers) {
+                std::string_view id;
+                if (tier["id"].get(id) == simdjson::SUCCESS && !id.empty()) {
+                    ids.emplace_back(id);
+                }
+            }
+            info.service_tiers = std::move(ids);
+        }
+        (void)model.string("default_service_tier", info.default_service_tier);
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

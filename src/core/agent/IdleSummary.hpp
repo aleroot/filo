@@ -19,6 +19,8 @@ public:
         std::string text;
         HistoryCompactionPlan plan;
         std::string active_skill_context;
+        /// The provider's own checkpoint, when it produced one.
+        std::optional<core::llm::ContinuationItem> checkpoint;
     };
 
     /// Claims the write for `revision`. False while another write runs or a

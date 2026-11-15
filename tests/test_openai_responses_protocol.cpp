@@ -219,6 +219,15 @@ TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"input_text","text":"Read the error in this screenshot.")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"input_image")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("detail")"));
+
+    // codex-rs DEFAULT_IMAGE_DETAIL is `high`; Responses Lite clears it
+    // (client_common.rs normalize_image_detail).
+    CodexResponsesProtocol codex;
+    REQUIRE_THAT(codex.serialize(req), Catch::Matchers::ContainsSubstring(R"(","detail":"high"})"));
+    req.catalog_wire_protocol = "responses_lite";
+    REQUIRE_THAT(codex.serialize(req), Catch::Matchers::ContainsSubstring(R"("type":"input_image")")
+                                           && !Catch::Matchers::ContainsSubstring(R"("detail")"));
 }
 
 TEST_CASE("OpenAIResponsesProtocol - serializer includes continuation/cache/tier fields",
@@ -372,8 +381,8 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("session_id") == "thread-123");
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
-    REQUIRE(headers.at("version") == "0.166.0");
-    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.166.0");
+    REQUIRE(headers.at("version") == "0.169.0");
+    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.169.0");
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
@@ -695,6 +704,121 @@ TEST_CASE("CodexResponsesProtocol - compresses incremental websocket input",
     REQUIRE_THAT(incremental_payload, Catch::Matchers::ContainsSubstring(R"("type":"function_call_output","call_id":"call_123")"));
     REQUIRE_THAT(incremental_payload, !Catch::Matchers::ContainsSubstring(R"("run tests")"));
     REQUIRE_THAT(incremental_payload, !Catch::Matchers::ContainsSubstring(R"("type":"function_call","call_id":"call_123")"));
+}
+
+TEST_CASE("Codex continues a conversation across turns on one websocket",
+          "[openai][responses][codex][websocket][continuity]") {
+    // codex-rs core/src/client.rs keeps the websocket session (connection,
+    // last request, last response) for the whole thread: a new turn sends
+    // only its new items with previous_response_id.
+    CodexResponsesProtocol protocol;
+    const std::string url = "wss://chatgpt.com/backend-api/codex/responses";
+    const cpr::Header headers{{"Authorization", "Bearer token"}};
+
+    ChatRequest first;
+    first.model = "gpt-6.1-sol";
+    first.session_id = "thread-123";
+    first.continuation_scope = "thread-123";
+    first.transport_turn_id = "thread-123:0";
+    first.messages.push_back(Message{.role = "user", .content = "first question"});
+    protocol.prepare_request(first);
+    const auto first_key = protocol.websocket_connection_key(url, headers, first);
+
+    REQUIRE(protocol.initial_websocket_request_frame(first).suppress_output);
+    REQUIRE(protocol.parse_event(
+        R"({"type":"response.completed","response":{"id":"resp_prewarm"}})").done);
+    const auto real = protocol.next_websocket_request_frame(
+        first, WebSocketRequestFrame{.payload = "x", .suppress_output = true});
+    REQUIRE_THAT(real.payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_prewarm")"));
+    const auto answer = protocol.parse_event(
+        R"({"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first answer"}]}})");
+    REQUIRE(protocol.parse_event(
+        R"({"type":"response.completed","response":{"id":"resp_turn_1"}})").done);
+
+    Message assistant{.role = "assistant", .content = "first answer"};
+    for (const auto& chunk : answer.chunks) {
+        assistant.continuation_items.insert(assistant.continuation_items.end(),
+            chunk.continuation_items.begin(), chunk.continuation_items.end());
+    }
+    REQUIRE_FALSE(assistant.continuation_items.empty());
+
+    ChatRequest second = first;
+    second.transport_turn_id = "thread-123:1";
+    second.messages.push_back(assistant);
+    second.messages.push_back(Message{.role = "user", .content = "second question"});
+    protocol.prepare_request(second);
+
+    // Same socket, no second prewarm, only the new user message.
+    CHECK(protocol.websocket_connection_key(url, headers, second) == first_key);
+    const auto next_turn = protocol.initial_websocket_request_frame(second);
+    CHECK_FALSE(next_turn.suppress_output);
+    CHECK_THAT(next_turn.payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_turn_1")"));
+    CHECK_THAT(next_turn.payload, Catch::Matchers::ContainsSubstring("second question"));
+    CHECK_THAT(next_turn.payload, !Catch::Matchers::ContainsSubstring("first question"));
+    CHECK_THAT(next_turn.payload, !Catch::Matchers::ContainsSubstring("first answer"));
+
+    // A request sent beside the conversation (keep-warm replay, compaction)
+    // has no continuation scope: its own socket and no inherited baseline.
+    ChatRequest beside = second;
+    beside.continuation_scope.clear();
+    CHECK(protocol.websocket_connection_key(url, headers, beside) != first_key);
+    const auto beside_frame = protocol.serialize_websocket_request(beside);
+    CHECK_THAT(beside_frame, Catch::Matchers::ContainsSubstring("first question"));
+    CHECK_THAT(beside_frame, !Catch::Matchers::ContainsSubstring("previous_response_id"));
+}
+
+TEST_CASE("Codex compacts natively with a compaction_trigger and replays the checkpoint",
+          "[openai][responses][codex][native-checkpoint]") {
+    CodexResponsesProtocol protocol;
+    CHECK(protocol.supports_native_compaction());
+    CHECK_FALSE(OpenAIResponsesProtocol{}.supports_native_compaction());
+
+    ChatRequest req;
+    req.model = "gpt-6.1-sol";
+    req.session_id = "thread-compact";
+    req.transport_turn_id = "thread-compact:3";
+    req.messages.push_back(Message{.role = "user", .content = "fix the bug"});
+    req.messages.push_back(Message{.role = "assistant", .content = "fixed"});
+    req.native_compaction = true;
+    protocol.prepare_request(req);
+
+    // codex-rs compact_remote_v2_attempt.rs: the conversation, then the trigger.
+    const std::string http = protocol.serialize(req);
+    CHECK_THAT(http, Catch::Matchers::ContainsSubstring(
+        R"("type":"output_text","text":"fixed"}]},{"type":"compaction_trigger"}])"));
+    // Over the socket it is one generating request: no prewarm, no delta.
+    const auto frame = protocol.initial_websocket_request_frame(req);
+    CHECK_FALSE(frame.suppress_output);
+    CHECK_THAT(frame.payload, Catch::Matchers::ContainsSubstring(R"({"type":"compaction_trigger"}])"));
+    CHECK_THAT(frame.payload, !Catch::Matchers::ContainsSubstring("generate"));
+
+    // The answer: one encrypted item, alias accepted, prefixed id kept.
+    const auto parsed = protocol.parse_event(
+        R"({"type":"response.output_item.done","item":{"type":"compaction_summary","id":"cmp_123","status":"completed","encrypted_content":"ENC=="}})");
+    REQUIRE(parsed.chunks.size() == 1);
+    REQUIRE(parsed.chunks[0].continuation_items.size() == 1);
+    const auto checkpoint = parsed.chunks[0].continuation_items[0];
+    CHECK(checkpoint.provider == "openai");
+    CHECK(checkpoint.kind == kCheckpointContinuationKind);
+    CHECK(checkpoint.payload == R"({"type":"compaction","id":"cmp_123","encrypted_content":"ENC=="})");
+    const auto bare = protocol.parse_event(
+        R"({"type":"response.output_item.done","item":{"type":"compaction","id":"opaque","encrypted_content":"E"}})");
+    REQUIRE(bare.chunks.size() == 1);
+    CHECK(bare.chunks[0].continuation_items[0].payload
+          == R"({"type":"compaction","encrypted_content":"E"})");
+
+    // Replayed right after the user message that carries it.
+    ChatRequest next;
+    next.model = req.model;
+    next.session_id = req.session_id;
+    Message retained{.role = "user", .content = "fix the bug"};
+    retained.continuation_items.push_back(checkpoint);
+    next.messages.push_back(retained);
+    next.messages.push_back(Message{.role = "user", .content = "and add a test"});
+    const std::string replay = protocol.serialize(next);
+    CHECK_THAT(replay, Catch::Matchers::ContainsSubstring(
+        R"("text":"fix the bug"}]},{"type":"compaction","id":"cmp_123","encrypted_content":"ENC=="},{"type":"message","role":"user")"));
+    CHECK_THAT(replay, !Catch::Matchers::ContainsSubstring("compaction_trigger"));
 }
 
 TEST_CASE("CodexResponsesProtocol - prewarm websocket request sends generate false",
@@ -1404,6 +1528,62 @@ TEST_CASE("Codex sends the catalog verbosity alongside any structured-output for
     CHECK_THAT(public_openai.serialize(request), !Catch::Matchers::ContainsSubstring("verbosity"));
 }
 
+TEST_CASE("Codex resolves the service tier against the catalog and hints routing",
+          "[openai][responses][codex][service-tier]") {
+    const auto tier_of = [](const std::string& payload) -> std::string {
+        simdjson::dom::parser parser;
+        const simdjson::padded_string padded(payload);
+        std::string_view tier;
+        if (parser.parse(padded)["service_tier"].get(tier) != simdjson::SUCCESS) return {};
+        return std::string(tier);
+    };
+    ChatRequest req;
+    req.model = "gpt-6.1-sol";
+    req.session_id = "thread-tier";
+    req.messages.push_back(Message{.role = "user", .content = "hello"});
+
+    // No catalog evidence: the configured tier is sent as is.
+    CodexResponsesProtocol configured(true, "priority");
+    CHECK(tier_of(configured.serialize(req)) == "priority");
+
+    // codex-rs codex-api/src/common.rs: routing fields precede the input.
+    const std::string payload = configured.serialize(req);
+    CHECK(payload.find(R"("service_tier")") < payload.find(R"("input")"));
+    CHECK(payload.find(R"("stream")") < payload.find(R"("service_tier")"));
+
+    cpr::Header headers;
+    configured.prepare_headers(headers, req, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-codex-routing-hint") == "model=gpt-6.1-sol;tier=priority");
+
+    // The catalog offers Fast (`priority`) for this model.
+    req.catalog_service_tiers = std::vector<std::string>{"priority"};
+    CHECK(tier_of(configured.serialize(req)) == "priority");
+    CodexResponsesProtocol unconfigured;
+    CHECK(tier_of(unconfigured.serialize(req)).empty());
+    cpr::Header plain;
+    unconfigured.prepare_headers(plain, req, "https://chatgpt.com/backend-api/codex");
+    CHECK(plain.at("x-codex-routing-hint") == "model=gpt-6.1-sol");
+
+    // The catalog default applies only when the user chose nothing, and
+    // `default` opts out of it.
+    req.catalog_default_service_tier = "priority";
+    CHECK(tier_of(unconfigured.serialize(req)) == "priority");
+    req.service_tier = "default";
+    CHECK(tier_of(unconfigured.serialize(req)).empty());
+
+    // A tier the catalog does not offer is dropped; flex is always accepted.
+    req.service_tier = "ultrafast";
+    CHECK(tier_of(unconfigured.serialize(req)).empty());
+    req.service_tier = "flex";
+    CHECK(tier_of(unconfigured.serialize(req)) == "flex");
+
+    // Public OpenAI keeps sending the configured value.
+    OpenAIResponsesProtocol public_openai(false, "priority");
+    req.service_tier.clear();
+    req.catalog_service_tiers = std::vector<std::string>{};
+    CHECK(tier_of(public_openai.serialize(req)) == "priority");
+}
+
 TEST_CASE("Responses retry reset preserves other session continuity and permanent quota failures",
           "[openai][responses][regression][retry][continuity]") {
     OpenAIResponsesProtocol owner;
@@ -1422,4 +1602,64 @@ TEST_CASE("Responses retry reset preserves other session continuity and permanen
     CHECK(next.previous_response_id == "keep-response");
     CHECK_FALSE(stream->is_retryable({429, R"({"error":{"code":"insufficient_quota"}})", headers}));
     CHECK(stream->is_retryable({429, R"({"error":{"code":"rate_limit_exceeded"}})", headers}));
+}
+
+TEST_CASE("ChatGPT plan limits named in error.type are final and worded like Codex",
+          "[openai][responses][codex][regression][retry]") {
+    // codex-rs codex-api/src/api_bridge.rs reads `error.type`; the ChatGPT
+    // backend sends no `error.code` for these.
+    CodexResponsesProtocol protocol;
+    const cpr::Header none;
+    const std::string limit =
+        R"({"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro"}})";
+    const std::string not_included = R"({"error":{"type":"usage_not_included"}})";
+    CHECK_FALSE(protocol.is_retryable({429, limit, none}));
+    CHECK_FALSE(protocol.is_retryable({429, not_included, none}));
+    CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"code":"credit_balance_exhausted"}})", none}));
+    CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"type":"insufficient_quota"}})", none}));
+    CHECK(protocol.is_retryable({429, R"({"error":{"type":"rate_limit_exceeded"}})", none}));
+
+    CHECK(protocol.format_error_message({429, limit, none})
+          == "[You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase "
+             "more credits or try again later.]");
+    CHECK(protocol.format_error_message({429, not_included, none})
+          == "[To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.]");
+    CHECK(protocol.format_error_message(
+              {429, R"({"error":{"type":"usage_limit_reached","plan_type":"enterprise"}})", none})
+          == "[You’ve hit your usage limit. Try again later.]");
+    CHECK(protocol.format_error_message(
+              {429, R"({"error":{"type":"usage_limit_reached","plan_type":"free"}})", none})
+          == "[You’ve hit your usage limit. Upgrade to Plus to continue using Codex "
+             "(https://chatgpt.com/explore/plus), or try again later.]");
+    const cpr::Header workspace{{"x-codex-rate-limit-reached-type", "workspace_member_credits_depleted"}};
+    CHECK(protocol.format_error_message({429, limit, workspace})
+          == "[Your workspace is out of credits. Ask your workspace owner to refill in order to continue.]");
+    const cpr::Header named{{"x-codex-active-limit", "codex_other"},
+                            {"x-codex-other-limit-name", "GPT-6.1-Sol"}};
+    CHECK(protocol.format_error_message({429, limit, named})
+          == "[You’ve hit your usage limit for GPT-6.1-Sol. Switch to another model now, or try again later.]");
+    // A reset time is rendered on the local clock; a far date carries its year.
+    CHECK_THAT(protocol.format_error_message(
+                   {429, R"({"error":{"type":"usage_limit_reached","resets_at":4086590400}})", none}),
+               Catch::Matchers::StartsWith("[You’ve hit your usage limit. Try again at ")
+                   && Catch::Matchers::ContainsSubstring(", 2099 ")
+                   && Catch::Matchers::EndsWith("M.]"));
+    // Ordinary failures keep the generic text.
+    CHECK_THAT(protocol.format_error_message({500, R"({"error":{"type":"server_error"}})", none}),
+               Catch::Matchers::StartsWith("[HTTP Error: 500"));
+
+    // The WebSocket wraps the same 429 as an `error` event (codex-rs
+    // responses_websocket.rs test payload), with numeric header values.
+    const auto wrapped = protocol.parse_event(
+        R"({"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":1738888888},"headers":{"x-codex-primary-used-percent":"100.0","x-codex-primary-window-minutes":15}})");
+    CHECK(wrapped.stream_error);
+    CHECK_FALSE(wrapped.retryable_stream_error);
+    CHECK_THAT(wrapped.stream_error_message,
+               Catch::Matchers::StartsWith("You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage"));
+    REQUIRE_FALSE(wrapped.chunks.empty());
+    CHECK_THAT(wrapped.chunks.back().content, Catch::Matchers::ContainsSubstring("usage limit"));
+    const auto limits = protocol.last_rate_limit();
+    REQUIRE(limits.usage_windows.size() == 1);
+    CHECK(limits.usage_windows.front().label == "15m");
+    CHECK(limits.usage_windows.front().utilization == Catch::Approx(1.0f));
 }
