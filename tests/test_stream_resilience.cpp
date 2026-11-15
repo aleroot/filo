@@ -11,6 +11,7 @@ using core::llm::transport::StreamOutputState;
 using core::llm::transport::StreamTimeoutKind;
 using core::llm::transport::StreamTimeoutPolicy;
 using core::llm::transport::StreamWatchdog;
+using core::llm::transport::timeout_user_message;
 
 TEST_CASE("Retry jitter never shortens the server retry deadline", "[http][resilience][retry]") {
     for (int i = 0; i < 100; ++i) {
@@ -127,6 +128,25 @@ TEST_CASE("RetryController can restart after streamed output",
     CHECK(first->attempt == 1);
     CHECK(after_output.schedule(true, StreamOutputState::Visible).has_value());
     CHECK_FALSE(after_output.schedule(true, StreamOutputState::Visible).has_value());
+}
+
+TEST_CASE("StreamWatchdog bounds one attempt by its lifetime",
+          "[http][resilience][timeout]") {
+    const StreamWatchdog::TimePoint started{};
+
+    // Activity keeps the idle deadline alive, but it cannot keep the attempt
+    // alive forever: a stream that trickles would otherwise hold the turn
+    // open without end.
+    StreamWatchdog watchdog(
+        StreamTimeoutPolicy{.response_start = 1s, .inactivity = 10s, .max_lifetime = 500ms},
+        started);
+
+    REQUIRE(watchdog.observe_activity(started + 100ms));
+    CHECK(watchdog.poll(started + 400ms));
+    CHECK_FALSE(watchdog.observe_activity(started + 500ms));
+    CHECK(watchdog.timeout_kind() == StreamTimeoutKind::MaxLifetime);
+    CHECK(std::string_view(timeout_user_message(StreamTimeoutKind::MaxLifetime))
+          == "stream ran past the maximum lifetime of one response");
 }
 
 TEST_CASE("Terminal-event requirements are protocol capabilities",

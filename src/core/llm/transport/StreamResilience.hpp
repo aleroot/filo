@@ -11,11 +11,17 @@ enum class StreamTimeoutKind {
     None,
     ResponseStart,
     Inactivity,
+    MaxLifetime,
 };
 
 struct StreamTimeoutPolicy {
     std::chrono::milliseconds response_start = std::chrono::seconds(120);
     std::chrono::milliseconds inactivity = std::chrono::seconds(240);
+    // The wall-clock bound on one stream attempt. The idle deadline cannot
+    // see a drip-fed stream: an upstream that sends one small chunk per
+    // window keeps resetting it while the message never completes. qwen-code
+    // caps a response at 15 minutes for the same reason.
+    std::chrono::milliseconds max_lifetime = std::chrono::seconds(900);
     bool operator==(const StreamTimeoutPolicy&) const = default;
 };
 

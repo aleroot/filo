@@ -35,12 +35,18 @@ bool StreamWatchdog::expire_if_needed(TimePoint now) noexcept {
             timeout_kind_ = StreamTimeoutKind::ResponseStart;
             return true;
         }
-        return false;
+    } else if (policy_.inactivity.count() > 0
+               && now - last_activity_at_ >= policy_.inactivity) {
+        timeout_kind_ = StreamTimeoutKind::Inactivity;
+        return true;
     }
 
-    if (policy_.inactivity.count() > 0
-        && now - last_activity_at_ >= policy_.inactivity) {
-        timeout_kind_ = StreamTimeoutKind::Inactivity;
+    // The wall-clock bound. The idle deadline above is reset by every chunk,
+    // so a stream that trickles keeps it alive forever; this one does not
+    // move.
+    if (policy_.max_lifetime.count() > 0
+        && now - started_at_ >= policy_.max_lifetime) {
+        timeout_kind_ = StreamTimeoutKind::MaxLifetime;
         return true;
     }
     return false;
@@ -52,6 +58,8 @@ std::string_view timeout_log_label(StreamTimeoutKind kind) noexcept {
             return "response start timeout";
         case StreamTimeoutKind::Inactivity:
             return "stream inactivity timeout";
+        case StreamTimeoutKind::MaxLifetime:
+            return "stream lifetime timeout";
         case StreamTimeoutKind::None:
             return {};
     }
@@ -64,6 +72,8 @@ std::string_view timeout_user_message(StreamTimeoutKind kind) noexcept {
             return "response did not start before the request timeout";
         case StreamTimeoutKind::Inactivity:
             return "stream was inactive past the idle timeout";
+        case StreamTimeoutKind::MaxLifetime:
+            return "stream ran past the maximum lifetime of one response";
         case StreamTimeoutKind::None:
             return {};
     }
