@@ -56,11 +56,17 @@ namespace core::agent {
 namespace {
 
 constexpr int kMaxOutputRecoveryLimit = 3;
+/// How many times one turn may resume a cut answer.
+constexpr int kMaxTransportCutRecoveryLimit = 3;
 /// How many times one turn may resume a paused server-side advisor call.
 constexpr int kMaxAdvisorResumes = 3;
 constexpr std::string_view kMaxOutputRecoveryPrompt =
     "Output token limit hit. Resume directly with the next unfinished action or text. "
     "Do not apologize or recap. If a tool call was cut off, emit the complete tool call again.";
+constexpr std::string_view kTransportCutRecoveryPrompt =
+    "The connection dropped mid-response. Resume directly with the next unfinished text. "
+    "Do not apologize or recap; continue from where the answer stopped, and do not repeat "
+    "what you already wrote.";
 
 class TurnCompletionState final {
 public:
@@ -2820,8 +2826,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // Accumulate actual response content
         if (!chunk.content.empty()) {
-            *assistant_response += chunk.content;
-            text_callback(chunk.content);
+            if (chunk.transport_cut) {
+                // A transport notice, not the answer. The turn continues from
+                // what arrived, so the notice never becomes part of it; when
+                // the turn cannot continue, the final handler shows it.
+            } else {
+                *assistant_response += chunk.content;
+                text_callback(chunk.content);
+            }
         }
         
         // Accumulate provider reasoning separately from visible answer text.
@@ -2882,7 +2894,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         self->session_stats_registry_->record_api_call(
             step_session_context.session_id,
             !chunk.is_error);
-        if (chunk.is_error) {
+        if (chunk.is_error && !chunk.transport_cut) {
             self->turn_failed_.store(true, std::memory_order_release);
         }
         if (chunk.authentication_recovery.has_value()
@@ -3100,6 +3112,59 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return;
         }
 
+        // The stream was lost after the answer had started. What arrived is a
+        // prefix of what the model was writing, so the turn is continued from
+        // it: the partial answer stays on screen and the model is asked to
+        // resume instead of starting over. A cut that delivered a tool call
+        // is excluded — a user turn between a function call and its result is
+        // a sequence providers reject.
+        if (chunk.transport_cut
+            && asst_msg.tool_calls.empty()
+            && !asst_msg.content.empty()
+            && turn_state->transport_cut_recovery_count < kMaxTransportCutRecoveryLimit
+            && !self->is_stop_requested()) {
+            ++turn_state->transport_cut_recovery_count;
+
+            const auto status = std::format(
+                "\n[{} lost the connection before the answer finished; continuing automatically ({}/{}).]\n",
+                provider_notice_subject(provider_name_snapshot),
+                turn_state->transport_cut_recovery_count,
+                kMaxTransportCutRecoveryLimit);
+            if (turn_callbacks.on_status_log) {
+                turn_callbacks.on_status_log(status);
+            } else {
+                text_callback(status);
+            }
+
+            if (!self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message>& history) {
+                        history.push_back(asst_msg);
+                        history.push_back(core::llm::Message{
+                            .role = "user",
+                            .content = std::string(kTransportCutRecoveryPrompt),
+                            .synthetic = true,
+                        });
+                    })) {
+                done_callback();
+                return;
+            }
+
+            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
+                                               turn_callbacks, turn_state] {
+                self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
+            });
+            return;
+        }
+
+        if (chunk.is_error && chunk.transport_cut) {
+            // The cut could not be continued from here — a tool call was in
+            // flight, or the turn ran out of recoveries. The answer is what
+            // arrived, and the notice says so.
+            asst_msg.content += chunk.content;
+            text_callback(chunk.content);
+        }
+
         if (!chunk.is_error && asst_msg.tool_calls.empty()) {
             if (asst_msg.content.empty()) {
                 asst_msg.content = empty_response_notice(
@@ -3140,6 +3205,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         if (chunk.is_error) {
+            // A cut the turn could not continue is a failed turn.
+            self->turn_failed_.store(true, std::memory_order_release);
             done_callback();
             return;
         }

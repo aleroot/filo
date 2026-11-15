@@ -1471,6 +1471,15 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     && !stream_error_seen;
 
                 if (stream_error_seen || incomplete_required_stream) {
+                    // The provider's own finish reason says whether the answer
+                    // closed. A stream that ended after it did lost the
+                    // terminal event, not the answer — the protocol may still
+                    // be holding back what it only releases at that event, so
+                    // the turn ends with the failure the transport saw, and
+                    // there is nothing to continue.
+                    const bool answer_closed =
+                        !protocol->attempt_finish_reason().empty();
+
                     const bool retryable_stream_failure =
                         !transport::retry_vetoed(r.header)
                         && (incomplete_required_stream || stream_error_retryable);
@@ -1503,9 +1512,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                     std::string message;
                     if (incomplete_required_stream) {
-                        message = std::format(
-                            "\n[{} stream ended before the terminal event; response may be incomplete]",
-                            protocol->name());
+                        message = answer_closed
+                            ? std::format(
+                                  "\n[{} stream ended without its terminal event; the answer was already complete]",
+                                  protocol->name())
+                            : std::format(
+                                  "\n[{} stream ended before the terminal event; response may be incomplete]",
+                                  protocol->name());
                     } else {
                         message = "\n[" + std::string(protocol->name()) + " stream error";
                         if (!stream_error_type.empty()) {
@@ -1519,7 +1532,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         message += "]";
                     }
                     self->set_last_rate_limit_info(rate_limit_info);
-                    callback(StreamChunk::make_error(std::move(message)));
+                    auto failure = StreamChunk::make_error(std::move(message));
+                    // The answer had already started when the stream was lost:
+                    // what arrived is a prefix the model can be asked to
+                    // continue. The agent owns the conversation and owns that
+                    // recovery; other callers still see the failure.
+                    failure.transport_cut =
+                        incomplete_required_stream
+                        && !answer_closed
+                        && output_state == transport::StreamOutputState::Visible;
+                    callback(std::move(failure));
                     break;
                 }
 

@@ -605,6 +605,48 @@ private:
     std::atomic<int> calls_{0};
 };
 
+/// A provider whose first attempt loses the stream after the answer has
+/// started, the way a gateway that caps SSE connection lifetime does.
+class CutStreamProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            callback(core::llm::StreamChunk::make_content("the answer started"));
+            auto cut = core::llm::StreamChunk::make_error(
+                "\n[dashscope stream ended before the terminal event; response may be incomplete]");
+            cut.transport_cut = true;
+            callback(std::move(cut));
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content(" and then it finished"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+};
+
 class AlwaysMaxOutputProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -2028,6 +2070,88 @@ TEST_CASE("Agent retracts in-progress output when the transport resets an attemp
     CHECK(history.back().tool_calls.empty());
     CHECK(history.back().continuation_items.empty());
     CHECK_FALSE(agent->last_turn_failed());
+}
+
+TEST_CASE("Agent continues an answer the transport cut", "[agent][loop][qwen]") {
+    auto provider = std::make_shared<CutStreamProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_active_provider_name("qwen-token-plan");
+
+    std::mutex capture_mutex;
+    std::string streamed_text;
+    std::vector<std::string> status_logs;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "write a long answer",
+        [&](const std::string& chunk) {
+            std::lock_guard lock(capture_mutex);
+            streamed_text += chunk;
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        core::agent::Agent::TurnCallbacks{
+            .on_status_log = [&](const std::string& status) {
+                std::lock_guard lock(capture_mutex);
+                status_logs.push_back(status);
+            },
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; }));
+    }
+
+    {
+        std::lock_guard lock(capture_mutex);
+        // The answer the user sees is the whole answer: the prefix that
+        // arrived plus the continuation, with the transport notice kept out
+        // of it.
+        CHECK_THAT(streamed_text, Catch::Matchers::ContainsSubstring("the answer started"));
+        CHECK_THAT(streamed_text, Catch::Matchers::ContainsSubstring("and then it finished"));
+        CHECK(streamed_text.find("stream ended before the terminal event") == std::string::npos);
+        REQUIRE_FALSE(status_logs.empty());
+        CHECK_THAT(status_logs.front(),
+                   Catch::Matchers::ContainsSubstring("continuing automatically (1/3)"));
+    }
+
+    CHECK(provider->call_count() == 2);
+    CHECK_FALSE(agent->last_turn_failed());
+
+    // The model is asked to resume from what arrived, not to start over.
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    REQUIRE_FALSE(requests[1].messages.empty());
+    const auto& recovery_message = requests[1].messages.back();
+    CHECK(recovery_message.role == "user");
+    CHECK_THAT(recovery_message.content,
+               Catch::Matchers::ContainsSubstring("The connection dropped mid-response"));
+    const auto& prefix_message = requests[1].messages[requests[1].messages.size() - 2];
+    CHECK(prefix_message.role == "assistant");
+    CHECK(prefix_message.content == "the answer started");
+
+    const auto history = agent->get_history();
+    bool found_recovery_prompt = false;
+    for (const auto& message : history) {
+        if (message.role == "user"
+            && message.content.find("The connection dropped mid-response") != std::string::npos) {
+            found_recovery_prompt = true;
+        }
+        CHECK(message.content.find("stream ended before the terminal event") == std::string::npos);
+    }
+    CHECK(found_recovery_prompt);
 }
 
 TEST_CASE("Agent automatically recovers from truncated Claude turns",

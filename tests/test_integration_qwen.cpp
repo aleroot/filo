@@ -195,6 +195,71 @@ TEST_CASE("Qwen replays a stream cut during the thinking phase",
     CHECK(text == "Recovered");
 }
 
+TEST_CASE("Qwen keeps an answer that lost its terminal event",
+          "[integration][qwen][regression][http][terminal]") {
+    QwenServer fixture;
+    std::atomic<int> count{0};
+    fixture.server.Post("/compatible-mode/v1/chat/completions", [&](const auto&, auto& response) {
+        ++count;
+        // The answer closed with its finish reason, but the terminal event
+        // never arrived: the text is complete, and the turn says so instead
+        // of calling the answer incomplete.
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Complete\"},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\n",
+            "text/event-stream");
+    });
+    auto provider = make_provider(fixture);
+    core::llm::ChatRequest request;
+    request.model = "qwen3.7-plus";
+    request.messages = {{.role = "user", .content = "Answer"}};
+    std::string text;
+    bool failed = false;
+    bool cut = false;
+    std::string message;
+    provider->stream_response(request, [&](const auto& chunk) {
+        failed = failed || chunk.is_error;
+        cut = cut || chunk.transport_cut;
+        if (chunk.is_error) message = chunk.content;
+        if (!chunk.is_error) text += chunk.content;
+    });
+    CHECK(failed);
+    CHECK_FALSE(cut);
+    CHECK(text == "Complete");
+    CHECK_THAT(message, Catch::Matchers::ContainsSubstring("the answer was already complete"));
+    CHECK(count == 1);
+}
+
+TEST_CASE("Qwen reports a cut answer as continuable",
+          "[integration][qwen][regression][http][terminal]") {
+    QwenServer fixture;
+    std::atomic<int> count{0};
+    fixture.server.Post("/compatible-mode/v1/chat/completions", [&](const auto&, auto& response) {
+        ++count;
+        // The gateway closed the connection mid-answer: no finish reason and
+        // no terminal event, with text already delivered.
+        response.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Half an ans\"}}]}\n\n",
+            "text/event-stream");
+    });
+    auto provider = make_provider(fixture);
+    core::llm::ChatRequest request;
+    request.model = "qwen3.7-plus";
+    request.messages = {{.role = "user", .content = "Answer"}};
+    std::string text;
+    bool failed = false;
+    bool cut = false;
+    provider->stream_response(request, [&](const auto& chunk) {
+        failed = failed || chunk.is_error;
+        cut = cut || chunk.transport_cut;
+        if (!chunk.is_error) text += chunk.content;
+    });
+    CHECK(failed);
+    CHECK(cut);
+    CHECK(text == "Half an ans");
+    CHECK(count == 1);
+}
+
 TEST_CASE("Coding Plan quota SSE is an error and is never shown as answer text",
           "[integration][qwen][regression][http][quota]") {
     QwenServer fixture;

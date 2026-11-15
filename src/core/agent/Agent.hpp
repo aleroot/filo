@@ -545,6 +545,8 @@ private:
         int steps_taken = 0;
         int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
         int max_output_recovery_count = 0;
+        // How many times this turn resumed an answer the transport cut.
+        int transport_cut_recovery_count = 0;
         std::string transport_turn_id;
         std::optional<core::context::PromptPlan> prompt_plan;
         ToolCallDeduplicator deduplicator;

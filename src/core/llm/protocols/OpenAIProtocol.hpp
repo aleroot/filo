@@ -51,6 +51,23 @@ struct OpenAIChatChunk {
 
 [[nodiscard]] OpenAIChatChunk parse_openai_sse_chunk(std::string_view json_str);
 
+/**
+ * Map an OpenAI-compatible finish reason to Filo's vocabulary.
+ *
+ * "length" is a truncated answer, "tool_calls" is a tool turn, and
+ * "content_filter" is a refusal; anything else is kept as the provider
+ * named it.
+ */
+[[nodiscard]] std::string map_openai_finish_reason(std::string_view reason);
+
+/**
+ * The first non-empty finish reason carried by a chat-completions chunk.
+ *
+ * Empty while the attempt has not closed with an answer. A stream that ends
+ * after this appeared lost its terminal event, not its answer.
+ */
+[[nodiscard]] std::string_view parse_openai_finish_reason(std::string_view json_str);
+
 /** OpenAI-native model reasoning policy shared by both OpenAI wire APIs. */
 [[nodiscard]] ReasoningCapabilities openai_reasoning_capabilities(
     std::string_view model) noexcept;
@@ -120,6 +137,10 @@ public:
         std::string_view model) const noexcept override {
         return openai_reasoning_capabilities(model);
     }
+    // The finish reason this attempt closed with, if it closed with one.
+    [[nodiscard]] std::string_view attempt_finish_reason() const noexcept override {
+        return attempt_finish_reason_;
+    }
 
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] bool is_retryable(
@@ -129,6 +150,8 @@ public:
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<OpenAIProtocol>(stream_usage_, system_prompt_layout_);
     }
+
+    void reset_state() override { attempt_finish_reason_.clear(); }
 
 protected:
     /**
@@ -149,6 +172,9 @@ protected:
 private:
     Serializer::SystemPromptLayout system_prompt_layout_;
     RateLimitInfo last_rate_limit_;
+    // The finish reason the attempt closed with, empty while it is still
+    // running. Reset with the attempt.
+    std::string attempt_finish_reason_;
 };
 
 } // namespace core::llm::protocols

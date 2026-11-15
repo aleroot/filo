@@ -537,6 +537,11 @@ struct StreamChunk {
     // RetryController is restarting the request. Not a terminal event: Agent
     // clears accumulators and the TUI retracts the live card.
     bool reset_attempt = false;
+    // True when the transport lost the stream after the answer had already
+    // started, so the answer on screen is a prefix of what the model was
+    // writing. The turn can be continued from that prefix; the agent owns the
+    // conversation and asks the model to resume.
+    bool transport_cut = false;
 
     // Factory methods for common cases
     [[nodiscard]] static StreamChunk make_final(

@@ -893,9 +893,7 @@ ParseResult DashScopeProtocol::parse_event(
         result.stream_started = true;
         std::string_view reason;
         if (choice["finish_reason"].get(reason) != simdjson::SUCCESS || reason.empty()) continue;
-        stop_reason_ = reason == "length" ? "max_tokens"
-            : reason == "tool_calls" ? "tool_use"
-            : reason == "content_filter" ? "refusal" : std::string(reason);
+        stop_reason_ = map_openai_finish_reason(reason);
     }
     return result;
 }
@@ -935,6 +933,7 @@ RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
 void DashScopeTokenPlanProtocol::reset_state() { delegate_->reset_state(); }
 
 void DashScopeProtocol::reset_state() {
+    OpenAIProtocol::reset_state();
     stop_reason_.clear();
     pending_tool_calls_.clear();
     stream_rate_limit_seen_ = false;

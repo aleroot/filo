@@ -415,6 +415,19 @@ public:
     }
 
     /**
+     * The provider's own finish reason for this attempt, empty while the
+     * attempt has not closed with an answer.
+     *
+     * A stream that ends after the provider closed its answer has lost its
+     * terminal event, not its answer: the text on screen is complete and
+     * there is nothing to continue. A stream that ends without one was cut
+     * mid-answer, and the turn can be resumed from what arrived.
+     */
+    [[nodiscard]] virtual std::string_view attempt_finish_reason() const noexcept {
+        return {};
+    }
+
+    /**
      * @brief Parse one discrete event into chunks and state signals.
      *
      * Called for each unit produced by splitting the stream on event_delimiter().
