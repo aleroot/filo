@@ -136,6 +136,9 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
         request.task_id.empty() ? "worker_" + core::session::SessionStore::generate_id() : request.task_id,
         request.parent_tool_call_id);
     agent->set_active_provider_name(request.provider_name);
+    // The worker names itself on the wire, so the backend can attribute the
+    // requests it sends (codex-rs `x-openai-subagent`).
+    agent->set_subagent_label(request.worker_name);
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.
     agent->set_mode(is_auto_mode(agent_mode_from_string(request.mode))

@@ -472,6 +472,14 @@ public:
         active_provider_name_ = std::move(provider_name);
     }
 
+    /// Name the delegated worker this agent runs as, so the provider can
+    /// attribute the requests it sends (codex-rs `x-openai-subagent`). A
+    /// conversation's own agent leaves it empty.
+    void set_subagent_label(std::string label) {
+        std::lock_guard lock(history_mutex_);
+        subagent_label_ = std::move(label);
+    }
+
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
 
     void set_efficiency_decision_fn(
@@ -780,6 +788,9 @@ private:
     std::string active_provider_name_;
     std::string active_model_;
     std::string effort_level_;
+    /// The delegated worker this agent runs as, empty for a conversation's
+    /// own agent. Travels on the request so the provider's wire can name it.
+    std::string subagent_label_;
     /// Whether this agent holds the user's conversation, whose prompt prefix
     /// is worth the longest cache retention; false for an isolated (review or
     /// exploration) agent. Delegated workers are recognised by their depth.

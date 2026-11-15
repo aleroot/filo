@@ -502,6 +502,29 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
     REQUIRE(events.back().summary == "delegated-response-1");
 }
 
+TEST_CASE("A delegated worker names itself on its requests", "[agent][orchestration][wire]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"investigate startup","prompt":"inspect startup sequence","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    // codex-rs names the delegated session so the backend can attribute it.
+    CHECK(requests[0].subagent_label == "general");
+}
+
 TEST_CASE("SubagentOrchestrator forwards profile response schemas to the provider", "[agent][orchestration][structured]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

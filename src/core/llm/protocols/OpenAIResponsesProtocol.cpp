@@ -1128,6 +1128,28 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
         || code == "permission_denied" || code == "not_found_error";
 }
 
+/// codex-rs subagent_header_value: a delegated session names itself, and the
+/// name travels in a header and in the request's client metadata. Only a
+/// conservative token is allowed through: upstream drops a label that is not
+/// a valid header value, and so does Filo.
+[[nodiscard]] std::optional<std::string> codex_subagent_header_value(
+    std::string_view label) noexcept {
+    constexpr std::size_t kMaxLength = 64;
+    if (label.empty() || label.size() > kMaxLength) return std::nullopt;
+    std::string sanitized;
+    sanitized.reserve(label.size());
+    for (const char ch : label) {
+        const auto byte = static_cast<unsigned char>(ch);
+        const bool safe = (byte >= 'a' && byte <= 'z')
+            || (byte >= 'A' && byte <= 'Z')
+            || (byte >= '0' && byte <= '9')
+            || ch == '-' || ch == '_' || ch == '.';
+        if (!safe) return std::nullopt;
+        sanitized.push_back(ch);
+    }
+    return sanitized;
+}
+
 } // namespace
 
 class CodexResponsesProtocol::RateLimitState {
@@ -1584,6 +1606,13 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     metadata += core::utils::escape_json_string(thread_id);
     metadata += R"(","x-codex-window-id":")";
     metadata += core::utils::escape_json_string(window_id);
+    // codex-rs CodexResponsesMetadata::client_metadata: a delegated session
+    // names itself so the backend can attribute the request.
+    if (const auto label = codex_subagent_header_value(request.subagent_label);
+        label.has_value()) {
+        metadata += R"(,"x-openai-subagent":")";
+        metadata += core::utils::escape_json_string(*label);
+    }
     if (websocket && responses_lite(request)) {
         metadata += R"(","ws_request_header_x_openai_internal_codex_responses_lite":"true)";
     }
@@ -1631,6 +1660,14 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-client-request-id"] = thread_id;
     headers["x-codex-installation-id"] = installation_id();
     headers["x-codex-window-id"] = thread_id + ":0";
+    // codex-rs compatibility_headers: a delegated session names itself, so
+    // the backend can attribute the request to the worker that sent it.
+    if (const auto label = codex_subagent_header_value(request.subagent_label);
+        label.has_value()) {
+        headers["x-openai-subagent"] = *label;
+    } else {
+        headers.erase("x-openai-subagent");
+    }
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = std::string(core::auth::codex_cli::kOriginator);
     headers["version"] = std::string(core::auth::codex_cli::kClientVersion);

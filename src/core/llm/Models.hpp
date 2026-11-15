@@ -653,6 +653,10 @@ struct ChatRequest {
     std::string effort = {};               ///< Optional effort hint ("low"/"medium"/"high"/"max")
     std::string session_id = {};            ///< Internal session scope for accounting/routing decisions
     std::string transport_turn_id = {};     ///< Short-lived provider transport scope for one agent turn
+    /// The delegated worker this request belongs to (codex-rs
+    /// `x-openai-subagent`). Empty for a conversation's own requests. The
+    /// provider's wire decides how to name it, if at all.
+    std::string subagent_label = {};
     /// Conversation whose requests may continue a server-side thread. Only an
     /// agent's own step loop sets it; every other request (keep-warm replays,
     /// side queries, compaction) leaves it empty and is sent unthreaded, so it

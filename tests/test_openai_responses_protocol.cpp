@@ -1528,6 +1528,49 @@ TEST_CASE("Codex sends the catalog verbosity alongside any structured-output for
     CHECK_THAT(public_openai.serialize(request), !Catch::Matchers::ContainsSubstring("verbosity"));
 }
 
+TEST_CASE("Codex names a delegated worker in the header and the client metadata",
+          "[openai][responses][codex][subagent]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.messages = {{.role = "user", .content = "hi"}};
+    request.subagent_label = "explore";
+
+    CodexResponsesProtocol codex;
+    // codex-rs compatibility_headers and CodexResponsesMetadata::client_metadata.
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-openai-subagent") == "explore");
+    CHECK_THAT(codex.serialize(request),
+               Catch::Matchers::ContainsSubstring(R"("x-openai-subagent":"explore")"));
+
+    // A conversation's own request names nobody.
+    ChatRequest own;
+    own.model = "gpt-6.1-sol";
+    own.messages = {{.role = "user", .content = "hi"}};
+    cpr::Header own_headers;
+    codex.prepare_headers(own_headers, own, "https://chatgpt.com/backend-api/codex");
+    CHECK(own_headers.count("x-openai-subagent") == 0);
+    CHECK_THAT(codex.serialize(own),
+               !Catch::Matchers::ContainsSubstring("x-openai-subagent"));
+
+    // A label that is not a safe header value is dropped, as upstream drops
+    // one it cannot send.
+    ChatRequest unsafe_label = own;
+    unsafe_label.subagent_label = "my worker";
+    cpr::Header unsafe_headers;
+    codex.prepare_headers(unsafe_headers, unsafe_label,
+                          "https://chatgpt.com/backend-api/codex");
+    CHECK(unsafe_headers.count("x-openai-subagent") == 0);
+    CHECK_THAT(codex.serialize(unsafe_label),
+               !Catch::Matchers::ContainsSubstring("x-openai-subagent"));
+
+    // The WebSocket handshake carries the same header.
+    cpr::Header websocket_headers;
+    codex.prepare_websocket_headers(websocket_headers, request,
+                                    "https://chatgpt.com/backend-api/codex");
+    CHECK(websocket_headers.at("x-openai-subagent") == "explore");
+}
+
 TEST_CASE("Codex resolves the service tier against the catalog and hints routing",
           "[openai][responses][codex][service-tier]") {
     const auto tier_of = [](const std::string& payload) -> std::string {
