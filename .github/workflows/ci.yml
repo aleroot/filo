@@ -43,8 +43,23 @@ jobs:
 
       # Use every core the runner has: at -j2 the build alone took ~43 of the
       # job's minutes and the tests were cancelled before finishing.
+      # The log is kept and the compiler's own words are echoed into the job
+      # summary: a failed build otherwise says nothing about what broke.
       - name: Build
-        run: cmake --build --preset linux-debug -j"$(nproc)"
+        run: |
+          set +e
+          cmake --build --preset linux-debug -j"$(nproc)" 2>&1 | tee build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$build_status" -ne 0 ]; then
+            {
+              echo "### Build failed"
+              echo '```'
+              grep -E "error:|FAILED:" build.log | head -n 120
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$build_status"
 
       - name: Test
         run: ctest --preset linux-debug --output-on-failure --parallel 4 -LE integration
