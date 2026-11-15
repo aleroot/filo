@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <ctime>
 #include <format>
+#include <limits>
 #include <random>
 #include <set>
 #include <tuple>
@@ -1041,6 +1042,92 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return "You’ve hit your usage limit." + codex_retry_suffix(resets_at, false);
 }
 
+/// codex-rs try_parse_retry_delay: a rate-limit message states when the
+/// client may come back ("Please try again in 11.054s."). The delay is a
+/// lower bound, so a fractional value rounds up.
+[[nodiscard]] std::optional<int32_t> codex_retry_delay_from_message(
+    std::string_view message) noexcept {
+    constexpr std::string_view kNeedle = "try again in";
+    const std::string lowered = lower_ascii(message);
+    const std::size_t needle_at = lowered.find(kNeedle);
+    if (needle_at == std::string::npos) return std::nullopt;
+
+    std::size_t pos = needle_at + kNeedle.size();
+    const auto skip_spaces = [&] {
+        while (pos < message.size()
+               && std::isspace(static_cast<unsigned char>(message[pos]))) {
+            ++pos;
+        }
+    };
+    skip_spaces();
+
+    const std::size_t digits_begin = pos;
+    while (pos < message.size()
+           && std::isdigit(static_cast<unsigned char>(message[pos]))) {
+        ++pos;
+    }
+    if (pos == digits_begin) return std::nullopt;
+
+    std::size_t number_end = pos;
+    if (pos < message.size() && message[pos] == '.') {
+        const std::size_t fraction_begin = pos + 1;
+        std::size_t fraction_end = fraction_begin;
+        while (fraction_end < message.size()
+               && std::isdigit(static_cast<unsigned char>(message[fraction_end]))) {
+            ++fraction_end;
+        }
+        if (fraction_end > fraction_begin) number_end = fraction_end;
+    }
+
+    double seconds = 0;
+    try {
+        seconds = std::stod(std::string(message.substr(digits_begin, number_end - digits_begin)));
+    } catch (...) {
+        return std::nullopt;
+    }
+    pos = number_end;
+    skip_spaces();
+
+    const std::string unit = lower_ascii(message.substr(
+        pos, std::min<std::size_t>(6, message.size() - pos)));
+    if (unit.starts_with("ms")) {
+        seconds /= 1000.0;
+    } else if (unit.starts_with("s") || unit.starts_with("second")) {
+        // Seconds already.
+    } else {
+        return std::nullopt;
+    }
+    if (!std::isfinite(seconds) || seconds <= 0) return std::nullopt;
+    return static_cast<int32_t>(std::min(
+        std::ceil(seconds),
+        static_cast<double>(std::numeric_limits<int32_t>::max())));
+}
+
+/// codex-rs parse_terminal_provider_error and the quota, usage and policy
+/// classes of codex-api/src/sse/responses_error.rs: the failures a retry
+/// cannot fix.
+[[nodiscard]] bool codex_terminal_failure_class(std::string_view code) noexcept {
+    if (code == "usage_limit_reached" || code == "usage_not_included"
+        || code == "insufficient_quota" || code == "credit_balance_exhausted"
+        || code == "organization_spend_limit_exceeded"
+        || code == "project_spend_limit_exceeded"
+        || code == "cyber_policy" || code == "bio_policy"
+        || code == "misalignment_policy_violation" || code == "invalid_prompt"
+        || code == "context_length_exceeded" || code == "content_policy_violation"
+        || code == "budget_reached" || code == "model_not_found"
+        || code == "inference_hook_denied" || code == "access_program_not_enabled"
+        || code == "invalid_access_program" || code == "unsupported_access_program") {
+        return true;
+    }
+    // A request the backend rejected cannot be fixed by asking again. The
+    // ChatGPT backend answers these with an HTTP status before the stream
+    // starts, so upstream never classifies them; a stream that carries one
+    // anyway is terminal too.
+    return code == "invalid_request_error" || code == "content_filter"
+        || code == "invalid_api_key" || code == "authentication_error"
+        || code == "permission_denied" || code == "not_found_error";
+}
+
 } // namespace
 
 class CodexResponsesProtocol::RateLimitState {
@@ -1922,6 +2009,73 @@ std::string CodexResponsesProtocol::installation_id() const {
     return transport_state_->installation_id;
 }
 
+OpenAIResponsesProtocol::FailureVerdict
+OpenAIResponsesProtocol::classify_failure(std::string_view code,
+                                          std::string_view /*message*/,
+                                          const cpr::Header& advice) const {
+    // The generic Responses API retries only the classes it knows to be
+    // transient; an unknown class fails the turn.
+    const bool retryable =
+        code == "server_error" || code == "internal_server_error"
+        || code == "server_is_overloaded" || code == "policy_capacity_unavailable"
+        || code == "rate_limit_exceeded"
+        || code == "rate_limit_error" || code == "timeout"
+        || code == "request_timeout" || code == "temporarily_unavailable"
+        || code == "previous_response_not_found"
+        || code == "websocket_connection_limit_reached";
+    const int32_t delay = transport::retry_after_seconds(advice);
+    return {
+        .retryable = retryable,
+        .retry_after_seconds = delay > 0 ? std::optional<int32_t>(delay)
+                                         : std::nullopt,
+    };
+}
+
+OpenAIResponsesProtocol::FailureVerdict CodexResponsesProtocol::classify_failure(
+    std::string_view code,
+    std::string_view message,
+    const cpr::Header& advice) const {
+    // codex-rs codex-api/src/sse/responses_error.rs: the ChatGPT backend
+    // names the class it failed with. Only the classes a retry cannot fix
+    // are terminal; a class upstream does not know is transient.
+    const int32_t header_delay = transport::retry_after_seconds(advice);
+    const auto delay = [header_delay](std::optional<int32_t> stated) {
+        if (header_delay > 0) return std::optional<int32_t>(header_delay);
+        return stated;
+    };
+
+    if (code == "rate_limit_exceeded" || code == "slow_down") {
+        // A rate limit states when to come back, in the header or in the
+        // message itself ("Please try again in 11.054s.").
+        return {
+            .retryable = true,
+            .retry_after_seconds = delay(codex_retry_delay_from_message(message)),
+        };
+    }
+    if (code == "policy_capacity_unavailable" || code == "server_is_overloaded") {
+        return {
+            .retryable = true,
+            .retry_after_seconds = delay(std::nullopt),
+        };
+    }
+    if (codex_terminal_failure_class(code)) {
+        return {};
+    }
+    if (code.empty()) {
+        // No class at all: upstream treats the event as terminal unless the
+        // server states when to come back.
+        return {
+            .retryable = header_delay > 0,
+            .retry_after_seconds = delay(std::nullopt),
+        };
+    }
+    // A class upstream does not know is transient.
+    return {
+        .retryable = true,
+        .retry_after_seconds = delay(std::nullopt),
+    };
+}
+
 ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
     sse::ParsedEventView parsed;
     if (!sse::parse_event_payload(raw_event, parsed)) return {};
@@ -2144,14 +2298,6 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         result.stream_error = true;
         result.stream_error_type = std::string(code);
         result.stream_error_message = message;
-        result.retryable_stream_error = !stream_retry_vetoed_
-            && (code == "server_error" || code == "internal_server_error"
-                || code == "server_is_overloaded" || code == "policy_capacity_unavailable"
-                || code == "rate_limit_exceeded"
-                || code == "rate_limit_error" || code == "timeout"
-                || code == "request_timeout" || code == "temporarily_unavailable"
-                || code == "previous_response_not_found"
-                || code == "websocket_connection_limit_reached");
         cpr::Header advice;
         for (const auto key : {"headers", "response_headers"}) {
             simdjson::dom::object headers;
@@ -2161,8 +2307,11 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
                 if (field.value.get(value) == simdjson::SUCCESS) advice[std::string(field.key)] = std::string(value);
             }
         }
-        result.retryable_stream_error = result.retryable_stream_error && !transport::retry_vetoed(advice);
-        result.rate_limit.retry_after = transport::retry_after_seconds(advice);
+        const auto verdict = classify_failure(code, message, advice);
+        result.retryable_stream_error = !stream_retry_vetoed_
+            && verdict.retryable
+            && !transport::retry_vetoed(advice);
+        result.rate_limit.retry_after = verdict.retry_after_seconds.value_or(0);
         result.chunks.push_back(StreamChunk::make_error("\n[Responses API error: " + message + "]"));
         result.done = true;
         saw_text_delta_ = false;

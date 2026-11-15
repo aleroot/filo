@@ -73,6 +73,28 @@ public:
 
 protected:
     [[nodiscard]] virtual bool preserves_output_messages() const noexcept { return true; }
+
+    /// How a failed response is classified, and when the request may run again.
+    ///
+    /// A provider names the class it failed with, and only the classes a
+    /// retry cannot fix are terminal. codex-rs states the classes for the
+    /// ChatGPT backend (codex-api/src/sse/responses_error.rs); the generic
+    /// Responses API keeps to the classes it knows.
+    struct FailureVerdict {
+        bool retryable = false;
+        /// Seconds the server asks the client to wait, when it says so.
+        std::optional<int32_t> retry_after_seconds = {};
+    };
+
+    /// Classify a failure event by its error class.
+    ///
+    /// @param code    The error class the event names.
+    /// @param message The error message, which may state when to come back.
+    /// @param advice  The headers the event carries, which may state it too.
+    [[nodiscard]] virtual FailureVerdict classify_failure(
+        std::string_view code,
+        std::string_view message,
+        const cpr::Header& advice) const;
     /// Defines how a Responses API implementation carries conversation context.
     /// The default preserves state through previous_response_id; replay-only
     /// implementations can instead place the complete conversation in input.
@@ -280,6 +302,13 @@ protected:
     /// offer for this model is dropped, `default` opts out of the catalog's
     /// default tier, and `flex` is always accepted.
     [[nodiscard]] std::string request_service_tier(const ChatRequest& request) const override;
+    /// codex-rs codex-api/src/sse/responses_error.rs: the ChatGPT backend
+    /// names the class it failed with, and a class it does not know is
+    /// transient. The classes a retry cannot fix stay terminal.
+    [[nodiscard]] FailureVerdict classify_failure(
+        std::string_view code,
+        std::string_view message,
+        const cpr::Header& advice) const override;
 
 private:
     class RateLimitState;

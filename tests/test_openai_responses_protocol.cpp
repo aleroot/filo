@@ -1739,3 +1739,49 @@ TEST_CASE("ChatGPT plan limits named in error.type are final and worded like Cod
     CHECK(limits.usage_windows.front().label == "15m");
     CHECK(limits.usage_windows.front().utilization == Catch::Approx(1.0f));
 }
+
+TEST_CASE("A failed response is classified by the class the backend names",
+          "[openai][responses][codex][retry]") {
+    CodexResponsesProtocol codex;
+
+    // codex-rs try_parse_retry_delay: a rate limit states when to come back
+    // in its message, and the delay is a lower bound.
+    const auto limited = codex.parse_event(
+        R"({"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached. Please try again in 11.054s."}}})");
+    CHECK(limited.stream_error);
+    CHECK(limited.retryable_stream_error);
+    CHECK(limited.rate_limit.retry_after == 12);
+
+    // The header states the delay too, and the header wins.
+    const auto with_header = codex.parse_event(
+        R"({"type":"response.failed","headers":{"Retry-After":"3"},"response":{"error":{"code":"slow_down","message":"Please try again in 11.054s."}}})");
+    CHECK(with_header.retryable_stream_error);
+    CHECK(with_header.rate_limit.retry_after == 3);
+
+    // A class the backend names and upstream does not know is transient.
+    const auto unknown = codex.parse_event(
+        R"({"type":"response.failed","response":{"error":{"code":"some_new_transient_class","message":"try later"}}})");
+    CHECK(unknown.stream_error);
+    CHECK(unknown.retryable_stream_error);
+
+    // The classes a retry cannot fix stay terminal.
+    for (const auto* code : {"usage_limit_reached", "usage_not_included",
+                              "insufficient_quota", "invalid_prompt",
+                              "cyber_policy", "context_length_exceeded",
+                              "invalid_request_error", "content_filter"}) {
+        const auto terminal = codex.parse_event(std::string{
+            R"({"type":"response.failed","response":{"error":{"code":")"
+            + std::string(code) + R"(","message":"no"}}})"});
+        CHECK(terminal.stream_error);
+        CHECK_FALSE(terminal.retryable_stream_error);
+    }
+
+    // The generic Responses API keeps to the classes it knows.
+    OpenAIResponsesProtocol generic;
+    CHECK_FALSE(generic.parse_event(
+        R"({"type":"response.failed","response":{"error":{"code":"some_new_transient_class","message":"try later"}}})")
+        .retryable_stream_error);
+    CHECK(generic.parse_event(
+        R"({"type":"response.failed","response":{"error":{"code":"server_error","message":"try later"}}})")
+        .retryable_stream_error);
+}
