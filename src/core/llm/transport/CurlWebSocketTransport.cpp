@@ -443,6 +443,9 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
 
     std::string message;
     auto last_activity = std::chrono::steady_clock::now();
+    // Set while a cancelled stream waits for the endpoint's answer to the
+    // interrupt it was sent.
+    std::optional<std::chrono::steady_clock::time_point> drain_deadline;
     // Sends the frames queued while the stream runs: an interrupt for the
     // response the endpoint is serving. The loop owns the connection, so it
     // writes to it itself; a frame that cannot be sent is dropped with the
@@ -477,8 +480,13 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
         if (is_cancelled()) {
             // The endpoint must learn that the response may stop.
             (void)flush_pending();
-            return fail(WebSocketStreamResult::Status::StreamFailed, CURLE_ABORTED_BY_CALLBACK,
-                        "request cancelled by user", true);
+            // It answers whether it stopped: the caller wants to know, so the
+            // loop reads for a moment before the connection goes away.
+            if (!drain_deadline) {
+                drain_deadline = std::chrono::steady_clock::now() + kInterruptAckWindow;
+            }
+        } else {
+            drain_deadline.reset();
         }
 
         char buffer[64 * 1024];
@@ -491,7 +499,16 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
         }
 
         if (code == CURLE_AGAIN) {
-            if (std::chrono::steady_clock::now() - last_activity > idle) {
+            const auto now = std::chrono::steady_clock::now();
+            if (drain_deadline) {
+                // The endpoint did not answer the interrupt in time: the turn
+                // ends without knowing.
+                if (now >= *drain_deadline) {
+                    return fail(WebSocketStreamResult::Status::StreamFailed,
+                                CURLE_ABORTED_BY_CALLBACK,
+                                "request cancelled by user", true);
+                }
+            } else if (now - last_activity > idle) {
                 return fail(WebSocketStreamResult::Status::StreamFailed, CURLE_OPERATION_TIMEDOUT,
                             "idle timeout waiting for websocket event", true);
             }

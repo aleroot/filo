@@ -103,6 +103,9 @@ public:
                          std::function<void(const StreamChunk&)> callback) override;
     void cancel() override;
     [[nodiscard]] std::string get_last_model() const override;
+    /// What the endpoint answered to the interrupt that asked it to stop the
+    /// response it was serving.
+    [[nodiscard]] protocols::InterruptOutcome interrupt_outcome() const noexcept;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
     [[nodiscard]] std::vector<ContinuationItem>
@@ -226,6 +229,9 @@ private:
     std::string                                    in_flight_response_id_;
     /// The response this provider already asked the endpoint to stop.
     std::string                                    interrupted_response_id_;
+    /// What the endpoint answered to that request.
+    protocols::InterruptOutcome                     interrupt_outcome_ =
+        protocols::InterruptOutcome::None;
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;

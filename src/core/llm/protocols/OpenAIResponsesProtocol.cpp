@@ -873,6 +873,16 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return {};
 }
 
+/// The response an interrupt acknowledgement names. The answer carries it at
+/// the top level, not inside a response object.
+[[nodiscard]] std::string parse_acknowledged_response_id(simdjson::dom::element doc) {
+    std::string_view id;
+    if (doc["response_id"].get(id) == simdjson::SUCCESS && !id.empty()) {
+        return std::string(id);
+    }
+    return {};
+}
+
 [[nodiscard]] std::string extract_assistant_output_text(simdjson::dom::object item) {
     simdjson::dom::array content_items;
     if (item["content"].get(content_items) != simdjson::SUCCESS) return {};
@@ -2253,6 +2263,18 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         // wants it stopped asks for it by name.
         result.response_id = in_progress_response_id_;
         result.stream_started = true;
+        return result;
+    }
+
+    // codex-rs responses_websocket.rs: the endpoint answers an interrupt with
+    // response.interrupt.accepted, or refuses it with response.interrupt.failed.
+    // The answer names the response it stopped.
+    if (event_type == "response.interrupt.accepted"
+        || event_type == "response.interrupt.failed") {
+        result.interrupt_outcome = event_type == "response.interrupt.accepted"
+            ? InterruptOutcome::Accepted
+            : InterruptOutcome::Rejected;
+        result.response_id = parse_acknowledged_response_id(doc);
         return result;
     }
 

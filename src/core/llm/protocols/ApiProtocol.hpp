@@ -247,6 +247,14 @@ struct RateLimitInfo {
 // ParseResult
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// What the endpoint answered to an interrupt that asked it to stop the
+/// response it is serving (codex-rs response.interrupt).
+enum class InterruptOutcome {
+    None,     ///< The endpoint has not answered.
+    Accepted, ///< The endpoint stopped the response.
+    Rejected, ///< The endpoint refused to stop it.
+};
+
 /**
  * @brief Result of parsing one discrete streaming event.
  *
@@ -275,6 +283,7 @@ struct ParseResult {
     std::string stop_reason = {};                ///< Provider terminal reason, when reported.
     bool incomplete_tool_call = false;      ///< True when a stream ended mid-tool-use block.
     std::string response_id = {};                  ///< Provider response handle, when reported (Antigravity echoes it as `labels.last_execution_id`).
+    InterruptOutcome interrupt_outcome = InterruptOutcome::None; ///< The endpoint's answer to an interrupt.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

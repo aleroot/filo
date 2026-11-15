@@ -450,6 +450,11 @@ std::string HttpLLMProvider::get_last_model() const {
     return last_model_;
 }
 
+protocols::InterruptOutcome HttpLLMProvider::interrupt_outcome() const noexcept {
+    std::lock_guard lock(state_mutex_);
+    return interrupt_outcome_;
+}
+
 std::optional<ProviderMetadata> HttpLLMProvider::metadata() const {
     return ProviderMetadata{
         .api_type = api_type_,
@@ -694,6 +699,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                       std::function<void(const StreamChunk&)> callback) {
 
     cancel_requested_.store(false, std::memory_order_release);
+    {
+        // The interrupt state belongs to the request that is about to run: the
+        // response of an earlier turn must not be named by this one's cancel.
+        std::lock_guard lock(state_mutex_);
+        in_flight_response_id_.clear();
+        interrupted_response_id_.clear();
+        interrupt_outcome_ = protocols::InterruptOutcome::None;
+    }
 
     std::shared_ptr<HttpLLMProvider> keepalive;
     try {
@@ -924,11 +937,28 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     return true;
                                 };
                                 auto parsed = protocol->parse_event(event);
-                                if (!parsed.response_id.empty()) {
+                                const bool answered = parsed.interrupt_outcome
+                                    != protocols::InterruptOutcome::None;
+                                if (answered) {
+                                    // The endpoint answered the interrupt. Its
+                                    // answer names the response it stopped: an
+                                    // answer about another response says
+                                    // nothing about this one.
+                                    std::lock_guard lock(self->state_mutex_);
+                                    if (parsed.response_id.empty()
+                                        || parsed.response_id == self->interrupted_response_id_) {
+                                        self->interrupt_outcome_ = parsed.interrupt_outcome;
+                                    }
+                                } else if (!parsed.response_id.empty()) {
                                     // The endpoint's handle for the response it
                                     // is serving: a cancel can name it.
                                     std::lock_guard lock(self->state_mutex_);
                                     self->in_flight_response_id_ = parsed.response_id;
+                                }
+                                if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                                    // The turn is over: only the endpoint's answer
+                                    // to the interrupt matters now.
+                                    return parsed.done || terminal_chunk.has_value() || answered;
                                 }
                                 if (parsed.stream_error) {
                                     stream_error = true;
@@ -981,6 +1011,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         protocol->observe_response_headers(result.response_headers, request_metadata);
                         if (self->cancel_requested_.load(std::memory_order_acquire)) {
                             abandon_websocket();
+                            // The endpoint refused to stop the response: the
+                            // user asked for something that did not happen.
+                            if (self->interrupt_outcome()
+                                    == protocols::InterruptOutcome::Rejected) {
+                                callback(StreamChunk::make_error(
+                                    "\n[The endpoint refused to stop the response.]"));
+                            }
                             callback(terminal_chunk.value_or(StreamChunk::make_final()));
                             return;
                         }

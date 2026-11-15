@@ -73,6 +73,10 @@ class CurlWebSocketTransport {
 public:
     using MessageCallback = std::function<bool(std::string_view)>;
 
+    /// How long a cancelled stream waits for the endpoint's answer to the
+    /// interrupt before the connection goes away.
+    static constexpr std::chrono::milliseconds kInterruptAckWindow{500};
+
     explicit CurlWebSocketTransport(std::chrono::milliseconds idle_timeout = std::chrono::seconds(120));
     ~CurlWebSocketTransport();
 

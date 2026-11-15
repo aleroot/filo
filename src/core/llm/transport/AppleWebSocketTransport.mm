@@ -333,7 +333,18 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
             }
         };
 
-        while (!is_cancelled()) {
+        // Set while a cancelled stream waits for the endpoint's answer to the
+        // interrupt it was sent.
+        std::optional<std::chrono::steady_clock::time_point> drain_deadline;
+        while (true) {
+            if (is_cancelled() && !drain_deadline) {
+                // The endpoint must hear that the response may stop before
+                // the connection goes away, and its answer tells the caller
+                // whether it stopped.
+                drain_deadline = std::chrono::steady_clock::now()
+                    + CurlWebSocketTransport::kInterruptAckWindow;
+                send_pending_frames();
+            }
             auto received = std::make_shared<Operation>();
             [task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage* incoming, NSError* error) {
                 std::lock_guard lock(received->mutex);
@@ -346,11 +357,34 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
                 received->done = true;
                 received->changed.notify_all();
             }];
-            if (!wait_for_message(received, state, cancelled, idle)) {
-                // The endpoint must hear that the response may stop before
-                // the connection goes away.
+            if (drain_deadline) {
+                // The endpoint answers whether it stopped the response: the
+                // caller wants to know, so the loop reads until the window
+                // closes.
+                const auto remaining = *drain_deadline - std::chrono::steady_clock::now();
+                const auto window = remaining > std::chrono::milliseconds::zero()
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
+                    : std::chrono::milliseconds::zero();
+                if (!wait_for_message(received, state, nullptr, window)) {
+                    return fail("request cancelled by user");
+                }
+            } else if (!wait_for_message(received, state, cancelled, idle)) {
+                if (!is_cancelled()) {
+                    return fail("idle timeout waiting for websocket event");
+                }
+                // The user asked the turn to stop while the endpoint was
+                // silent: the endpoint must hear that the response may stop,
+                // and the pending receive is still outstanding, so its answer
+                // can still arrive.
+                drain_deadline = std::chrono::steady_clock::now()
+                    + CurlWebSocketTransport::kInterruptAckWindow;
                 send_pending_frames();
-                return fail("idle timeout waiting for websocket event");
+                const auto remaining = *drain_deadline - std::chrono::steady_clock::now();
+                if (remaining <= std::chrono::milliseconds::zero()
+                    || !wait_for_message(received, state, nullptr,
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(remaining))) {
+                    return fail("request cancelled by user");
+                }
             }
             if (!received->done) {
                 // A frame was queued while the endpoint stayed silent: it
@@ -375,10 +409,6 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
                 return result;
             }
         }
-        // The endpoint must hear that the response may stop before the
-        // connection goes away.
-        send_pending_frames();
-        return fail("request cancelled by user");
     }
 }
 

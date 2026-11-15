@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/HistoryCompactor.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
@@ -825,6 +826,226 @@ TEST_CASE("Cancelling a Codex turn tells the endpoint to stop the response",
         return payload.find("response.interrupt") != std::string::npos;
     });
     CHECK(interrupts == 1);
+#endif
+}
+
+TEST_CASE("The endpoint's answer to an interrupt reaches the provider",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The endpoint answers the warmup, names the response it is serving, and
+    // then answers the interrupt.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
+        {R"({"type":"response.created","response":{"id":"resp_live"}})",
+         R"({"type":"response.output_text.delta","delta":"thinking"})"},
+        {R"({"type":"response.interrupt.accepted","response_id":"resp_live"})"},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-ack";
+    request.transport_turn_id = "ws-ack-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (!chunk.content.empty()) provider->cancel();
+    });
+
+    // codex-rs responses_websocket.rs: the endpoint answers the interrupt.
+    CHECK(provider->interrupt_outcome() == core::llm::protocols::InterruptOutcome::Accepted);
+#endif
+}
+
+TEST_CASE("A refused interrupt is reported to the caller",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The endpoint refuses to stop the response it is serving.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
+        {R"({"type":"response.created","response":{"id":"resp_live"}})",
+         R"({"type":"response.output_text.delta","delta":"thinking"})"},
+        {R"({"type":"response.interrupt.failed","response_id":"resp_live"})"},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-refused";
+    request.transport_turn_id = "ws-refused-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+
+    std::string reported;
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (!chunk.content.empty()) provider->cancel();
+        if (chunk.is_error) reported += chunk.content;
+    });
+
+    CHECK(provider->interrupt_outcome() == core::llm::protocols::InterruptOutcome::Rejected);
+    // The user asked for something that did not happen: they are told.
+    CHECK_THAT(reported, Catch::Matchers::ContainsSubstring("refused to stop"));
+#endif
+}
+
+TEST_CASE("An answer about another response is not an answer about this one",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The endpoint names the response it is serving, and then answers the
+    // interrupt about a response of its own.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
+        {R"({"type":"response.created","response":{"id":"resp_live"}})",
+         R"({"type":"response.output_text.delta","delta":"thinking"})"},
+        {R"({"type":"response.interrupt.accepted","response_id":"resp_other"})"},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-other";
+    request.transport_turn_id = "ws-other-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (!chunk.content.empty()) provider->cancel();
+    });
+
+    // The answer does not name the response that was stopped: it says
+    // nothing about this turn.
+    CHECK(provider->interrupt_outcome() == core::llm::protocols::InterruptOutcome::None);
+#endif
+}
+
+TEST_CASE("A turn does not stop the response of an earlier turn",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The first turn runs to the end, and the endpoint names the response it
+    // served. The second turn is cancelled before the endpoint names a
+    // response of its own.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
+        {R"({"type":"response.created","response":{"id":"resp_first"}})",
+         R"({"type":"response.output_text.delta","delta":"first"})",
+         R"({"type":"response.completed","response":{"id":"resp_first"}})"},
+        {R"({"type":"response.output_text.delta","delta":"second"})"},
+        // The answer to an interrupt the second turn never sent.
+        {R"({"type":"response.interrupt.accepted","response_id":"resp_first"})"},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest first;
+    first.model = "gpt-6.1-sol";
+    first.session_id = "ws-turns";
+    first.transport_turn_id = "ws-turns-turn";
+    first.messages = {{.role = "user", .content = "first"}};
+    provider->stream_response(first, [](const auto&) {});
+
+    core::llm::ChatRequest second = first;
+    second.messages = {{.role = "user", .content = "first"},
+                       {.role = "user", .content = "second"}};
+    provider->stream_response(second, [&](const auto& chunk) {
+        if (chunk.content == "second") provider->cancel();
+    });
+
+    // The response of the first turn is over: the endpoint is not asked to
+    // stop it again.
+    const auto payloads = server.received_payloads();
+    // The warmup, the first turn and the second turn all went over the same
+    // socket: the second turn really reached the endpoint.
+    REQUIRE(payloads.size() == 3);
+    CHECK(std::ranges::none_of(payloads, [](const std::string& payload) {
+        return payload.find("response.interrupt") != std::string::npos;
+    }));
+    // Nothing answered an interrupt: the second turn had no response of its
+    // own to stop.
+    CHECK(provider->interrupt_outcome() == core::llm::protocols::InterruptOutcome::None);
+#endif
+}
+
+TEST_CASE("A cancel that arrives while the endpoint is silent still reaches it",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The endpoint names the response it is serving, says nothing, and
+    // answers the interrupt once it hears it.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
+        {R"({"type":"response.created","response":{"id":"resp_live"}})"},
+        {R"({"type":"response.interrupt.accepted","response_id":"resp_live"})"},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    options.timeouts.inactivity = std::chrono::seconds(20);
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-silent";
+    request.transport_turn_id = "ws-silent-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+
+    // The cancel comes from another thread, the way a Ctrl-C reaches a turn
+    // that is waiting for the endpoint.
+    std::thread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        provider->cancel();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    provider->stream_response(request, [](const auto&) {});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    canceller.join();
+
+    // The turn ended on the cancel, not on the idle timeout.
+    CHECK(elapsed < std::chrono::seconds(10));
+    // The endpoint heard that the response may stop.
+    const auto payloads = server.received_payloads();
+    CHECK(std::ranges::any_of(payloads, [](const std::string& payload) {
+        return payload.find("response.interrupt") != std::string::npos;
+    }));
+    // The turn waited for the answer: the endpoint said it stopped.
+    CHECK(provider->interrupt_outcome() == core::llm::protocols::InterruptOutcome::Accepted);
 #endif
 }
 
