@@ -661,6 +661,22 @@ void AgentSession::emit_status(std::string_view text) {
     }
 }
 
+void AgentSession::flush_thought() {
+    std::string thought;
+    {
+        std::lock_guard lock(state_mu_);
+        thought = std::move(thought_);
+        thought_.clear();
+    }
+    if (thought.empty()) return;
+    emit(text_update(id_, "agent_thought_chunk", thought));
+}
+
+void AgentSession::discard_thought() {
+    std::lock_guard lock(state_mu_);
+    thought_.clear();
+}
+
 void AgentSession::save() const {
     if (discarded_.load(std::memory_order_acquire)) return;
     core::session::SessionData data;
@@ -895,6 +911,9 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
     std::promise<void> finished;
     std::atomic<bool> finished_once{false};
     auto finish = [&] {
+        // The turn is over: whatever thinking the last attempt produced goes
+        // out now, unless the attempt was discarded.
+        flush_thought();
         if (!finished_once.exchange(true, std::memory_order_acq_rel)) finished.set_value();
     };
 
@@ -904,8 +923,14 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
         callbacks.advisor_override = advisor_.value_or(std::string{});
     }
     callbacks.on_reasoning = [this](const std::string& text) {
-        if (!text.empty()) emit(text_update(id_, "agent_thought_chunk", text));
+        if (text.empty()) return;
+        // The protocol cannot retract a thought chunk, so the thinking waits
+        // until the attempt says something the client keeps. A discarded
+        // attempt's thinking then never reaches the editor.
+        std::lock_guard lock(state_mu_);
+        thought_ += text;
     };
+    callbacks.on_attempt_reset = [this] { discard_thought(); };
     callbacks.on_status_log = [this](const std::string& text) {
         if (text.empty()) return;
         core::logging::info("[acp] {}", text);
@@ -938,6 +963,9 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
     };
     callbacks.on_tool_start = [this](const core::llm::ToolCall& call) {
         LiveCall live{call.id, call.function.name, call.function.arguments, false};
+        // The tool call is what the client keeps: the thinking of this
+        // attempt goes out with it.
+        flush_thought();
         // Before permission is asked, so before the tool can run.
         capture_before(live);
         {
@@ -969,7 +997,11 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
     agent_->send_message(
         std::move(message),
         [this](const std::string& text) {
-            if (!text.empty()) emit(text_update(id_, "agent_message_chunk", text));
+            if (text.empty()) return;
+            // The answer starts: the thinking of this attempt is what the
+            // client keeps, so it goes out now.
+            flush_thought();
+            emit(text_update(id_, "agent_message_chunk", text));
         },
         [this](const std::string& name, const std::string& detail) {
             LiveCall live;

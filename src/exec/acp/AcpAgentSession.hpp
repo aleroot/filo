@@ -73,6 +73,17 @@ private:
     /// A status line from the turn: a notice when the editor shows them,
     /// otherwise a thought, so it never lands in the answer.
     void emit_status(std::string_view text);
+    /// Send the attempt's thinking, once the attempt produced something the
+    /// client keeps.
+    ///
+    /// The protocol cannot retract a thought chunk, so a thought that is sent
+    /// while the attempt is still running stays on the editor's screen when
+    /// the transport discards that attempt and replays it. Holding the
+    /// thinking back until the attempt speaks keeps a discarded attempt's
+    /// thinking off the screen.
+    void flush_thought();
+    /// Drop the thinking of an attempt the transport discarded.
+    void discard_thought();
     void emit_state(ClientChannel& client);
     void capture_before(LiveCall& call) const;
     void publish_tool(const LiveCall& call, std::string status, std::string output, bool initial);
@@ -109,6 +120,9 @@ private:
     std::atomic<bool> auth_required_{false};
     /// The mode to return to when the editor leaves plan mode. Guarded by state_mu_.
     std::string mode_before_plan_ = "BUILD";
+    /// The thinking of the attempt in flight, held until the attempt speaks.
+    /// Guarded by state_mu_.
+    std::string thought_;
     /// Set once the editor has been given a title for this conversation.
     bool titled_ = false;
 

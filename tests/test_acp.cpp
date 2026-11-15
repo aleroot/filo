@@ -711,6 +711,55 @@ TEST_CASE("ACP session streams a model reply", "[acp]") {
     std::filesystem::remove_all(dir);
 }
 
+/// Thinks, then answers. The thinking of an attempt the transport discards
+/// must never reach the editor: the protocol cannot retract a thought chunk.
+class ThinkingThenTextProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        // The transport's first attempt is discarded and replayed: the reset
+        // marker is followed by the next attempt's own chunks.
+        core::llm::StreamChunk discarded;
+        discarded.reasoning_content = "thinking about the discarded attempt";
+        callback(discarded);
+        callback(core::llm::StreamChunk::make_attempt_reset("[retrying]"));
+
+        core::llm::StreamChunk kept;
+        kept.reasoning_content = "thinking about the kept attempt";
+        callback(kept);
+        core::llm::StreamChunk chunk;
+        chunk.content = "hello from filo";
+        callback(chunk);
+        callback(core::llm::StreamChunk::make_final());
+    }
+};
+
+TEST_CASE("ACP keeps a discarded attempt's thinking off the editor", "[acp]") {
+    auto provider = std::make_shared<ThinkingThenTextProvider>();
+    auto& tools = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tools,
+        test_support::make_workspace_session_context(core::context::SessionTransport::acp, "acp-thought"));
+    const auto dir = scratch_dir();
+    AgentSession session(std::move(agent), "acp-thought", std::filesystem::current_path(),
+                         "test", AgentSession::Options{}, {}, dir);
+
+    RecordingChannel channel;
+    const auto prompt = core::utils::JsonValue::parse(R"([{"type":"text","text":"Say hello"}])");
+    REQUIRE(prompt);
+    CHECK(session.prompt(*prompt, channel) == "end_turn");
+    const auto said = [&](std::string_view needle) {
+        return std::ranges::any_of(channel.notifications, [&](const std::string& note) {
+            return note.find(needle) != std::string::npos;
+        });
+    };
+    CHECK(said("hello from filo"));
+    CHECK(said("thinking about the kept attempt"));
+    CHECK_FALSE(said("thinking about the discarded attempt"));
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("ACP passes a prompt that starts with a path to the model", "[acp]") {
     auto agent = std::make_shared<core::agent::Agent>(
         std::make_shared<TextProvider>(),
