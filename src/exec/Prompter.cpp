@@ -37,6 +37,7 @@
 #include "core/tools/SkillRegistry.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/utils/InterruptSignal.hpp"
 #include "core/utils/StringUtils.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonInterpreterTool.hpp"
@@ -836,113 +837,139 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     const auto start_time = std::chrono::steady_clock::now();
 
-    agent->send_message(
-        diagnostics.final_prompt,
-        [&](const std::string& chunk) {
-            {
-                std::lock_guard lock(state_mutex);
-                streamed_text += chunk;
-            }
-
-            if (output_format == OutputFormat::Text) {
-                emit_text(chunk);
-            } else if (output_format == OutputFormat::StreamJson
-                       && options.include_partial_messages
-                       && !chunk.empty()) {
-                emit_event(make_assistant_delta_event(emitted_session_id, chunk));
-            }
-        },
-        [&](const std::string& tool_name, const std::string& tool_payload) {
-            {
-                std::lock_guard lock(state_mutex);
-                auto& stats = tool_stats.by_name[tool_name];
-                stats.calls += 1;
-                tool_stats.total_calls += 1;
-            }
-
-            if (output_format == OutputFormat::StreamJson) {
-                emit_event(make_tool_event(
-                    emitted_session_id,
-                    "start",
-                    tool_name,
-                    tool_payload,
-                    false));
-            }
-        },
-        [&]() {
-            std::lock_guard lock(done_mutex);
-            done = true;
-            done_cv.notify_all();
-        },
-        core::agent::Agent::TurnCallbacks{
-            .on_step_begin = {},
-            .on_tool_start = {},
-            .on_tool_finish = [&](const core::llm::ToolCall& tool_call,
-                                  const core::llm::Message& result) {
-                const bool success = result.content.find("\"error\"") == std::string::npos;
-
+    // The turn runs on its own thread, so that a Ctrl-C can stop it: the
+    // agent stops the request it is serving, and the endpoint is told to stop
+    // the response before the connection goes away.
+    std::thread turn_thread([&] {
+        agent->send_message(
+            diagnostics.final_prompt,
+            [&](const std::string& chunk) {
                 {
                     std::lock_guard lock(state_mutex);
-                    auto& stats = tool_stats.by_name[tool_call.function.name];
-                    if (success) {
-                        stats.success += 1;
-                        tool_stats.success_calls += 1;
-                    } else {
-                        stats.failed += 1;
-                        tool_stats.failed_calls += 1;
-                    }
+                    streamed_text += chunk;
+                }
+
+                if (output_format == OutputFormat::Text) {
+                    emit_text(chunk);
+                } else if (output_format == OutputFormat::StreamJson
+                           && options.include_partial_messages
+                           && !chunk.empty()) {
+                    emit_event(make_assistant_delta_event(emitted_session_id, chunk));
+                }
+            },
+            [&](const std::string& tool_name, const std::string& tool_payload) {
+                {
+                    std::lock_guard lock(state_mutex);
+                    auto& stats = tool_stats.by_name[tool_name];
+                    stats.calls += 1;
+                    tool_stats.total_calls += 1;
                 }
 
                 if (output_format == OutputFormat::StreamJson) {
                     emit_event(make_tool_event(
                         emitted_session_id,
-                        "finish",
-                        tool_call.function.name,
-                        result.content,
-                        true,
-                        success));
+                        "start",
+                        tool_name,
+                        tool_payload,
+                        false));
                 }
             },
-            .advisor_override = startup_advisor.value_or(std::string{}),
-            .on_advisor_event = [&](const core::llm::AdvisorEvent& event) {
-                // The advisor runs inside the provider's turn: the client only
-                // learns that it happened. The notice goes to stderr, so the
-                // answer on stdout stays exactly what the caller asked for.
-                const std::string label = event.advisor_model.empty()
-                    ? std::string("the advisor")
-                    : event.advisor_model;
-                std::lock_guard lock(advisor_notice_mutex);
-                switch (event.state) {
-                    case core::llm::AdvisorCallState::Pending:
-                        err << "[advisor] consulting " << label << ".\n";
-                        break;
-                    case core::llm::AdvisorCallState::Reviewed:
-                        err << "[advisor] " << label << " answered.\n";
-                        break;
-                    case core::llm::AdvisorCallState::Unavailable:
-                        err << "[advisor] the consultation failed";
-                        if (!event.error_code.empty()) {
-                            err << " (" << event.error_code << ")";
-                        }
-                        err << ".\n";
-                        break;
-                    case core::llm::AdvisorCallState::Refused:
-                        err << "[advisor] the provider refused to run the advisor";
-                        if (!event.detail.empty()) err << ": " << event.detail;
-                        err << ".\n";
-                        break;
-                }
+            [&]() {
+                std::lock_guard lock(done_mutex);
+                done = true;
+                done_cv.notify_all();
             },
-        });
+            core::agent::Agent::TurnCallbacks{
+                .on_step_begin = {},
+                .on_tool_start = {},
+                .on_tool_finish = [&](const core::llm::ToolCall& tool_call,
+                                      const core::llm::Message& result) {
+                    const bool success = result.content.find("\"error\"") == std::string::npos;
 
+                    {
+                        std::lock_guard lock(state_mutex);
+                        auto& stats = tool_stats.by_name[tool_call.function.name];
+                        if (success) {
+                            stats.success += 1;
+                            tool_stats.success_calls += 1;
+                        } else {
+                            stats.failed += 1;
+                            tool_stats.failed_calls += 1;
+                        }
+                    }
+
+                    if (output_format == OutputFormat::StreamJson) {
+                        emit_event(make_tool_event(
+                            emitted_session_id,
+                            "finish",
+                            tool_call.function.name,
+                            result.content,
+                            true,
+                            success));
+                    }
+                },
+                .advisor_override = startup_advisor.value_or(std::string{}),
+                .on_advisor_event = [&](const core::llm::AdvisorEvent& event) {
+                    // The advisor runs inside the provider's turn: the client only
+                    // learns that it happened. The notice goes to stderr, so the
+                    // answer on stdout stays exactly what the caller asked for.
+                    const std::string label = event.advisor_model.empty()
+                        ? std::string("the advisor")
+                        : event.advisor_model;
+                    std::lock_guard lock(advisor_notice_mutex);
+                    switch (event.state) {
+                        case core::llm::AdvisorCallState::Pending:
+                            err << "[advisor] consulting " << label << ".\n";
+                            break;
+                        case core::llm::AdvisorCallState::Reviewed:
+                            err << "[advisor] " << label << " answered.\n";
+                            break;
+                        case core::llm::AdvisorCallState::Unavailable:
+                            err << "[advisor] the consultation failed";
+                            if (!event.error_code.empty()) {
+                                err << " (" << event.error_code << ")";
+                            }
+                            err << ".\n";
+                            break;
+                        case core::llm::AdvisorCallState::Refused:
+                            err << "[advisor] the provider refused to run the advisor";
+                            if (!event.detail.empty()) err << ": " << event.detail;
+                            err << ".\n";
+                            break;
+                    }
+                },
+            });
+    });
+
+    bool timed_out = false;
+    bool interrupted = false;
     {
         std::unique_lock lock(done_mutex);
-        constexpr auto kRunTimeout = std::chrono::minutes(30);
-        if (!done_cv.wait_for(lock, kRunTimeout, [&] { return done; })) {
-            diagnostics.exit_code = 1;
-            err << "Prompter mode timed out while waiting for the agent response.\n";
-            return diagnostics;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+        bool stop_requested = false;
+        while (!done_cv.wait_for(lock, std::chrono::milliseconds(100), [&] { return done; })) {
+            if (stop_requested) continue;
+            if (core::utils::InterruptSignal::interrupted()) {
+                // The user asked the turn to stop: the provider tells the
+                // endpoint to stop the response it is serving.
+                interrupted = true;
+                stop_requested = true;
+                agent->request_stop();
+            } else if (std::chrono::steady_clock::now() >= deadline) {
+                timed_out = true;
+                stop_requested = true;
+                agent->request_stop();
+            }
         }
+    }
+    // The thread owns the turn, and the turn reads the state around it: it
+    // has to end before that state goes away.
+    turn_thread.join();
+
+    if (timed_out) {
+        diagnostics.exit_code = 1;
+        err << "Prompter mode timed out while waiting for the agent response.\n";
+        return diagnostics;
     }
 
     const auto finished_at = std::chrono::steady_clock::now();
@@ -1030,11 +1057,17 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     diagnostics.session_id = session_id;
     diagnostics.session_file_path = maybe_abbreviate_home(store.compute_path(data).string());
-    diagnostics.exit_code = request_failed ? 1 : 0;
+    diagnostics.exit_code = interrupted ? 130 : (request_failed ? 1 : 0);
     return diagnostics;
 }
 
 int run(const RunOptions& options) {
+    // A Ctrl-C stops the turn instead of killing the process: the endpoint is
+    // told to stop the response it is serving. An earlier interrupt does not
+    // belong to this run.
+    core::utils::InterruptSignal::clear();
+    const core::utils::InterruptSignal interrupt_watcher;
+
     std::string runtime_error;
     RuntimeContext runtime = build_runtime_context(options, runtime_error);
     if (!runtime_error.empty()) {
