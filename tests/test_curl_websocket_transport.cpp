@@ -782,11 +782,12 @@ TEST_CASE("Cancelling a Codex turn tells the endpoint to stop the response",
     if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
         SKIP("WebSocket transport unavailable");
     }
-    // The endpoint names the response it is serving, then stays quiet.
+    // The endpoint answers the warmup, then names the response it is serving
+    // and stays quiet.
     LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"resp_prewarm"}})"},
         {R"({"type":"response.created","response":{"id":"resp_live"}})",
          R"({"type":"response.output_text.delta","delta":"thinking"})"},
-        {},
         {},
     });
     core::llm::HttpStreamTransportOptions options;
@@ -802,8 +803,12 @@ TEST_CASE("Cancelling a Codex turn tells the endpoint to stop the response",
     request.messages = {{.role = "user", .content = "inspect"}};
 
     provider->stream_response(request, [&](const auto& chunk) {
-        // The user cancels while the response is being served.
-        if (!chunk.content.empty()) provider->cancel();
+        // The user cancels while the response is being served, and the turn
+        // asks again when it notices the stop.
+        if (!chunk.content.empty()) {
+            provider->cancel();
+            provider->cancel();
+        }
     });
 
     // codex-rs responses_websocket.rs: the frame names the response to stop.
@@ -813,6 +818,13 @@ TEST_CASE("Cancelling a Codex turn tells the endpoint to stop the response",
     });
     REQUIRE(interrupt != payloads.end());
     CHECK(interrupt->find("resp_live") != std::string::npos);
+
+    // The endpoint is told once: a turn that notices the stop asks again, and
+    // the second frame would say nothing new.
+    const auto interrupts = std::ranges::count_if(payloads, [](const std::string& payload) {
+        return payload.find("response.interrupt") != std::string::npos;
+    });
+    CHECK(interrupts == 1);
 #endif
 }
 

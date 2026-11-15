@@ -251,6 +251,13 @@ void HttpLLMProvider::cancel() {
         {
             std::lock_guard lock(state_mutex_);
             response_id = in_flight_response_id_;
+            // The endpoint is told once: a second frame for the same response
+            // says nothing new, and a turn that notices the stop asks again.
+            if (response_id.empty() || response_id == interrupted_response_id_) {
+                cancel_requested_.store(true, std::memory_order_release);
+                return;
+            }
+            interrupted_response_id_ = response_id;
         }
         if (const auto frame = protocol_->interrupt_request(response_id);
             frame.has_value()) {
