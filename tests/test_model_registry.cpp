@@ -1045,8 +1045,11 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
     CHECK(sol->reasoning.effort.supports(ReasoningCapability::XHighEffort));
     CHECK(sol->reasoning.effort.supports(ReasoningCapability::MaxEffort));
     CHECK(sol->reasoning.effort.supports(ReasoningCapability::UltraEffort));
+    // The needle is a std::string, not a literal: ranges::equal_to compares
+    // the needle with the range's value type, and a string literal is an
+    // array type, which that comparison rejects (GCC 16, C++26).
     CHECK(std::ranges::find(
-              sol->reasoning.supported_efforts, "ultra")
+              sol->reasoning.supported_efforts, std::string("ultra"))
           != sol->reasoning.supported_efforts.end());
 
     // The long-context member of the family.
