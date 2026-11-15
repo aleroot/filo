@@ -3115,11 +3115,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // The stream was lost after the answer had started. What arrived is a
         // prefix of what the model was writing, so the turn is continued from
         // it: the partial answer stays on screen and the model is asked to
-        // resume instead of starting over. A cut that delivered a tool call
-        // is excluded — a user turn between a function call and its result is
-        // a sequence providers reject.
+        // resume instead of starting over. A cut that had a tool call in
+        // flight is excluded — the model was deciding to call a tool, and a
+        // user turn in the middle of that is a sequence providers reject.
         if (chunk.transport_cut
-            && asst_msg.tool_calls.empty()
+            && tool_calls_accum->empty()
             && !asst_msg.content.empty()
             && turn_state->transport_cut_recovery_count < kMaxTransportCutRecoveryLimit
             && !self->is_stop_requested()) {
