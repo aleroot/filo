@@ -1,5 +1,6 @@
 #include "../tools/shell/ShellSessions.hpp"
 #include "Agent.hpp"
+#include "../llm/advisor/AdvisorService.hpp"
 #include "../changes/TurnRecovery.hpp"
 #include "AgentCapabilities.hpp"
 #include "../budget/BudgetTracker.hpp"
@@ -55,6 +56,8 @@ namespace core::agent {
 namespace {
 
 constexpr int kMaxOutputRecoveryLimit = 3;
+/// How many times one turn may resume a paused server-side advisor call.
+constexpr int kMaxAdvisorResumes = 3;
 constexpr std::string_view kMaxOutputRecoveryPrompt =
     "Output token limit hit. Resume directly with the next unfinished action or text. "
     "Do not apologize or recap. If a tool call was cut off, emit the complete tool call again.";
@@ -1330,6 +1333,98 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
 // History manipulation
 // ---------------------------------------------------------------------------
 
+void Agent::resolve_turn_advisor(
+    TurnState& turn_state,
+    const TurnCallbacks& turn_callbacks,
+    std::span<const core::llm::Message> conversation) {
+    const auto plan = advisor_plan_for_turn(turn_state, turn_callbacks, conversation);
+    turn_state.advisor_model = plan.spec ? plan.spec->model : std::string{};
+    turn_state.advisor_refusal = plan.refusal;
+}
+
+core::llm::AdvisorPlan Agent::advisor_plan_for_turn(
+    TurnState& turn_state,
+    const TurnCallbacks& turn_callbacks,
+    std::span<const core::llm::Message> conversation) {
+    core::llm::AdvisorPlan plan;
+    if (!turn_state.provider) return plan;
+
+    std::lock_guard lock(advisor_mutex_);
+
+    // The provider declined to run the advisor for this conversation. It is
+    // not asked again: the request goes without it, and the user has already
+    // been told why.
+    if (advisor_refused_) {
+        plan.refusal = "The provider refused to run the advisor for this "
+                       "conversation. It stays off until the conversation is "
+                       "cleared or compacted.";
+        return plan;
+    }
+
+    const auto support = turn_state.provider->advisor_support();
+    if (!support) return plan;
+
+    // What the session asks for. An advisor the provider does not accept for
+    // the model this turn runs on is not declared; the session keeps asking
+    // for it, so it starts as soon as a compatible model runs.
+    const auto requested = core::llm::advisor::resolve(
+        *turn_state.provider, turn_state.model, turn_callbacks.advisor_override);
+    std::optional<std::string> desired;
+    std::string note;
+    if (requested.has_advisor()) {
+        desired = requested.spec->model;
+    } else if (!turn_callbacks.advisor_override.empty()) {
+        note = requested.refusal;
+    }
+
+    // Changing the advisor edits the request's tool list. A provider that
+    // binds its reasoning to the request prefix invalidates that reasoning
+    // when the tools change, so the provider decides whether the change can
+    // be absorbed.
+    if (desired != advisor_declared_) {
+        const bool changing = desired.has_value() || advisor_declared_.has_value();
+        if (changing && !support->absorbs_advisor_changes(
+                           turn_state.model, conversation)) {
+            // The change cannot be absorbed: the conversation keeps the
+            // advisor it declared.
+            note = advisor_declared_
+                ? std::format(
+                    "This conversation keeps {} as its advisor. "
+                    "Start a new conversation to change it.",
+                    *advisor_declared_)
+                : "This conversation cannot change its advisor yet.";
+            if (advisor_declared_) {
+                plan.spec = core::llm::AdvisorSpec{.model = *advisor_declared_};
+            }
+            plan.refusal = note;
+            return plan;
+        }
+        advisor_declared_ = desired;
+    }
+
+    if (!advisor_declared_) {
+        plan.refusal = note;
+        return plan;
+    }
+
+    const core::llm::AdvisorSpec spec{.model = *advisor_declared_};
+    if (!support->supports(turn_state.model, spec)) {
+        // The model this turn runs on does not accept the conversation's
+        // advisor. It is not declared, and the session keeps asking for it.
+        plan.refusal = std::format(
+            "{} does not accept {} as an advisor.",
+            turn_state.model, *advisor_declared_);
+        return plan;
+    }
+    plan.spec = spec;
+    return plan;
+}
+
+std::optional<std::string> Agent::advisor_in_use() const {
+    std::lock_guard lock(advisor_mutex_);
+    return advisor_declared_;
+}
+
 void Agent::clear_history() {
     std::shared_ptr<core::llm::LLMProvider> provider;
     {
@@ -1344,6 +1439,14 @@ void Agent::clear_history() {
         reset_efficiency_tracking_unlocked();
         prompt_cache_.reset();
         provider = provider_;
+        // A cleared history is a new conversation: the advisor it pinned is
+        // released with it.
+        {
+            std::lock_guard lock(advisor_mutex_);
+            advisor_declared_.reset();
+            advisor_refused_ = false;
+            advisor_refusal_reported_.clear();
+        }
         ensure_system_prompt();
         refresh_context_window_snapshot_unlocked();
     }
@@ -1405,6 +1508,15 @@ void Agent::apply_compaction_unlocked(
     // The summary starts a new prefix: nothing cached for the old one can be
     // read again, so there is nothing left to keep warm or warn about.
     prompt_cache_.reset();
+    // The compacted conversation starts a new one for the advisor: the
+    // request's tool list can change again, and a refused advisor may be
+    // asked for once more.
+    {
+        std::lock_guard lock(advisor_mutex_);
+        advisor_declared_.reset();
+        advisor_refused_ = false;
+        advisor_refusal_reported_.clear();
+    }
     ensure_system_prompt();
     history_.insert(
         history_.end(),
@@ -2023,6 +2135,9 @@ void Agent::send_message(core::llm::Message user_message,
         append_project_facts_update_unlocked(std::move(project_facts));
         mode_snapshot = std::string(to_string(current_mode_));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
+        // The advisor this turn declares, decided once: a turn keeps one tool
+        // list for every step it takes.
+        resolve_turn_advisor(*turn_state, turn_callbacks, history_);
         if (is_auto_mode(current_mode_) || boost_task.has_value()) {
           const auto user_count = std::ranges::count_if(
               history_, [](const core::llm::Message &message) {
@@ -2156,6 +2271,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         turn_state->max_steps = sanitize_max_steps_per_turn(
             turn_callbacks.max_steps_override.value_or(loop_limits_.max_steps_per_turn));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
+        resolve_turn_advisor(*turn_state, turn_callbacks, history_);
     }
 
     if (turn_callbacks.cancellation_requested && turn_callbacks.cancellation_requested()) {
@@ -2208,6 +2324,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::string task_state_prompt;
     std::vector<std::string> request_memory_entry_ids;
     std::size_t request_history_size = 0;
+    std::string advisor_refusal;
     bool stale_turn = false;
     {
         std::lock_guard lock(history_mutex_);
@@ -2242,6 +2359,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 ? core::llm::PromptCacheScope::Conversation
                 : core::llm::PromptCacheScope::Auxiliary;
             provider = turn_state->provider;
+            // The advisor this turn declares. A turn declares one advisor for
+            // all of its steps: the request's tool list must not change under
+            // a turn, not even between the steps of one tool exchange.
+            if (!turn_state->advisor_model.empty()) {
+                request.advisor = core::llm::AdvisorSpec{
+                    .model = turn_state->advisor_model};
+            }
+            advisor_refusal = turn_state->advisor_refusal;
             mode_snapshot = std::string(to_string(current_mode_));
             session_state_prompt = build_session_state_prompt();
             task_state_prompt = build_task_state_prompt();
@@ -2278,6 +2403,26 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     if (stale_turn) {
         done_callback();
         return;
+    }
+    // The advisor a turn asked for and did not get: say so once, in the
+    // conversation that asked. A delegated worker stays quiet.
+    if (!advisor_refusal.empty() && step_session_context.delegation_depth == 0) {
+        bool report = false;
+        {
+            std::lock_guard lock(advisor_mutex_);
+            if (advisor_refusal_reported_ != advisor_refusal) {
+                advisor_refusal_reported_ = advisor_refusal;
+                report = true;
+            }
+        }
+        if (report) {
+            const auto status = std::format("\n[Advisor: {}]\n", advisor_refusal);
+            if (turn_callbacks.on_status_log) {
+                turn_callbacks.on_status_log(status);
+            } else {
+                text_callback(status);
+            }
+        }
     }
     if (const auto invalid = core::llm::validate_tool_transcript(request.messages);
         invalid.has_value()) {
@@ -2548,6 +2693,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             chunk.continuation_items.begin(),
             chunk.continuation_items.end());
 
+        // A provider-side advisor reported what it did. The event says what
+        // happened; the UI decides how to show it.
+        if (chunk.advisor_event) {
+            // A refusal is the provider declining to run the advisor at all.
+            // The conversation keeps going without one.
+            if (chunk.advisor_event->state == core::llm::AdvisorCallState::Refused) {
+                std::lock_guard lock(self->advisor_mutex_);
+                // The provider will not run this advisor. The conversation
+                // goes on without one, and does not ask again.
+                self->advisor_refused_ = true;
+                self->advisor_declared_.reset();
+            }
+            if (turn_callbacks.on_advisor_event) {
+                turn_callbacks.on_advisor_event(*chunk.advisor_event);
+            }
+        }
+
         // Accumulate streamed tool-call fragments (OpenAI-style delta streaming)
         for (const auto& t : chunk.tools) {
             core::llm::merge_tool_call_fragment(*tool_calls_accum, t);
@@ -2711,6 +2873,35 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         asst_msg.continuation_items = discard_uncommitted_state
             ? std::vector<core::llm::ContinuationItem>{}
             : *continuation_accum;
+
+        // A provider-side advisor call can pause the turn: the provider
+        // finishes it when the same turn is sent again. The assistant turn
+        // keeps the pending call, and its (possibly empty) text stays empty so
+        // the turn replays verbatim. No user message is added.
+        const auto advisor_support = turn_state->provider
+            ? turn_state->provider->advisor_support()
+            : nullptr;
+        if (!chunk.is_error
+            && chunk.stop_reason == "pause_turn"
+            && shared_request->advisor.has_value()
+            && advisor_support
+            && advisor_support->can_pause_turn()
+            && turn_state->advisor_resumes < kMaxAdvisorResumes) {
+            ++turn_state->advisor_resumes;
+            if (!self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message>& history) {
+                        history.push_back(asst_msg);
+                    })) {
+                done_callback();
+                return;
+            }
+            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
+                                               turn_callbacks, turn_state] {
+                self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
+            });
+            return;
+        }
 
         if (!chunk.is_error
             && asst_msg.tool_calls.empty()
@@ -3351,6 +3542,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 // summary, so it records into the same tracker
                                 // instead of one that is thrown away with it.
                                 .change_tracker = recovery_turn_state->change_tracker,
+                                // The worker inherits the advisor and checks the
+                                // pairing against its own model.
+                                .advisor = recovery_turn_state->advisor_model,
                             };
 
                             result = self->orchestrator_.execute_task(

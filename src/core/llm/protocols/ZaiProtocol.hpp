@@ -94,7 +94,9 @@ private:
 
 class ZaiCodingProtocol final : public AnthropicProtocol {
 public:
-    ZaiCodingProtocol() = default;
+    // Z.ai speaks Anthropic's shape but has no Anthropic server tools, so it
+    // offers no advisor capability.
+    ZaiCodingProtocol() : AnthropicProtocol(kAnthropicDefaultMaxTokens, nullptr) {}
     bool accepts_legacy_continuation() const noexcept override { return true; }
     /// Images in a Messages `tool_result` are not documented for Z.ai.
     ToolResultMediaPlacement tool_result_media() const noexcept override {

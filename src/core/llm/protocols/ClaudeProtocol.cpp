@@ -739,18 +739,22 @@ ClaudeWirePolicy claude_wire_policy(
 std::string ClaudeSerializer::serialize(const ChatRequest& req, int default_max_tokens,
                                         const ClaudeThinkingConfig& thinking,
                                         PromptCacheTtl cache_ttl,
-                                        const claude::RequestLineage* lineage) {
-    auto body = serialize_unsigned(req, default_max_tokens, thinking, cache_ttl, lineage);
+                                        const claude::RequestLineage* lineage,
+                                        std::string_view advisor_tool_json) {
+    auto body = serialize_unsigned(req, default_max_tokens, thinking, cache_ttl, lineage,
+                                   advisor_tool_json);
     if (body.signs) claude::sign_body(body.payload);
     return std::move(body.payload);
 }
 
 ClaudeSerializer::UnsignedBody ClaudeSerializer::serialize_unsigned(
     const ChatRequest& req, int default_max_tokens, const ClaudeThinkingConfig& thinking,
-    PromptCacheTtl cache_ttl, const claude::RequestLineage* lineage) {
+    PromptCacheTtl cache_ttl, const claude::RequestLineage* lineage,
+    std::string_view advisor_tool_json) {
     const auto wire_policy = claude_wire_policy(
         req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     AnthropicSerializationOptions options;
+    options.advisor_tool_json = std::string(advisor_tool_json);
     const bool has_attribution = req.prompt_plan.empty()
         && std::ranges::any_of(req.messages, [](const Message& message) {
             return message.role == "system"
@@ -910,6 +914,7 @@ std::string ClaudeProtocol::model_id(std::string_view model) const {
 }
 
 void ClaudeProtocol::prepare_request(ChatRequest& request) {
+    AnthropicProtocol::prepare_request(request);
     request_uses_context_1m_ = false;
     request_structured_output_ = request.response_format.type == ResponseFormat::Type::JsonSchema;
     last_requested_model_.clear();
@@ -933,7 +938,8 @@ void ClaudeProtocol::prepare_request(ChatRequest& request) {
     if (lineage_.session_id.empty() || !thread_.available(request.continuation_scope, request.model)) return;
     try {
         const auto body = ClaudeSerializer::serialize_unsigned(
-            request, default_max_tokens_, thinking_, cache_ttl_.for_scope(request.prompt_cache_scope), &lineage_);
+            request, default_max_tokens_, thinking_, cache_ttl_.for_scope(request.prompt_cache_scope), &lineage_,
+            advisor_tool_json(request));
         if (!body.signs) return;
         thread_.plan(request.continuation_scope, request.model, body.payload,
                      std::format("1m={};json={}", request_uses_context_1m_, request_structured_output_));
@@ -947,16 +953,22 @@ std::string ClaudeProtocol::serialize(const ChatRequest& req) const {
     // Only a prepared request belongs to a conversation.
     const auto* lineage = lineage_.session_id.empty() ? nullptr : &lineage_;
     const auto cache_ttl = cache_ttl_.for_scope(req.prompt_cache_scope);
+    const auto advisor_json = advisor_tool_json(req);
     if (!thread_.threaded()) {
-        return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl, lineage);
+        return ClaudeSerializer::serialize(req, default_max_tokens_, thinking_, cache_ttl, lineage,
+                                           advisor_json);
     }
-    auto body = ClaudeSerializer::serialize_unsigned(req, default_max_tokens_, thinking_, cache_ttl, lineage);
+    auto body = ClaudeSerializer::serialize_unsigned(req, default_max_tokens_, thinking_, cache_ttl, lineage,
+                                                      advisor_json);
     auto payload = thread_.body(body.payload).value_or(std::move(body.payload));
     claude::sign_body(payload);
     return payload;
 }
 
 bool ClaudeProtocol::rebuilds_after_rejection(const HttpResponse& response) {
+    // The advisor is refused before the thread ladder: a request the account
+    // cannot run with an advisor is rebuilt without it, then threaded.
+    if (AnthropicProtocol::rebuilds_after_rejection(response)) return true;
     return thread_.on_rejection(response.status_code, response.body);
 }
 
@@ -1085,6 +1097,9 @@ cpr::Header ClaudeProtocol::build_headers(const core::auth::AuthInfo& auth) cons
              oauth != auth.properties.end() && oauth->second == "1",
              request_structured_output_)) {
         append_beta_unique(beta);
+    }
+    for (const auto flag : advisor_feature_flags_for_request()) {
+        append_beta_unique(flag);
     }
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
 

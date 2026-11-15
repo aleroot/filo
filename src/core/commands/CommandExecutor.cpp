@@ -1502,6 +1502,7 @@ public:
             "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
             "  /profile [name]     Show/list/switch named configuration profiles\n"
             "  /effort [level]     Open/show/set model effort (auto|low|medium|high|max)\n"
+            "  /advisor [model]    Open/show/set the provider-side advisor model\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /workspace [action] Show workspace roots, or add/change a working directory\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
@@ -1765,6 +1766,43 @@ public:
             ? ctx.switch_effort_fn(arg)
             : "Effort switching is not available in this session.";
         const bool success = body.starts_with("Set");
+        ctx.append_history_fn(std::format(
+            "\n{}\n", success
+                ? "✓  " + body
+                : "✗  " + body));
+    }
+};
+
+class AdvisorCommand : public Command {
+public:
+    std::string get_name() const override { return "/advisor"; }
+    std::string get_description() const override {
+        return "Show or set the provider-side advisor model";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        std::string_view arg = trim(std::string_view{ctx.text}.substr(
+            std::min(ctx.text.size(), std::string::size_type{8})));
+
+        if (arg.empty()) {
+            if (ctx.open_command_option_picker_fn
+                && ctx.open_command_option_picker_fn(get_name())) {
+                return;
+            }
+            const std::string body = ctx.advisor_status_fn
+                ? ctx.advisor_status_fn()
+                : "Use /advisor <model> or /advisor off.";
+            emit_info_lines(ctx, body, "No advisor information is available.");
+            return;
+        }
+
+        const std::string body = ctx.switch_advisor_fn
+            ? ctx.switch_advisor_fn(arg)
+            : "The advisor is not available in this session.";
+        const bool success = body.starts_with("Advisor set")
+            || body.starts_with("Advisor cleared");
         ctx.append_history_fn(std::format(
             "\n{}\n", success
                 ? "✓  " + body
@@ -4070,6 +4108,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ModelCommand>());
     register_command(std::make_unique<ProfileCommand>());
     register_command(std::make_unique<EffortCommand>());
+    register_command(std::make_unique<AdvisorCommand>());
     register_command(std::make_unique<SettingsCommand>());
     register_command(std::make_unique<WorkspaceCommand>());
     register_command(std::make_unique<SteeringCommand>());

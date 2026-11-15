@@ -87,6 +87,7 @@
 
 #include "ProtocolRequest.hpp"
 #include "../Models.hpp"
+#include "../AdvisorSupport.hpp"
 #include "../PromptCacheProfile.hpp"
 #include "../ReasoningCapabilities.hpp"
 #include "../transport/StreamResilience.hpp"
@@ -459,6 +460,18 @@ public:
         return {};
     }
 
+    /**
+     * @brief The provider's advisor capability, when its wire has one.
+     *
+     * Null means the wire cannot run a second model inside a turn, so the core
+     * never offers an advisor for it. The protocol owns the capability: it
+     * renders the advisor into the request and reads the provider's answer.
+     */
+    [[nodiscard]] virtual std::shared_ptr<const core::llm::IAdvisorSupport>
+    advisor_support() const {
+        return {};
+    }
+
     /// Whether deployment metadata takes precedence over model-family rules.
     [[nodiscard]] virtual bool uses_provider_reasoning_catalog() const noexcept { return false; }
 
@@ -542,6 +555,16 @@ public:
     [[nodiscard]] virtual bool rebuilds_after_rejection([[maybe_unused]] const HttpResponse& response) {
         return false;
     }
+
+    /**
+     * @brief What the protocol wants the client to know after a rebuild.
+     *
+     * A protocol that drops something the server refused (a capability the
+     * provider will not run, for example) reports it here, so the client can
+     * tell the user what the rebuilt request no longer carries. Empty by
+     * default, so a protocol that never rebuilds is unaffected.
+     */
+    [[nodiscard]] virtual std::vector<StreamChunk> rejection_notice() const { return {}; }
 
     /// Legacy opaque state predates provenance. Adapters must opt out where
     /// sharing a wire format does not imply compatible continuation state.

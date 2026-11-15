@@ -200,6 +200,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          provider_name = std::move(request.provider_name),
          model = request.model,
          effort = request.effort,
+         advisor = request.advisor,
          response_format = std::move(request.response_format),
          allowed_tools = std::move(request.allowed_tools),
          cancellation_requested = std::move(worker_cancel_requested),
@@ -290,6 +291,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                         run_state->has_final_response = true;
                         run_state->final_text = text;
                     },
+                    .advisor_override = std::move(advisor),
                     .cancellation_requested = std::move(cancellation_requested),
                 });
           } catch (const std::exception& error) {

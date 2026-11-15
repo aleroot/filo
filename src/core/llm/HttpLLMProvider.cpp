@@ -540,6 +540,10 @@ ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(
     return protocol_capabilities;
 }
 
+std::shared_ptr<const IAdvisorSupport> HttpLLMProvider::advisor_support() const {
+    return protocol_ ? protocol_->advisor_support() : nullptr;
+}
+
 PromptCacheProfile HttpLLMProvider::prompt_cache_profile(
     std::string_view model) const noexcept {
     if (!protocol_ || looks_like_loopback_base_url(base_url_)) {
@@ -1255,6 +1259,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     core::logging::info(
                         "[HTTP] {} rebuilt a request the server rejected (HTTP {}); sending it again",
                         protocol->name(), r.status_code);
+                    // The protocol may have dropped something the server
+                    // refused. The client is told what the rebuilt request no
+                    // longer carries.
+                    for (const auto& notice : protocol->rejection_notice()) {
+                        callback(notice);
+                    }
                     protocol->reset_attempt_state();
                     payload = protocol->serialize(request_metadata);
                     prepare_http_headers();

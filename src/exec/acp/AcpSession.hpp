@@ -111,6 +111,8 @@ struct HostOptions {
     std::optional<std::string> startup_model;
     /// Agent effort value: "" is auto, "none" is off, otherwise a level.
     std::optional<std::string> startup_effort;
+    /// The provider-side advisor this session consults; unset means none.
+    std::optional<std::string> startup_advisor;
     core::context::SteeringPolicy steering{};
 };
 

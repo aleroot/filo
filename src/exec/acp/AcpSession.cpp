@@ -315,6 +315,7 @@ AgentSession::AgentSession(std::shared_ptr<core::agent::Agent> agent,
     , options_(std::move(options))
     , replay_(std::move(replay))
     , agent_(std::move(agent)) {
+    advisor_ = options_.advisor;
     titled_ = std::ranges::any_of(replay_, [](const core::llm::Message& message) {
         return message.role == "user" && !message.synthetic;
     });
@@ -364,6 +365,7 @@ std::vector<CommandSpec> AgentSession::commands() {
         {"mode", "Set the agent mode (auto, build, debug, plan, execute)"},
         {"model", "Set the model, as a model id or provider/model"},
         {"effort", "Set reasoning effort (auto, off, low, medium, high, xhigh, max, ultra)"},
+        {"advisor", "Set the provider-side advisor model (or off)"},
         {"compact", "Summarise the conversation so far"},
     };
 }
@@ -744,7 +746,8 @@ std::string AgentSession::run_slash(std::string_view name,
         client.notify("session/update", text_update(id_, "agent_message_chunk", text));
     };
     if (name == "help") {
-        say("Commands: /help, /mode <mode>, /model <model>, /effort <level>, /compact.\n"
+        say("Commands: /help, /mode <mode>, /model <model>, /effort <level>, "
+            "/advisor <model>, /compact.\n"
             "Mode, model and effort are also in the editor's session controls.\n"
             "File changes ask for permission unless this process was started with --yolo.");
         return "end_turn";
@@ -780,6 +783,24 @@ std::string AgentSession::run_slash(std::string_view name,
         } else {
             say("Effort is " + effort_option(agent_->get_effort_level()) + ".");
         }
+        return "end_turn";
+    }
+    if (name == "advisor") {
+        if (argument.empty()) {
+            std::string current;
+            {
+                std::lock_guard lock(state_mu_);
+                current = advisor_ ? *advisor_ : std::string("none");
+            }
+            say("Advisor is " + current + ".");
+            return "end_turn";
+        }
+        const auto selected = core::llm::parse_advisor_selection(argument);
+        {
+            std::lock_guard lock(state_mu_);
+            advisor_ = selected;
+        }
+        say(selected ? "Advisor is " + *selected + "." : "Advisor is none.");
         return "end_turn";
     }
     if (name == "compact") {
@@ -878,6 +899,10 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
     };
 
     core::agent::Agent::TurnCallbacks callbacks;
+    {
+        std::lock_guard lock(state_mu_);
+        callbacks.advisor_override = advisor_.value_or(std::string{});
+    }
     callbacks.on_reasoning = [this](const std::string& text) {
         if (!text.empty()) emit(text_update(id_, "agent_thought_chunk", text));
     };
@@ -1181,6 +1206,9 @@ open_session(const OpenRequest& request, const HostOptions& host) {
         .yolo = host.yolo,
         .trusted_tools = host.trusted_tools,
         .created_at = resumed ? resumed->created_at : std::string{},
+        .advisor = host.startup_advisor.has_value()
+            ? core::llm::parse_advisor_selection(*host.startup_advisor)
+            : std::optional<std::string>{},
     };
     return std::make_unique<AgentSession>(
         std::move(agent),

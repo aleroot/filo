@@ -777,6 +777,11 @@ RunResult run(RunOptions opts) {
     std::string active_provider_name;
     std::string active_model_name;
     std::string session_effort_value = opts.startup_effort.value_or(std::string{}); // empty => auto/provider default
+    // The provider-side advisor this session asks for, named the way the
+    // provider names it. Empty => no advisor. The saved setting is the
+    // default; --advisor overrides it for this process only.
+    std::string session_advisor_value = opts.startup_advisor.value_or(
+        config_manager.get_config().advisor_model);
 
     std::optional<ModelSelectionSnapshot> previous_model_selection;
 
@@ -4590,6 +4595,31 @@ RunResult run(RunOptions opts) {
         return resolution.effective;
     };
 
+    // The provider and model the session currently runs. Every capability
+    // the session shows is resolved against this pair.
+    auto active_model_target = [&]() -> std::pair<std::string, std::string> {
+        const bool manual_mode = model_selection_mode == ModelSelectionMode::Manual;
+        const std::string model = manual_mode
+            ? manual_model_name
+            : (active_model_name.empty() ? manual_model_name : active_model_name);
+        const std::string provider = manual_mode
+            ? manual_provider_name
+            : (active_provider_name.empty() ? manual_provider_name : active_provider_name);
+        return {provider, model};
+    };
+
+    // The provider's advisor capability, when its wire has one. Null means
+    // the provider cannot run a second model inside a turn.
+    auto advisor_capability = [&](std::string_view provider_name)
+        -> std::shared_ptr<const core::llm::IAdvisorSupport> {
+        try {
+            return provider_manager.get_provider(std::string(provider_name))
+                ->advisor_support();
+        } catch (...) {
+            return {};
+        }
+    };
+
     auto describe_effort = [&]() -> std::string {
         const std::string configured = session_effort_value.empty()
             ? "auto"
@@ -4684,6 +4714,98 @@ RunResult run(RunOptions opts) {
             return "Set effort to ultra. Unsupported models will use max or high.";
         }
         return std::format("Set effort to {}.", normalized);
+    };
+
+    // The advisor the session asks for, the one this conversation declares,
+    // and the ones the provider accepts for the model the session runs on.
+    auto describe_advisor = [&]() -> std::string {
+        const auto [provider, model] = active_model_target();
+        const auto support = advisor_capability(provider);
+        if (!support) {
+            return std::format(
+                "Advisor: none\n"
+                "        Provider '{}' cannot run an advisor.",
+                provider);
+        }
+        std::string accepted;
+        for (const auto& choice : support->advisor_choices(model)) {
+            if (!accepted.empty()) accepted += ", ";
+            accepted += choice;
+        }
+        if (accepted.empty()) accepted = "none";
+        std::string running = "none";
+        if (agent) {
+            const auto in_use = agent->advisor_in_use();
+            if (in_use) running = *in_use;
+        }
+        return std::format(
+            "Advisor: {}\n"
+            "        Running in this conversation: {}\n"
+            "        Active provider: {}\n"
+            "        Active model: {}\n"
+            "        Accepted advisors: {}\n"
+            "        The provider runs the advisor inside the turn, on its own "
+            "credential and billing.",
+            session_advisor_value.empty() ? "none" : session_advisor_value,
+            running,
+            provider,
+            model.empty() ? "<provider default>" : model,
+            accepted);
+    };
+
+    auto switch_advisor = [&](std::string_view requested) -> std::string {
+        const auto trimmed = trim_ascii(requested);
+        if (trimmed.empty()) {
+            return "Usage: /advisor <model>|off";
+        }
+        const auto [provider, model] = active_model_target();
+        const auto support = advisor_capability(provider);
+        if (!support) {
+            return std::format("Provider '{}' cannot run an advisor.", provider);
+        }
+
+        const std::string lowered = to_lower_ascii(trimmed);
+        if (lowered == "off" || lowered == "none") {
+            session_advisor_value.clear();
+            std::string error;
+            if (!config_manager.persist_managed_setting(
+                    core::config::SettingsScope::User,
+                    core::config::ManagedSettingKey::AdvisorModel,
+                    std::nullopt,
+                    std::nullopt,
+                    &error)) {
+                return std::format("Advisor cleared for this session. "
+                                   "Could not save it: {}", error);
+            }
+            return "Advisor cleared.";
+        }
+
+        // The advisor is saved whatever the current model accepts: it starts
+        // as soon as a model that accepts it runs, the way Claude Code's
+        // saved advisor does.
+        session_advisor_value = lowered;
+        std::string error;
+        if (!config_manager.persist_managed_setting(
+                core::config::SettingsScope::User,
+                core::config::ManagedSettingKey::AdvisorModel,
+                lowered,
+                std::nullopt,
+                &error)) {
+            return std::format("Advisor set to {} for this session. "
+                               "Could not save it: {}", lowered, error);
+        }
+
+        const core::llm::AdvisorSpec spec{.model = lowered};
+        if (!support->supports(model, spec)) {
+            const auto reason = support->unsupported_reason(model, spec);
+            return std::format(
+                "Advisor set to {}. It does not run on {} yet: {}",
+                lowered,
+                model.empty() ? std::string("the current model") : model,
+                reason.empty() ? "the provider does not accept that pairing."
+                                : reason);
+        }
+        return std::format("Advisor set to {}.", lowered);
     };
 
     auto apply_model_selector = [&](std::string_view requested,
@@ -5086,6 +5208,8 @@ RunResult run(RunOptions opts) {
                 return settings.auto_compact_threshold;
             case core::config::ManagedSettingKey::ContextCompression:
                 return settings.context_compression;
+            case core::config::ManagedSettingKey::AdvisorModel:
+                return settings.advisor_model;
             case core::config::ManagedSettingKey::SteeringMode:
                 return settings.steering_mode;
             case core::config::ManagedSettingKey::PromptCacheGuardTokens:
@@ -5172,6 +5296,8 @@ RunResult run(RunOptions opts) {
                           user.revert_history_days, core::session::kDefaultRevertHistoryRetention);
                 return std::to_string(days ? days->count() : 0);
             }
+            case core::config::ManagedSettingKey::AdvisorModel:
+                return effective.advisor_model;
         }
         return {};
     };
@@ -5638,6 +5764,32 @@ RunResult run(RunOptions opts) {
             next.on_select = switch_compression;
         } else if (command_name == "/memory") {
             return open_memory_picker && open_memory_picker(tui::MemoryMenuPage::Overview, {});
+        } else if (command_name == "/advisor") {
+            // The provider owns the list: it knows which advisors it accepts
+            // for the model this session runs.
+            const auto [provider, model] = active_model_target();
+            const auto support = advisor_capability(provider);
+            if (!support) {
+                return false;
+            }
+            next.title = "ADVISOR";
+            next.current_value = session_advisor_value.empty()
+                ? std::string("off")
+                : session_advisor_value;
+            next.help_text =
+                "The provider runs the advisor inside the turn. Esc closes this panel.";
+            next.options = {
+                {.value = "off", .label = "No advisor",
+                 .description = "Run every turn on the main model alone."},
+            };
+            for (const auto& choice : support->advisor_choices(model)) {
+                next.options.push_back({
+                    .value = choice,
+                    .label = choice,
+                    .description = "Consult this model at the provider's decision points.",
+                });
+            }
+            next.on_select = switch_advisor;
         } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
             next.title = "WORKSPACE";
             next.help_text = "Enter opens selection. Esc closes this panel.";
@@ -7292,6 +7444,9 @@ RunResult run(RunOptions opts) {
         [&](const ThreadRuntime::Ptr& runtime,
             std::shared_ptr<LiveAssistantTimeline> timeline) {
         core::agent::Agent::TurnCallbacks callbacks;
+        // The advisor the session asks for. The agent validates the pairing
+        // against the provider and keeps the advisor for the conversation.
+        callbacks.advisor_override = session_advisor_value;
         callbacks.on_step_begin = [runtime, timeline,
                                    &ui_mutex,
                                    &animation_cv,
@@ -7390,6 +7545,54 @@ RunResult run(RunOptions opts) {
                     if (!has_pending_tools && message.pending) {
                         message.thinking = true;
                         message.show_activity_status = true;
+                    }
+                });
+            };
+        callbacks.on_advisor_event =
+            [runtime, timeline, &update_live_assistant_message](
+                const core::llm::AdvisorEvent& event) {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
+                    if (message.finalized) {
+                        return;
+                    }
+                    // The advisor is a provider-side tool: it shows up with the
+                    // other tools of the turn.
+                    const std::string id = "advisor:" + event.advisor_model;
+                    auto* tool = find_tool_activity(message, id);
+                    if (tool == nullptr) {
+                        message.tools.push_back(make_tool_activity(
+                            id,
+                            "advisor",
+                            "{}",
+                            event.advisor_model.empty()
+                                ? "Consulting the advisor"
+                                : "Consulting " + event.advisor_model));
+                        tool = &message.tools.back();
+                    }
+                    switch (event.state) {
+                    case core::llm::AdvisorCallState::Pending:
+                        tool->status = ToolActivity::Status::Executing;
+                        break;
+                    case core::llm::AdvisorCallState::Reviewed:
+                        tool->status = ToolActivity::Status::Succeeded;
+                        tool->result.summary = event.guidance_readable
+                            ? "The advisor reviewed the conversation."
+                            : "The advisor reviewed the conversation. Its guidance "
+                              "stays with the provider.";
+                        break;
+                    case core::llm::AdvisorCallState::Unavailable:
+                        tool->status = ToolActivity::Status::Failed;
+                        tool->result.summary = event.error_code.empty()
+                            ? "The advisor could not advise."
+                            : "The advisor could not advise: " + event.error_code;
+                        break;
+                    case core::llm::AdvisorCallState::Refused:
+                        tool->status = ToolActivity::Status::Failed;
+                        tool->result.summary = event.detail.empty()
+                            ? "The provider refused to run the advisor."
+                            : "The provider refused to run the advisor: "
+                              + event.detail;
+                        break;
                     }
                 });
             };
@@ -8068,6 +8271,8 @@ RunResult run(RunOptions opts) {
             .switch_profile_fn = switch_profile,
             .effort_status_fn = describe_effort,
             .switch_effort_fn = switch_effort,
+            .advisor_status_fn = describe_advisor,
+            .switch_advisor_fn = switch_advisor,
             .compression_status_fn = describe_compression,
             .switch_compression_fn = switch_compression,
             .open_model_picker_fn = open_model_picker,

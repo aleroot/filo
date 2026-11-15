@@ -67,7 +67,7 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
     check(root, {"default_provider", "default_model_selection", "default_mode", "default_approval_mode",
                  "prompt_editor", "diff_comparer", "ui_banner", "ui_footer", "ui_model_info",
                  "ui_context_usage", "ui_timestamps", "ui_spinner", "ui_reasoning", "ui_theme",
-                 "context_compression", "steering_mode", "prompt_cache_keep_warm", "active_profile",
+                 "context_compression", "advisor_model", "steering_mode", "prompt_cache_keep_warm", "active_profile",
                  "default_router_policy", "session_retention_days", "revert_history_days"}, string, "a string");
     check(root, {"tool_recovery", "strict_tool_schemas"}, boolean, "a boolean");
     check(root, {"tool_output_token_limit"}, integer, "an integer");

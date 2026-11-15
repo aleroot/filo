@@ -131,6 +131,26 @@ inline constexpr std::array<ModelPolicy, 16>
         || normalized[end] == '[';
 }
 
+/// The models that run the prefix check on the thinking blocks they produced:
+/// a change to the request's `system`, `tools` or an earlier message
+/// invalidates that reasoning. Anthropic documents the set at
+/// platform.claude.com/docs/en/build-with-claude/preserved-thinking/prefix-checks.
+///
+/// A model outside the set runs no prefix check, so editing the request's
+/// tools costs it nothing.
+inline constexpr std::array<std::string_view, 7> kPrefixCheckedModels{
+    "fable-5-2", "mythos-5-2", "mythos-5-1", "fable-5-1",
+    "opus-5-5", "sonnet-5-5", "haiku-5-5"};
+
+/// Whether the model runs the prefix check on its own thinking blocks.
+[[nodiscard]] inline bool model_runs_prefix_check(std::string_view model) {
+    const auto normalized = normalized_claude_id(model);
+    if (normalized.empty()) return false;
+    return std::ranges::any_of(kPrefixCheckedModels, [&](std::string_view token) {
+        return matches_generation(normalized, token);
+    });
+}
+
 namespace detail {
 
 struct GenerationVersion {

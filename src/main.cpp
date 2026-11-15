@@ -103,6 +103,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> trusted_tools;
     std::string startup_model;
     std::string startup_effort;
+    std::string startup_advisor;
     std::string sandbox_mode = "off";
     std::vector<std::string> policy_options;
     std::optional<std::string> requested_sandbox_mode;
@@ -212,6 +213,12 @@ int main(int argc, char** argv) {
             return std::format("unknown effort level '{}' (use one of: {})",
                                value, core::llm::kSelectableEffortLevels);
         });
+    auto* advisor_opt = app.add_option(
+        "--advisor",
+        startup_advisor,
+        "Provider-side advisor for this process only: MODEL (or 'off'). The "
+        "provider runs the advisor inside the turn, on its own credential and "
+        "billing. Same as /advisor; does not change saved defaults.");
     auto* sandbox_opt = app.add_option(
         "--sandbox",
         requested_sandbox_mode,
@@ -762,6 +769,9 @@ int main(int argc, char** argv) {
         if (effort_opt->count() > 0) {
             opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
         }
+        if (advisor_opt->count() > 0) {
+            opts.startup_advisor = startup_advisor;
+        }
         opts.steering = startup_steering_policy;
         return exec::acp::run(opts);
     }
@@ -796,6 +806,9 @@ int main(int argc, char** argv) {
         }
         if (effort_opt->count() > 0) {
             opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
+        }
+        if (advisor_opt->count() > 0) {
+            opts.startup_advisor = startup_advisor;
         }
         if (resume_opt->count() > 0) {
             opts.resume_session = resume_session;
@@ -857,6 +870,9 @@ int main(int argc, char** argv) {
         }
         if (effort_opt->count() > 0) {
             run_opts.startup_effort = core::llm::parse_effort_selection(startup_effort);
+        }
+        if (advisor_opt->count() > 0) {
+            run_opts.startup_advisor = startup_advisor;
         }
         const auto run_result = tui::run(run_opts);
 

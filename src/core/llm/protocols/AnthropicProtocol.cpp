@@ -42,11 +42,43 @@ namespace {
             : R"(,"cache_control":{"type":"ephemeral"})";
     }
 
+    /// Appends a beta flag to a comma-separated list unless the list already
+    /// names it.
+    void append_beta_flag(std::string& betas, std::string_view beta) {
+        if (beta.empty()) return;
+        std::size_t start = 0;
+        while (start <= betas.size()) {
+            const auto end = betas.find(',', start);
+            const auto token = core::utils::str::trim_ascii_view(betas.substr(
+                start, end == std::string::npos ? std::string::npos : end - start));
+            if (token == beta) return;
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        if (!betas.empty()) betas += ',';
+        betas.append(beta);
+    }
+
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
         return type == "overloaded_error"
             || type == "rate_limit_error"
             || type == "api_error"
             || type == "timeout_error";
+    }
+
+    /// True when the conversation carries advisor result blocks. Anthropic
+    /// needs the advisor's feature flag to accept them, so a request that
+    /// replays them keeps the flag even when no advisor runs now.
+    [[nodiscard]] bool history_carries_advisor_blocks(
+        const std::vector<Message>& messages) {
+        constexpr std::string_view kAdvisorResultMarker = "\"advisor_tool_result\"";
+        for (const auto& message : messages) {
+            for (const auto& item : message.continuation_items) {
+                if (item.provider != "anthropic" || item.kind != "assistant_content") continue;
+                if (item.payload.find(kAdvisorResultMarker) != std::string::npos) return true;
+            }
+        }
+        return false;
     }
 
     [[nodiscard]] int model_default_max_tokens(std::string_view model,
@@ -156,7 +188,8 @@ namespace {
                     || block["input"].get(input) != simdjson::SUCCESS
                     || arguments_parser.parse(arguments).get_object().get(expected) != simdjson::SUCCESS
                     || simdjson::to_string(input) != simdjson::to_string(expected)) { matches = false; break; }
-            } else if (type != "thinking" && type != "redacted_thinking") {
+            } else if (type != "thinking" && type != "redacted_thinking"
+                       && type != "server_tool_use" && type != "advisor_tool_result") {
                 matches = false; break;
             }
             if (omit_thinking && (type == "thinking" || type == "redacted_thinking")) continue;
@@ -204,13 +237,16 @@ std::string AnthropicSerializer::serialize(
     const bool omit_historical_thinking = options.omit_historical_thinking;
 
     // Tools (Anthropic uses "input_schema" instead of "parameters").
-    if (!req.tools.empty()) {
+    if (!req.tools.empty() || !options.advisor_tool_json.empty()) {
         // Strict tool use constrains the sampler to the declared shape, so a
         // mis-typed argument cannot be generated in the first place. A tool
         // whose contract does not survive the projection is sent unflagged.
         const auto strict_dialect = options.tool_schema_dialect;
         payload += R"(,"tools":[)";
+        bool first_entry = true;
         for (size_t i = 0; i < req.tools.size(); ++i) {
+            if (!first_entry) payload += ',';
+            first_entry = false;
             const auto& def = req.tools[i].function;
             payload += R"({"name":")";
             payload += core::utils::escape_json_string(def.name);
@@ -232,7 +268,12 @@ std::string AnthropicSerializer::serialize(
                 append_cache_control(payload, options);
             }
             payload += '}';
-            if (i + 1 < req.tools.size()) payload += ',';
+        }
+        // The advisor is a provider-side server tool, declared after the client
+        // tools so the cache breakpoint stays on the last client tool.
+        if (!options.advisor_tool_json.empty()) {
+            if (!first_entry) payload += ',';
+            payload += options.advisor_tool_json;
         }
         payload += ']';
     }
@@ -564,6 +605,20 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             std::string_view text;
             current_text_ = content_block["text"].get(text) == simdjson::SUCCESS ? std::string(text) : "";
             result.text = *current_text_;
+        } else if (type_v == "server_tool_use" || type_v == "advisor_tool_result") {
+            // Provider-side blocks are replayed verbatim: Anthropic requires
+            // the advisor's blocks to be echoed back in later requests.
+            replay_blocks_.push_back(simdjson::to_string(content_block));
+            if (type_v == "server_tool_use") {
+                std::string_view name;
+                if (content_block["name"].get(name) == simdjson::SUCCESS
+                    && name == anthropic::kAdvisorToolName) {
+                    result.advisor_event = AdvisorEvent{.state = AdvisorCallState::Pending};
+                }
+            } else {
+                result.advisor_event = anthropic::advisor_result_event(
+                    simdjson::to_string(content_block));
+            }
         } else {
             replay_complete_ = false;
         }
@@ -699,9 +754,53 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 std::string AnthropicProtocol::serialize(const ChatRequest& req) const {
     AnthropicSerializationOptions options;
     options.extra_fields = reasoning_emitter();
+    options.advisor_tool_json = advisor_tool_json(req);
     return AnthropicSerializer::serialize(req, default_max_tokens_, options);
 }
 AnthropicReasoningEmitter AnthropicProtocol::reasoning_emitter() const { return {}; }
+
+std::string AnthropicProtocol::advisor_tool_json(const ChatRequest& req) const {
+    if (!req.advisor || !advisor_support_ || advisor_refused_) return {};
+    return advisor_support_->tool_definition_json(*req.advisor);
+}
+
+std::vector<std::string_view> AnthropicProtocol::advisor_feature_flags_for_request() const {
+    if (!advisor_support_) return {};
+    // The flag must accompany any request whose history carries advisor
+    // blocks: Anthropic needs it to accept those blocks, even when the
+    // conversation no longer declares an advisor.
+    if (!advisor_ && !advisor_history_present_) return {};
+    return advisor_support_->feature_flags();
+}
+
+void AnthropicProtocol::prepare_request(ChatRequest& request) {
+    advisor_ = request.advisor;
+    advisor_history_present_ = history_carries_advisor_blocks(request.messages);
+    advisor_refused_ = false;
+    advisor_refusal_detail_.clear();
+}
+
+bool AnthropicProtocol::rebuilds_after_rejection(const HttpResponse& response) {
+    if (!advisor_ || advisor_refused_) return false;
+    if (!anthropic::advisor_refused_by_response(response.status_code, response.body)) {
+        return false;
+    }
+    // The provider will not run this advisor. The request goes again without
+    // it, so the turn continues instead of failing on a capability the
+    // account cannot use.
+    advisor_refused_ = true;
+    advisor_refusal_detail_ = anthropic::advisor_refusal_detail(response.body);
+    return true;
+}
+
+std::vector<StreamChunk> AnthropicProtocol::rejection_notice() const {
+    if (!advisor_refused_) return {};
+    AdvisorEvent event{.state = AdvisorCallState::Refused};
+    if (advisor_) event.advisor_model = advisor_->model;
+    event.detail = advisor_refusal_detail_;
+    return {StreamChunk::make_advisor_event(std::move(event))};
+}
+
 int AnthropicSerializer::max_tokens(const ChatRequest& req, int fallback) {
     return req.max_tokens.value_or(model_default_max_tokens(req.model, fallback));
 }
@@ -710,6 +809,10 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
     cpr::Header headers{{"anthropic-version", "2023-06-01"},
                         {"Content-Type", "application/json"}, {"Accept", "text/event-stream"}};
     for (const auto& [key, value] : auth.headers) headers[key] = value;
+    std::string betas;
+    if (const auto it = headers.find("anthropic-beta"); it != headers.end()) betas = it->second;
+    for (const auto flag : advisor_feature_flags_for_request()) append_beta_flag(betas, flag);
+    if (!betas.empty()) headers["anthropic-beta"] = betas;
     return headers;
 }
 
@@ -761,6 +864,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
         result.chunks.push_back(std::move(chunk));
     }
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
+    if (r.advisor_event) {
+        auto event = *r.advisor_event;
+        if (event.advisor_model.empty() && advisor_) event.advisor_model = advisor_->model;
+        result.chunks.push_back(StreamChunk::make_advisor_event(std::move(event)));
+    }
     if (!preserves_native_assistant_content()) {
         std::erase_if(r.continuation_items, [](const auto& item) { return item.kind == "assistant_content"; });
     }
@@ -789,7 +897,7 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
 }
 
 std::unique_ptr<ApiProtocolBase> AnthropicProtocol::clone() const {
-    return std::make_unique<AnthropicProtocol>(default_max_tokens_);
+    return std::make_unique<AnthropicProtocol>(default_max_tokens_, advisor_support_);
 }
 
 void AnthropicProtocol::reset_state() {

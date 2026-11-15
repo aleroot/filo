@@ -403,6 +403,7 @@ std::string SubagentOrchestrator::execute_task(
         .permission_check = adapt_permission_check(context),
         .on_event = context.on_subagent_event,
         .effort = context.effort,
+        .advisor = context.advisor,
         .execution_journal = context.execution_journal,
         .execution_lease = read_only_slot,
         .isolated_context = plan->isolated,

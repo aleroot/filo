@@ -5,6 +5,7 @@
 #include "../context/ContextWindowTracker.hpp"
 #include "../context/SessionContext.hpp"
 #include "../hooks/HookManager.hpp"
+#include "../llm/Advisor.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../memory/MemoryPolicy.hpp"
 #include "../power/SleepInhibitor.hpp"
@@ -124,6 +125,13 @@ public:
         bool allow_tool_calls = true;
         // Raised only for an accepted final answer, after completion hooks pass.
         std::function<void(const std::string&)> on_final_response = {};
+        /// The advisor model this turn should consult, as the provider names it
+        /// (empty = none). The agent validates the pairing against the provider
+        /// and keeps the advisor a conversation started with.
+        std::string advisor_override{};
+        /// A provider-side advisor reported progress. The event is
+        /// provider-neutral: it says what happened, not who happened to do it.
+        std::function<void(const core::llm::AdvisorEvent&)> on_advisor_event = {};
         std::function<bool()> cancellation_requested = {};
     };
 
@@ -375,6 +383,10 @@ public:
     void set_effort_level(std::string effort);
     [[nodiscard]] std::string get_effort_level() const;
 
+    /// The advisor this conversation runs, once one has been declared.
+    /// Empty before the first turn that asks for one.
+    [[nodiscard]] std::optional<std::string> advisor_in_use() const;
+
     /// Execute one repository-owned verification recipe outside the normal
     /// conversation loop. Used by the goal engine so it shares AUTO's trusted
     /// receipt path instead of executing model-authored shell strings.
@@ -523,6 +535,13 @@ private:
         // a delegated worker can record into its parent's tracker; a worker
         // that borrows one never publishes it (see inherit_change_tracker).
         std::shared_ptr<core::changes::TurnChangeTracker> change_tracker;
+        // How many times this turn resumed a paused server-side advisor call.
+        int advisor_resumes = 0;
+        // The advisor this turn declares. A delegated worker inherits it and
+        // checks the pairing against its own model.
+        std::string advisor_model = {};
+        // Why the turn runs without the advisor the session asked for.
+        std::string advisor_refusal = {};
     };
 
     void step(std::function<void(const std::string&)> text_callback,
@@ -571,6 +590,21 @@ private:
     // through a tool-use/result exchange. Caller must hold history_mutex_.
     void capture_turn_provider_snapshot_unlocked(
         TurnState& turn_state, const TurnCallbacks& turn_callbacks);
+
+    /// Resolves the advisor for this turn and keeps the conversation's
+    /// declaration in step with it. The provider owns the capability; this
+    /// only decides what to declare.
+    void resolve_turn_advisor(
+        TurnState& turn_state,
+        const TurnCallbacks& turn_callbacks,
+        std::span<const core::llm::Message> conversation);
+
+    /// The advisor this turn declares. A turn declares one advisor for all of
+    /// its steps: the request's tool list must not change under a turn.
+    core::llm::AdvisorPlan advisor_plan_for_turn(
+        TurnState& turn_state,
+        const TurnCallbacks& turn_callbacks,
+        std::span<const core::llm::Message> conversation);
 
     [[nodiscard]] AutoGraphOrchestrator::Hooks make_auto_graph_hooks(
         std::shared_ptr<core::llm::LLMProvider> provider,
@@ -689,6 +723,19 @@ private:
     const std::shared_ptr<core::changes::TurnChangeTracker> inherited_change_tracker_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
+    // The advisor this conversation declares in its requests. The advisor is
+    // a tool declaration, and editing it edits the request the provider's
+    // signed reasoning is bound to, so a change needs the provider's word
+    // that it can absorb one.
+    mutable std::mutex advisor_mutex_;
+    std::optional<std::string> advisor_declared_;
+    // True when the provider refused to run the conversation's advisor. The
+    // conversation goes on without one, and does not ask again until it is
+    // cleared or compacted.
+    bool advisor_refused_ = false;
+    // The last advisor refusal the user was told about, so a repeated turn
+    // does not repeat the notice.
+    std::string advisor_refusal_reported_;
     std::uint64_t history_revision_ = 0;
     std::uint64_t conversation_generation_ = 0;
     bool compaction_in_progress_ = false;

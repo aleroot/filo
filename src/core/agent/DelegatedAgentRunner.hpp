@@ -77,6 +77,9 @@ public:
         PermissionCheck permission_check = {};
         EventCallback on_event = {};
         std::string effort = {};
+        /// The advisor the worker consults. A worker inherits the parent's
+        /// advisor and applies the same pairing check against its own model.
+        std::string advisor = {};
         std::shared_ptr<core::session::ExecutionJournal> execution_journal = {};
         // Resources such as fan-out slots belong to the invocation, including
         // the time a cancelled provider takes to actually return.

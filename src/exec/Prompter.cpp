@@ -630,6 +630,10 @@ RunDiagnostics run_for_test(const RunOptions& options,
     if (options.startup_effort.has_value()) {
         agent->set_effort_level(*options.startup_effort);
     }
+    // The provider-side advisor this process asked for.
+    const auto startup_advisor = options.startup_advisor.has_value()
+        ? core::llm::parse_advisor_selection(*options.startup_advisor)
+        : std::optional<std::string>{};
 
     const auto trust_resolution =
         core::cli::resolve_trust_flags(options.yolo, options.trusted_tools);
@@ -895,6 +899,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
                         success));
                 }
             },
+            .advisor_override = startup_advisor.value_or(std::string{}),
         });
 
     {

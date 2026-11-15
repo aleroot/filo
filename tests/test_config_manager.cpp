@@ -109,6 +109,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.session_retention_days;
         case core::config::ManagedSettingKey::RevertHistoryDays:
             return settings.revert_history_days;
+        case core::config::ManagedSettingKey::AdvisorModel:
+            return settings.advisor_model;
     }
     return settings.default_mode;
 }
@@ -159,6 +161,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
         case core::config::ManagedSettingKey::SessionRetentionDays:
         case core::config::ManagedSettingKey::RevertHistoryDays:
             return {};  // User-only: not part of AppConfig.
+        case core::config::ManagedSettingKey::AdvisorModel:
+            return config.advisor_model;
     }
     return config.default_mode;
 }
@@ -1371,6 +1375,44 @@ TEST_CASE("ConfigManager persists managed settings and reset removes empty setti
                                             &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().context_compression == "off");
+    REQUIRE_FALSE(fs::exists(user_settings));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager keeps the advisor in the user settings",
+          "[config][advisor]") {
+    const fs::path sandbox = make_temp_dir("filo_advisor_config");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path user_settings = xdg_home / "filo" / "settings.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    // The advisor is saved the way Claude Code saves it: in the user
+    // settings, so a cloned repository never decides it.
+    std::string error;
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::AdvisorModel,
+                                            std::string("fable"),
+                                            project_dir,
+                                            &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().advisor_model == "fable");
+    REQUIRE(fs::exists(user_settings));
+    REQUIRE(read_text(user_settings).find("\"advisor_model\"") != std::string::npos);
+
+    // Clearing it leaves no advisor behind.
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::AdvisorModel,
+                                            std::nullopt,
+                                            project_dir,
+                                            &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().advisor_model.empty());
     REQUIRE_FALSE(fs::exists(user_settings));
 
     fs::remove_all(sandbox);

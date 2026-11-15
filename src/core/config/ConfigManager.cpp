@@ -64,7 +64,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 21> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 22> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -90,6 +90,9 @@ static constexpr std::array<ManagedSettingDescriptor, 21> kManagedSettingDescrip
     { ManagedSettingKey::ContextCompression,
       "context_compression",
       &ManagedSettings::context_compression },
+    { ManagedSettingKey::AdvisorModel,
+      "advisor_model",
+      &ManagedSettings::advisor_model },
     { ManagedSettingKey::SteeringMode,
       "steering_mode",
       &ManagedSettings::steering_mode },
@@ -189,6 +192,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::ContextCompression:
             config.context_compression = value;
+            break;
+        case ManagedSettingKey::AdvisorModel:
+            config.advisor_model = value;
             break;
         case ManagedSettingKey::SteeringMode:
             config.steering_mode = value;
@@ -620,6 +626,7 @@ AppConfig make_default_config() {
     config.tool_recovery = true;
     config.strict_tool_schemas = false;
     config.context_compression = "off";
+    config.advisor_model = "";
     config.router = core::llm::routing::make_default_router_config();
 
     auto add_provider = [&](std::string name, std::string model,
@@ -1262,6 +1269,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed,
     if (!doc["context_compression"].get(value)) {
         parsed.context_compression = std::string(value);
     }
+    if (!doc["advisor_model"].get(value)) {
+        parsed.advisor_model = std::string(value);
+    }
     if (!doc["steering_mode"].get(value)) {
         parsed.steering_mode = std::string(value);
     }
@@ -1652,6 +1662,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;
+    }
+    if (!overlay.advisor_model.empty()) {
+        base.advisor_model = overlay.advisor_model;
     }
     for (const auto& [name, provider] : overlay.providers) {
         auto it = base.providers.find(name);

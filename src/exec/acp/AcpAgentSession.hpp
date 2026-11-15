@@ -21,6 +21,8 @@ public:
         /// A resumed conversation keeps its start time: the session file is
         /// named from it, and a new time would write a second file.
         std::string created_at;
+        /// The provider-side advisor this session consults; unset means none.
+        std::optional<std::string> advisor;
     };
 
     AgentSession(std::shared_ptr<core::agent::Agent> agent,
@@ -91,6 +93,8 @@ private:
     std::string provider_name_;  // guarded by state_mu_
     std::string created_at_;
     Options options_;
+    /// The provider-side advisor this session consults.
+    std::optional<std::string> advisor_;
     std::vector<core::llm::Message> replay_;
     std::vector<std::string> allow_rules_;
 

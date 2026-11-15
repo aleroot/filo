@@ -73,6 +73,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto profile_target = std::make_shared<std::string>();
     auto effort_target  = std::make_shared<std::string>();
     auto effort_value   = std::make_shared<std::string>("auto");
+    auto advisor_target = std::make_shared<std::string>();
+    auto advisor_value  = std::make_shared<std::string>("none");
     auto compression_target = std::make_shared<std::string>();
     auto compression_value = std::make_shared<std::string>("off");
     auto picker_opened  = std::make_shared<bool>(false);
@@ -138,6 +140,15 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *effort_target = std::string(level);
             *effort_value = std::string(level);
             return std::string("Set effort to ") + std::string(level);
+        },
+        .advisor_status_fn = [advisor_value]() {
+            return std::string("Advisor: ") + *advisor_value
+                + "\n        Accepted advisors: fable, opus";
+        },
+        .switch_advisor_fn = [advisor_target, advisor_value](std::string_view model) {
+            *advisor_target = std::string(model);
+            *advisor_value = std::string(model);
+            return std::string("Advisor set to ") + std::string(model) + ".";
         },
         .compression_status_fn = [compression_value]() {
             return std::string("Compression: ") + *compression_value
@@ -1167,6 +1178,42 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*effort_target == "low");
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Set effort to low"));
+    }
+
+    SECTION("/advisor reports the advisor and the accepted ones") {
+        *mock_history = "";
+        *option_picker_command = "";
+        *advisor_value = "fable";
+        ctx.text = "/advisor";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Advisor: fable"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Accepted advisors: fable, opus"));
+    }
+
+    SECTION("/advisor opens the option picker when the callback handles it") {
+        *mock_history = "";
+        *option_picker_command = "";
+        ctx.open_command_option_picker_fn =
+            [option_picker_command](std::string_view command_name) {
+                *option_picker_command = std::string(command_name);
+                return true;
+            };
+        ctx.text = "/advisor";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*option_picker_command == "/advisor");
+        REQUIRE(mock_history->empty());
+    }
+
+    SECTION("/advisor sets the advisor") {
+        *mock_history = "";
+        *advisor_target = "";
+        ctx.text = "/advisor fable";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*advisor_target == "fable");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Advisor set to fable"));
     }
 
     SECTION("/compression opens picker when callback handles it") {

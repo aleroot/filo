@@ -77,6 +77,9 @@ public:
         /// the worker tracks only itself and reports nothing.
         std::shared_ptr<core::changes::TurnChangeTracker> change_tracker = {};
         std::string effort = {};
+        /// The advisor the parent conversation runs. A worker inherits it and
+        /// applies the same pairing check against its own model.
+        std::string advisor = {};
     };
 
     struct ExecutionRequest {

@@ -45,10 +45,13 @@ struct ClaudeSerializer {
     /// @p lineage, when given, adds Claude Code's conversation lineage: billing
     /// lineage fields, `metadata.user_id` (with an account id in
     /// `auth_properties`) and `diagnostics.previous_message_id`.
+    /// @p advisor_tool_json, when given, is the provider's advisor declaration,
+    /// already rendered as one JSON tool entry.
     static std::string serialize(const ChatRequest& req, int default_max_tokens = kAnthropicDefaultMaxTokens,
                                  const ClaudeThinkingConfig& thinking = {},
                                  PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
-                                 const claude::RequestLineage* lineage = nullptr);
+                                 const claude::RequestLineage* lineage = nullptr,
+                                 std::string_view advisor_tool_json = {});
 
     /// The body before Claude Code's signature, for callers that reshape it.
     struct UnsignedBody {
@@ -59,7 +62,8 @@ struct ClaudeSerializer {
                                            int default_max_tokens = kAnthropicDefaultMaxTokens,
                                            const ClaudeThinkingConfig& thinking = {},
                                            PromptCacheTtl cache_ttl = PromptCacheTtl::Standard,
-                                           const claude::RequestLineage* lineage = nullptr);
+                                           const claude::RequestLineage* lineage = nullptr,
+                                           std::string_view advisor_tool_json = {});
 };
 
 class ClaudeProtocol : public AnthropicProtocol {
@@ -69,7 +73,17 @@ public:
     explicit ClaudeProtocol(ClaudeThinkingConfig thinking = {}, int default_max_tokens = kAnthropicDefaultMaxTokens,
                             PromptCacheTtlPolicy cache_ttl = {},
                             std::shared_ptr<claude_threads::ThreadSession> threads = {})
-        : AnthropicProtocol(default_max_tokens), thinking_(thinking), cache_ttl_(cache_ttl),
+        // This wire asks the provider to drop the reasoning a changed request
+        // prefix invalidated, so it can change the request's tools mid
+        // conversation. Only the models whose requests carry that setting can
+        // do it: the others reject a request whose prefix moved.
+        : AnthropicProtocol(default_max_tokens,
+                             std::make_shared<anthropic::AnthropicAdvisorSupport>(
+                                 [](std::string_view model) {
+                                     return claude_wire_policy(model)
+                                         .reasoning_bound_to_prefix;
+                                 })),
+          thinking_(thinking), cache_ttl_(cache_ttl),
           thread_(std::move(threads)) {}
     /// Also plans the request as a thread create or continue when it may be
     /// one. Claude overrides neither media nor context preparation, so the

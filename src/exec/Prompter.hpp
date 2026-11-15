@@ -27,6 +27,8 @@ struct RunOptions {
     std::optional<std::string> startup_model;
     /// Parsed --effort selection ("" = auto, "none" = off); unset keeps the default.
     std::optional<std::string> startup_effort;
+    /// Parsed --advisor selection; unset keeps the default (no advisor).
+    std::optional<std::string> startup_advisor;
     core::context::SteeringPolicy steering_policy;
 
     // When present and empty, resume the most recent session.

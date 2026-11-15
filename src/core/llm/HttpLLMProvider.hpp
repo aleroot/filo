@@ -111,6 +111,9 @@ public:
     [[nodiscard]] bool should_estimate_cost() const override;
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
+    /// The wire protocol's advisor capability, when it has one.
+    [[nodiscard]] std::shared_ptr<const IAdvisorSupport>
+    advisor_support() const override;
     /// The protocol's profile, except that a loopback endpoint (Ollama,
     /// LM Studio, a llama.cpp server) bills no cache whatever it speaks.
     [[nodiscard]] PromptCacheProfile prompt_cache_profile(

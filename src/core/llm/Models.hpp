@@ -26,6 +26,7 @@
 #include "PromptCacheProfile.hpp"
 #include "ResponseFormat.hpp"
 #include "ReasoningCapabilities.hpp"
+#include "Advisor.hpp"
 
 namespace core::llm {
 
@@ -511,6 +512,9 @@ struct StreamChunk {
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
     std::vector<ContinuationItem> continuation_items = {}; // Opaque signed/encrypted reasoning state
     std::optional<AuthenticationRecoveryRequest> authentication_recovery = {};
+    // A provider-side advisor consultation the provider reported. The core
+    // never learns which provider ran it, only what it produced.
+    std::optional<AdvisorEvent> advisor_event = {};
     // Wire-protocol family that produced reasoning_content (for example
     // "kimi" or "dashscope"). This prevents reasoning text from one provider
     // being replayed through another provider after a live model switch.
@@ -587,6 +591,12 @@ struct StreamChunk {
             .is_error = false,
         };
     }
+    /// One advisor consultation the provider reported.
+    [[nodiscard]] static StreamChunk make_advisor_event(AdvisorEvent event) {
+        StreamChunk chunk;
+        chunk.advisor_event = std::move(event);
+        return chunk;
+    }
 };
 
 struct Message {
@@ -657,6 +667,11 @@ struct ChatRequest {
     /// Output verbosity the serving endpoint's live catalog prescribes for
     /// `model`, sent as `text.verbosity`. Copied for the same reason.
     std::optional<std::string> catalog_verbosity = {};
+    /// A provider-side advisor: the provider runs a second model inside this
+    /// turn, on its own credential. Only the provider's wire knows how to
+    /// declare one, so the request carries the specification and the
+    /// provider's adapter renders it.
+    std::optional<AdvisorSpec> advisor = {};
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

@@ -128,7 +128,9 @@ std::string describe_minimax_error(int http_status, std::string_view body) {
 
 MiniMaxProtocol::MiniMaxProtocol(bool subscription, std::string default_effort,
                                std::shared_ptr<IMiniMaxUsageSource> usage, int context_window)
-    : AnthropicProtocol(kMiniMaxOutputLimit), context_window_(context_window), subscription_(subscription),
+    // MiniMax speaks Anthropic's shape but has no Anthropic server tools, so
+    // it offers no advisor capability.
+    : AnthropicProtocol(kMiniMaxOutputLimit, nullptr), context_window_(context_window), subscription_(subscription),
       default_effort_(std::move(default_effort)),
       usage_(usage ? std::move(usage) : make_minimax_usage_source()) {
     if (context_window_ != kMiniMaxContextWindow && context_window_ != kMiniMaxConservativeContextWindow) {

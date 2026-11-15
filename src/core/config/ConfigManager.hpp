@@ -36,6 +36,7 @@ enum class ManagedSettingKey {
     UiTheme,
     AutoCompactThreshold,
     ContextCompression,
+    AdvisorModel,
     SteeringMode,
     PromptCacheGuardTokens,
     PromptCacheNoticeSeconds,
@@ -73,6 +74,8 @@ struct ManagedSettings {
     std::optional<std::string> ui_theme;
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
+    /// The provider-side advisor the session asks for, empty for none.
+    std::optional<std::string> advisor_model;
     std::optional<std::string> steering_mode;
     std::optional<std::string> prompt_cache_guard_tokens;
     std::optional<std::string> prompt_cache_notice_seconds;
@@ -311,6 +314,8 @@ struct AppConfig {
     bool        strict_tool_schemas = false;
     bool        strict_tool_schemas_explicit = false;
     std::string context_compression;
+    // The provider-side advisor the session asks for, empty for none.
+    std::string advisor_model;
     // Cold prompt-cache protection; unset keeps the built-in defaults of
     // core::agent::PromptCacheGuardSettings. Zero turns each part off.
     //   prompt_cache_guard_tokens   — context size from which an expired

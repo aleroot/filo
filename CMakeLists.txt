@@ -320,6 +320,8 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/QwenSubscriptionProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
+    src/core/llm/protocols/AnthropicAdvisor.cpp
+    src/core/llm/advisor/AdvisorService.cpp
     src/core/llm/protocols/ClaudeProtocol.cpp
     src/core/llm/protocols/ClaudeMessageThreads.cpp
     src/core/llm/continuation/ThreadLedger.cpp
@@ -829,6 +831,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_grok_enhanced.cpp
     tests/test_gemini_provider.cpp
     tests/test_claude_provider.cpp
+    tests/test_anthropic_advisor.cpp
+    tests/test_agent_advisor.cpp
     tests/test_message_threads.cpp
     tests/test_mistral_provider.cpp
     tests/test_mimo_provider.cpp
@@ -937,6 +941,7 @@ set(FILO_UNIT_TEST_SOURCES
 )
 
 set(FILO_INTEGRATION_TEST_SOURCES
+    tests/test_integration_advisor_live.cpp
     tests/test_integration_daemon_reliability.cpp
     tests/test_integration_mcp_client_session.cpp
     tests/test_integration_prompt_input.cpp

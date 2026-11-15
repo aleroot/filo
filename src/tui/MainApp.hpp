@@ -30,6 +30,9 @@ struct RunOptions {
     /// Parsed --effort selection ("" = auto, "none" = off), applied as if the
     /// user ran /effort before the first turn. Unset keeps the default.
     std::optional<std::string> startup_effort;
+    /// Parsed --advisor selection, applied as if the user ran /advisor before
+    /// the first turn. Unset keeps the default (no advisor).
+    std::optional<std::string> startup_advisor;
     /// Explicit process sandbox mode; supplied by the application composition root.
     core::landrun::LandrunMode landrun_mode{core::landrun::LandrunMode::off};
     core::landrun::LandrunPolicyEnvironment landrun_environment;

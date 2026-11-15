@@ -77,6 +77,10 @@ struct CommandContext {
     std::function<std::string(std::string_view)> switch_profile_fn = {};
     std::function<std::string()> effort_status_fn = {};
     std::function<std::string(std::string_view)> switch_effort_fn = {};
+    /// The provider-side advisor this session runs, and the ones the active
+    /// provider accepts.
+    std::function<std::string()> advisor_status_fn = {};
+    std::function<std::string(std::string_view)> switch_advisor_fn = {};
     std::function<std::string()> compression_status_fn = {};
     std::function<std::string(std::string_view)> switch_compression_fn = {};
     std::function<bool()> open_model_picker_fn = {};

@@ -129,6 +129,18 @@ public:
     }
 
     /**
+     * @brief The provider's advisor capability, when its wire has one.
+     *
+     * Null means the provider cannot run a second model inside a turn, so the
+     * core never offers an advisor for it. The provider answers with the wire
+     * protocol's capability; nothing else in Filo knows the vendor details.
+     */
+    [[nodiscard]] virtual std::shared_ptr<const IAdvisorSupport>
+    advisor_support() const {
+        return {};
+    }
+
+    /**
      * @brief Reset provider-managed conversation continuity state.
      *
      * Some providers maintain opaque response-chain state or server-side prompt
