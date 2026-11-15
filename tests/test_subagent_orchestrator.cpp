@@ -523,6 +523,11 @@ TEST_CASE("A delegated worker names itself on its requests", "[agent][orchestrat
     REQUIRE(requests.size() == 1);
     // codex-rs names the delegated session so the backend can attribute it.
     CHECK(requests[0].subagent_label == "general");
+    // The worker owns its conversation: it never continues the thread of the
+    // conversation that spawned it, and it keeps its own prompt cache.
+    CHECK(requests[0].conversation_scope.starts_with("worker:"));
+    CHECK(requests[0].conversation_scope != requests[0].session_id);
+    CHECK(requests[0].continuation_scope == requests[0].conversation_scope);
 }
 
 TEST_CASE("SubagentOrchestrator forwards profile response schemas to the provider", "[agent][orchestration][structured]") {

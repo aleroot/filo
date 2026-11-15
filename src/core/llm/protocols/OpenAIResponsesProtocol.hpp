@@ -161,7 +161,7 @@ protected:
 
     void share_continuity_state_with(OpenAIResponsesProtocol& cloned) const {
         cloned.shared_state_ = shared_state_;
-        cloned.active_session_id_ = active_session_id_;
+        cloned.active_conversation_ = active_conversation_;
     }
 
     [[nodiscard]] std::string serialize_with_input_items(
@@ -181,7 +181,7 @@ protected:
     std::shared_ptr<SharedState> shared_state_ = std::make_shared<SharedState>();
 
 private:
-    std::string active_session_id_;
+    std::string active_conversation_;
     bool saw_text_delta_ = false;
     bool stream_retry_vetoed_ = false;
     std::string in_progress_response_id_;

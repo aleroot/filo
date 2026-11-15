@@ -1571,6 +1571,48 @@ TEST_CASE("Codex names a delegated worker in the header and the client metadata"
     CHECK(websocket_headers.at("x-openai-subagent") == "explore");
 }
 
+TEST_CASE("Codex gives a delegated worker its own thread",
+          "[openai][responses][codex][subagent]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "session-parent";
+    request.conversation_scope = "worker:task_1";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    // codex-rs gives every subagent session its own thread id; the session
+    // stays the one the worker was spawned from.
+    const auto payload = codex.serialize(request);
+    CHECK_THAT(payload,
+               Catch::Matchers::ContainsSubstring(R"("thread_id":"worker:task_1")"));
+    CHECK_THAT(payload,
+               Catch::Matchers::ContainsSubstring(R"("session_id":"session-parent")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+                            R"("x-codex-window-id":"worker:task_1:0")"));
+
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("thread-id") == "worker:task_1");
+    CHECK(headers.at("session_id") == "session-parent");
+    CHECK(headers.at("x-client-request-id") == "worker:task_1");
+
+    // The worker keeps its own prompt cache: it never shares the one of the
+    // conversation that spawned it.
+    CodexResponsesProtocol state;
+    ChatRequest parent;
+    parent.session_id = "session-parent";
+    parent.messages = {{.role = "user", .content = "hi"}};
+    state.prepare_request(parent);
+    CHECK(parent.prompt_cache_key == "session-parent");
+
+    ChatRequest worker;
+    worker.session_id = "session-parent";
+    worker.conversation_scope = "worker:task_1";
+    worker.messages = {{.role = "user", .content = "hi"}};
+    state.prepare_request(worker);
+    CHECK(worker.prompt_cache_key == "worker:task_1");
+}
+
 TEST_CASE("Codex resolves the service tier against the catalog and hints routing",
           "[openai][responses][codex][service-tier]") {
     const auto tier_of = [](const std::string& payload) -> std::string {

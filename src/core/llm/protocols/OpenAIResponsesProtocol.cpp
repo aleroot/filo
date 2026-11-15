@@ -360,6 +360,16 @@ void append_function_call_output_item(std::string& payload,
     return "turn:" + request.transport_turn_id;
 }
 
+/// The conversation a request belongs to: its thread, its prompt cache and
+/// its session state. A delegated worker owns its own conversation, so it
+/// never continues the one that spawned it; every other request shares the
+/// session's.
+[[nodiscard]] std::string conversation_of(const ChatRequest& request) {
+    return request.conversation_scope.empty()
+        ? request.session_id
+        : request.conversation_scope;
+}
+
 // ── `ultra` ────────────────────────────────────────────────────────────────
 // `ultra` is a client-side selection the API rejects ("Invalid value:
 // 'ultra'"). With a catalog that describes it, Filo follows Codex: drive the
@@ -1245,12 +1255,12 @@ private:
 void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
     std::scoped_lock lock(shared_state_->mutex);
 
-    active_session_id_ = req.session_id;
-    auto& session = shared_state_->sessions[active_session_id_];
+    active_conversation_ = conversation_of(req);
+    auto& session = shared_state_->sessions[active_conversation_];
     if (session.prompt_cache_key.empty()) {
-        session.prompt_cache_key = req.session_id.empty()
+        session.prompt_cache_key = active_conversation_.empty()
             ? generate_prompt_cache_key()
-            : req.session_id;
+            : active_conversation_;
     }
     if (req.prompt_cache_key.empty()) {
         req.prompt_cache_key = session.prompt_cache_key;
@@ -1285,7 +1295,7 @@ void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
 void OpenAIResponsesProtocol::reset_state() {
     std::scoped_lock lock(shared_state_->mutex);
     shared_state_->sessions.clear();
-    active_session_id_.clear();
+    active_conversation_.clear();
     OpenAIResponsesProtocol::reset_attempt_state();
 }
 
@@ -1594,14 +1604,15 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     options.tools_in_input = responses_lite(request);
     std::string payload = serialize_with_input_items(
         request, input_items, previous_response_id_override, options);
-    const std::string thread_id = request.session_id.empty()
+    const std::string thread_id = conversation_of(request).empty()
         ? std::string("filo")
-        : request.session_id;
+        : conversation_of(request);
     const std::string window_id = thread_id + ":0";
     std::string metadata = R"("client_metadata":{"x-codex-installation-id":")";
     metadata += core::utils::escape_json_string(installation_id());
     metadata += R"(","session_id":")";
-    metadata += core::utils::escape_json_string(thread_id);
+    metadata += core::utils::escape_json_string(
+        request.session_id.empty() ? thread_id : request.session_id);
     metadata += R"(","thread_id":")";
     metadata += core::utils::escape_json_string(thread_id);
     metadata += R"(","x-codex-window-id":")";
@@ -1642,8 +1653,13 @@ std::string CodexResponsesProtocol::request_service_tier(const ChatRequest& requ
 void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
                                              const ChatRequest& request,
                                              [[maybe_unused]] std::string_view base_url) {
-    const std::string thread_id = request.session_id.empty()
+    // The thread is the conversation the request belongs to: a delegated
+    // worker owns its own thread, as a Codex subagent session does.
+    const std::string thread_id = conversation_of(request).empty()
         ? std::string("filo")
+        : conversation_of(request);
+    const std::string session_id = request.session_id.empty()
+        ? thread_id
         : request.session_id;
 
     std::string turn_state;
@@ -1675,8 +1691,8 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     else headers.erase("x-openai-internal-codex-responses-lite");
     // Current Codex sends the hyphenated names. Filo has always sent the
     // underscore form as well, so it stays.
-    headers["session_id"] = thread_id;
-    headers["session-id"] = thread_id;
+    headers["session_id"] = session_id;
+    headers["session-id"] = session_id;
     headers["thread-id"] = thread_id;
     headers["User-Agent"] = core::auth::codex_cli::user_agent();
     // codex-rs client.rs build_routing_hint_header, sent with ChatGPT auth on
@@ -2402,7 +2418,7 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
         && response.status_code == 200
         && !last_response_id_.empty()) {
         std::scoped_lock lock(shared_state_->mutex);
-        shared_state_->sessions[active_session_id_].previous_response_id = last_response_id_;
+        shared_state_->sessions[active_conversation_].previous_response_id = last_response_id_;
     }
 }
 

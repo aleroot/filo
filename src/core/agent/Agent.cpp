@@ -2477,7 +2477,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.session_id = step_session_context.session_id;
             request.transport_turn_id = turn_state->transport_turn_id;
             request.subagent_label = subagent_label_;
-            request.continuation_scope = step_session_context.session_id;
+            // A delegated worker owns its conversation: it continues its own
+            // thread and keeps its own prompt cache, never the ones of the
+            // conversation that spawned it.
+            request.conversation_scope = conversation_scope_.empty()
+                ? step_session_context.session_id
+                : conversation_scope_;
+            request.continuation_scope = request.conversation_scope;
             request.prompt_cache_scope =
                 holds_user_conversation_ && step_session_context.delegation_depth == 0
                 ? core::llm::PromptCacheScope::Conversation

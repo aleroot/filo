@@ -480,6 +480,14 @@ public:
         subagent_label_ = std::move(label);
     }
 
+    /// The conversation this agent runs as. Empty for the conversation the
+    /// user talks to; a delegated worker owns its own conversation and never
+    /// continues the one that spawned it.
+    void set_conversation_scope(std::string scope) {
+        std::lock_guard lock(history_mutex_);
+        conversation_scope_ = std::move(scope);
+    }
+
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
 
     void set_efficiency_decision_fn(
@@ -791,6 +799,9 @@ private:
     /// The delegated worker this agent runs as, empty for a conversation's
     /// own agent. Travels on the request so the provider's wire can name it.
     std::string subagent_label_;
+    /// The conversation this agent runs as, empty for the conversation the
+    /// user talks to. A delegated worker owns its own conversation.
+    std::string conversation_scope_;
     /// Whether this agent holds the user's conversation, whose prompt prefix
     /// is worth the longest cache retention; false for an isolated (review or
     /// exploration) agent. Delegated workers are recognised by their depth.

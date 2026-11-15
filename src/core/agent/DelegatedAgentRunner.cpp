@@ -139,6 +139,12 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     // The worker names itself on the wire, so the backend can attribute the
     // requests it sends (codex-rs `x-openai-subagent`).
     agent->set_subagent_label(request.worker_name);
+    // A worker is its own conversation: it never continues the thread of the
+    // conversation that spawned it, and it keeps its own prompt cache. The
+    // task id names the worker across its steps and its resume.
+    if (!request.task_id.empty()) {
+        agent->set_conversation_scope("worker:" + request.task_id);
+    }
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.
     agent->set_mode(is_auto_mode(agent_mode_from_string(request.mode))
