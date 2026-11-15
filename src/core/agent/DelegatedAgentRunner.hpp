@@ -55,6 +55,9 @@ public:
         std::string worker_name = {};
         std::string worker_description = {};
         std::string worker_prompt = {};
+        /// The conversation the worker is spawned from. The endpoint is told
+        /// which thread owns it.
+        std::string parent_conversation_scope = {};
         std::string task_id = {};
         std::string task_description = {};
         std::string parent_tool_call_id = {};

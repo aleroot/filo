@@ -242,6 +242,21 @@ std::string HttpLLMProvider::continuation_service() const {
 }
 
 void HttpLLMProvider::cancel() {
+    // Tell the endpoint to stop the response it is serving before the request
+    // is torn down: codex-rs sends a response.interrupt frame and waits for
+    // the acknowledgement. The frame goes out first, so the endpoint hears it
+    // even though the request is about to end.
+    if (protocol_) {
+        std::string response_id;
+        {
+            std::lock_guard lock(state_mutex_);
+            response_id = in_flight_response_id_;
+        }
+        if (const auto frame = protocol_->interrupt_request(response_id);
+            frame.has_value()) {
+            websocket_.client->send_text(*frame);
+        }
+    }
     cancel_requested_.store(true, std::memory_order_release);
 }
 
@@ -902,6 +917,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     return true;
                                 };
                                 auto parsed = protocol->parse_event(event);
+                                if (!parsed.response_id.empty()) {
+                                    // The endpoint's handle for the response it
+                                    // is serving: a cancel can name it.
+                                    std::lock_guard lock(self->state_mutex_);
+                                    self->in_flight_response_id_ = parsed.response_id;
+                                }
                                 if (parsed.stream_error) {
                                     stream_error = true;
                                     retryable = parsed.retryable_stream_error;
@@ -1163,6 +1184,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     if (event_payload.empty()) return;
                     if (response_status >= 400) return;
                     protocols::ParseResult result = protocol->parse_event(event_payload);
+                    if (!result.response_id.empty()) {
+                        // The endpoint's handle for the response it is
+                        // serving: a cancel can name it.
+                        std::lock_guard lock(self->state_mutex_);
+                        self->in_flight_response_id_ = result.response_id;
+                    }
 
                     stream_started = stream_started || result.stream_started;
                     if (result.stream_error) {

@@ -733,6 +733,89 @@ TEST_CASE("WebSocket cancellation interrupts a waiting receive and invalidates t
 #endif
 }
 
+TEST_CASE("A frame queued while a stream runs reaches the endpoint",
+          "[transport][websocket][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) SKIP("WebSocket transport unavailable");
+    // Two groups: the server reads the request, then the frame the client
+    // queues while the stream waits for an answer.
+    LoopbackWebSocketServer server({{}, {}});
+    CurlWebSocketTransport transport(std::chrono::seconds(2));
+    std::atomic_bool cancelled{false};
+    std::thread worker([&] {
+        (void)transport.stream_text(
+            "ws://127.0.0.1:" + std::to_string(server.port()) + "/responses",
+            "interrupt", {}, R"({"type":"response.create"})",
+            [](auto) { return false; }, &cancelled, std::chrono::seconds(5));
+    });
+
+    const auto request_arrived = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (server.received_payloads().empty()
+           && std::chrono::steady_clock::now() < request_arrived) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(server.received_payloads().size() == 1);
+
+    // The endpoint is told to stop while the stream is still running.
+    transport.send_text(R"({"type":"response.interrupt","response_id":"resp_1"})");
+    const auto frame_arrived = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (server.received_payloads().size() < 2
+           && std::chrono::steady_clock::now() < frame_arrived) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    cancelled.store(true);
+    worker.join();
+
+    const auto payloads = server.received_payloads();
+    REQUIRE(payloads.size() == 2);
+    CHECK(payloads[1] == R"({"type":"response.interrupt","response_id":"resp_1"})");
+#endif
+}
+
+TEST_CASE("Cancelling a Codex turn tells the endpoint to stop the response",
+          "[transport][websocket][codex][interrupt]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The endpoint names the response it is serving, then stays quiet.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.created","response":{"id":"resp_live"}})",
+         R"({"type":"response.output_text.delta","delta":"thinking"})"},
+        {},
+        {},
+    });
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 0;
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-6.1-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", options);
+    core::llm::ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "ws-interrupt";
+    request.transport_turn_id = "ws-interrupt-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+
+    provider->stream_response(request, [&](const auto& chunk) {
+        // The user cancels while the response is being served.
+        if (!chunk.content.empty()) provider->cancel();
+    });
+
+    // codex-rs responses_websocket.rs: the frame names the response to stop.
+    const auto payloads = server.received_payloads();
+    const auto interrupt = std::ranges::find_if(payloads, [](const std::string& payload) {
+        return payload.find("response.interrupt") != std::string::npos;
+    });
+    REQUIRE(interrupt != payloads.end());
+    CHECK(interrupt->find("resp_live") != std::string::npos);
+#endif
+}
+
 TEST_CASE("WebSocket transport assembles fragmented messages before parsing JSON",
           "[transport][websocket][regression][fragmentation]") {
 #if defined(_WIN32)

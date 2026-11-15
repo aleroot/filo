@@ -61,6 +61,9 @@ public:
         std::string active_provider_name = {};
         std::string active_model;
         std::string parent_mode;
+        /// The conversation the worker is spawned from. The endpoint is told
+        /// which thread owns the worker it serves.
+        std::string parent_conversation_scope = {};
         const core::context::SessionContext& session_context;
         std::function<bool(const std::string&, const std::string&)> permission_check;
         std::string parent_tool_call_id = {};

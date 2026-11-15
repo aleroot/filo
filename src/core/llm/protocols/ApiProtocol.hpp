@@ -679,6 +679,14 @@ public:
         return {};
     }
 
+    /// The frame that asks the endpoint to stop the response it is serving,
+    /// when the wire speaks one (codex-rs `response.interrupt`). Empty when
+    /// the endpoint cannot be told, or when the response is unknown.
+    [[nodiscard]] virtual std::optional<std::string>
+    interrupt_request([[maybe_unused]] std::string_view response_id) const {
+        return std::nullopt;
+    }
+
     [[nodiscard]] virtual std::string build_websocket_url(
         [[maybe_unused]] std::string_view base_url,
         [[maybe_unused]] std::string_view model) const {

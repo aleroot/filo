@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 
 namespace {
@@ -16,6 +17,9 @@ struct SocketState {
     long status = 0;
     cpr::Header headers;
     std::string error;
+    // Frames queued for the live connection while a stream runs. The stream
+    // loop sends them, so a caller never writes to the task itself.
+    std::deque<std::string> pending_sends;
 };
 
 std::string utf8(NSString* value) {
@@ -60,6 +64,30 @@ bool wait_for(const std::shared_ptr<State>& state, Predicate ready,
         state->changed.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(50)));
     }
     return true;
+}
+
+/// Waits for the message, the cancellation, or a frame queued for the
+/// connection. The wait is sliced, so a queued frame is noticed promptly even
+/// while the endpoint stays silent.
+bool wait_for_message(const std::shared_ptr<Operation>& received,
+                      const std::shared_ptr<SocketState>& state,
+                      const std::atomic_bool* cancelled,
+                      std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        {
+            std::unique_lock lock(received->mutex);
+            if (received->done) return true;
+            received->changed.wait_until(
+                lock, std::chrono::steady_clock::now() + std::chrono::milliseconds(20));
+        }
+        if (cancelled && cancelled->load(std::memory_order_acquire)) return false;
+        {
+            std::lock_guard lock(state->mutex);
+            if (!state->pending_sends.empty()) return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+    }
 }
 
 } // namespace
@@ -147,6 +175,20 @@ void AppleWebSocketTransport::reset_locked() {
 bool AppleWebSocketTransport::matches_connection(std::string_view key) const {
     std::lock_guard lock(impl_->mutex);
     return matches_connection_locked(key);
+}
+
+void AppleWebSocketTransport::send_text(std::string_view payload) {
+    if (payload.empty()) return;
+    std::shared_ptr<SocketState> state;
+    {
+        std::lock_guard lock(impl_->mutex);
+        state = impl_->state;
+    }
+    // No connection, no endpoint to interrupt.
+    if (!state) return;
+    std::lock_guard lock(state->mutex);
+    state->pending_sends.emplace_back(payload);
+    state->changed.notify_all();
 }
 
 bool AppleWebSocketTransport::matches_connection_locked(std::string_view key) const {
@@ -264,6 +306,33 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
         message = nil;
         payload_string = nil;
         core::net::NetworkTrafficStats::get_instance().record_sent(payload.size());
+
+        // Sends the frames queued while the stream runs: an interrupt for the
+        // response the endpoint is serving. The loop owns the task, so it
+        // writes to it itself, and it waits for the frame to be handed over
+        // before the connection goes away.
+        const auto send_pending_frames = [&]() {
+            std::deque<std::string> frames;
+            {
+                std::lock_guard lock(state->mutex);
+                frames.swap(state->pending_sends);
+            }
+            for (const auto& frame : frames) {
+                NSString* text = ns_string(frame);
+                if (!text) continue;
+                auto frame_sent = std::make_shared<Operation>();
+                auto frame_message = [[NSURLSessionWebSocketMessage alloc] initWithString:text];
+                [task sendMessage:frame_message completionHandler:^(NSError* error) {
+                    std::lock_guard lock(frame_sent->mutex);
+                    frame_sent->error = utf8(error.localizedDescription);
+                    frame_sent->done = true;
+                    frame_sent->changed.notify_all();
+                }];
+                (void)wait_for(frame_sent, [](const auto& s) { return s.done; }, nullptr,
+                               std::chrono::seconds(2));
+            }
+        };
+
         while (!is_cancelled()) {
             auto received = std::make_shared<Operation>();
             [task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage* incoming, NSError* error) {
@@ -277,7 +346,18 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
                 received->done = true;
                 received->changed.notify_all();
             }];
-            if (!wait_for(received, [](const auto& s) { return s.done; }, cancelled, idle)) return fail("idle timeout waiting for websocket event");
+            if (!wait_for_message(received, state, cancelled, idle)) {
+                // The endpoint must hear that the response may stop before
+                // the connection goes away.
+                send_pending_frames();
+                return fail("idle timeout waiting for websocket event");
+            }
+            if (!received->done) {
+                // A frame was queued while the endpoint stayed silent: it
+                // goes out before the next message is read.
+                send_pending_frames();
+                continue;
+            }
             if (!received->error.empty()) return fail(received->error);
             core::net::NetworkTrafficStats::get_instance().record_received(received->text.size());
             // No transport lock is held here, so the consumer may reset this
@@ -295,6 +375,9 @@ WebSocketStreamResult AppleWebSocketTransport::stream_text(
                 return result;
             }
         }
+        // The endpoint must hear that the response may stop before the
+        // connection goes away.
+        send_pending_frames();
         return fail("request cancelled by user");
     }
 }

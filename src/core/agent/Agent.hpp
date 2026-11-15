@@ -488,6 +488,20 @@ public:
         conversation_scope_ = std::move(scope);
     }
 
+    /// The conversation this agent runs as, empty when it runs as the
+    /// conversation the user talks to.
+    [[nodiscard]] std::string conversation_scope() const {
+        std::lock_guard lock(history_mutex_);
+        return conversation_scope_;
+    }
+
+    /// The thread that spawned this conversation, empty for the conversation
+    /// the user started. The endpoint is told which thread owns a worker.
+    void set_parent_thread_id(std::string thread_id) {
+        std::lock_guard lock(history_mutex_);
+        parent_thread_id_ = std::move(thread_id);
+    }
+
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
 
     void set_efficiency_decision_fn(
@@ -802,6 +816,9 @@ private:
     /// The conversation this agent runs as, empty for the conversation the
     /// user talks to. A delegated worker owns its own conversation.
     std::string conversation_scope_;
+    /// The thread that spawned this conversation, empty for the conversation
+    /// the user started.
+    std::string parent_thread_id_;
     /// Whether this agent holds the user's conversation, whose prompt prefix
     /// is worth the longest cache retention; false for an isolated (review or
     /// exploration) agent. Delegated workers are recognised by their depth.

@@ -1571,6 +1571,25 @@ TEST_CASE("Codex names a delegated worker in the header and the client metadata"
     CHECK(websocket_headers.at("x-openai-subagent") == "explore");
 }
 
+TEST_CASE("Codex asks the endpoint to stop the response it is serving",
+          "[openai][responses][codex][interrupt]") {
+    CodexResponsesProtocol codex;
+    // No response is known: there is nothing to stop.
+    CHECK_FALSE(codex.interrupt_request("").has_value());
+
+    // codex-rs responses_websocket.rs: the frame names the response to stop.
+    const auto created = codex.parse_event(
+        R"({"type":"response.created","response":{"id":"resp_123"}})");
+    // The endpoint's handle for the response it is serving travels with the
+    // event, so a caller can name it.
+    CHECK(created.response_id == "resp_123");
+
+    const auto frame = codex.interrupt_request(created.response_id);
+    REQUIRE(frame.has_value());
+    CHECK(*frame
+          == R"({"type":"response.interrupt","response_id":"resp_123","mode":"discard_partial_items"})");
+}
+
 TEST_CASE("Codex gives a delegated worker its own thread",
           "[openai][responses][codex][subagent]") {
     ChatRequest request;
@@ -1611,6 +1630,75 @@ TEST_CASE("Codex gives a delegated worker its own thread",
     worker.messages = {{.role = "user", .content = "hi"}};
     state.prepare_request(worker);
     CHECK(worker.prompt_cache_key == "worker:task_1");
+}
+
+TEST_CASE("Codex names the thread that spawned a worker and the turn it serves",
+          "[openai][responses][codex][subagent]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "session-parent";
+    request.conversation_scope = "worker:task_1";
+    request.parent_thread_id = "session-parent";
+    request.transport_turn_id = "worker:task_1:1";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    // codex-rs CodexResponsesMetadata::client_metadata and
+    // compatibility_headers: the worker names the thread that owns it.
+    const auto payload = codex.serialize(request);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+                            R"("x-codex-parent-thread-id":"session-parent")"));
+    CHECK_THAT(payload,
+               Catch::Matchers::ContainsSubstring(R"("turn_id":"worker:task_1:1")"));
+
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-codex-parent-thread-id") == "session-parent");
+
+    // A conversation the user started names no parent.
+    ChatRequest own;
+    own.model = "gpt-6.1-sol";
+    own.session_id = "session-own";
+    own.messages = {{.role = "user", .content = "hi"}};
+    cpr::Header own_headers;
+    codex.prepare_headers(own_headers, own, "https://chatgpt.com/backend-api/codex");
+    CHECK(own_headers.count("x-codex-parent-thread-id") == 0);
+    CHECK_THAT(codex.serialize(own),
+               !Catch::Matchers::ContainsSubstring("x-codex-parent-thread-id"));
+}
+
+TEST_CASE("Codex client metadata is a well formed object whatever it carries",
+          "[openai][responses][codex][subagent]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "session-parent";
+    request.conversation_scope = "worker:task_1";
+    request.parent_thread_id = "session-parent";
+    request.transport_turn_id = "worker:task_1:1";
+    request.subagent_label = "explore";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    const auto payload = codex.serialize(request);
+
+    // Every field codex-rs puts in the client metadata has to arrive as a
+    // member of one object: a missing separator would make the whole request
+    // unparseable for the backend.
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(payload).get(document) == simdjson::SUCCESS);
+    const auto field = [&document](const char* name) -> std::string {
+        std::string_view value;
+        REQUIRE(document["client_metadata"][name].get_string().get(value)
+                == simdjson::SUCCESS);
+        return std::string(value);
+    };
+    CHECK(field("x-openai-subagent") == "explore");
+    CHECK(field("x-codex-parent-thread-id") == "session-parent");
+    CHECK(field("turn_id") == "worker:task_1:1");
+    CHECK(field("thread_id") == "worker:task_1");
+    CHECK(field("session_id") == "session-parent");
+    CHECK(field("x-codex-window-id") == "worker:task_1:0");
 }
 
 TEST_CASE("Codex resolves the service tier against the catalog and hints routing",

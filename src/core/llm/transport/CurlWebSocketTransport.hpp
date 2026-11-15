@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -94,6 +95,13 @@ public:
     void reset();
     [[nodiscard]] bool matches_connection(std::string_view connection_key);
 
+    /// Sends a text frame on the live connection: an endpoint that is
+    /// serving a response can be told to stop it. A stream in flight takes
+    /// the frame at its next turn, so the connection is never touched from
+    /// another thread; an endpoint with no stream is told nothing. Safe from
+    /// any thread.
+    void send_text(std::string_view payload);
+
 private:
     struct Connection;
     class StreamClaim;
@@ -127,6 +135,10 @@ private:
     std::optional<std::thread::id> streaming_thread_;
     // Bumped by reset(). A stream compares it with the value it started under.
     std::atomic<std::uint64_t> generation_{0};
+    // Frames queued for the live connection while a stream runs. The stream
+    // loop sends them, so a caller never writes to the connection itself.
+    std::mutex send_mutex_;
+    std::deque<std::string> pending_sends_;
 #if defined(FILO_WEBSOCKET_NATIVE_APPLE)
     std::unique_ptr<AppleWebSocketTransport> native_;
 #endif

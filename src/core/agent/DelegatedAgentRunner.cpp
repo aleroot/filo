@@ -145,6 +145,10 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     if (!request.task_id.empty()) {
         agent->set_conversation_scope("worker:" + request.task_id);
     }
+    // The endpoint is told which thread owns the worker.
+    if (!request.parent_conversation_scope.empty()) {
+        agent->set_parent_thread_id(request.parent_conversation_scope);
+    }
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.
     agent->set_mode(is_auto_mode(agent_mode_from_string(request.mode))

@@ -657,6 +657,10 @@ struct ChatRequest {
     /// `x-openai-subagent`). Empty for a conversation's own requests. The
     /// provider's wire decides how to name it, if at all.
     std::string subagent_label = {};
+    /// The thread that spawned this conversation (codex-rs
+    /// `x-codex-parent-thread-id`). Empty for a conversation the user
+    /// started.
+    std::string parent_thread_id = {};
     /// The conversation this request belongs to. A delegated worker owns its
     /// own conversation: it never continues the thread of the conversation
     /// that spawned it, and it keeps its own prompt cache (codex-rs gives

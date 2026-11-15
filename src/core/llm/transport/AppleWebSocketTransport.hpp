@@ -12,6 +12,12 @@ public:
     ~AppleWebSocketTransport();
     void reset();
     [[nodiscard]] bool matches_connection(std::string_view key) const;
+    /// Sends a text frame on the live connection: an endpoint that is
+    /// serving a response can be told to stop it. A stream in flight takes
+    /// the frame at its next turn, so the connection is never written to from
+    /// another thread; an endpoint with no stream is told nothing. Safe from
+    /// any thread.
+    void send_text(std::string_view payload);
     [[nodiscard]] WebSocketStreamResult stream_text(
         std::string_view url, std::string_view key, const cpr::Header& headers,
         std::string_view payload, const CurlWebSocketTransport::MessageCallback& callback,

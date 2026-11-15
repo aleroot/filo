@@ -2407,7 +2407,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
     if (turn_state->transport_turn_id.empty()) {
         const auto sequence = next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed);
-        turn_state->transport_turn_id = std::format("{}:{}", session_context_snapshot().session_id, sequence);
+        // The turn is scoped to its conversation: a delegated worker numbers
+        // its turns apart from the conversation that spawned it.
+        const std::string conversation = conversation_scope_.empty()
+            ? session_context_snapshot().session_id
+            : conversation_scope_;
+        turn_state->transport_turn_id = std::format("{}:{}", conversation, sequence);
     }
 
     if (turn_state->auto_turn &&
@@ -2477,6 +2482,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.session_id = step_session_context.session_id;
             request.transport_turn_id = turn_state->transport_turn_id;
             request.subagent_label = subagent_label_;
+            request.parent_thread_id = parent_thread_id_;
             // A delegated worker owns its conversation: it continues its own
             // thread and keeps its own prompt cache, never the ones of the
             // conversation that spawned it.
@@ -3657,10 +3663,17 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         };
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
+                            // The conversation the worker is spawned from:
+                            // the endpoint is told which thread owns it.
+                            const std::string parent_conversation =
+                                self->conversation_scope().empty()
+                                    ? session_context.session_id
+                                    : self->conversation_scope();
                             SubagentOrchestrator::RunContext run_context{
                                 .active_provider_name = active_provider_name_for_task,
                                 .active_model = active_model_for_task,
                                 .parent_mode = parent_mode_for_task,
+                                .parent_conversation_scope = parent_conversation,
                                 .session_context = session_context,
                                 .permission_check = [self](const std::string& tool_name,
                                                            const std::string& args) {

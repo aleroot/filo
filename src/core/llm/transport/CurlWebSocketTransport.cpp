@@ -305,6 +305,24 @@ bool CurlWebSocketTransport::matches_connection(std::string_view key) {
 #endif
 }
 
+void CurlWebSocketTransport::send_text(std::string_view payload) {
+    if (payload.empty()) return;
+#if defined(FILO_WEBSOCKET_NATIVE_APPLE)
+    if (native_) {
+        native_->send_text(payload);
+        return;
+    }
+#endif
+    {
+        std::lock_guard lock(mutex_);
+        // No stream, no endpoint to interrupt: the frame would only be sent
+        // with the next request.
+        if (!streaming_thread_) return;
+    }
+    std::lock_guard lock(send_mutex_);
+    pending_sends_.emplace_back(payload);
+}
+
 std::optional<WebSocketStreamResult> CurlWebSocketTransport::claim_stream(
     const std::atomic_bool* cancel_requested, std::uint64_t& generation) {
     const auto self = std::this_thread::get_id();
@@ -425,6 +443,23 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
 
     std::string message;
     auto last_activity = std::chrono::steady_clock::now();
+    // Sends the frames queued while the stream runs: an interrupt for the
+    // response the endpoint is serving. The loop owns the connection, so it
+    // writes to it itself; a frame that cannot be sent is dropped with the
+    // connection.
+    const auto flush_pending = [&]() {
+        std::deque<std::string> frames;
+        {
+            std::lock_guard lock(send_mutex_);
+            frames.swap(pending_sends_);
+        }
+        for (const auto& frame : frames) {
+            const SendResult sent = send_all(
+                conn->curl.get(), frame, nullptr, std::chrono::milliseconds(2000));
+            if (sent.code != CURLE_OK) return false;
+        }
+        return true;
+    };
     while (true) {
         if (abandoned()) {
             // reset() ran, from a consumer callback or from another thread. The
@@ -433,7 +468,15 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
             return fail(WebSocketStreamResult::Status::Aborted, CURLE_ABORTED_BY_CALLBACK,
                         "websocket connection was reset", true);
         }
+        // A queued frame goes out before anything else, so an endpoint that is
+        // told to stop hears it even when the stream is ending.
+        if (!flush_pending()) {
+            return fail(WebSocketStreamResult::Status::StreamFailed, CURLE_SEND_ERROR,
+                        {}, true);
+        }
         if (is_cancelled()) {
+            // The endpoint must learn that the response may stop.
+            (void)flush_pending();
             return fail(WebSocketStreamResult::Status::StreamFailed, CURLE_ABORTED_BY_CALLBACK,
                         "request cancelled by user", true);
         }

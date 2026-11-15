@@ -221,6 +221,9 @@ private:
     std::string                                    default_model_;
     mutable std::mutex                             state_mutex_;
     std::string                                    last_model_;
+    /// The response the endpoint is serving for this provider's stream. The
+    /// endpoint can be asked to stop it by name.
+    std::string                                    in_flight_response_id_;
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;

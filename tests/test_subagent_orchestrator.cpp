@@ -528,6 +528,8 @@ TEST_CASE("A delegated worker names itself on its requests", "[agent][orchestrat
     CHECK(requests[0].conversation_scope.starts_with("worker:"));
     CHECK(requests[0].conversation_scope != requests[0].session_id);
     CHECK(requests[0].continuation_scope == requests[0].conversation_scope);
+    // The endpoint is told which thread owns the worker.
+    CHECK(requests[0].parent_thread_id == requests[0].session_id);
 }
 
 TEST_CASE("SubagentOrchestrator forwards profile response schemas to the provider", "[agent][orchestration][structured]") {

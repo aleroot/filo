@@ -14,6 +14,7 @@
 #include "../../tools/ToolNames.hpp"
 #include "../StrictToolPolicy.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "../../utils/JsonWriter.hpp"
 #include "core/utils/TimeUtils.hpp"
 #include "core/version/Version.hpp"
 #include <simdjson.h>
@@ -1585,11 +1586,21 @@ std::vector<ContinuationItem> CodexResponsesProtocol::conversation_control_items
     }};
 }
 
-std::string CodexResponsesProtocol::serialize_codex_with_input_items(
+std::optional<std::string> CodexResponsesProtocol::interrupt_request(
+    std::string_view response_id) const {
+    // codex-rs codex-api/src/endpoint/responses_websocket.rs: the frame that
+    // asks the endpoint to stop the response it is serving.
+    if (response_id.empty()) return std::nullopt;
+    std::string frame = R"({"type":"response.interrupt","response_id":")";
+    frame += core::utils::escape_json_string(response_id);
+    frame += R"(","mode":"discard_partial_items"})";
+    return frame;
+}
+
+std::string CodexResponsesProtocol::codex_request_body(
     const ChatRequest& request,
     const std::vector<std::string>& input_items,
-    std::optional<std::string_view> previous_response_id_override,
-    bool websocket) const {
+    std::optional<std::string_view> previous_response_id_override) const {
     SerializationOptions options;
     const auto* reasoning = request.catalog_reasoning ? &*request.catalog_reasoning : nullptr;
     options.include_reasoning_summary = !reasoning || reasoning->summary_supported.value_or(true);
@@ -1602,33 +1613,62 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     options.include_catalog_verbosity = true;
     options.include_sampling_controls = false;
     options.tools_in_input = responses_lite(request);
-    std::string payload = serialize_with_input_items(
+    return serialize_with_input_items(
         request, input_items, previous_response_id_override, options);
+}
+
+std::string CodexResponsesProtocol::client_metadata_member(
+    const ChatRequest& request,
+    bool websocket) const {
     const std::string thread_id = conversation_of(request).empty()
         ? std::string("filo")
         : conversation_of(request);
     const std::string window_id = thread_id + ":0";
-    std::string metadata = R"("client_metadata":{"x-codex-installation-id":")";
-    metadata += core::utils::escape_json_string(installation_id());
-    metadata += R"(","session_id":")";
-    metadata += core::utils::escape_json_string(
-        request.session_id.empty() ? thread_id : request.session_id);
-    metadata += R"(","thread_id":")";
-    metadata += core::utils::escape_json_string(thread_id);
-    metadata += R"(","x-codex-window-id":")";
-    metadata += core::utils::escape_json_string(window_id);
-    // codex-rs CodexResponsesMetadata::client_metadata: a delegated session
-    // names itself so the backend can attribute the request.
-    if (const auto label = codex_subagent_header_value(request.subagent_label);
-        label.has_value()) {
-        metadata += R"(,"x-openai-subagent":")";
-        metadata += core::utils::escape_json_string(*label);
+    const std::string session_id = request.session_id.empty()
+        ? thread_id
+        : request.session_id;
+    // codex-rs CodexResponsesMetadata::client_metadata: the request names the
+    // conversation it belongs to, the worker that sent it, the thread that
+    // spawned it and the turn it serves. A JSON writer keeps the object well
+    // formed whatever the set of fields is.
+    core::utils::JsonWriter metadata_writer(256);
+    metadata_writer.key("client_metadata");
+    {
+        auto _metadata = metadata_writer.object();
+        metadata_writer.kv_str("x-codex-installation-id", installation_id());
+        metadata_writer.comma().kv_str("session_id", session_id);
+        metadata_writer.comma().kv_str("thread_id", thread_id);
+        metadata_writer.comma().kv_str("x-codex-window-id", window_id);
+        // A delegated session names itself so the backend can attribute the
+        // request.
+        if (const auto label = codex_subagent_header_value(request.subagent_label);
+            label.has_value()) {
+            metadata_writer.comma().kv_str("x-openai-subagent", *label);
+        }
+        // The thread that spawned this one, and the turn this request is.
+        if (!request.parent_thread_id.empty()) {
+            metadata_writer.comma().kv_str(
+                "x-codex-parent-thread-id", request.parent_thread_id);
+        }
+        if (!request.transport_turn_id.empty()) {
+            metadata_writer.comma().kv_str("turn_id", request.transport_turn_id);
+        }
+        if (websocket && responses_lite(request)) {
+            metadata_writer.comma().kv_str(
+                "ws_request_header_x_openai_internal_codex_responses_lite", "true");
+        }
     }
-    if (websocket && responses_lite(request)) {
-        metadata += R"(","ws_request_header_x_openai_internal_codex_responses_lite":"true)";
-    }
-    metadata += R"("})";
-    append_member_before_object_end(payload, metadata);
+    return std::move(metadata_writer).take();
+}
+
+std::string CodexResponsesProtocol::serialize_codex_with_input_items(
+    const ChatRequest& request,
+    const std::vector<std::string>& input_items,
+    std::optional<std::string_view> previous_response_id_override,
+    bool websocket) const {
+    std::string payload = codex_request_body(
+        request, input_items, previous_response_id_override);
+    append_member_before_object_end(payload, client_metadata_member(request, websocket));
     return payload;
 }
 
@@ -1683,6 +1723,12 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
         headers["x-openai-subagent"] = *label;
     } else {
         headers.erase("x-openai-subagent");
+    }
+    // The thread that spawned this one.
+    if (!request.parent_thread_id.empty()) {
+        headers["x-codex-parent-thread-id"] = request.parent_thread_id;
+    } else {
+        headers.erase("x-codex-parent-thread-id");
     }
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = std::string(core::auth::codex_cli::kOriginator);
@@ -1791,10 +1837,12 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
         append_message_item(item, developer);
         signature_input.push_back(std::move(item));
     }
-    const std::string request_signature = serialize_codex_with_input_items(
-        request,
-        signature_input,
-        std::string_view{}, true);
+    // The signature covers the request's shape: the model, its controls and
+    // the stable instructions. The client metadata names the turn, so it
+    // changes every turn and cannot take part in the comparison
+    // (codex-rs responses_request_properties_mismatch ignores it as well).
+    const std::string request_signature = codex_request_body(
+        request, signature_input, std::nullopt);
 
     std::string incremental_previous_response_id;
     std::vector<std::string> incremental_input_items;
@@ -2161,6 +2209,9 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
 
     if (event_type == "response.created") {
         in_progress_response_id_ = parse_response_id(doc);
+        // The endpoint's handle for the response it is serving: a caller that
+        // wants it stopped asks for it by name.
+        result.response_id = in_progress_response_id_;
         result.stream_started = true;
         return result;
     }

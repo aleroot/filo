@@ -260,6 +260,10 @@ public:
     /// the prompt cache intact.
     [[nodiscard]] std::vector<ContinuationItem>
     conversation_control_items(const ChatRequest& request) const override;
+    /// codex-rs codex-api/src/endpoint/responses_websocket.rs: the frame that
+    /// asks the endpoint to stop the response it is serving.
+    [[nodiscard]] std::optional<std::string>
+    interrupt_request(std::string_view response_id) const override;
     [[nodiscard]] std::string build_websocket_url(std::string_view base_url,
                                                   std::string_view model) const override;
     void prepare_websocket_headers(cpr::Header& headers,
@@ -336,6 +340,19 @@ private:
     };
 
     [[nodiscard]] std::string installation_id() const;
+    /// The request body without the client metadata: the model's controls and
+    /// the given input items. The shape of a request, free of the fields that
+    /// name the turn it belongs to.
+    [[nodiscard]] std::string codex_request_body(
+        const ChatRequest& request,
+        const std::vector<std::string>& input_items,
+        std::optional<std::string_view> previous_response_id_override = std::nullopt) const;
+    /// The client metadata member codex-rs sends: the conversation the
+    /// request belongs to, the worker that sent it, the thread that spawned
+    /// it and the turn it serves.
+    [[nodiscard]] std::string client_metadata_member(
+        const ChatRequest& request,
+        bool websocket) const;
     [[nodiscard]] std::string serialize_codex_with_input_items(
         const ChatRequest& request,
         const std::vector<std::string>& input_items,
