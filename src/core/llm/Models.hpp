@@ -661,6 +661,13 @@ struct ChatRequest {
     /// `x-codex-parent-thread-id`). Empty for a conversation the user
     /// started.
     std::string parent_thread_id = {};
+    /// The turn that spawned this conversation (codex-rs `parent_turn_id`).
+    /// Empty for a conversation the user started.
+    std::string parent_turn_id = {};
+    /// The first turn of the tree this conversation belongs to (codex-rs
+    /// `root_turn_id`). A delegated worker keeps the root of the tree it
+    /// belongs to, so the whole tree is attributed to one turn.
+    std::string root_turn_id = {};
     /// The conversation this request belongs to. A delegated worker owns its
     /// own conversation: it never continues the thread of the conversation
     /// that spawned it, and it keeps its own prompt cache (codex-rs gives

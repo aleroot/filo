@@ -1821,6 +1821,100 @@ TEST_CASE("Codex reads the routing token from either metadata event",
     CHECK(codex.parse_event(R"({"type":"response.metadata"})").turn_state.empty());
 }
 
+TEST_CASE("Codex names the turn and the tree it belongs to",
+          "[openai][responses][codex][subagent]") {
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.session_id = "session-parent";
+    request.conversation_scope = "worker:task_1";
+    request.parent_thread_id = "session-parent";
+    request.parent_turn_id = "session-parent:3";
+    request.root_turn_id = "session-parent:1";
+    request.transport_turn_id = "worker:task_1:1";
+    request.subagent_label = "explore";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    const auto payload = codex.serialize(request);
+
+    // codex-rs CodexResponsesMetadata::client_metadata names the turn that
+    // spawned the worker and the turn the tree starts at.
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(payload).get(document) == simdjson::SUCCESS);
+    const auto field = [&document](const char* name) -> std::string {
+        std::string_view value;
+        REQUIRE(document["client_metadata"][name].get_string().get(value)
+                == simdjson::SUCCESS);
+        return std::string(value);
+    };
+    CHECK(field("parent_turn_id") == "session-parent:3");
+    CHECK(field("root_turn_id") == "session-parent:1");
+
+    // The turn metadata names the same turn, in the shape the backend reads.
+    const std::string blob = field("x-codex-turn-metadata");
+    simdjson::dom::element turn;
+    REQUIRE(parser.parse(blob).get(turn) == simdjson::SUCCESS);
+    const auto turn_field = [&turn](const char* name) -> std::string {
+        std::string_view value;
+        REQUIRE(turn[name].get_string().get(value) == simdjson::SUCCESS);
+        return std::string(value);
+    };
+    CHECK(turn_field("turn_id") == "worker:task_1:1");
+    CHECK(turn_field("thread_id") == "worker:task_1");
+    CHECK(turn_field("session_id") == "session-parent");
+    CHECK(turn_field("agent_name") == "explore");
+    CHECK(turn_field("parent_thread_id") == "session-parent");
+    CHECK(turn_field("parent_turn_id") == "session-parent:3");
+    CHECK(turn_field("root_turn_id") == "session-parent:1");
+    CHECK(turn_field("request_kind") == "turn");
+    CHECK(turn_field("window_id") == "worker:task_1:0");
+    int64_t window_number = 0;
+    REQUIRE(turn["window_number"].get(window_number) == simdjson::SUCCESS);
+    CHECK(window_number == 0);
+
+    // The header carries the same thing.
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-codex-turn-metadata") == blob);
+}
+
+TEST_CASE("Codex says what the request is for",
+          "[openai][responses][codex][turn-kind]") {
+    const auto request_kind_of = [](const std::string& payload) -> std::string {
+        simdjson::dom::parser parser;
+        simdjson::dom::element document;
+        REQUIRE(parser.parse(payload).get(document) == simdjson::SUCCESS);
+        std::string_view blob;
+        REQUIRE(document["client_metadata"]["x-codex-turn-metadata"]
+                    .get_string().get(blob) == simdjson::SUCCESS);
+        const std::string inner(blob);
+        simdjson::dom::element turn;
+        REQUIRE(parser.parse(inner).get(turn) == simdjson::SUCCESS);
+        std::string_view kind;
+        REQUIRE(turn["request_kind"].get_string().get(kind) == simdjson::SUCCESS);
+        return std::string(kind);
+    };
+
+    ChatRequest request;
+    request.model = "gpt-6.1-sol";
+    request.transport_turn_id = "turn-1";
+    request.messages = {{.role = "user", .content = "hi"}};
+
+    CodexResponsesProtocol codex;
+    // The warm-up that opens the socket is not a turn.
+    ChatRequest prewarm = request;
+    codex.prepare_request(prewarm);
+    CHECK(request_kind_of(codex.initial_websocket_request_frame(prewarm).payload)
+          == "prewarm");
+    // A compaction asks the endpoint for its own checkpoint of the history.
+    ChatRequest compaction = request;
+    compaction.native_compaction = true;
+    CHECK(request_kind_of(codex.serialize(compaction)) == "compaction");
+    // A turn is a turn.
+    CHECK(request_kind_of(codex.serialize(request)) == "turn");
+}
+
 TEST_CASE("Codex resolves the service tier against the catalog and hints routing",
           "[openai][responses][codex][service-tier]") {
     const auto tier_of = [](const std::string& payload) -> std::string {

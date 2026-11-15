@@ -2413,6 +2413,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? session_context_snapshot().session_id
             : conversation_scope_;
         turn_state->transport_turn_id = std::format("{}:{}", conversation, sequence);
+        // The first turn of a conversation is the root of its tree. A
+        // delegated worker inherits the root of the tree it belongs to, so
+        // the whole tree is attributed to one turn.
+        {
+            std::lock_guard lock(history_mutex_);
+            if (root_turn_id_.empty()) {
+                root_turn_id_ = turn_state->transport_turn_id;
+            }
+        }
     }
 
     if (turn_state->auto_turn &&
@@ -2483,6 +2492,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.transport_turn_id = turn_state->transport_turn_id;
             request.subagent_label = subagent_label_;
             request.parent_thread_id = parent_thread_id_;
+            request.parent_turn_id = parent_turn_id_;
+            request.root_turn_id = root_turn_id_;
             // A delegated worker owns its conversation: it continues its own
             // thread and keeps its own prompt cache, never the ones of the
             // conversation that spawned it.
@@ -3669,11 +3680,18 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 self->conversation_scope().empty()
                                     ? session_context.session_id
                                     : self->conversation_scope();
+                            // The turn that spawns the worker, and the root of
+                            // the tree it belongs to: the endpoint is told
+                            // which turn owns the worker.
+                            const std::string parent_turn =
+                                recovery_turn_state->transport_turn_id;
                             SubagentOrchestrator::RunContext run_context{
                                 .active_provider_name = active_provider_name_for_task,
                                 .active_model = active_model_for_task,
                                 .parent_mode = parent_mode_for_task,
                                 .parent_conversation_scope = parent_conversation,
+                                .parent_turn_id = parent_turn,
+                                .root_turn_id = self->root_turn_id(),
                                 .session_context = session_context,
                                 .permission_check = [self](const std::string& tool_name,
                                                            const std::string& args) {

@@ -532,6 +532,34 @@ TEST_CASE("A delegated worker names itself on its requests", "[agent][orchestrat
     CHECK(requests[0].parent_thread_id == requests[0].session_id);
 }
 
+TEST_CASE("A delegated worker names the turn that spawned it",
+          "[agent][orchestration][wire]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"investigate startup","prompt":"inspect startup sequence","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "BUILD",
+            .parent_turn_id = "session-parent:3",
+            .root_turn_id = "session-parent:1",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    // The endpoint is told which turn owns the worker, and which turn the
+    // tree it belongs to starts at.
+    CHECK(requests[0].parent_turn_id == "session-parent:3");
+    CHECK(requests[0].root_turn_id == "session-parent:1");
+}
+
 TEST_CASE("SubagentOrchestrator forwards profile response schemas to the provider", "[agent][orchestration][structured]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

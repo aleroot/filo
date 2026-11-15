@@ -1236,6 +1236,21 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return sanitized;
 }
 
+/// codex-rs CodexResponsesRequestKind::metadata: the name the wire uses for
+/// the kind of request.
+[[nodiscard]] std::string_view request_kind_name(
+    CodexResponsesProtocol::RequestKind kind) noexcept {
+    switch (kind) {
+        case CodexResponsesProtocol::RequestKind::Turn:
+            return "turn";
+        case CodexResponsesProtocol::RequestKind::Prewarm:
+            return "prewarm";
+        case CodexResponsesProtocol::RequestKind::Compaction:
+            return "compaction";
+    }
+    return "turn";
+}
+
 } // namespace
 
 class CodexResponsesProtocol::RateLimitState {
@@ -1634,7 +1649,13 @@ cpr::Header CodexResponsesProtocol::build_headers(
 }
 
 std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const {
-    return serialize_codex_with_input_items(request, codex_input_items(request));
+    // A compaction request is not a turn of the conversation: it asks the
+    // endpoint for its own checkpoint of the history.
+    const RequestKind request_kind = request.native_compaction
+        ? RequestKind::Compaction
+        : RequestKind::Turn;
+    return serialize_codex_with_input_items(
+        request, codex_input_items(request), std::nullopt, false, request_kind);
 }
 
 std::unique_ptr<core::llm::ModelCatalogProvider>
@@ -1694,7 +1715,8 @@ std::string CodexResponsesProtocol::codex_request_body(
 
 std::string CodexResponsesProtocol::client_metadata_member(
     const ChatRequest& request,
-    bool websocket) const {
+    bool websocket,
+    RequestKind request_kind) const {
     const std::string thread_id = conversation_of(request).empty()
         ? std::string("filo")
         : conversation_of(request);
@@ -1728,6 +1750,17 @@ std::string CodexResponsesProtocol::client_metadata_member(
         if (!request.transport_turn_id.empty()) {
             metadata_writer.comma().kv_str("turn_id", request.transport_turn_id);
         }
+        // The turn that spawned this one, and the turn the tree it belongs
+        // to starts at.
+        if (!request.parent_turn_id.empty()) {
+            metadata_writer.comma().kv_str("parent_turn_id", request.parent_turn_id);
+        }
+        if (!request.root_turn_id.empty()) {
+            metadata_writer.comma().kv_str("root_turn_id", request.root_turn_id);
+        }
+        // What the turn is, in the shape the backend reads it.
+        metadata_writer.comma().kv_str(
+            "x-codex-turn-metadata", turn_metadata(request, request_kind));
         if (websocket && responses_lite(request)) {
             metadata_writer.comma().kv_str(
                 "ws_request_header_x_openai_internal_codex_responses_lite", "true");
@@ -1736,14 +1769,59 @@ std::string CodexResponsesProtocol::client_metadata_member(
     return std::move(metadata_writer).take();
 }
 
+std::string CodexResponsesProtocol::turn_metadata(
+    const ChatRequest& request,
+    RequestKind request_kind) const {
+    // codex-rs CodexTurnMetadataPayload: what the turn is. Only the keys
+    // Filo knows are filled: a key it cannot answer stays out rather than
+    // guess.
+    const std::string thread_id = conversation_of(request).empty()
+        ? std::string("filo")
+        : conversation_of(request);
+    const std::string session_id = request.session_id.empty()
+        ? thread_id
+        : request.session_id;
+
+    core::utils::JsonWriter writer(256);
+    {
+        auto _turn = writer.object();
+        writer.kv_str("installation_id", installation_id());
+        writer.comma().kv_str("session_id", session_id);
+        writer.comma().kv_str("thread_id", thread_id);
+        // The worker that serves the turn, when the turn belongs to one.
+        if (const auto label = codex_subagent_header_value(request.subagent_label);
+            label.has_value()) {
+            writer.comma().kv_str("agent_name", *label);
+        }
+        if (!request.transport_turn_id.empty()) {
+            writer.comma().kv_str("turn_id", request.transport_turn_id);
+        }
+        writer.comma().kv_str("window_id", thread_id + ":0");
+        writer.comma().kv_num("window_number", 0);
+        writer.comma().kv_str("request_kind", request_kind_name(request_kind));
+        if (!request.parent_thread_id.empty()) {
+            writer.comma().kv_str("parent_thread_id", request.parent_thread_id);
+        }
+        if (!request.parent_turn_id.empty()) {
+            writer.comma().kv_str("parent_turn_id", request.parent_turn_id);
+        }
+        if (!request.root_turn_id.empty()) {
+            writer.comma().kv_str("root_turn_id", request.root_turn_id);
+        }
+    }
+    return std::move(writer).take();
+}
+
 std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     const ChatRequest& request,
     const std::vector<std::string>& input_items,
     std::optional<std::string_view> previous_response_id_override,
-    bool websocket) const {
+    bool websocket,
+    RequestKind request_kind) const {
     std::string payload = codex_request_body(
         request, input_items, previous_response_id_override);
-    append_member_before_object_end(payload, client_metadata_member(request, websocket));
+    append_member_before_object_end(
+        payload, client_metadata_member(request, websocket, request_kind));
     return payload;
 }
 
@@ -1805,6 +1883,10 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     } else {
         headers.erase("x-codex-parent-thread-id");
     }
+    // codex-rs compatibility_headers: what the turn is, in the shape the
+    // backend reads it.
+    headers["x-codex-turn-metadata"] = turn_metadata(
+        request, request.native_compaction ? RequestKind::Compaction : RequestKind::Turn);
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = std::string(core::auth::codex_cli::kOriginator);
     headers["version"] = std::string(core::auth::codex_cli::kClientVersion);
@@ -1957,10 +2039,17 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     }
 
     const bool use_incremental = !incremental_previous_response_id.empty();
+    // What the request is for: the warm-up that opens the socket, a
+    // compaction, or a turn of the conversation.
+    const RequestKind request_kind = prewarm
+        ? RequestKind::Prewarm
+        : (request.native_compaction ? RequestKind::Compaction : RequestKind::Turn);
     std::string payload = use_incremental
         ? serialize_codex_with_input_items(
-            request, incremental_input_items, std::string_view{incremental_previous_response_id}, true)
-        : serialize_codex_with_input_items(request, full_input_items, std::nullopt, true);
+            request, incremental_input_items, std::string_view{incremental_previous_response_id}, true,
+            request_kind)
+        : serialize_codex_with_input_items(
+            request, full_input_items, std::nullopt, true, request_kind);
 
     if (prewarm) {
         append_member_before_object_end(payload, R"("generate":false)");

@@ -58,6 +58,10 @@ public:
         /// The conversation the worker is spawned from. The endpoint is told
         /// which thread owns it.
         std::string parent_conversation_scope = {};
+        /// The turn that spawns the worker, and the first turn of the tree it
+        /// belongs to. The endpoint is told which turn owns it.
+        std::string parent_turn_id = {};
+        std::string root_turn_id = {};
         std::string task_id = {};
         std::string task_description = {};
         std::string parent_tool_call_id = {};

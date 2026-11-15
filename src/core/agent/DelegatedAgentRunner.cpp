@@ -149,6 +149,11 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     if (!request.parent_conversation_scope.empty()) {
         agent->set_parent_thread_id(request.parent_conversation_scope);
     }
+    // The endpoint is told which turn owns the worker, and which turn the
+    // tree it belongs to starts at.
+    if (!request.parent_turn_id.empty() || !request.root_turn_id.empty()) {
+        agent->set_turn_ancestry(request.parent_turn_id, request.root_turn_id);
+    }
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.
     agent->set_mode(is_auto_mode(agent_mode_from_string(request.mode))

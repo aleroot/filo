@@ -213,6 +213,10 @@ codex_stream_retry_policy() noexcept {
 
 class CodexResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
+    /// What a request is for (codex-rs CodexResponsesRequestKind): a turn of
+    /// the conversation, the warm-up that opens the socket, or a compaction.
+    enum class RequestKind { Turn, Prewarm, Compaction };
+
     explicit CodexResponsesProtocol(bool include_reasoning_encrypted = true,
                                     std::string default_service_tier = {},
                                     std::shared_ptr<IProviderClientIdentitySource>
@@ -360,12 +364,20 @@ private:
     /// it and the turn it serves.
     [[nodiscard]] std::string client_metadata_member(
         const ChatRequest& request,
-        bool websocket) const;
+        bool websocket,
+        RequestKind request_kind) const;
+    /// What the turn is, for the backend (codex-rs
+    /// CodexTurnMetadataPayload): the conversation, the turn and the tree it
+    /// belongs to.
+    [[nodiscard]] std::string turn_metadata(
+        const ChatRequest& request,
+        RequestKind request_kind) const;
     [[nodiscard]] std::string serialize_codex_with_input_items(
         const ChatRequest& request,
         const std::vector<std::string>& input_items,
         std::optional<std::string_view> previous_response_id_override = std::nullopt,
-        bool websocket = false) const;
+        bool websocket = false,
+        RequestKind request_kind = RequestKind::Turn) const;
     [[nodiscard]] std::string serialize_websocket_prewarm_request(
         const ChatRequest& request) const;
     [[nodiscard]] std::string serialize_websocket_request_impl(

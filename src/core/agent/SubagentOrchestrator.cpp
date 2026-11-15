@@ -391,6 +391,8 @@ std::string SubagentOrchestrator::execute_task(
         .worker_description = plan->worker_description,
         .worker_prompt = plan->worker_prompt,
         .parent_conversation_scope = context.parent_conversation_scope,
+        .parent_turn_id = context.parent_turn_id,
+        .root_turn_id = context.root_turn_id,
         .task_id = session->id,
         .task_description = description,
         .parent_tool_call_id = context.parent_tool_call_id,

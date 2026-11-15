@@ -502,6 +502,21 @@ public:
         parent_thread_id_ = std::move(thread_id);
     }
 
+    /// The first turn of the tree this conversation belongs to.
+    [[nodiscard]] std::string root_turn_id() const {
+        std::lock_guard lock(history_mutex_);
+        return root_turn_id_;
+    }
+
+    /// The turn that spawned this conversation and the first turn of the tree
+    /// it belongs to, empty for the conversation the user started. The
+    /// endpoint is told which turn owns a worker.
+    void set_turn_ancestry(std::string parent_turn_id, std::string root_turn_id) {
+        std::lock_guard lock(history_mutex_);
+        parent_turn_id_ = std::move(parent_turn_id);
+        root_turn_id_ = std::move(root_turn_id);
+    }
+
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
 
     void set_efficiency_decision_fn(
@@ -819,6 +834,12 @@ private:
     /// The thread that spawned this conversation, empty for the conversation
     /// the user started.
     std::string parent_thread_id_;
+    /// The turn that spawned this conversation, empty for the conversation
+    /// the user started.
+    std::string parent_turn_id_;
+    /// The first turn of the tree this conversation belongs to. A delegated
+    /// worker keeps the root of the tree it belongs to.
+    std::string root_turn_id_;
     /// Whether this agent holds the user's conversation, whose prompt prefix
     /// is worth the longest cache retention; false for an isolated (review or
     /// exploration) agent. Delegated workers are recognised by their depth.
