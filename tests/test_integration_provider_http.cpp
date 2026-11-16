@@ -23,6 +23,7 @@
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
+#include "core/llm/protocols/MiniMaxProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
@@ -1173,6 +1174,67 @@ TEST_CASE("HttpLLMProvider aborts an inactive response stream",
     REQUIRE(error != chunks.end());
     CHECK_THAT(error->content,
                Catch::Matchers::ContainsSubstring("idle timeout"));
+}
+
+TEST_CASE("A stalled MiniMax stream is an idle timeout, not a missing terminal event",
+          "[integration][http][timeout][minimax]") {
+    httplib::Server server;
+    server.Post("/anthropic/v1/messages",
+                [](const httplib::Request&, httplib::Response& res) {
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [phase = 0](std::size_t, httplib::DataSink& sink) mutable {
+                if (phase++ == 0) {
+                    const std::string started =
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n";
+                    return sink.write(started.data(), started.size());
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(750));
+                sink.done();
+                return false;
+            });
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/anthropic", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        "MiniMax-M3.1-Flash",
+        std::make_unique<protocols::MiniMaxProtocol>(true),
+        core::config::ApiType::Anthropic,
+        "minimax-m-plan",
+        nullptr,
+        nullptr,
+        std::string{},
+        HttpStreamTransportOptions{
+            .timeouts = {
+                .response_start = std::chrono::seconds(1),
+                .inactivity = std::chrono::milliseconds(100),
+            },
+            .retries = {.max_retries = 0},
+        });
+
+    ChatRequest request;
+    request.model = "MiniMax-M3.1-Flash";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    const auto error = std::ranges::find_if(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error;
+    });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content, Catch::Matchers::ContainsSubstring("idle timeout"));
+    CHECK_THAT(error->content,
+               !Catch::Matchers::ContainsSubstring("terminal event"));
 }
 
 TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recovery",

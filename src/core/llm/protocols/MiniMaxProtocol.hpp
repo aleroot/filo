@@ -2,6 +2,9 @@
 #include "AnthropicProtocol.hpp"
 #include "../MiniMaxUsageClient.hpp"
 #include "../MiniMaxModelTraits.hpp"
+#include "../transport/StreamResilience.hpp"
+
+#include <chrono>
 
 namespace core::llm::protocols {
 /// MiniMax business code from any MiniMax JSON body (`error.code`,
@@ -33,6 +36,16 @@ public:
                          std::string_view base_url) override;
     std::string_view name() const noexcept override { return "minimax"; }
     transport::RetryPolicy stream_retry_policy() const noexcept override;
+    /// Matches the 600s timeout MiniMax Code's Anthropic SDK advertises
+    /// (`X-Stainless-Timeout`). The shared 120s/240s budgets cut off a
+    /// max-effort thinking stream and then report it as a missing
+    /// `message_stop`.
+    transport::StreamTimeoutPolicy stream_timeouts() const noexcept override {
+        return {
+            .response_start = std::chrono::seconds(600),
+            .inactivity = std::chrono::seconds(600),
+        };
+    }
     ReasoningCapabilities reasoning_capabilities(std::string_view model) const noexcept override;
     std::unique_ptr<ModelCatalogProvider> model_catalog(std::string_view provider) const override;
     ParseResult parse_event(std::string_view raw_event) override;

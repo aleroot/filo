@@ -1473,11 +1473,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     continue;
                 }
 
+                const bool timed_out =
+                    watchdog.timeout_kind() != transport::StreamTimeoutKind::None;
                 const bool incomplete_required_stream =
                     requires_terminal_event
                     && r.status_code == 200
                     && !done_signalled
-                    && !stream_error_seen;
+                    && !stream_error_seen
+                    && !timed_out;
 
                 if (stream_error_seen || incomplete_required_stream) {
                     // The provider's own finish reason says whether the answer
@@ -1554,7 +1557,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
 
                 const bool transport_failed =
-                    r.error.code != cpr::ErrorCode::OK && !done_signalled;
+                    (timed_out || r.error.code != cpr::ErrorCode::OK) && !done_signalled;
                 const auto transport_retry = retry_controller.schedule(
                     transport_failed && !transport::retry_vetoed(r.header), output_state);
                 if (transport_retry.has_value()) {
