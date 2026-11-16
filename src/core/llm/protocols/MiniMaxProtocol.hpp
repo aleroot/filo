@@ -35,6 +35,9 @@ public:
     void prepare_headers(cpr::Header& headers, const ChatRequest& request,
                          std::string_view base_url) override;
     std::string_view name() const noexcept override { return "minimax"; }
+    /// api.minimax.io negotiates HTTP/2 when the client offers it. MiniMax
+    /// Code's Anthropic SDK uses Node fetch, which stays on HTTP/1.1.
+    bool stream_over_http1() const noexcept override { return true; }
     transport::RetryPolicy stream_retry_policy() const noexcept override;
     /// Matches the 600s timeout MiniMax Code's Anthropic SDK advertises
     /// (`X-Stainless-Timeout`). The shared 120s/240s budgets cut off a

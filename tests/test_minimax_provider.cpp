@@ -431,6 +431,8 @@ TEST_CASE("MiniMax retries plan rate limits on a seconds-scale schedule", "[mini
     const auto timeouts = MiniMaxProtocol(true).stream_timeouts();
     CHECK(timeouts.response_start == std::chrono::seconds(600));
     CHECK(timeouts.inactivity == std::chrono::seconds(600));
+    CHECK(MiniMaxProtocol(true).stream_over_http1());
+    CHECK_FALSE(AnthropicProtocol{}.stream_over_http1());
 }
 
 TEST_CASE("MiniMax image input supports native URL sources", "[minimax][vision]") {

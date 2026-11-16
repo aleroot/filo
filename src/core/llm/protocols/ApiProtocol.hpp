@@ -414,6 +414,13 @@ public:
         return false;
     }
 
+    /// Stream over HTTP/1.1 instead of letting libcurl negotiate HTTP/2.
+    /// Node's fetch, which MiniMax Code uses, does not offer HTTP/2. Some SSE
+    /// gateways reset an HTTP/2 stream without `message_stop`.
+    [[nodiscard]] virtual bool stream_over_http1() const noexcept {
+        return false;
+    }
+
     /**
      * @brief Parse one discrete event into chunks and state signals.
      *

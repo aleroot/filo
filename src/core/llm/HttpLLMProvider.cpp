@@ -1201,6 +1201,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 cpr::Session session;
                 session.SetUrl(cpr::Url{url});
                 session.SetHeader(headers);
+                if (protocol->stream_over_http1()) {
+                    session.SetHttpVersion(cpr::HttpVersion{cpr::HttpVersionCode::VERSION_1_1});
+                }
                 // A view, not a copy: payload outlives the session, and both
                 // cpr::Body and curl's COPYPOSTFIELDS would duplicate a body
                 // that grows with the whole conversation.
