@@ -24,6 +24,7 @@
 #include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/MiniMaxProtocol.hpp"
+#include "core/llm/providers/MiniMaxProvider.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
@@ -3080,4 +3081,243 @@ TEST_CASE("Claude message threads fall back to the plain request on every reject
         REQUIRE(third.size() == 1);
         CHECK_THAT(third[0].body, !Catch::Matchers::ContainsSubstring(R"("thread")"));
     }
+}
+
+namespace {
+// A complete Anthropic SSE turn whose only content is one text block.
+std::string minimax_text_sse(const std::string& text, const std::string& stop_reason) {
+    return std::string(
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"")
+        + text + "\"}}\n\n"
+        "event: content_block_stop\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"" + stop_reason + "\"},\"usage\":{\"output_tokens\":1}}\n\n"
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n";
+}
+
+// A complete Anthropic SSE turn carrying one structured tool_use block.
+std::string minimax_tool_sse() {
+    return
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n\n"
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
+        "event: content_block_stop\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n"
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n";
+}
+
+std::shared_ptr<providers::MiniMaxProvider> minimax_leak_test_provider(int port) {
+    return std::make_shared<providers::MiniMaxProvider>(providers::MiniMaxProvider::Options{
+        .base_url = std::format("http://127.0.0.1:{}/anthropic", port),
+        .credentials = core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        .model = "MiniMax-M3",
+        .provider_name = "minimax-m-plan",
+    });
+}
+
+ChatRequest minimax_leak_test_request() {
+    ChatRequest request;
+    request.model = "MiniMax-M3";
+    request.messages.push_back(Message{.role = "user", .content = "Read README.md"});
+    return request;
+}
+
+// The leaked markup as it arrives in a text_delta: single-quoted attributes
+// keep the fixture JSON-safe; detection only needs the marker and <invoke.
+const std::string kLeakedMiniMaxCall =
+    "]<]minimax[>[<invoke name='read'>]<]minimax[>[<path>README.md]"
+    "<]minimax[>[</path>]<]minimax[>[</invoke>";
+} // namespace
+
+TEST_CASE("MiniMax retracts a tool call leaked as text and retries once",
+          "[integration][http][minimax][leak]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/anthropic/v1/messages",
+                [&](const httplib::Request&, httplib::Response& res) {
+        const int attempt = ++requests;
+        res.set_content(attempt == 1 ? minimax_text_sse(kLeakedMiniMaxCall, "end_turn")
+                                     : minimax_tool_sse(),
+                        "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = minimax_leak_test_provider(port);
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(minimax_leak_test_request(),
+                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(requests.load() == 2);
+    const auto resets = std::ranges::count_if(chunks,
+        [](const StreamChunk& c) { return c.reset_attempt; });
+    CHECK(resets == 1);
+
+    // The leaked text streams live, then the reset retracts it: nothing after
+    // the reset may carry the markup, and the retry's tool call survives.
+    std::string answer;
+    std::vector<ToolCall> tools;
+    bool seen_reset = false;
+    for (const auto& chunk : chunks) {
+        if (chunk.reset_attempt) { seen_reset = true; answer.clear(); continue; }
+        if (chunk.is_error) continue;
+        answer += chunk.content;
+        tools.insert(tools.end(), chunk.tools.begin(), chunk.tools.end());
+    }
+    CHECK(seen_reset);
+    CHECK(answer.find("]<]minimax[>[") == std::string::npos);
+    REQUIRE(tools.size() == 1);
+    CHECK(tools[0].function.name == "read");
+    CHECK_THAT(tools[0].function.arguments, Catch::Matchers::ContainsSubstring("README.md"));
+    REQUIRE_FALSE(chunks.empty());
+    CHECK(chunks.back().is_final);
+    CHECK_FALSE(chunks.back().is_error);
+}
+
+TEST_CASE("MiniMax reports a repeated text leak honestly instead of executing it",
+          "[integration][http][minimax][leak]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/anthropic/v1/messages",
+                [&](const httplib::Request&, httplib::Response& res) {
+        ++requests;
+        res.set_content(minimax_text_sse(kLeakedMiniMaxCall, "end_turn"),
+                        "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = minimax_leak_test_provider(port);
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(minimax_leak_test_request(),
+                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(requests.load() == 2);
+    const auto resets = std::ranges::count_if(chunks,
+        [](const StreamChunk& c) { return c.reset_attempt; });
+    CHECK(resets == 2);
+
+    // No tool is ever executed from leaked markup; the turn ends in an honest
+    // error rather than showing the raw markup as the answer.
+    const auto tools = std::ranges::count_if(chunks,
+        [](const StreamChunk& c) { return !c.tools.empty(); });
+    CHECK(tools == 0);
+    const auto error = std::ranges::find_if(chunks,
+        [](const StreamChunk& c) { return c.is_error; });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content, Catch::Matchers::ContainsSubstring("No tool was executed"));
+    CHECK(error->content.find("]<]minimax[>[") == std::string::npos);
+    CHECK(chunks.back().is_final);
+    CHECK(chunks.back().is_error);
+}
+
+TEST_CASE("MiniMax passes a clean answer through without a retry",
+          "[integration][http][minimax][leak]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/anthropic/v1/messages",
+                [&](const httplib::Request&, httplib::Response& res) {
+        ++requests;
+        res.set_content(minimax_text_sse("All good.", "end_turn"), "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = minimax_leak_test_provider(port);
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(minimax_leak_test_request(),
+                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(requests.load() == 1);
+    const auto resets = std::ranges::count_if(chunks,
+        [](const StreamChunk& c) { return c.reset_attempt; });
+    CHECK(resets == 0);
+    std::string answer;
+    for (const auto& chunk : chunks) {
+        if (!chunk.is_error && !chunk.reset_attempt) answer += chunk.content;
+    }
+    CHECK(answer == "All good.");
+    REQUIRE_FALSE(chunks.empty());
+    CHECK(chunks.back().is_final);
+    CHECK_FALSE(chunks.back().is_error);
+    CHECK(chunks.back().stop_reason == "end_turn");
+}
+
+TEST_CASE("MiniMax forwards a policy refusal error followed by a final marker",
+          "[integration][http][minimax][leak][policy]") {
+    httplib::Server server;
+    std::atomic<int> hits{0};
+    server.Post("/anthropic/v1/messages",
+                [&](const httplib::Request&, httplib::Response& res) {
+        ++hits;
+        res.set_content(minimax_text_sse("ok", "end_turn"), "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    core::policy::PolicyRule deny;
+    deny.id = "deny-minimax";
+    deny.effect = core::policy::Effect::deny;
+    deny.principal = core::policy::PrincipalKind::model_provider;
+    deny.host = core::policy::HostPattern::parse("127.0.0.1").value();
+    deny.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
+    auto denied_policy = std::make_shared<core::policy::PolicySnapshot>(
+        core::policy::PolicySet({deny}, core::policy::Effect::ask),
+        std::make_shared<core::policy::GrantStore>());
+    core::policy::ScopedActivePolicyForTesting installed(denied_policy);
+
+    auto provider = minimax_leak_test_provider(port);
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(minimax_leak_test_request(),
+                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    // The refusal emits an error chunk and then a plain final marker. The
+    // wrapper must forward the error, not let the final overwrite it.
+    CHECK(hits.load() == 0);
+    const auto error = std::ranges::find_if(chunks,
+        [](const StreamChunk& c) { return c.is_error; });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content, Catch::Matchers::ContainsSubstring("Network policy"));
+    const auto resets = std::ranges::count_if(chunks,
+        [](const StreamChunk& c) { return c.reset_attempt; });
+    CHECK(resets == 0);
+    REQUIRE_FALSE(chunks.empty());
+    CHECK(chunks.back().is_final);
 }

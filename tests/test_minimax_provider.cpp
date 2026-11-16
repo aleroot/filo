@@ -819,3 +819,27 @@ TEST_CASE("MiniMax plan search maps organic hits, limits and domain filters", "[
     const auto empty = parse_minimax_web_search_response(R"({"organic":[]})", request);
     REQUIRE(empty); CHECK(empty->results.empty());
 }
+
+TEST_CASE("MiniMax detects tool-call markup leaked as plain text", "[minimax][leak]") {
+    using core::llm::providers::minimax_leaked_tool_call_markup;
+
+    // The incident shape (session 7cdbc826): every structural tag carries the
+    // M3 namespace marker, and the closer of <limit_lines> is malformed.
+    const std::string incident = R"MINIMAX(]<]minimax[>[<invoke name="read">]<]minimax[>[<limit_lines>110]<]minimax[>[</limit_line>]<]minimax[>[<offset_line>180]<]minimax[>[</offset_line>]<]minimax[>[<path>Lampo/Settings/SettingsProvider.swift]<]minimax[>[</path>]<]minimax[>[</invoke>)MINIMAX";
+    CHECK(minimax_leaked_tool_call_markup(incident));
+
+    // A well-formed leak wrapped in <tool_call> is the same failure.
+    const std::string ns = "]<]minimax[>[";
+    const std::string wrapped = ns + "<tool_call>" + ns + "<invoke name='read'>"
+        + ns + "<path>README.md</path>" + ns + "</invoke>" + ns + "</tool_call>";
+    CHECK(minimax_leaked_tool_call_markup(wrapped));
+
+    // Prose, or text missing either signal, is not a leaked call.
+    CHECK_FALSE(minimax_leaked_tool_call_markup(""));
+    CHECK_FALSE(minimax_leaked_tool_call_markup("I will read the file next."));
+    CHECK_FALSE(minimax_leaked_tool_call_markup("The parser expects <invoke name='read'> tags."));
+    // The namespace marker alone (a stray prefix) is not a call.
+    CHECK_FALSE(minimax_leaked_tool_call_markup("]<]minimax[>["));
+    // Legacy M2-style markup without the M3 namespace marker is not matched.
+    CHECK_FALSE(minimax_leaked_tool_call_markup("<minimax:tool_call><invoke name='read'></minimax:tool_call>"));
+}
