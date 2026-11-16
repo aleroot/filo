@@ -39,6 +39,8 @@ inline constexpr std::size_t kMiniMaxImagesPerMessage = 4;
 /// Images one request may carry, newest first (MiniMax Code's
 /// `DEFAULT_MAX_IMAGES_PER_REQUEST`).
 inline constexpr std::size_t kMiniMaxImagesPerRequest = 20;
+/// Inline video ceiling (`max_video_bytes_inline` in MiniMax Code's catalog).
+inline constexpr std::size_t kMiniMaxVideoMaxBytes = 52'428'800;
 
 /// MIME of a format MiniMax accepts, detected from its leading bytes; empty
 /// for anything else.

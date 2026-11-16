@@ -1,6 +1,7 @@
 #pragma once
 #include "AnthropicAdvisor.hpp"
 #include "ApiProtocol.hpp"
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -98,6 +99,11 @@ struct AnthropicSerializationOptions {
     /// because the API requires longer lifetimes to precede shorter ones.
     PromptCacheTtl cache_ttl = PromptCacheTtl::Standard;
     bool image_urls = false;
+    /// Send `ContentPartType::Video` as a Messages `type: "video"` block.
+    /// Left off for endpoints that only accept images.
+    bool videos = false;
+    /// Inline video ceiling used when `videos` is set. 0 keeps the shared cap.
+    std::uintmax_t max_inline_video_bytes = 0;
     std::optional<core::tools::schema::StrictDialect> tool_schema_dialect;
     std::function<bool(std::string_view)> admit_strict_tool;
     bool omit_historical_thinking = false;

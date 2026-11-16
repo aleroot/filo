@@ -1,6 +1,8 @@
 #include "MiniMaxModelTraits.hpp"
 #include "core/utils/StringUtils.hpp"
 
+#include <algorithm>
+
 namespace core::llm {
 std::string canonical_minimax_model(std::string_view model) {
     const auto id = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(model));
@@ -16,6 +18,16 @@ std::string canonical_minimax_model(std::string_view model) {
 bool is_minimax_plan_model(std::string_view model) {
     const auto id = canonical_minimax_model(model);
     return id == kMiniMaxDefaultModel || id == "MiniMax-M3";
+}
+
+int minimax_working_context_window(std::string_view model, int configured) noexcept {
+    const auto id = canonical_minimax_model(model);
+    const int model_default = id == "MiniMax-M3"
+        ? kMiniMaxConservativeContextWindow : kMiniMaxContextWindow;
+    if (configured != kMiniMaxContextWindow && configured != kMiniMaxConservativeContextWindow) {
+        return model_default;
+    }
+    return std::min(configured, kMiniMaxContextWindow);
 }
 
 std::string_view minimax_effort_ceiling(int max_tokens) noexcept {
@@ -34,7 +46,8 @@ std::optional<ModelInfo> minimax_model_info(std::string_view model) {
     info.display_name = id;
     info.provider = "minimax";
     if (flash) info.aliases = {"MiniMax-M3.1-Flash-Preview"};
-    info.context_window = kMiniMaxContextWindow;
+    info.max_context_window = kMiniMaxContextWindow;
+    info.context_window = minimax_working_context_window(id);
     info.max_output_tokens = kMiniMaxOutputLimit;
     info.capabilities = static_cast<uint32_t>(ModelCapability::TextInput)
         | static_cast<uint32_t>(ModelCapability::TextOutput)
@@ -55,7 +68,7 @@ std::optional<ModelInfo> minimax_model_info(std::string_view model) {
         ? ReasoningCapability::Effort | ReasoningCapability::MaxEffort
             | ReasoningCapability::XHighEffort | ReasoningCapability::Required
         : ReasoningCapabilities(ReasoningCapability::ToggleOnly) | ReasoningCapability::Disable;
-    info.reasoning.catalog_default_effort = flash ? "max" : "off";
+    info.reasoning.catalog_default_effort = flash ? "max" : "on";
     if (flash) info.reasoning.supported_efforts = {"low", "medium", "high", "xhigh", "max"};
     info.wire.thinking_always_on = flash;
     info.wire.fixed_sampling = true;

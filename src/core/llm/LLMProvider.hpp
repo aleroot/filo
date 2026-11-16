@@ -179,6 +179,12 @@ public:
      */
     [[nodiscard]] virtual int max_context_size() const noexcept { return 0; }
 
+    /// Context window for a specific model. Providers whose models do not share
+    /// one window override this; the default is the provider's current model.
+    [[nodiscard]] virtual int max_context_size_for(std::string_view) const noexcept {
+        return max_context_size();
+    }
+
     /// Optional provider catalog limit for automatic compaction of this model.
     [[nodiscard]] virtual std::optional<int> auto_compaction_limit(
         [[maybe_unused]] std::string_view model) const noexcept { return std::nullopt; }

@@ -17,12 +17,17 @@ std::size_t MiniMaxProvider::estimate_context_tokens(
     return MiniMaxRequestBudget::estimate_history(messages);
 }
 
-int MiniMaxProvider::max_context_size() const noexcept {
-    if (const auto live = provider_model_info(canonical_minimax_model(options_.model));
-        live && live->context_window > 0) {
-        return std::min(options_.context_window, live->context_window);
+int MiniMaxProvider::max_context_size_for(std::string_view model) const noexcept {
+    const auto id = canonical_minimax_model(model.empty() ? std::string_view(options_.model) : model);
+    const int selected = minimax_working_context_window(id, options_.context_window);
+    if (const auto live = provider_model_info(id); live && live->context_window > 0) {
+        return std::min(selected, live->context_window);
     }
-    return options_.context_window;
+    return selected;
+}
+
+int MiniMaxProvider::max_context_size() const noexcept {
+    return max_context_size_for(options_.model);
 }
 
 std::shared_ptr<LLMProvider> MiniMaxProvider::fork_for_parallel_request() const {

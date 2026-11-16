@@ -37,7 +37,9 @@ int32_t ContextWindowTracker::resolve_max_context_tokens(
     std::string_view model) noexcept {
     int32_t max_context_tokens = 0;
     if (provider) {
-        max_context_tokens = provider->max_context_size();
+        max_context_tokens = model.empty()
+            ? provider->max_context_size()
+            : provider->max_context_size_for(model);
     }
     if (max_context_tokens == 0 && !model.empty()) {
         max_context_tokens = core::llm::get_max_context_size(model);

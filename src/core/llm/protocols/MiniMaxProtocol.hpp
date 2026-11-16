@@ -16,7 +16,7 @@ class MiniMaxProtocol final : public AnthropicProtocol {
 public:
     explicit MiniMaxProtocol(bool subscription = false, std::string default_effort = {},
                              std::shared_ptr<IMiniMaxUsageSource> usage = {},
-                             int context_window = kMiniMaxContextWindow);
+                             int context_window = 0);
     std::string model_id(std::string_view model) const override;
     void prepare_request(ChatRequest& req) override;
     /// Images go through the MiniMax user-message image policy.
@@ -50,5 +50,8 @@ private:
     std::string default_effort_;
     std::shared_ptr<IMiniMaxUsageSource> usage_;
     RateLimitInfo rate_limit_;
+    /// Set once this stream's `message_start` arrives. A later `message_stop`
+    /// with no `stop_reason` is a truncated reply, not a success.
+    bool saw_message_start_ = false;
 };
 } // namespace core::llm::protocols

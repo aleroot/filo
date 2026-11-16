@@ -3,6 +3,7 @@
 #include "core/llm/MiniMaxModelTraits.hpp"
 #include "core/utils/Base64.hpp"
 #include "core/utils/ImageHeader.hpp"
+#include "core/utils/MimeUtils.hpp"
 #include "core/utils/StringUtils.hpp"
 
 #include <algorithm>
@@ -105,6 +106,63 @@ struct Attachment {
            "Use the exact file paths below and do not guess filenames.\n" + entries + "</system-reminder>";
 }
 
+[[nodiscard]] bool allowed_video_mime(std::string_view mime) noexcept {
+    return mime == "video/mp4" || mime == "video/quicktime"
+        || mime == "video/x-msvideo" || mime == "video/avi"
+        || mime == "video/msvideo" || mime == "video/x-matroska";
+}
+
+/// Empty when the video can be sent. `inline_bytes` is its base64 size, or 0
+/// for a remote URL MiniMax fetches itself.
+[[nodiscard]] std::optional<std::string> video_omission(const ContentPart& part,
+                                                       std::size_t& inline_bytes) {
+    inline_bytes = 0;
+    constexpr std::string_view kNote =
+        "[Video omitted: MiniMax accepts MP4, MOV, AVI or MKV up to 50 MiB inline]";
+    if (!part.url.empty() && !part.url.starts_with("data:")) return std::nullopt;
+    if (!part.url.empty()) {
+        const auto inline_url = decode_inline_data_url(ContentPartType::Video, part.url);
+        if (!inline_url || !allowed_video_mime(inline_url->mime_type)
+            || inline_url->decoded_size > kMiniMaxVideoMaxBytes) {
+            return std::string(kNote);
+        }
+        inline_bytes = inline_url->base64_data.size();
+        return std::nullopt;
+    }
+    if (part.path.empty()) return std::string(kNote);
+    std::error_code error;
+    const auto size = std::filesystem::file_size(part.path, error);
+    const auto mime = part.mime_type.empty()
+        ? core::utils::mime::guess_type(part.path, false) : part.mime_type;
+    if (error || size > kMiniMaxVideoMaxBytes || !allowed_video_mime(mime)) {
+        return std::string(kNote);
+    }
+    inline_bytes = (size + 2) / 3 * 4;
+    return std::nullopt;
+}
+
+/// Replaces videos MiniMax would reject and returns the base64 bytes still sent.
+[[nodiscard]] std::size_t withhold_videos(ChatRequest& request) {
+    std::size_t kept = 0;
+    for (auto& message : request.messages) {
+        for (auto& part : message.content_parts) {
+            if (part.type != ContentPartType::Video) continue;
+            std::size_t bytes = 0;
+            if (auto note = video_omission(part, bytes)) {
+                part = ContentPart::make_text(std::move(*note));
+                continue;
+            }
+            if (kept + bytes > kMiniMaxRequestBodyLimit) {
+                part = ContentPart::make_text(
+                    "[Video omitted: the request body limit leaves no room for it]");
+                continue;
+            }
+            kept += bytes;
+        }
+    }
+    return kept;
+}
+
 } // namespace
 
 // The image signatures of the WHATWG MIME Sniffing Standard, section 6.1.
@@ -114,6 +172,7 @@ std::string_view minimax_image_mime(std::string_view bytes) noexcept {
 }
 
 void prepare_minimax_images(ChatRequest& request) {
+    const std::size_t video_bytes = withhold_videos(request);
     // Oldest first: within a message the first images are the ones kept.
     std::vector<Attachment> attachments;
     for (std::size_t m = 0; m < request.messages.size(); ++m) {
@@ -134,7 +193,7 @@ void prepare_minimax_images(ChatRequest& request) {
 
     // Newest first: history images give way to the ones just attached.
     std::size_t kept = 0;
-    std::size_t body = 0;
+    std::size_t body = video_bytes;
     for (auto& attachment : attachments | std::views::reverse) {
         if (attachment.withheld != Withheld::No) continue;
         if (kept == kMiniMaxImagesPerRequest) {

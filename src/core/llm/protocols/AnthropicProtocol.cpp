@@ -280,6 +280,30 @@ std::string AnthropicSerializer::serialize(
 
     // One image block, or a text placeholder when the media cannot be sent.
     const auto append_media_block = [&](const ContentPart& part) {
+        if (part.type == ContentPartType::Video) {
+            const auto encoded = options.videos
+                ? encode_media_part(part, options.max_inline_video_bytes == 0
+                      ? kMaxInlineVideoBytes : options.max_inline_video_bytes)
+                : std::nullopt;
+            if (encoded && encoded->is_url_reference()) {
+                payload += R"({"type":"video","source":{"type":"url","url":")";
+                payload += core::utils::escape_json_string(encoded->url);
+                payload += R"("}})";
+            } else if (encoded && !encoded->base64_data.empty()
+                       && is_video_mime(encoded->mime_type)) {
+                payload += R"({"type":"video","source":{"type":"base64","media_type":")";
+                payload += core::utils::escape_json_string(encoded->mime_type);
+                payload += R"(","data":")";
+                payload += core::utils::escape_json_string(encoded->base64_data);
+                payload += R"("}})";
+            } else {
+                payload += R"({"type":"text","text":")";
+                payload += core::utils::escape_json_string(
+                    unavailable_media_attachment_text(part.type, media_reference(part)));
+                payload += R"("})";
+            }
+            return;
+        }
         const auto encoded = encode_image_part(part);
         const auto media_type = encoded.has_value() && !encoded->is_url_reference()
             ? anthropic_image_media_type(encoded->mime_type)

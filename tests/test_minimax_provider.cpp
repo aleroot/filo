@@ -155,11 +155,17 @@ TEST_CASE("MiniMax keeps required thinking and all supported effort levels", "[m
     auto m3 = request("MiniMax-M3");
     MiniMaxProtocol api;
     api.prepare_request(m3);
-    CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
+    CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+    CHECK_THAT(api.serialize(m3), !ContainsSubstring("output_config"));
     m3.effort = "high";
     CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("type":"adaptive")"));
     CHECK_THAT(api.serialize(m3), !ContainsSubstring("output_config"));
-    for (const auto effort : {"auto", "default", "unset", " OFF ", " disabled "}) {
+    for (const auto effort : {"auto", "default", "unset", "on"}) {
+        m3.effort = effort;
+        CHECK_THAT(api.serialize(m3), ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+        CHECK_THAT(api.serialize(m3), !ContainsSubstring("output_config"));
+    }
+    for (const auto effort : {" OFF ", "none", " disabled "}) {
         m3.effort = effort;
         CHECK_THAT(api.serialize(m3), !ContainsSubstring("thinking"));
     }
@@ -286,14 +292,29 @@ TEST_CASE("MiniMax sparse discovery preserves curated limits and separate plan i
     });
     REQUIRE(flash != result.models.end());
     CHECK(flash->context_window == kMiniMaxContextWindow);
+    CHECK(flash->max_context_window == kMiniMaxContextWindow);
     CHECK(flash->max_output_tokens == kMiniMaxOutputLimit);
     CHECK(flash->provider == "minimax-m-plan");
     CHECK(flash->supports(ModelCapability::Vision));
     // JSON-object output passes request validation; schemas are refused by the protocol.
     CHECK(flash->supports(ModelCapability::JsonMode));
-    CHECK(std::ranges::any_of(result.models, [](const auto& model) {
+    const auto m3 = std::ranges::find_if(result.models, [](const auto& model) {
         return model.canonical_id == "MiniMax-M3";
-    }));
+    });
+    REQUIRE(m3 != result.models.end());
+    // M3's working default stays under the 512k usage boundary unless the
+    // user opts into the 1M window. The model can still serve 1M.
+    CHECK(m3->context_window == kMiniMaxConservativeContextWindow);
+    CHECK(m3->max_context_window == kMiniMaxContextWindow);
+    const auto wide = MiniMaxProtocol(true, {}, {}, kMiniMaxContextWindow).model_catalog("minimax-m-plan");
+    const auto widened = wide->parse_models_response(R"({"data":[{"id":"MiniMax-M3"}]})");
+    REQUIRE(widened.models.size() == 1);
+    CHECK(widened.models[0].context_window == kMiniMaxContextWindow);
+    const auto narrow = MiniMaxProtocol(true, {}, {}, kMiniMaxConservativeContextWindow)
+                            .model_catalog("minimax-m-plan");
+    const auto narrowed = narrow->parse_models_response(R"({"data":[{"id":"MiniMax-M3.1-Flash"}]})");
+    REQUIRE(narrowed.models.size() == 1);
+    CHECK(narrowed.models[0].context_window == kMiniMaxConservativeContextWindow);
     const std::vector<std::string> providers{"minimax", "minimax-m-plan"};
     const auto group = provider_catalog_group_for("minimax-m-plan", providers);
     REQUIRE(group.sources.size() == 2);
@@ -435,6 +456,20 @@ TEST_CASE("MiniMax context configuration survives forks and supplies compaction 
     CHECK(estimator->estimate_context_tokens(request().messages)
         == providers::MiniMaxRequestBudget::estimate_history(request().messages));
     CHECK(core::budget::context_window_for_model("MiniMax-M3.1-Flash") == kMiniMaxContextWindow);
+    CHECK(core::budget::context_window_for_model("MiniMax-M3") == kMiniMaxConservativeContextWindow);
+    core::config::ProviderConfig m3_config;
+    m3_config.api_key = "fixture";
+    m3_config.model = "MiniMax-M3";
+    const auto m3 = ProviderFactory::create_provider("minimax-m-plan", m3_config);
+    REQUIRE(m3);
+    CHECK(m3->max_context_size() == kMiniMaxConservativeContextWindow);
+    CHECK(m3->max_context_size_for("MiniMax-M3.1-Flash") == kMiniMaxContextWindow);
+    // The explicit 1M above is an opt-in, so this provider serves M3 at 1M too.
+    CHECK(provider->max_context_size_for("MiniMax-M3") == kMiniMaxContextWindow);
+    m3_config.context_window = kMiniMaxContextWindow;
+    const auto m3_wide = ProviderFactory::create_provider("minimax-m-plan", m3_config);
+    REQUIRE(m3_wide);
+    CHECK(m3_wide->max_context_size() == kMiniMaxContextWindow);
     config.context_window = 999999;
     CHECK_THROWS(ProviderFactory::create_provider("minimax-m-plan", config));
     config.api_type = core::config::ApiType::Anthropic;
@@ -481,6 +516,39 @@ TEST_CASE("MiniMax preserves ordered reasoning and tools with cache-aware usage"
     CHECK_THAT(payload, ContainsSubstring(R"("thinking":"Reason","signature":"signed")"));
     CHECK_THAT(payload, ContainsSubstring(R"("type":"tool_result","tool_use_id":"call")"));
     CHECK(payload.find("Reason") < payload.find("\"type\":\"tool_use\""));
+}
+
+TEST_CASE("MiniMax sends inline video as a video block and omits other formats", "[minimax][vision]") {
+    MiniMaxProtocol protocol;
+    auto req = request();
+    req.messages.back().content_parts = {
+        ContentPart::make_video_url("https://example.test/clip.mp4"),
+        ContentPart::make_video_url("data:video/mp4;base64,AAAA"),
+        ContentPart::make_video_url("data:video/webm;base64,AAAA"),
+    };
+    protocol.prepare_request(req);
+    const auto payload = protocol.serialize(req);
+    valid_json(payload);
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"video","source":{"type":"url","url":"https://example.test/clip.mp4"})"));
+    CHECK_THAT(payload, ContainsSubstring(R"("type":"video","source":{"type":"base64","media_type":"video/mp4","data":"AAAA"})"));
+    CHECK_THAT(payload, ContainsSubstring("Video omitted"));
+    CHECK_THAT(payload, !ContainsSubstring("video/webm"));
+}
+
+TEST_CASE("MiniMax rejects a finished stream that never reported stop_reason", "[minimax][sse]") {
+    MiniMaxProtocol protocol;
+    const auto start = protocol.parse_event(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n");
+    CHECK_FALSE(start.stream_error);
+    const auto stop = protocol.parse_event("data: {\"type\":\"message_stop\"}\n\n");
+    CHECK(stop.stream_error);
+    CHECK(stop.retryable_stream_error);
+    CHECK_FALSE(stop.done);
+    CHECK_THAT(stop.stream_error_message, ContainsSubstring("stop_reason"));
+    protocol.reset_state();
+    const auto lone = protocol.parse_event("data: {\"type\":\"message_stop\"}\n\n");
+    CHECK_FALSE(lone.stream_error);
+    CHECK(lone.done);
 }
 
 TEST_CASE("MiniMax business errors distinguish exhaustion from transient rate limits", "[minimax][errors]") {

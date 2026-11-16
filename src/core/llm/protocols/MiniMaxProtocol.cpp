@@ -133,7 +133,10 @@ MiniMaxProtocol::MiniMaxProtocol(bool subscription, std::string default_effort,
     : AnthropicProtocol(kMiniMaxOutputLimit, nullptr), context_window_(context_window), subscription_(subscription),
       default_effort_(std::move(default_effort)),
       usage_(usage ? std::move(usage) : make_minimax_usage_source()) {
-    if (context_window_ != kMiniMaxContextWindow && context_window_ != kMiniMaxConservativeContextWindow) {
+    // 0 keeps each model's working default. The only explicit choices are the
+    // two windows MiniMax Code offers.
+    if (context_window_ != 0 && context_window_ != kMiniMaxContextWindow
+        && context_window_ != kMiniMaxConservativeContextWindow) {
         throw std::invalid_argument("MiniMax context_window must be 512000 or 1000000.");
     }
 }
@@ -165,8 +168,9 @@ void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_ur
     // The request goes to the same configured endpoint, with no redirect or
     // cross-origin fallback. Failure retains the conservative local budget.
     if (cancelled && cancelled()) return;
+    const int selected = minimax_working_context_window(req.model, context_window_);
     const int context_window = req.catalog_context_window && *req.catalog_context_window > 0
-        ? std::min(context_window_, *req.catalog_context_window) : context_window_;
+        ? std::min(selected, *req.catalog_context_window) : selected;
     std::size_t counted = 0;
     if (providers::MiniMaxRequestBudget::estimate_request(req) >= static_cast<std::size_t>(context_window / 3)) {
         try {
@@ -218,6 +222,8 @@ void MiniMaxProtocol::prepare_context(ChatRequest& req, std::string_view base_ur
 std::string MiniMaxProtocol::serialize(const ChatRequest& req) const {
     AnthropicSerializationOptions options;
     options.image_urls = true;
+    options.videos = true;
+    options.max_inline_video_bytes = kMiniMaxVideoMaxBytes;
     options.extra_fields = [&](std::string& payload, const ChatRequest& request) {
         const auto info = minimax_model_info(request.model);
         if (!info) throw std::invalid_argument("Unknown MiniMax model policy.");
@@ -231,14 +237,14 @@ std::string MiniMaxProtocol::serialize(const ChatRequest& req) const {
             payload += core::utils::escape_json_string(effective);
             payload += R"("})";
         } else {
-            const auto effort = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(request.effort));
-            const bool requested = !effort.empty() && effort != "auto" && effort != "default"
-                && effort != "unset" && effort != "off" && effort != "none" && effort != "disabled";
-            // Optional thinking is dropped where even the shallowest effort
-            // could exhaust the budget before any answer text.
+            // M3 has no effort levels. MiniMax Code starts it thinking; an
+            // explicit off is the only selection that omits the field. A tiny
+            // output budget still drops it, because thinking counts toward
+            // max_tokens and can finish the turn before any answer text.
+            const bool disabled = is_reasoning_off_effort(request.effort);
             const bool fits = !request.max_tokens
                 || minimax_effort_ceiling(*request.max_tokens) != "low";
-            if (requested && fits) payload += R"(,"thinking":{"type":"adaptive"})";
+            if (!disabled && fits) payload += R"(,"thinking":{"type":"adaptive"})";
         }
     };
     auto payload = AnthropicSerializer::serialize(req, kMiniMaxOutputLimit, options);
@@ -282,7 +288,21 @@ std::unique_ptr<ModelCatalogProvider> MiniMaxProtocol::model_catalog(std::string
 }
 ParseResult MiniMaxProtocol::parse_event(std::string_view raw_event) {
     sse::ParsedEventView event;
-    if (sse::parse_event_payload(raw_event, event)
+    const bool parsed = sse::parse_event_payload(raw_event, event);
+    if (parsed && event.event == "message_start") {
+        saw_message_start_ = true;
+    } else if (parsed && event.event.empty()) {
+        // Some streams put the event name only in the JSON `type` field.
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(event.data);
+        simdjson::dom::element doc;
+        std::string_view type;
+        if (parser.parse(padded).get(doc) == simdjson::SUCCESS
+            && doc["type"].get(type) == simdjson::SUCCESS && type == "message_start") {
+            saw_message_start_ = true;
+        }
+    }
+    if (parsed
         && (event.event == "error" || event.data.find("\"error\"") != std::string_view::npos
             || event.data.find("\"base_resp\"") != std::string_view::npos)) {
         const auto error = parse_error(event.data);
@@ -294,7 +314,18 @@ ParseResult MiniMaxProtocol::parse_event(std::string_view raw_event) {
             return failed;
         }
     }
-    return AnthropicProtocol::parse_event(raw_event);
+    auto result = AnthropicProtocol::parse_event(raw_event);
+    // MiniMax Code rejects a message that starts and stops without ever
+    // reporting why. The initial empty reason would otherwise look like success.
+    if (result.done && saw_message_start_ && result.stop_reason.empty() && !result.stream_error) {
+        result.stream_error = true;
+        result.retryable_stream_error = true;
+        result.stream_error_message =
+            "MiniMax stream ended without stop_reason; the reply was cut short.";
+        result.done = false;
+        result.chunks.clear();
+    }
+    return result;
 }
 std::unique_ptr<ApiProtocolBase> MiniMaxProtocol::clone() const {
     return std::make_unique<MiniMaxProtocol>(subscription_, default_effort_, usage_, context_window_);
@@ -323,5 +354,9 @@ bool MiniMaxProtocol::is_retryable(const HttpResponse& response) const noexcept 
     return response.status_code == 429 || response.status_code == 500 || response.status_code == 502
         || response.status_code == 503 || response.status_code == 504 || response.status_code == 529;
 }
-void MiniMaxProtocol::reset_state() { AnthropicProtocol::reset_state(); rate_limit_ = {}; }
+void MiniMaxProtocol::reset_state() {
+    AnthropicProtocol::reset_state();
+    rate_limit_ = {};
+    saw_message_start_ = false;
+}
 } // namespace core::llm::protocols

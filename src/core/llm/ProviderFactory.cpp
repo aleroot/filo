@@ -374,7 +374,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             .provider_name = std::string(name),
             .subscription = billing_kind == core::auth::BillingKind::Subscription,
             .default_effort = config.reasoning_effort,
-            .context_window = config.context_window > 0 ? config.context_window : kMiniMaxContextWindow,
+            .context_window = config.context_window,
         });
     }
     // Build protocol based on api_type (and provider-specific extensions).

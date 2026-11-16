@@ -318,7 +318,8 @@ struct InlineDataUrl {
 }
 
 [[nodiscard]] inline std::optional<EncodedMediaPart> encode_media_part(
-    const ContentPart& part) {
+    const ContentPart& part,
+    std::uintmax_t max_inline_video_bytes = kMaxInlineVideoBytes) {
     if (!is_media_part(part.type)) {
         return std::nullopt;
     }
@@ -329,7 +330,7 @@ struct InlineDataUrl {
             // data URL through, and inline-only providers refuse them the same
             // way they refuse an oversized local file.
             const bool inline_allowed = part.type != ContentPartType::Video
-                || inline_url->decoded_size <= kMaxInlineVideoBytes;
+                || inline_url->decoded_size <= max_inline_video_bytes;
             return EncodedMediaPart{
                 .type = part.type,
                 .path = part.path,
@@ -376,7 +377,7 @@ struct InlineDataUrl {
         return std::nullopt;
     }
     if (part.type == ContentPartType::Video
-        && static_cast<std::uintmax_t>(size) > kMaxInlineVideoBytes) {
+        && static_cast<std::uintmax_t>(size) > max_inline_video_bytes) {
         return std::nullopt;
     }
     input.seekg(0, std::ios::beg);

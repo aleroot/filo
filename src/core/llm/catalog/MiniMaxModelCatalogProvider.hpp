@@ -7,7 +7,7 @@ namespace core::llm {
 class MiniMaxModelCatalogProvider final : public ModelCatalogProvider {
 public:
     MiniMaxModelCatalogProvider(std::string provider, bool subscription,
-                               int context_window = kMiniMaxContextWindow);
+                               int context_window = 0);
     std::string_view provider_name() const noexcept override;
     std::string model_list_path(std::string_view cursor = {}) const override;
     ModelCatalogResult parse_models_response(std::string_view body) const override;

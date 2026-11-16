@@ -23,8 +23,15 @@ ModelCatalogResult MiniMaxModelCatalogProvider::parse_models_response(std::strin
         if (subscription_ && !is_minimax_plan_model(remote.canonical_id)) continue;
         if (auto curated = minimax_model_info(remote.canonical_id)) {
             curated->provider = provider_;
-            curated->context_window = remote.context_window > 0
-                ? std::min(context_window_, remote.context_window) : context_window_;
+            // The API's reported input limit, when present, is a hard ceiling.
+            // An explicit provider `context_window` replaces the model working
+            // default; otherwise M3 stays at 512k and Flash at 1M.
+            const int ceiling = remote.context_window > 0
+                ? std::min(kMiniMaxContextWindow, remote.context_window)
+                : kMiniMaxContextWindow;
+            curated->context_window = std::min(
+                minimax_working_context_window(curated->canonical_id, context_window_), ceiling);
+            curated->max_context_window = ceiling;
             if (remote.max_output_tokens > 0) {
                 curated->max_output_tokens = std::min(
                     curated->max_output_tokens, remote.max_output_tokens);

@@ -8,12 +8,13 @@
 
 namespace core::llm {
 inline constexpr std::string_view kMiniMaxDefaultModel = "MiniMax-M3.1-Flash";
-// MiniMax documents a 1M context window for both curated models. Discovery
-// keeps the tighter of this ceiling and any API-reported `max_input_tokens`;
-// an explicit `context_window` config narrows it the same way.
+// Documented context ceiling for both curated models. Discovery keeps the
+// tighter of this and any API-reported `max_input_tokens`.
 inline constexpr int kMiniMaxContextWindow = 1000000;
-// MiniMax Code's conservative working window (also M3's cheaper pricing-tier
-// boundary); the only other value the context config accepts.
+// Working window MiniMax Code uses unless the user opts into 1M
+// (`higher_usage`). For pay-as-you-go M3 this is also the price boundary:
+// input above 512k tokens is billed at twice the rate. Flash's list price is
+// flat, so its working default stays at the ceiling.
 inline constexpr int kMiniMaxConservativeContextWindow = 512000;
 inline constexpr int kMiniMaxOutputLimit = 128000;
 // MiniMax Code's `max_request_body_bytes` for the Messages endpoint.
@@ -22,6 +23,11 @@ inline constexpr std::size_t kMiniMaxRequestBodyLimit = 64 * 1024 * 1024;
 [[nodiscard]] std::string canonical_minimax_model(std::string_view model);
 [[nodiscard]] std::optional<ModelInfo> minimax_model_info(std::string_view model);
 [[nodiscard]] bool is_minimax_plan_model(std::string_view model);
+/// Working context for admission and compaction. `configured` 0 keeps the
+/// model default (M3 at 512k, Flash at 1M). An explicit 512000 or 1000000
+/// replaces that default and is still capped at the 1M ceiling.
+[[nodiscard]] int minimax_working_context_window(std::string_view model,
+                                                 int configured = 0) noexcept;
 
 /// MiniMax counts thinking toward `max_tokens`; a short output budget at a
 /// deep effort ends with `stop_reason: max_tokens` and no text. Returns the

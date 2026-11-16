@@ -15,11 +15,13 @@ public:
         std::string provider_name = "minimax-m-plan";
         bool subscription = true;
         std::string default_effort;
-        int context_window = kMiniMaxContextWindow;
+        /// 0 keeps the model working default (Flash 1M, M3 512k).
+        int context_window = 0;
     };
     explicit MiniMaxProvider(Options options);
     std::size_t estimate_context_tokens(const std::vector<Message>& messages) const noexcept override;
     int max_context_size() const noexcept override;
+    int max_context_size_for(std::string_view model) const noexcept override;
     std::shared_ptr<LLMProvider> fork_for_parallel_request() const override;
 private:
     Options options_;
