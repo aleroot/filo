@@ -9,13 +9,46 @@
 
 namespace core::llm::providers {
 namespace {
-/// The namespace marker M3 prefixes to every structural tool-call tag.
-constexpr std::string_view kLeakedNamespace = "]<]minimax[>[";
+/// M3 prefixes every structural tool-call tag with this marker. vLLM's parser
+/// names it `NAMESPACE`; it is not a string the model emits as prose.
+constexpr std::string_view kMiniMaxToolNamespace = "]<]minimax[>[";
+
+constexpr std::string_view kLeakedToolCallError =
+    "\n[MiniMax returned tool-call markup as plain text instead of a "
+    "structured tool call. No tool was executed.]\n";
+
+/// What one streamed attempt contained. The transport callback only records
+/// it; the provider decides what to emit once the terminal event arrives.
+struct AttemptObservation {
+    std::string text;
+    bool saw_structured_tools = false;
+    bool failed = false;
+
+    void clear() noexcept {
+        text.clear();
+        saw_structured_tools = false;
+        failed = false;
+    }
+
+    void observe(const StreamChunk& chunk) {
+        text += chunk.content;
+        saw_structured_tools = saw_structured_tools || !chunk.tools.empty();
+    }
+
+    /// A leak is a clean text final. A structured tool_use is the gateway
+    /// doing its job, and an incomplete or failed attempt already has a
+    /// failure path. Neither is replaced by this one.
+    [[nodiscard]] bool is_leaked_tool_call(const StreamChunk& terminal) const noexcept {
+        return !failed
+            && !terminal.incomplete_tool_call
+            && !saw_structured_tools
+            && minimax_leaked_tool_call_markup(text);
+    }
+};
 } // namespace
 
 bool minimax_leaked_tool_call_markup(std::string_view text) noexcept {
-    return text.find(kLeakedNamespace) != std::string_view::npos
-        && text.find("<invoke") != std::string_view::npos;
+    return text.find(kMiniMaxToolNamespace) != std::string_view::npos;
 }
 
 MiniMaxProvider::MiniMaxProvider(Options options)
@@ -27,72 +60,48 @@ MiniMaxProvider::MiniMaxProvider(Options options)
 void MiniMaxProvider::stream_response(const ChatRequest& request,
                                       std::function<void(const StreamChunk&)> callback) {
     cancelled_.store(false, std::memory_order_release);
-    // The gateway usually structures the model's native tool-call markup into
-    // tool_use blocks, but intermittently leaks it as plain text and closes the
-    // turn normally. The leaked markup is not a usable call (it can even carry
-    // malformed tags), so it is never executed: retract it and ask once more.
-    // A second leak is reported honestly instead of shown as garbage.
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (cancelled_.load(std::memory_order_acquire)) {
-            callback(StreamChunk::make_final());
-            return;
-        }
-        std::string text;
-        bool saw_structured_tools = false;
-        bool failed = false;
-        std::optional<StreamChunk> terminal;
-        HttpLLMProvider::stream_response(request, [&](const StreamChunk& chunk) {
-            if (chunk.reset_attempt) {
-                text.clear();
-                saw_structured_tools = false;
-                failed = false;
-                callback(chunk);
-                return;
-            }
-            // Errors (transport cuts included) are never retracted, and the
-            // base may follow one with a plain final marker: forward them
-            // as they arrive instead of letting the final overwrite them.
-            if (chunk.is_error) {
-                failed = true;
-                callback(chunk);
-                return;
-            }
-            // Hold a clean terminal back until the whole attempt is observed:
-            // a leaked call is only decidable once all text has arrived, and a
-            // retry must replace this terminal with an attempt reset.
-            if (chunk.is_final) {
-                text += chunk.content;
-                saw_structured_tools = saw_structured_tools || !chunk.tools.empty();
-                terminal = chunk;
-                return;
-            }
-            text += chunk.content;
-            saw_structured_tools = saw_structured_tools || !chunk.tools.empty();
+    // The gateway sometimes returns M3's native tool-call markup as a text
+    // block and closes the turn normally. That text is not a tool call: it
+    // can be truncated or malformed, and executing it would invent a call the
+    // server did not structure. Retract it and fail the turn. Do not send the
+    // request again. The response was a success, and a second identical call
+    // only repeats the cost.
+    AttemptObservation attempt;
+    std::optional<StreamChunk> terminal;
+    HttpLLMProvider::stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.reset_attempt) {
+            attempt.clear();
             callback(chunk);
-        });
-        if (!terminal) return;
-        if (cancelled_.load(std::memory_order_acquire)) {
-            callback(*terminal);
             return;
         }
-        const bool leaked = !failed && !terminal->incomplete_tool_call
-            && !saw_structured_tools && minimax_leaked_tool_call_markup(text);
-        if (!leaked) {
-            callback(*terminal);
+        // Errors (transport cuts included) are never retracted, and the base
+        // may follow one with a plain final marker: forward them as they
+        // arrive instead of letting the final overwrite them.
+        if (chunk.is_error) {
+            attempt.failed = true;
+            callback(chunk);
             return;
         }
-        if (attempt == 0) {
-            callback(StreamChunk::make_attempt_reset(
-                "[MiniMax returned a tool call as text; retrying (1/1)]"));
-            continue;
+        // Hold a clean terminal back until the whole attempt is observed. A
+        // leak is only decidable once all text has arrived, and rejecting it
+        // must replace this terminal with a reset and an error.
+        attempt.observe(chunk);
+        if (chunk.is_final) {
+            terminal = chunk;
+            return;
         }
-        callback(StreamChunk::make_attempt_reset());
-        callback(StreamChunk::make_error(
-            "\n[MiniMax returned its tool-call markup as plain text instead of a "
-            "structured tool call, twice. No tool was executed. Send the message "
-            "again; if it keeps happening, switch models.]"));
+        callback(chunk);
+    });
+    if (!terminal || cancelled_.load(std::memory_order_acquire)) {
+        if (terminal) callback(*terminal);
         return;
     }
+    if (!attempt.is_leaked_tool_call(*terminal)) {
+        callback(*terminal);
+        return;
+    }
+    callback(StreamChunk::make_attempt_reset());
+    callback(StreamChunk::make_error(std::string(kLeakedToolCallError)));
 }
 
 void MiniMaxProvider::cancel() {

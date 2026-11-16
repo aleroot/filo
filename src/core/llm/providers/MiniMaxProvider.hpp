@@ -8,16 +8,18 @@
 
 namespace core::llm::providers {
 
-/// True when `text` is MiniMax's native tool-call markup leaked into a plain
-/// text block instead of a structured tool_use. M3 prefixes every structural
-/// tag with the `]<]minimax[>[` namespace marker; a leaked call always carries
-/// an `<invoke` tag. The marker never occurs in ordinary prose, so this is a
-/// precise signal that the gateway failed to structure a tool call.
+/// True when `text` contains MiniMax M3's tool-call namespace marker
+/// (`]<]minimax[>[`). The model prefixes every structural tool-call tag with
+/// that marker, and the serving stack is supposed to turn the result into a
+/// structured tool_use before the client sees it. A clean text final that
+/// still contains the marker is the gateway leak, including a truncated leak
+/// that never reached `<invoke`. The marker is not ordinary prose.
 [[nodiscard]] bool minimax_leaked_tool_call_markup(std::string_view text) noexcept;
 
 /// Supplies the same context estimate to compaction that request admission uses.
-/// Streaming wraps the shared HTTP transport with one bounded recovery for a
-/// leaked tool call; authentication and the wire itself stay in the base.
+/// Streaming wraps the shared HTTP transport so a leaked tool call is retracted
+/// and reported as a failure. The leaked text is never executed, and the
+/// request is not sent again. Authentication and the wire stay in the base.
 class MiniMaxProvider final : public HttpLLMProvider, public ContextTokenEstimator {
 public:
     struct Options {

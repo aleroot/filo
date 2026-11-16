@@ -38,6 +38,8 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <functional>
+#include <optional>
 #include <fstream>
 #include <future>
 #include <mutex>
@@ -3135,23 +3137,29 @@ ChatRequest minimax_leak_test_request() {
     return request;
 }
 
-// The leaked markup as it arrives in a text_delta: single-quoted attributes
-// keep the fixture JSON-safe; detection only needs the marker and <invoke.
+// Single-quoted attributes keep the fixtures JSON-safe. Detection keys off
+// the namespace marker, so a truncated leak needs no <invoke> tag.
 const std::string kLeakedMiniMaxCall =
     "]<]minimax[>[<invoke name='read'>]<]minimax[>[<path>README.md]"
     "<]minimax[>[</path>]<]minimax[>[</invoke>";
-} // namespace
+// The shape reported against api.minimaxi.com: parameter tags, no <invoke>.
+const std::string kTruncatedMiniMaxCall =
+    "]<]minimax[>[<tool_call>]<]minimax[>[<path>README.md]"
+    "<]minimax[>[</path>]<]minimax[>[</tool_call>";
 
-TEST_CASE("MiniMax retracts a tool call leaked as text and retries once",
-          "[integration][http][minimax][leak]") {
+struct RecordedMiniMaxTurn {
+    int requests = 0;
+    std::vector<StreamChunk> chunks;
+};
+
+RecordedMiniMaxTurn record_minimax_turn(
+    const std::function<std::string(int attempt)>& response_for_attempt,
+    const std::function<void(int port)>& before_request = {}) {
     httplib::Server server;
     std::atomic<int> requests{0};
     server.Post("/anthropic/v1/messages",
                 [&](const httplib::Request&, httplib::Response& res) {
-        const int attempt = ++requests;
-        res.set_content(attempt == 1 ? minimax_text_sse(kLeakedMiniMaxCall, "end_turn")
-                                     : minimax_tool_sse(),
-                        "text/event-stream");
+        res.set_content(response_for_attempt(++requests), "text/event-stream");
     });
 
     const int port = server.bind_to_any_port("127.0.0.1");
@@ -3161,163 +3169,156 @@ TEST_CASE("MiniMax retracts a tool call leaked as text and retries once",
     std::jthread server_thread([&server]() { server.listen_after_bind(); });
     ScopedServerStop stop_server(server);
     wait_until_running(server);
+    if (before_request) before_request(port);
 
-    auto provider = minimax_leak_test_provider(port);
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(minimax_leak_test_request(),
-                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    RecordedMiniMaxTurn recorded;
+    minimax_leak_test_provider(port)->stream_response(
+        minimax_leak_test_request(),
+        [&](const StreamChunk& chunk) { recorded.chunks.push_back(chunk); });
+    recorded.requests = requests.load();
+    return recorded;
+}
 
-    CHECK(requests.load() == 2);
-    const auto resets = std::ranges::count_if(chunks,
-        [](const StreamChunk& c) { return c.reset_attempt; });
+void check_leaked_markup_rejected(const RecordedMiniMaxTurn& turn) {
+    CHECK(turn.requests == 1);
+    const auto resets = std::ranges::count_if(turn.chunks,
+        [](const StreamChunk& chunk) { return chunk.reset_attempt; });
     CHECK(resets == 1);
 
-    // The leaked text streams live, then the reset retracts it: nothing after
-    // the reset may carry the markup, and the retry's tool call survives.
-    std::string answer;
-    std::vector<ToolCall> tools;
+    // The leaked text streams live, then the reset retracts it. Nothing after
+    // the reset may carry the markup, and nothing is executed.
+    std::string after_reset;
     bool seen_reset = false;
-    for (const auto& chunk : chunks) {
-        if (chunk.reset_attempt) { seen_reset = true; answer.clear(); continue; }
-        if (chunk.is_error) continue;
-        answer += chunk.content;
-        tools.insert(tools.end(), chunk.tools.begin(), chunk.tools.end());
+    int tools = 0;
+    for (const auto& chunk : turn.chunks) {
+        tools += static_cast<int>(chunk.tools.size());
+        if (chunk.reset_attempt) {
+            seen_reset = true;
+            after_reset.clear();
+            continue;
+        }
+        if (seen_reset) after_reset += chunk.content;
     }
     CHECK(seen_reset);
-    CHECK(answer.find("]<]minimax[>[") == std::string::npos);
-    REQUIRE(tools.size() == 1);
-    CHECK(tools[0].function.name == "read");
-    CHECK_THAT(tools[0].function.arguments, Catch::Matchers::ContainsSubstring("README.md"));
-    REQUIRE_FALSE(chunks.empty());
-    CHECK(chunks.back().is_final);
-    CHECK_FALSE(chunks.back().is_error);
-}
-
-TEST_CASE("MiniMax reports a repeated text leak honestly instead of executing it",
-          "[integration][http][minimax][leak]") {
-    httplib::Server server;
-    std::atomic<int> requests{0};
-    server.Post("/anthropic/v1/messages",
-                [&](const httplib::Request&, httplib::Response& res) {
-        ++requests;
-        res.set_content(minimax_text_sse(kLeakedMiniMaxCall, "end_turn"),
-                        "text/event-stream");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-    ScopedServerStop stop_server(server);
-    wait_until_running(server);
-
-    auto provider = minimax_leak_test_provider(port);
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(minimax_leak_test_request(),
-                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
-
-    CHECK(requests.load() == 2);
-    const auto resets = std::ranges::count_if(chunks,
-        [](const StreamChunk& c) { return c.reset_attempt; });
-    CHECK(resets == 2);
-
-    // No tool is ever executed from leaked markup; the turn ends in an honest
-    // error rather than showing the raw markup as the answer.
-    const auto tools = std::ranges::count_if(chunks,
-        [](const StreamChunk& c) { return !c.tools.empty(); });
+    CHECK(after_reset.find("]<]minimax[>[") == std::string::npos);
+    CHECK_THAT(after_reset, Catch::Matchers::ContainsSubstring("No tool was executed"));
     CHECK(tools == 0);
-    const auto error = std::ranges::find_if(chunks,
-        [](const StreamChunk& c) { return c.is_error; });
-    REQUIRE(error != chunks.end());
-    CHECK_THAT(error->content, Catch::Matchers::ContainsSubstring("No tool was executed"));
-    CHECK(error->content.find("]<]minimax[>[") == std::string::npos);
-    CHECK(chunks.back().is_final);
-    CHECK(chunks.back().is_error);
+    REQUIRE_FALSE(turn.chunks.empty());
+    CHECK(turn.chunks.back().is_final);
+    CHECK(turn.chunks.back().is_error);
 }
 
-TEST_CASE("MiniMax passes a clean answer through without a retry",
+std::string minimax_marked_text_and_tool_sse() {
+    return
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\""
+        "]<]minimax[>[<invoke name='read'>\"}}\n\n"
+        "event: content_block_stop\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n\n"
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
+        "event: content_block_stop\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n"
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n";
+}
+} // namespace
+
+TEST_CASE("MiniMax retracts leaked tool-call markup and fails the turn",
           "[integration][http][minimax][leak]") {
-    httplib::Server server;
-    std::atomic<int> requests{0};
-    server.Post("/anthropic/v1/messages",
-                [&](const httplib::Request&, httplib::Response& res) {
-        ++requests;
-        res.set_content(minimax_text_sse("All good.", "end_turn"), "text/event-stream");
-    });
+    const auto turn = record_minimax_turn(
+        [](int) { return minimax_text_sse(kLeakedMiniMaxCall, "end_turn"); });
+    check_leaked_markup_rejected(turn);
+}
 
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-    ScopedServerStop stop_server(server);
-    wait_until_running(server);
+TEST_CASE("MiniMax rejects a truncated leak that never reached invoke",
+          "[integration][http][minimax][leak]") {
+    const auto turn = record_minimax_turn(
+        [](int) { return minimax_text_sse(kTruncatedMiniMaxCall, "end_turn"); });
+    check_leaked_markup_rejected(turn);
+}
 
-    auto provider = minimax_leak_test_provider(port);
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(minimax_leak_test_request(),
-                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+TEST_CASE("MiniMax passes a clean answer through without another request",
+          "[integration][http][minimax][leak]") {
+    const auto turn = record_minimax_turn(
+        [](int) { return minimax_text_sse("All good.", "end_turn"); });
 
-    CHECK(requests.load() == 1);
-    const auto resets = std::ranges::count_if(chunks,
-        [](const StreamChunk& c) { return c.reset_attempt; });
+    CHECK(turn.requests == 1);
+    const auto resets = std::ranges::count_if(turn.chunks,
+        [](const StreamChunk& chunk) { return chunk.reset_attempt; });
     CHECK(resets == 0);
     std::string answer;
-    for (const auto& chunk : chunks) {
+    for (const auto& chunk : turn.chunks) {
         if (!chunk.is_error && !chunk.reset_attempt) answer += chunk.content;
     }
     CHECK(answer == "All good.");
-    REQUIRE_FALSE(chunks.empty());
-    CHECK(chunks.back().is_final);
-    CHECK_FALSE(chunks.back().is_error);
-    CHECK(chunks.back().stop_reason == "end_turn");
+    REQUIRE_FALSE(turn.chunks.empty());
+    CHECK(turn.chunks.back().is_final);
+    CHECK_FALSE(turn.chunks.back().is_error);
+    CHECK(turn.chunks.back().stop_reason == "end_turn");
+}
+
+TEST_CASE("MiniMax keeps a structured tool call when the text also carries the marker",
+          "[integration][http][minimax][leak]") {
+    const auto turn = record_minimax_turn(
+        [](int) { return minimax_marked_text_and_tool_sse(); });
+
+    CHECK(turn.requests == 1);
+    const auto resets = std::ranges::count_if(turn.chunks,
+        [](const StreamChunk& chunk) { return chunk.reset_attempt; });
+    CHECK(resets == 0);
+    std::string text;
+    std::vector<ToolCall> tools;
+    for (const auto& chunk : turn.chunks) {
+        if (!chunk.reset_attempt) text += chunk.content;
+        tools.insert(tools.end(), chunk.tools.begin(), chunk.tools.end());
+        CHECK_FALSE(chunk.is_error);
+    }
+    CHECK(text.find("]<]minimax[>[") != std::string::npos);
+    REQUIRE(tools.size() == 1);
+    CHECK(tools[0].function.name == "read");
+    CHECK_THAT(tools[0].function.arguments, Catch::Matchers::ContainsSubstring("README.md"));
+    REQUIRE_FALSE(turn.chunks.empty());
+    CHECK(turn.chunks.back().is_final);
+    CHECK(turn.chunks.back().stop_reason == "tool_use");
 }
 
 TEST_CASE("MiniMax forwards a policy refusal error followed by a final marker",
           "[integration][http][minimax][leak][policy]") {
-    httplib::Server server;
-    std::atomic<int> hits{0};
-    server.Post("/anthropic/v1/messages",
-                [&](const httplib::Request&, httplib::Response& res) {
-        ++hits;
-        res.set_content(minimax_text_sse("ok", "end_turn"), "text/event-stream");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-    ScopedServerStop stop_server(server);
-    wait_until_running(server);
-
-    core::policy::PolicyRule deny;
-    deny.id = "deny-minimax";
-    deny.effect = core::policy::Effect::deny;
-    deny.principal = core::policy::PrincipalKind::model_provider;
-    deny.host = core::policy::HostPattern::parse("127.0.0.1").value();
-    deny.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
-    auto denied_policy = std::make_shared<core::policy::PolicySnapshot>(
-        core::policy::PolicySet({deny}, core::policy::Effect::ask),
-        std::make_shared<core::policy::GrantStore>());
-    core::policy::ScopedActivePolicyForTesting installed(denied_policy);
-
-    auto provider = minimax_leak_test_provider(port);
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(minimax_leak_test_request(),
-                              [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    std::optional<core::policy::ScopedActivePolicyForTesting> installed;
+    const auto turn = record_minimax_turn(
+        [](int) { return minimax_text_sse("ok", "end_turn"); },
+        [&](int port) {
+            core::policy::PolicyRule deny;
+            deny.id = "deny-minimax";
+            deny.effect = core::policy::Effect::deny;
+            deny.principal = core::policy::PrincipalKind::model_provider;
+            deny.host = core::policy::HostPattern::parse("127.0.0.1").value();
+            deny.port = core::policy::PortRange::exact(static_cast<std::uint16_t>(port));
+            installed.emplace(std::make_shared<core::policy::PolicySnapshot>(
+                core::policy::PolicySet({deny}, core::policy::Effect::ask),
+                std::make_shared<core::policy::GrantStore>()));
+        });
 
     // The refusal emits an error chunk and then a plain final marker. The
-    // wrapper must forward the error, not let the final overwrite it.
-    CHECK(hits.load() == 0);
-    const auto error = std::ranges::find_if(chunks,
-        [](const StreamChunk& c) { return c.is_error; });
-    REQUIRE(error != chunks.end());
+    // wrapper must forward the error, not let the final overwrite it, and
+    // must not replace it with the leaked-markup failure.
+    CHECK(turn.requests == 0);
+    const auto error = std::ranges::find_if(turn.chunks,
+        [](const StreamChunk& chunk) { return chunk.is_error; });
+    REQUIRE(error != turn.chunks.end());
     CHECK_THAT(error->content, Catch::Matchers::ContainsSubstring("Network policy"));
-    const auto resets = std::ranges::count_if(chunks,
-        [](const StreamChunk& c) { return c.reset_attempt; });
+    const auto resets = std::ranges::count_if(turn.chunks,
+        [](const StreamChunk& chunk) { return chunk.reset_attempt; });
     CHECK(resets == 0);
-    REQUIRE_FALSE(chunks.empty());
-    CHECK(chunks.back().is_final);
+    REQUIRE_FALSE(turn.chunks.empty());
+    CHECK(turn.chunks.back().is_final);
 }
