@@ -12,11 +12,13 @@
 #include "core/llm/Models.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include "core/utils/HostTarget.hpp"
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <mutex>
 #include <simdjson.h>
@@ -577,9 +579,12 @@ TEST_CASE("GeminiAntigravityProtocol build_headers sets Antigravity client ident
     REQUIRE(headers.at("Authorization") == "Bearer test-token");
     REQUIRE(headers.at("Content-Type") == "application/json");
     REQUIRE(headers.count("User-Agent") == 1);
-    REQUIRE_THAT(headers.at("User-Agent"),
-                 Catch::Matchers::StartsWith("antigravity/hub/" + std::string(kAntigravityClientVersion)
-                                             + " (aidev_client; os_type=darwin; arch=arm64;"));
+    // os/arch name this host the way the Go hub client does (GOOS/GOARCH).
+    constexpr auto host = core::utils::build_host_target();
+    REQUIRE(headers.at("User-Agent")
+            == std::format("antigravity/hub/{} (aidev_client; os_type={:go}; arch={:go}; cl={})",
+                           kAntigravityClientVersion, host.os, host.arch,
+                           core::auth::antigravity::kAntigravityChangelist));
     // The real hub client sends no X-Goog-Api-Client / Client-Metadata on
     // these calls; adding them would fingerprint Filo as a third-party client.
     REQUIRE(headers.count("X-Goog-Api-Client") == 0);
@@ -1064,6 +1069,34 @@ TEST_CASE("Antigravity thinking families are one model whose effort picks the SK
             CHECK(wire.level == "HIGH");
         }
         CHECK(wire_for(with_effort("gemini-3.8-flash", "minimal")).model == "gemini-3.8-flash-low");
+    }
+
+    SECTION("Gemini 4 Hydrogen is sold up to xhigh") {
+        const Wire top = wire_for(with_effort("gemini-4-hydrogen", "max"));
+        CHECK(top.model == "gemini-4-hydrogen-xhigh");
+        CHECK(top.model_enum == "MODEL_PLACEHOLDER_M528");
+        CHECK(top.level == "XHIGH");
+
+        const Wire high = wire_for(with_effort("gemini-4-hydrogen", "high"));
+        CHECK(high.model == "gemini-4-hydrogen-high");
+        CHECK(high.model_enum == "MODEL_PLACEHOLDER_M525");
+        CHECK(high.level == "HIGH");
+
+        // xhigh is opt-in: without an effort the family runs at high.
+        const Wire unset = wire_for(with_effort("gemini-4-hydrogen", ""));
+        CHECK(unset.model == "gemini-4-hydrogen-high");
+        CHECK(unset.level == "HIGH");
+        CHECK(wire_for(with_effort("gemini-4-hydrogen-xhigh", "")).model
+              == "gemini-4-hydrogen-xhigh");
+
+        // A single SKU tops out at HIGH whatever effort is asked for.
+        CHECK(wire_for(with_effort("gemini-pro-orchestrator-g1-pro", "xhigh")).level == "HIGH");
+
+        const auto profile = antigravity_wire_profile("gemini-4-hydrogen-low");
+        REQUIRE(profile.has_value());
+        CHECK(profile->max_output_tokens == 262144);
+        CHECK(protocol.reasoning_capabilities("gemini-4-hydrogen")
+                  .supports(ReasoningCapability::XHighEffort));
     }
 
     SECTION("a configured variant id is the default level, not a pin") {

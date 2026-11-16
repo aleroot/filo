@@ -3,6 +3,9 @@
 
 #include "core/auth/CodexClientIdentity.hpp"
 #include "core/utils/ClientPlatform.hpp"
+#include "core/utils/HostTarget.hpp"
+
+#include <format>
 
 #include <cstdlib>
 #include <optional>
@@ -170,3 +173,45 @@ TEST_CASE("The terminal token is safe to send as a header value",
     CHECK(core::utils::terminal_token() == "xterm_256color");
 }
 #endif
+
+TEST_CASE("A host target is spelled the way each toolchain spells it",
+          "[utils][platform][host-target]") {
+    using core::utils::Architecture;
+    using core::utils::OperatingSystem;
+
+    // Go: runtime.GOOS / runtime.GOARCH.
+    CHECK(std::format("{:go}", OperatingSystem::Darwin) == "darwin");
+    CHECK(std::format("{:go}", OperatingSystem::Linux) == "linux");
+    CHECK(std::format("{:go}", OperatingSystem::Windows) == "windows");
+    CHECK(std::format("{:go}", OperatingSystem::FreeBsd) == "freebsd");
+    CHECK(std::format("{:go}", Architecture::Arm64) == "arm64");
+    CHECK(std::format("{:go}", Architecture::X86_64) == "amd64");
+    CHECK(std::format("{:go}", Architecture::Arm) == "arm");
+    CHECK(std::format("{:go}", Architecture::X86) == "386");
+
+    // Rust: std::env::consts::OS / ARCH.
+    CHECK(std::format("{:rust}", OperatingSystem::Darwin) == "macos");
+    CHECK(std::format("{:rust}", OperatingSystem::Linux) == "linux");
+    CHECK(std::format("{:rust}", Architecture::Arm64) == "aarch64");
+    CHECK(std::format("{:rust}", Architecture::X86_64) == "x86_64");
+    CHECK(std::format("{:rust}", Architecture::X86) == "x86");
+
+    CHECK(std::format("{:go}/{:rust}", OperatingSystem::Unknown, Architecture::Unknown)
+          == "unknown/unknown");
+}
+
+TEST_CASE("A host target formatted without a naming is rejected",
+          "[utils][platform][host-target]") {
+    // A constant format string fails to compile; a runtime one throws.
+    const auto os = core::utils::OperatingSystem::Linux;
+    CHECK_THROWS_AS(std::vformat("{}", std::make_format_args(os)), std::format_error);
+    CHECK_THROWS_AS(std::vformat("{:GO}", std::make_format_args(os)), std::format_error);
+}
+
+TEST_CASE("The build target is known and agrees with the client platform",
+          "[utils][platform][host-target]") {
+    constexpr auto host = core::utils::build_host_target();
+    STATIC_REQUIRE(host.os != core::utils::OperatingSystem::Unknown);
+    STATIC_REQUIRE(host.arch != core::utils::Architecture::Unknown);
+    CHECK(core::utils::client_platform().architecture == std::format("{:rust}", host.arch));
+}

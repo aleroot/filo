@@ -43,8 +43,11 @@ struct ThinkingVariant {
 
 /// The reasoning profile of a family sold at `levels` (any order): the levels
 /// ordered weakest first as `supported_efforts`, an effort ladder covering
-/// them, and the strongest level as the default, matching both vendors' API
-/// default (Gemini's `thinkingLevel` and Anthropic's effort default to high).
+/// them, and the strongest level up to `high` as the default, matching both
+/// vendors' API default (Gemini's `thinkingLevel` and Anthropic's effort
+/// default to high). Rungs above `high` stay opt-in: Gemini 4 Hydrogen's
+/// `xhigh` spent ~65k thought tokens and over four minutes on a one-line
+/// question.
 [[nodiscard]] ModelReasoningProfile thinking_family_profile(std::span<const std::string_view> levels);
 
 /// The level of `family` (a thinking_family_profile) a request runs at.

@@ -17,9 +17,13 @@ namespace core::llm {
 namespace {
 
 // Ids the real hub client keeps out of its model picker: retired preview
-// chat builds and the superseded Gemini 2.5 Pro route.
+// chat builds, the superseded Gemini 2.5 Pro route, the Hydrogen worker
+// the Argon orchestrator offloads to (it is listed as "Gemini 4 Hydrogen
+// (Orchestrator)" but never offered for selection), and the editor's
+// tab-completion models (4096-token output, no display name).
 constexpr std::string_view kDeniedModelIds[] = {
-    "chat_20706", "chat_23310", "gemini-2.5-pro"};
+    "chat_20706", "chat_23310", "gemini-2.5-pro", "gemini-flash-worker-agy",
+    "tab_flash_lite_preview", "tab_jump_flash_lite_preview"};
 
 [[nodiscard]] bool is_denied_model_id(std::string_view id) {
     for (const auto denied : kDeniedModelIds) {
@@ -130,6 +134,9 @@ ModelCatalogResult CodeAssistModelCatalogProvider::parse_models_response(
 
         const catalog::JsonObjectView model(model_object);
         if (model.optional_boolean("isInternal").value_or(false)) continue;
+        // A SKU the account's plan does not include (e.g. Gemini 4 Carbon
+        // outside Ultra): listed for upsell, answered 404 when called.
+        if (model.optional_boolean("disabled").value_or(false)) continue;
         if (is_denied_model_id(id)) continue;
 
         ModelInfo info;

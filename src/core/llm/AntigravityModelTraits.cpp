@@ -4,6 +4,7 @@
 #include "../utils/StringUtils.hpp"
 
 #include <algorithm>
+#include <iterator>
 
 namespace core::llm::antigravity {
 
@@ -58,7 +59,12 @@ ModelReasoningProfile thinking_family_profile(std::span<const std::string_view> 
                                       : ReasoningCapability::MapsMinimalToLow);
     if (offers(profile, "xhigh")) profile.effort = profile.effort | ReasoningCapability::XHighEffort;
     if (offers(profile, "max")) profile.effort = profile.effort | ReasoningCapability::MaxEffort;
-    profile.catalog_default_effort = profile.supported_efforts.back();
+    const auto above_high = std::ranges::find_if(profile.supported_efforts, [](const std::string& level) {
+        return level_rank(level) > level_rank("high");
+    });
+    profile.catalog_default_effort = above_high == profile.supported_efforts.begin()
+        ? profile.supported_efforts.front()
+        : *std::prev(above_high);
     return profile;
 }
 

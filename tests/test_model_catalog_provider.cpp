@@ -2265,7 +2265,11 @@ TEST_CASE("CodeAssistModelCatalogProvider serves the hub fetchAvailableModels di
           "maxOutputTokens": 65535
         },
         "chat_20706": {"displayName": "Retired chat build"},
-        "internal-preview": {"displayName": "Internal", "isInternal": true}
+        "internal-preview": {"displayName": "Internal", "isInternal": true},
+        "gemini-4-carbon-disabled": {"displayName": "Gemini 4 Carbon", "disabled": true,
+                                     "tagTitle": "Unavailable"},
+        "gemini-flash-worker-agy": {"displayName": "Gemini 4 Hydrogen (Orchestrator)"},
+        "tab_flash_lite_preview": {"maxOutputTokens": 4096}
       },
       "agentModelSorts": [{"groups": [{"modelIds": ["gemini-3.1-pro-low"]}]}],
       "imageGenerationModelIds": ["gemini-3-pro-image"]
@@ -2359,7 +2363,8 @@ TEST_CASE("Antigravity folding follows the catalog, not a list of vendors or tie
     CHECK(family.display_name == "Acme Coder 7");
     CHECK(family.reasoning.supported_efforts
           == std::vector<std::string>{"minimal", "medium", "max"});
-    CHECK(family.reasoning.catalog_default_effort == "max");
+    // Rungs above high are opt-in, so the default is the strongest one below.
+    CHECK(family.reasoning.catalog_default_effort == "medium");
     CHECK(family.reasoning.effort.supports(ReasoningCapability::MinimalEffort));
     CHECK(family.reasoning.effort.supports(ReasoningCapability::MaxEffort));
     CHECK_FALSE(family.reasoning.effort.supports(ReasoningCapability::XHighEffort));
@@ -2372,7 +2377,7 @@ TEST_CASE("Antigravity folding follows the catalog, not a list of vendors or tie
     CHECK(select_thinking_level(profile, "ultra", "") == "max");
     CHECK(select_thinking_level(profile, "", "medium") == "medium");
     CHECK(select_thinking_level(profile, "off", "minimal") == "minimal");
-    CHECK(select_thinking_level(profile, "", "") == "max");
+    CHECK(select_thinking_level(profile, "", "") == "medium");
     // The requested effort beats the level a configured variant id carries.
     CHECK(select_thinking_level(profile, "minimal", "max") == "minimal");
 }

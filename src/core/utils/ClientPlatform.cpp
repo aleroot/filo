@@ -1,6 +1,7 @@
 #include "ClientPlatform.hpp"
 
 #include "AsciiUtils.hpp"
+#include "HostTarget.hpp"
 
 #include "core/version/Version.hpp"
 
@@ -19,22 +20,6 @@
 
 namespace core::utils {
 namespace {
-
-/// The architecture the binary was built for, in the spelling os_info uses
-/// (codex-rs reports it in the same User-Agent).
-[[nodiscard]] constexpr std::string_view build_architecture() noexcept {
-#if defined(__aarch64__) || defined(_M_ARM64)
-    return "aarch64";
-#elif defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__arm__)
-    return "arm";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "x86";
-#else
-    return "unknown";
-#endif
-}
 
 #if defined(__APPLE__)
 /// The product version of macOS ("15.6.1"), not the kernel's.
@@ -174,7 +159,9 @@ struct NamedTerminal {
 
 [[nodiscard]] ClientPlatform detect_platform() {
     ClientPlatform platform;
-    platform.architecture = std::string(build_architecture());
+    // os_info (which codex-rs reports) spells the architecture the Rust way.
+    platform.architecture = std::string(
+        target_name(build_host_target().arch, TargetNaming::Rust));
 
 #if defined(__APPLE__)
     platform.os = "macOS";

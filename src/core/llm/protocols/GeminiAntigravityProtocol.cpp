@@ -23,7 +23,7 @@ constexpr int kClaudeMaxOutputTokens = 128000;
 constexpr int kGeminiMaxOutputTokens = 65536;
 
 // Per-wire-id constants snapshotted from `v1internal:fetchAvailableModels` as
-// served to the 2.27.0 hub client (2026-10-28), unchanged for 2.29.0 (2026-11-05). `model_enum` is telemetry-only
+// served to the 2.32.1 hub client (2026-11-16). `model_enum` is telemetry-only
 // (the backend does not require it) but the real client never omits it for the
 // ids it lists, so neither does Filo; an id absent from this snapshot simply
 // sends no label. `max_output_tokens` is the fixed `generationConfig.
@@ -33,11 +33,24 @@ struct WireProfileEntry {
     AntigravityModelWireProfile profile;
 };
 
-constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
-    // Gemini 4 Argon — the frontier tier of the 2.27.0/2.29.0 client.
+constexpr int kGemini4MaxOutputTokens = 262144;
+
+constexpr std::array<WireProfileEntry, 29> kWireProfiles{{
+    // Gemini 4 Argon — the frontier tier since the 2.27.0 client.
     {"gemini-4-argon-low", {"MODEL_PLACEHOLDER_M419", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-medium", {"MODEL_PLACEHOLDER_M418", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-high", {"MODEL_PLACEHOLDER_M417", kGeminiMaxOutputTokens}},
+    // Gemini 4 Hydrogen (2.32.1) — the first family sold at `xhigh`.
+    {"gemini-4-hydrogen-low", {"MODEL_PLACEHOLDER_M527", kGemini4MaxOutputTokens}},
+    {"gemini-4-hydrogen-medium", {"MODEL_PLACEHOLDER_M526", kGemini4MaxOutputTokens}},
+    {"gemini-4-hydrogen-high", {"MODEL_PLACEHOLDER_M525", kGemini4MaxOutputTokens}},
+    {"gemini-4-hydrogen-xhigh", {"MODEL_PLACEHOLDER_M528", kGemini4MaxOutputTokens}},
+    // Ultra-plan only; listed `disabled` (and answered 404) for other plans.
+    {"gemini-4-carbon-disabled", {"MODEL_PLACEHOLDER_M670", kGemini4MaxOutputTokens}},
+    // "Orchestrator (Argon)" and the Hydrogen worker it offloads to. The
+    // catalog lists both only to a >= 2.32 client.
+    {"gemini-pro-orchestrator-g1-pro", {"MODEL_PLACEHOLDER_M668", kGeminiMaxOutputTokens}},
+    {"gemini-flash-worker-agy", {"MODEL_PLACEHOLDER_M669", kGemini4MaxOutputTokens}},
     // Gemini 3.8 Flash. `-tiered` is the SKU the hub's own agent runs: it
     // carries no display name and asks for a dynamic thinking budget.
     {"gemini-3.8-flash-low", {"MODEL_PLACEHOLDER_M320", kGeminiMaxOutputTokens}},
@@ -149,7 +162,7 @@ constexpr std::array<WireProfileEntry, 22> kWireProfiles{{
     const std::string hint = core::utils::str::to_lower_ascii_copy(effort);
     if (hint == "low") return "LOW";
     if (hint == "medium") return "MEDIUM";
-    if (hint == "high" || hint == "max") return "HIGH";
+    if (hint == "high" || hint == "xhigh" || hint == "max") return "HIGH";
 
     const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
     if (lowered.ends_with("-low")) return "LOW";
