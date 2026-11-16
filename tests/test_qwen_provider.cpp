@@ -269,7 +269,8 @@ TEST_CASE("Tiered Qwen models disable thinking with reasoning_effort",
     CHECK_THAT(disabled, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     request.effort = "high";
     const auto enabled = protocol.serialize(request);
-    CHECK_THAT(enabled, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"xhigh")"));
+    // Qwen4 keeps high as its own tier. Only the 3.8 ladder folds it into xhigh.
+    CHECK_THAT(enabled, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
     CHECK_THAT(enabled, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     // The legacy hybrid family keeps the on/off toggle.
     request.model = "qwen3.7-plus";
