@@ -83,6 +83,15 @@ ReasoningEffortResolution resolve_reasoning_effort(
         && capabilities.supports(ReasoningCapability::MapsXHighToHigh)) {
         return {"high", Kind::Mapped};
     }
+    // Qwen4 accepts xhigh but not the client name `max`. The 3.8 ladder uses
+    // MapsHighToXHigh instead, which also rewrites `high`.
+    if ((configured == "max" || configured == "ultra")
+        && capabilities.supports(ReasoningCapability::XHighEffort)
+        && capabilities.supports(ReasoningCapability::MapsMinimalToLow)
+        && !capabilities.supports(ReasoningCapability::MapsHighToXHigh)
+        && !capabilities.supports(ReasoningCapability::MaxEffort)) {
+        return {"xhigh", Kind::Mapped};
+    }
     if (configured == "max"
         && !capabilities.supports(ReasoningCapability::MaxEffort)) {
         return {"high", Kind::UnsupportedFallback};

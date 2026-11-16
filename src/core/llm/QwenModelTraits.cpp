@@ -162,6 +162,8 @@ std::optional<ModelInfo> qwen_hosted_model_info(std::string_view model) {
 
 int qwen_endpoint_output_limit(std::string_view model) {
     if (const auto* entry = hosted_entry(model)) return entry->output;
+    // Thinking and the answer share this cap. 131072 is the non-thinking max.
+    if (wire_id(model).starts_with("qwen4-max")) return 262144;
     return 0;
 }
 
@@ -222,7 +224,7 @@ bool qwen_model_supports_vision(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(model_id));
     if (lowered == "coder-model") return true;
-    static constexpr std::array<std::string_view, 8> kPrefixes{
+    static constexpr std::array<std::string_view, 9> kPrefixes{
         "qwen-vl",
         "qwen3-vl",
         "qwen3.5-plus",
@@ -231,6 +233,9 @@ bool qwen_model_supports_vision(std::string_view model_id) {
         "qwen3.8-plus",
         "qwen3.8-flash",
         "qwen3.8-max",
+        // Qwen4-Max understands images and video. The prefix covers dated and
+        // preview suffixes without claiming every future qwen4 variant does.
+        "qwen4-max",
     };
     for (const auto prefix : kPrefixes) {
         if (lowered.starts_with(prefix)) return true;

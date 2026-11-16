@@ -3,9 +3,20 @@
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/QwenModelTraits.hpp"
 
+#include "core/utils/StringUtils.hpp"
+
 #include <algorithm>
 
 namespace core::llm::providers {
+namespace {
+
+[[nodiscard]] bool qwen4_max_model(std::string_view model) {
+    auto id = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(model));
+    if (const auto slash = id.rfind('/'); slash != std::string::npos) id.erase(0, slash + 1);
+    return id.starts_with("qwen4-max");
+}
+
+} // namespace
 std::size_t QwenRequestBudget::estimate_history(std::span<const Message> messages) noexcept {
     // A conservative fallback, not a tokenizer: UTF-8 and code/tool-heavy
     // text need more headroom than chars/4. Never count base64 bytes as text.
@@ -51,7 +62,15 @@ void QwenRequestBudget::prepare(ChatRequest& request, const ModelInfo* model,
     const int window = model && model->context_window > 0 ? model->context_window
         : endpoint_window > 0 ? endpoint_window : get_max_context_size(request.model);
     const int output_limit = model ? model->max_output_tokens : 0;
-    int ceiling = request.max_tokens.value_or(output_limit > 0 ? std::min(output_limit, 64000) : 32000);
+    // Other Qwen models default below their advertised output so a short turn
+    // does not reserve the whole cap. Qwen4-Max shares max_tokens with its
+    // thinking budget (server default 262144); the 32k/64k ceilings cut that
+    // off. The endpoint cap below still bounds an explicit request.
+    const bool combined_output = qwen4_max_model(request.model);
+    const int unset_ceiling = output_limit > 0
+        ? (combined_output ? output_limit : std::min(output_limit, 64000))
+        : (combined_output ? 262144 : 32000);
+    int ceiling = request.max_tokens.value_or(unset_ceiling);
     if (output_limit > 0) ceiling = std::min(ceiling, output_limit);
     // The gateway's hard cap applies even if a live catalog or an explicit
     // request carries the native vendor's larger output limit.

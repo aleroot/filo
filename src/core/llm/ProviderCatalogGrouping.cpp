@@ -40,7 +40,8 @@ constexpr std::array<std::string_view, 6> kZaiCodingPlanModels{{
 // Qwen services share a registry key but authenticate independently. Scoped
 // fallback catalogs and selection identities keep subscription models routed
 // to the endpoint whose credentials can serve them.
-constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
+constexpr std::array<std::string_view, 7> kQwenTokenPlanTextModels{{
+    "qwen4-max",
     "qwen3.8-max",
     "qwen3.8-flash",
     "qwen3.7-max",

@@ -1546,6 +1546,21 @@ std::vector<ModelInfo> build_qwen_catalog() {
 
     return {
         // ── Current Qwen Cloud / Token Plan family ───────────────────────
+        // Qwen4-Max: thinking and the answer share max_output_tokens.
+        // max_reasoning_tokens is the default thinking budget, not a second cap.
+        {
+            .canonical_id      = "qwen4-max",
+            .aliases           = {},
+            .display_name      = "Qwen4 Max",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 262'144,
+            .max_reasoning_tokens = 131'072,
+            .capabilities      = CAP_QWEN_MULTIMODAL,
+            .tier              = ModelTier::Powerful,
+            .pricing           = {-1.0, -1.0, -1.0, -1.0},
+            .constraints       = kStandardConstraints,
+        },
         {
             .canonical_id      = "qwen3.8-max",
             .aliases           = {},

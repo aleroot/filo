@@ -821,6 +821,12 @@ TEST_CASE("DashScopeProtocol - vision models request high-resolution images",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("vl_high_resolution_images":true)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+    payload = DashScopeProtocol(0, "high").serialize(make_simple_request("qwen4-max"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("vl_high_resolution_images":true)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    payload = DashScopeProtocol(0, "high").serialize(make_simple_request("qwen4-plus"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("vl_high_resolution_images"));
 }
 
 TEST_CASE("DashScopeProtocol - enable_thinking injected when budget > 0",
@@ -1058,15 +1064,31 @@ TEST_CASE("Qwen 4 and latest-series previews take the tiered effort contract at 
         const auto caps = DashScopeTokenPlanProtocol{}.reasoning_capabilities(model);
         CHECK(caps.supports_effort());
         CHECK(caps.supports(ReasoningCapability::Disable));
+        CHECK(caps.supports(ReasoningCapability::XHighEffort));
+        CHECK_FALSE(caps.supports(ReasoningCapability::MapsHighToXHigh));
+        CHECK(resolve_reasoning_effort("high", caps).effective == "high");
+        CHECK(resolve_reasoning_effort("max", caps).effective == "xhigh");
 
-        auto request = make_simple_request(model);
-        request.effort = "medium";
-        const auto payload = DashScopeTokenPlanProtocol{}.serialize(request);
-        require_valid_json(payload);
-        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"medium")"));
-        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
-        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+        for (const auto& [configured, expected] :
+             {std::pair{"minimal", "low"}, {"low", "low"}, {"medium", "medium"},
+              {"high", "high"}, {"xhigh", "xhigh"}, {"max", "xhigh"}}) {
+            CAPTURE(configured);
+            auto request = make_simple_request(model);
+            request.effort = configured;
+            const auto payload = DashScopeTokenPlanProtocol{}.serialize(request);
+            require_valid_json(payload);
+            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+                std::string(R"("reasoning_effort":")") + expected + '"'));
+            CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+        }
     }
+
+    auto request = make_simple_request("qwen4-max");
+    const auto responses = DashScopeResponsesProtocol({.default_effort = "high"}).serialize(request);
+    require_valid_json(responses);
+    CHECK_THAT(responses, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"high"})"));
+    CHECK_THAT(responses, !Catch::Matchers::ContainsSubstring(R"("effort":"xhigh")"));
 }
 
 TEST_CASE("Token Plan preserves a Qwen 3.8 budget without competing effort",
@@ -1253,6 +1275,10 @@ TEST_CASE("Qwen model traits match Qwen Code",
     CHECK(core::llm::qwen_model_supports_vision("qwen3.6-plus"));
     CHECK(core::llm::qwen_model_supports_vision("qwen3.8-max"));
     CHECK(core::llm::qwen_model_supports_vision("qwen3-vl-plus"));
+    CHECK(core::llm::qwen_model_supports_vision("qwen4-max"));
+    CHECK(core::llm::qwen_model_supports_vision("qwen4-max-preview"));
+    CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen4-plus"));
+    CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen4-coder-plus"));
     CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen3-coder-plus"));
     CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen3.7-max"));
 }
@@ -1960,7 +1986,7 @@ TEST_CASE("ModelRegistry - Token Plan vision and structured-output capabilities 
         REQUIRE_FALSE(registry.supports(model, ModelCapability::VideoInput));
     }
     for (const auto model : {"qwen3.8-max", "qwen3.7-plus",
-                             "qwen3.6-plus"}) {
+                             "qwen3.6-plus", "qwen4-max"}) {
         CAPTURE(model);
         REQUIRE(registry.supports(model, ModelCapability::Vision));
         REQUIRE(registry.supports(model, ModelCapability::VideoInput));
@@ -2013,6 +2039,32 @@ TEST_CASE("ModelRegistry - qwen3.5-plus supports Vision capability", "[qwen][reg
 
 TEST_CASE("ModelRegistry - qwen3-vl-plus supports Vision capability", "[qwen][registry]") {
     REQUIRE(ModelRegistry::instance().supports("qwen3-vl-plus", ModelCapability::Vision));
+}
+
+TEST_CASE("ModelRegistry - qwen4-max advertises the combined output cap",
+          "[qwen][registry][qwen4]") {
+    const auto info = ModelRegistry::instance().get_info("qwen4-max");
+    REQUIRE(info.has_value());
+    CHECK(info->context_window == 1'000'000);
+    CHECK(info->max_output_tokens == 262'144);
+    CHECK(info->max_reasoning_tokens == 131'072);
+    CHECK(info->supports(ModelCapability::Vision));
+    CHECK(info->supports(ModelCapability::VideoInput));
+    CHECK(qwen_endpoint_output_limit("qwen4-max") == 262'144);
+    CHECK(qwen_endpoint_output_limit("qwen4-plus") == 0);
+
+    using core::llm::providers::QwenRequestBudget;
+    ChatRequest request;
+    request.model = "qwen4-max";
+    request.messages = {Message{.role = "user", .content = "hi"}};
+    QwenRequestBudget::prepare(request, &*info);
+    CHECK(request.max_tokens == 262'144);
+    request.max_tokens = 4'000;
+    QwenRequestBudget::prepare(request, &*info);
+    CHECK(request.max_tokens == 4'000);
+    request.max_tokens = 300'000;
+    QwenRequestBudget::prepare(request, &*info);
+    CHECK(request.max_tokens == 262'144);
 }
 
 TEST_CASE("ModelRegistry - qwen3-plus alias qwen-plus-latest resolves correctly",

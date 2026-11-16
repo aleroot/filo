@@ -55,6 +55,9 @@ struct ThinkingPolicy {
     bool required = false;
     bool low_effort = false;
     bool xhigh_maps_high = false;
+    // Qwen4 and the invite-only latest-series previews accept `high` as its
+    // own tier. Qwen 3.8's ladder still folds `high` into `xhigh`.
+    bool native_high = false;
 };
 
 [[nodiscard]] std::string wire_model(std::string_view model) {
@@ -66,7 +69,10 @@ struct ThinkingPolicy {
 [[nodiscard]] ThinkingPolicy thinking_policy(std::string_view model) {
     const std::string id = wire_model(model);
     if (qwen_model_supports_tiered_effort(id)) {
-        return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true};
+        const bool native_high = id.starts_with("qwen4")
+            || id.starts_with("qwen-latest-series-invite-");
+        return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true,
+                false, native_high};
     }
     if (id.starts_with("qwen3-coder")) return {};
     // Hosted GLM exposes a toggle, not native vendor effort tiers. GLM-5.3
@@ -102,7 +108,9 @@ struct ThinkingPolicy {
     if (policy.mode == ThinkingMode::Toggle) return caps | ReasoningCapability::ToggleOnly;
     caps = caps | ReasoningCapability::Effort | ReasoningCapability::MapsMinimalToLow;
     if (policy.mode == ThinkingMode::QwenEffort) {
-        return caps | ReasoningCapability::XHighEffort | ReasoningCapability::MapsHighToXHigh;
+        caps = caps | ReasoningCapability::XHighEffort;
+        if (!policy.native_high) caps = caps | ReasoningCapability::MapsHighToXHigh;
+        return caps;
     }
     caps = caps | ReasoningCapability::MaxEffort | ReasoningCapability::MapsMediumToHigh;
     if (!policy.low_effort) caps = caps | ReasoningCapability::MapsLowToHigh;
@@ -189,10 +197,13 @@ struct ThinkingPolicy {
     if (effort != "minimal" && effort != "low" && effort != "medium"
         && effort != "high" && effort != "xhigh" && effort != "max") return {};
     if (policy.mode == ThinkingMode::QwenEffort) {
-        // Use QwenCloud's documented low/medium/xhigh ladder. In particular,
-        // forwarding Filo's max/minimal verbatim can produce a persistent 400.
+        // `max` and `minimal` are client names. Qwen4's native tiers are
+        // low/high/xhigh (Qwen Code passes `high` through and clamps `max`
+        // to `xhigh`). Qwen 3.8 still has no distinct `high` and folds it
+        // into `xhigh`. `medium` is forwarded; Qwen4's server maps it to high.
         if (effort == "minimal") return "low";
-        if (effort == "high" || effort == "max") return "xhigh";
+        if (effort == "max") return "xhigh";
+        if (effort == "high" && !policy.native_high) return "xhigh";
     }
     if (policy.mode == ThinkingMode::VendorEffort) {
         if (effort == "minimal") effort = policy.low_effort ? "low" : "high";
@@ -649,7 +660,9 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
     const std::string effort = normalize_dashscope_effort(
         req.effort.empty() ? std::string_view(options_.default_effort) : std::string_view(req.effort),
         policy);
-    const std::string effective_effort = effort.empty() ? "xhigh" : effort;
+    const std::string effective_effort = effort.empty()
+        ? (policy.native_high ? "high" : "xhigh")
+        : effort;
     const auto model_reasoning =
         qwen_reasoning_capabilities(req.model);
     const std::optional<std::string_view> reasoning_effort =
