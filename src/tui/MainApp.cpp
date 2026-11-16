@@ -7869,6 +7869,8 @@ RunResult run(RunOptions opts) {
         auto retry_callbacks = turn_callbacks;
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
+        effective_callbacks.effort_override = std::move(turn_callbacks.effort_override);
+        effective_callbacks.effort_floor = std::move(turn_callbacks.effort_floor);
         effective_callbacks.allowed_tools = std::move(turn_callbacks.allowed_tools);
         effective_callbacks.allow_efficiency_rotation = turn_callbacks.allow_efficiency_rotation;
         if (turn_callbacks.min_context_utilization_for_rotation > 0.0) {
@@ -7968,6 +7970,39 @@ RunResult run(RunOptions opts) {
                 }
                 break;
             }
+            }
+            // The Agent applies an `ultrathink` floor against the live session
+            // effort; this only reports what the turn will do.
+            if (effective_callbacks.effort_override.empty()
+                && !effective_callbacks.effort_floor.empty()
+                && effective_callbacks.on_status_log) {
+                if (const auto raised = core::llm::raised_effort(
+                        agent->get_effort_level(), effective_callbacks.effort_floor)) {
+                    // Capabilities are empty when unknown (router mode, or a
+                    // protocol that reports none), so only a known mapping is named.
+                    const auto provider = agent->get_provider();
+                    const auto model = agent->get_active_model_name();
+                    const auto capabilities = provider && !model.empty()
+                        ? provider->reasoning_capabilities(model)
+                        : core::llm::ReasoningCapabilities{};
+                    const bool known = capabilities.supports_effort()
+                        || capabilities.supports(core::llm::ReasoningCapability::ToggleOnly);
+                    const auto effective = known
+                        ? core::llm::resolve_reasoning_effort(*raised, capabilities).effective
+                        : *raised;
+                    const std::string note = effective != *raised
+                        ? std::format(
+                              "ultrathink: this turn asks for {} effort, which {} runs "
+                              "as {}; your /effort setting is unchanged.",
+                              *raised, model, effective)
+                        : std::format(
+                              "ultrathink: this turn asks for {} effort{}; your /effort "
+                              "setting is unchanged.",
+                              *raised,
+                              known ? "" : " where the model supports it");
+                    effective_callbacks.on_status_log(
+                        std::format("\n\xe2\x84\xb9  {}\n", note));
+                }
             }
             const auto expanded_prompt = core::context::expand_prompt(
                 text,
@@ -8439,7 +8474,13 @@ RunResult run(RunOptions opts) {
         bind_memory_commands(ctx);
         if (cmd_executor.try_execute(text, ctx)) return;
 
-        submit_or_queue_agent_turn(std::move(text), {});
+        // Only a prompt the user typed can say `ultrathink`: skill bodies and
+        // command-built prompts never raise effort.
+        core::agent::Agent::TurnCallbacks typed_callbacks;
+        if (core::llm::ultrathink_requested(text)) {
+            typed_callbacks.effort_floor = core::llm::kUltrathinkEffort;
+        }
+        submit_or_queue_agent_turn(std::move(text), std::move(typed_callbacks));
     };
 
     // Ctrl+G — hand the draft to the configured prompt editor.

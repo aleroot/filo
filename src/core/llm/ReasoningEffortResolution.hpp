@@ -42,4 +42,25 @@ inline constexpr std::string_view kSelectableEffortLevels =
 /// else the level. Case, spaces, '-' and '_' are ignored. nullopt = unknown.
 [[nodiscard]] std::optional<std::string> parse_effort_selection(std::string_view requested);
 
+/// The effort a prompt containing the `ultrathink` keyword runs at.
+inline constexpr std::string_view kUltrathinkEffort = "xhigh";
+
+/// Set to a non-empty value other than "0"/"false" to ignore the keyword.
+inline constexpr std::string_view kDisableUltrathinkEnv = "FILO_DISABLE_ULTRATHINK";
+
+/// True when the user wrote the word `ultrathink` (any case) as an
+/// instruction: not quoted or bracketed, not inside a backtick code span or
+/// fence, not part of a longer word, identifier, file name or path, and not in
+/// a prompt that starts with `/` (a command) or `!` (a shell command).
+[[nodiscard]] bool mentions_ultrathink(std::string_view prompt);
+
+/// mentions_ultrathink() unless FILO_DISABLE_ULTRATHINK is set.
+[[nodiscard]] bool ultrathink_requested(std::string_view prompt);
+
+/// `floor` (lowercased) when it is a stronger effort than `current`, where
+/// auto ("") and off rank below every level. nullopt when `current` already
+/// meets it or either value is unrecognised, so a raise never lowers effort.
+[[nodiscard]] std::optional<std::string> raised_effort(
+    std::string_view current, std::string_view floor);
+
 } // namespace core::llm

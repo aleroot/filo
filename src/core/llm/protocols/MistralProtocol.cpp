@@ -20,7 +20,9 @@ namespace {
     if (iequals(effort, "low")) return "none";
     if (iequals(effort, "medium")
         || iequals(effort, "high")
-        || iequals(effort, "max")) {
+        || iequals(effort, "xhigh")
+        || iequals(effort, "max")
+        || iequals(effort, "ultra")) {
         return "high";
     }
     return {};

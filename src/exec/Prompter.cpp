@@ -10,6 +10,7 @@
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ProviderManager.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/GoalManager.hpp"
@@ -837,6 +838,16 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     const auto start_time = std::chrono::steady_clock::now();
 
+    // `ultrathink` counts only in what the user wrote: the -p prompt, or stdin
+    // when it is the prompt. Piped input next to a -p prompt is data.
+    const bool has_prompt_argument = options.prompt.has_value()
+        && !core::utils::str::trim_ascii_view(*options.prompt).empty();
+    const std::string_view typed_prompt =
+        has_prompt_argument ? std::string_view(*options.prompt) : std::string_view(stdin_data);
+    const std::string effort_floor = core::llm::ultrathink_requested(typed_prompt)
+        ? std::string(core::llm::kUltrathinkEffort)
+        : std::string{};
+
     // The turn runs on its own thread, so that a Ctrl-C can stop it: the
     // agent stops the request it is serving, and the endpoint is told to stop
     // the response before the connection goes away.
@@ -908,6 +919,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
                             success));
                     }
                 },
+                .effort_floor = effort_floor,
                 .advisor_override = startup_advisor.value_or(std::string{}),
                 .on_advisor_event = [&](const core::llm::AdvisorEvent& event) {
                     // The advisor runs inside the provider's turn: the client only

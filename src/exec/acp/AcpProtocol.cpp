@@ -376,7 +376,9 @@ std::optional<PromptBlocks> parse_prompt(const core::utils::JsonValue& prompt,
         if (!block.is_object()) continue;
         const auto type = field_string(block, "type");
         if (type == "text") {
-            blocks.text += field_string(block, "text");
+            const auto text = field_string(block, "text");
+            blocks.text += text;
+            blocks.typed_text += text;
             continue;
         }
         if (type == "resource") {

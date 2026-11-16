@@ -12,6 +12,7 @@
 #include "../llm/ToolCallAssembly.hpp"
 #include "../llm/ToolTranscript.hpp"
 #include "../llm/OneShotCompletion.hpp"
+#include "../llm/ReasoningEffortResolution.hpp"
 #include "../logging/Logger.hpp"
 #include "../memory/MemorySystem.hpp"
 #include "../scm/EphemeralWorktree.hpp"
@@ -54,6 +55,19 @@ namespace core::agent {
 // ---------------------------------------------------------------------------
 
 namespace {
+
+// The effort one turn runs at: an explicit override wins, else the session
+// effort raised to the turn's floor.
+[[nodiscard]] std::string turn_effort(const std::string& session_effort,
+                                      const Agent::TurnCallbacks& callbacks) {
+    if (!callbacks.effort_override.empty()) return callbacks.effort_override;
+    if (!callbacks.effort_floor.empty()) {
+        if (auto raised = core::llm::raised_effort(session_effort, callbacks.effort_floor)) {
+            return std::move(*raised);
+        }
+    }
+    return session_effort;
+}
 
 constexpr int kMaxOutputRecoveryLimit = 3;
 /// How many times one turn may resume a cut answer.
@@ -2293,7 +2307,7 @@ void Agent::send_message(core::llm::Message user_message,
               turn_callbacks.on_subagent_event,
               auto_turn_coordinator_.decision(*turn_state->auto_turn).boost,
               turn_callbacks.allowed_tools,
-              turn_callbacks.effort_override.empty() ? get_effort_level() : turn_callbacks.effort_override));
+              turn_effort(get_effort_level(), turn_callbacks)));
       if (orchestrated && turn_state->provider &&
           turn_callbacks.on_status_log) {
         const auto &decision =
@@ -2477,10 +2491,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.messages = history_;
             request_history_size = history_.size();
             request.model = turn_state->model;
-            request.effort = effort_level_;
-            if (!turn_callbacks.effort_override.empty()) {
-                request.effort = turn_callbacks.effort_override;
-            }
+            request.effort = turn_effort(effort_level_, turn_callbacks);
             if (turn_state->auto_turn &&
                 auto_turn_coordinator_.decision(*turn_state->auto_turn).boost) {
               // Copy first: the returned view can reference request.effort's

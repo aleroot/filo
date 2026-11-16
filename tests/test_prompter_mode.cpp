@@ -489,6 +489,38 @@ TEST_CASE("prompter combines prompt and stdin context", "[prompter][stdin]") {
     REQUIRE_THAT(diag.final_prompt, ContainsSubstring("Input from stdin"));
 }
 
+TEST_CASE("prompter ultrathink raises only that request's effort", "[prompter][ultrathink]") {
+    const ScopedEnvVar enabled("FILO_DISABLE_ULTRATHINK", "0");
+    const auto run = [](std::optional<std::string> prompt, std::string stdin_data,
+                        std::string effort = "low") {
+        auto provider = std::make_shared<MockProvider>();
+        exec::prompter::RunOptions opts;
+        opts.startup_effort = std::move(effort);
+        if (prompt) {
+            opts.prompt = std::move(prompt);
+            opts.prompt_was_provided = true;
+        }
+        exec::prompter::StreamInput input;
+        input.has_stdin_data = !stdin_data.empty();
+        input.stdin_data = std::move(stdin_data);
+        std::ostringstream out;
+        std::ostringstream err;
+        TempDir tmp{"filo_prompter_ultrathink_test"};
+        const auto diag = exec::prompter::run_for_test(
+            opts, make_runtime(provider), input, out, err, tmp.path);
+        REQUIRE(diag.exit_code == 0);
+        return provider->last_request.effort;
+    };
+
+    CHECK(run("ultrathink: why does the cache miss?", "") == "xhigh");
+    CHECK(run(std::nullopt, "ultrathink about this\n") == "xhigh");
+    CHECK(run("why does the cache miss?", "") == "low");
+    // Piped data beside a -p prompt is input, not an instruction.
+    CHECK(run("Summarize", "notes: ultrathink later") == "low");
+    // It never lowers a stronger session effort.
+    CHECK(run("ultrathink: why does the cache miss?", "", "max") == "max");
+}
+
 TEST_CASE("prompter trust-tools blocks untrusted sensitive tools", "[prompter][trust]") {
     auto provider = std::make_shared<MockProvider>();
     TempDir tmp{"filo_prompter_trust_blocked_test"};

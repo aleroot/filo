@@ -125,7 +125,7 @@ struct NamedTerminal {
     const auto term = env_value("TERM");
     if (env_present("GHOSTTY_RESOURCES_DIR")) return {"Ghostty", {}};
     if (env_present("WEZTERM_VERSION")) {
-        return {"WezTerm", env_value("WEZTERM_VERSION").value_or({})};
+        return {"WezTerm", env_value("WEZTERM_VERSION").value_or("")};
     }
     if (env_present("ITERM_SESSION_ID") || env_present("ITERM_PROFILE")
         || env_present("ITERM_PROFILE_NAME")) {
@@ -140,11 +140,11 @@ struct NamedTerminal {
         return {"Alacritty", {}};
     }
     if (env_present("KONSOLE_VERSION")) {
-        return {"Konsole", env_value("KONSOLE_VERSION").value_or({})};
+        return {"Konsole", env_value("KONSOLE_VERSION").value_or("")};
     }
     if (env_present("GNOME_TERMINAL_SCREEN")) return {"gnome-terminal", {}};
     if (env_present("VTE_VERSION")) {
-        return {"VTE", env_value("VTE_VERSION").value_or({})};
+        return {"VTE", env_value("VTE_VERSION").value_or("")};
     }
     if (env_present("WT_SESSION")) return {"WindowsTerminal", {}};
     return {};

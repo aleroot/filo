@@ -7,6 +7,7 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/ReasoningEffortResolution.hpp"
+#include "TestEnvironment.hpp"
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -204,4 +205,80 @@ TEST_CASE("Effort selections parse the same for /effort and --effort", "[llm][ef
     CHECK(parse_effort_selection("disabled") == "none");
     CHECK_FALSE(parse_effort_selection("extreme"));
     CHECK_FALSE(parse_effort_selection("   "));
+}
+
+TEST_CASE("ultrathink is recognised only as a plain word the user wrote", "[llm][effort][ultrathink]") {
+    for (const std::string_view prompt : {
+             "ultrathink",
+             "ULTRATHINK fix the flaky test",
+             "please ultrathink: why does the cache miss?",
+             "Fix the race. Ultrathink.",
+             "(see below) ultrathink",
+             "look at it,\nultrathink!",
+             "fix the \"foo\" bug, ultrathink",
+             "`ultrathink` is the keyword, so ultrathink",
+             "an unclosed `tick, ultrathink",
+         }) {
+        INFO(prompt);
+        CHECK(mentions_ultrathink(prompt));
+    }
+    for (const std::string_view prompt : {
+             "",
+             "think hard about it",
+             "stop ultrathinking",
+             "the ultrathinker",
+             "`ultrathink`",
+             "a ``code ` ultrathink`` span",
+             "```\nultrathink\n```",
+             "what does \"ultrathink\" do?",
+             "say \"please ultrathink now\" to it",
+             "what does 'ultrathink' do?",
+             "explain the \xe2\x80\x9cultrathink\xe2\x80\x9d keyword",
+             "explain the \xe2\x80\x98ultrathink\xe2\x80\x99 keyword",
+             "open docs/ultrathink.md",
+             "open ultrathink.md",
+             "see @ultrathink",
+             "run with --ultrathink",
+             "ultrathink-mode",
+             "ultrathink/notes",
+             "my_ultrathink",
+             "echo $ultrathink",
+             "(ultrathink) then refactor",
+             "fix it [ultrathink]",
+             "use {ultrathink} here",
+             "the <ultrathink> tag",
+             "/review ultrathink",
+             "  /goal fix it, ultrathink",
+             "!echo ultrathink",
+         }) {
+        INFO(prompt);
+        CHECK_FALSE(mentions_ultrathink(prompt));
+    }
+}
+
+TEST_CASE("raised_effort only ever raises", "[llm][effort][ultrathink]") {
+    for (const std::string_view session : {"", "none", "off", "minimal", "low", "medium", "high", " High "}) {
+        INFO(session);
+        CHECK(raised_effort(session, kUltrathinkEffort) == "xhigh");
+    }
+    for (const std::string_view session : {"xhigh", "max", "ultra", "extreme"}) {
+        INFO(session);
+        CHECK_FALSE(raised_effort(session, kUltrathinkEffort));
+    }
+    CHECK(raised_effort("high", " XHigh ") == "xhigh");
+    CHECK_FALSE(raised_effort("low", ""));
+    CHECK_FALSE(raised_effort("low", "bogus"));
+}
+
+TEST_CASE("FILO_DISABLE_ULTRATHINK turns the keyword off", "[llm][effort][ultrathink]") {
+    {
+        const test_support::ScopedEnvVar disabled(std::string(kDisableUltrathinkEnv), "1");
+        CHECK(mentions_ultrathink("ultrathink"));
+        CHECK_FALSE(ultrathink_requested("ultrathink"));
+    }
+    for (const std::string_view off : {"0", "false", ""}) {
+        const test_support::ScopedEnvVar enabled(std::string(kDisableUltrathinkEnv), std::string(off));
+        INFO(off);
+        CHECK(ultrathink_requested("ultrathink"));
+    }
 }

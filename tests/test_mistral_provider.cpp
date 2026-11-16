@@ -105,6 +105,15 @@ TEST_CASE("Mistral protocol mirrors Vibe reasoning effort semantics",
     REQUIRE_THAT(protocol.serialize(low),
                  Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
 
+    // xhigh (what `ultrathink` asks for) and ultra must raise, not drop, reasoning.
+    for (const char* stronger : {"xhigh", "ultra"}) {
+        INFO(stronger);
+        auto request = make_mistral_request("mistral-vibe-cli-latest");
+        request.effort = stronger;
+        REQUIRE_THAT(protocol.serialize(request),
+                     Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    }
+
     auto off = make_mistral_request("mistral-vibe-cli-latest");
     off.effort = "off";
     REQUIRE_THAT(protocol.serialize(off),

@@ -307,6 +307,9 @@ TEST_CASE("ACP prompt blocks keep text, files and images apart", "[acp]") {
     CHECK(blocks->text.find("note body") != std::string::npos);
     CHECK(blocks->text.find("/tmp/main.cpp") != std::string::npos);
     CHECK(blocks->text.find("audio omitted") != std::string::npos);
+    // Keywords such as `ultrathink` are read from what the user typed, never
+    // from an attached file's contents.
+    CHECK(blocks->typed_text == "Look at this.");
     REQUIRE(blocks->grant_paths.size() == 1);
     CHECK(blocks->grant_paths.front() == "/tmp/main.cpp");
     REQUIRE(blocks->parts.size() == 1);

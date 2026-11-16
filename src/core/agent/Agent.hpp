@@ -106,6 +106,10 @@ public:
         std::string provider_name_override{};
         std::string model_override{};
         std::string effort_override{};
+        // Raises the turn to at least this effort, judged against the session
+        // effort at each step and never lowering it (`ultrathink`). Ignored
+        // when effort_override is set.
+        std::string effort_floor{};
         std::optional<int> max_tokens_override{};
         // Optional per-turn cap for bounded workflows such as code review.
         // An unset value preserves the session's configured default; zero is

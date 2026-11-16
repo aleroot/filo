@@ -922,6 +922,12 @@ std::string AgentSession::prompt(const core::utils::JsonValue& blocks, ClientCha
         std::lock_guard lock(state_mu_);
         callbacks.advisor_override = advisor_.value_or(std::string{});
     }
+    if (core::llm::ultrathink_requested(parsed->typed_text)) {
+        callbacks.effort_floor = core::llm::kUltrathinkEffort;
+        if (auto effort = core::llm::raised_effort(agent_->get_effort_level(), callbacks.effort_floor)) {
+            emit_status("[ultrathink: this turn asks for " + *effort + " effort; the session effort is unchanged.]");
+        }
+    }
     callbacks.on_reasoning = [this](const std::string& text) {
         if (text.empty()) return;
         // The protocol cannot retract a thought chunk, so the thinking waits

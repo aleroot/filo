@@ -89,6 +89,8 @@ inline constexpr int kAuthRequiredCode = -32000;
 
 struct PromptBlocks {
     std::string text;
+    /// Only the text blocks the user typed, without embedded resources.
+    std::string typed_text;
     std::vector<core::llm::ContentPart> parts;
     /// Absolute paths the client named. The session grants the ones that exist.
     std::vector<std::filesystem::path> grant_paths;

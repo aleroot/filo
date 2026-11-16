@@ -625,7 +625,7 @@ one yourself: `gunzip -c < session-….json | jq`.
 | `/logout` | Sign out of a provider OAuth session |
 | `/compression` · `/compress` | Tool output compression (`off`, `light`, `full`, `ultra`) |
 | `/steering` · `/agents` | Inspect steering files, switch mode, load or unload individual files |
-| `/effort` | Model effort (`auto`, `low`, `medium`, `high`, `max`) |
+| `/effort` | Model effort (`auto`, `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`) |
 | `/yolo` | Toggle auto-approval for sensitive tools |
 | `/mcp` | List or manage external MCP tool servers |
 | `/profile` | List, switch, or clear named profiles |
@@ -633,6 +633,15 @@ one yourself: `gunzip -c < session-….json | jq`.
 | `/sessions` · `/resume` · `/continue` · `/rename` | Manage and resume saved conversation sessions |
 | `/goal` · `/todo` · `/memory` | Session goal, todos, and durable memory |
 | `/help` | Full command and keyboard shortcut list |
+
+Write `ultrathink` anywhere in a prompt to run that one turn at `xhigh` effort without
+changing `/effort`; a session already at `xhigh` or above is left alone, models
+without `xhigh` get their nearest supported level, and providers with no effort
+control (for example Gemini API keys or Ollama) run the turn as usual. The word is
+ignored when it is quoted, bracketed, in backticks, or part of a file name or path; in
+prompts that start with `/` or `!`, skill bodies, `@` files, editor attachments and
+input piped alongside `-p`. It works in the terminal, `filo -p` and editors (ACP).
+Set `FILO_DISABLE_ULTRATHINK=1` to turn it off.
 
 Skills without an `entry_point` also appear as slash commands: `/<skill-name> [arguments]`.
 Skills are discovered from every workspace root and the primary wins name collisions,
