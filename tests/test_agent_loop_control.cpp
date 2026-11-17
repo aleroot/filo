@@ -934,6 +934,9 @@ private:
 
 class ParallelExploreProvider final : public core::llm::LLMProvider {
 public:
+    explicit ParallelExploreProvider(std::string subagent_type = "explore")
+        : subagent_type_(std::move(subagent_type)) {}
+
     [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
         return {
             .supports_tool_calls = true,
@@ -973,9 +976,10 @@ public:
             call.type = "function";
             call.function.name = "task";
             call.function.arguments = std::format(
-                R"({{"description":"worker {}","prompt":"worker-{} inspect independently","subagent_type":"explore"}})",
+                R"({{"description":"worker {}","prompt":"worker-{} inspect independently","subagent_type":"{}"}})",
                 i,
-                i);
+                i,
+                subagent_type_);
             calls.push_back(std::move(call));
         }
         core::llm::StreamChunk chunk;
@@ -1000,12 +1004,12 @@ private:
             std::unique_lock lock(mutex_);
             ++active_;
             max_active_ = std::max(max_active_, active_);
-            if (max_active_ >= core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents) {
+            if (max_active_ >= core::agent::SubagentOrchestrator::kMaxParallelSubagents) {
                 ready_.notify_all();
             }
             (void)ready_.wait_for(lock, std::chrono::milliseconds(500), [&] {
                 return max_active_
-                    >= core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents;
+                    >= core::agent::SubagentOrchestrator::kMaxParallelSubagents;
             });
         }
 
@@ -1020,6 +1024,7 @@ private:
         ready_.notify_all();
     }
 
+    std::string subagent_type_;
     mutable std::mutex mutex_;
     std::condition_variable ready_;
     int active_ = 0;
@@ -1879,6 +1884,22 @@ TEST_CASE("Agent exposes one delegation API even when the MCP registry is shared
     CHECK(std::ranges::none_of(requests.front().tools, [](const auto& tool) { return tool.function.name == "delegate_task"; }));
 }
 
+TEST_CASE("Agent runs writing subagents concurrently, as codex-rs agents share one checkout",
+          "[agent][orchestration][parallel]") {
+    auto provider = std::make_shared<ParallelExploreProvider>("general");
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_permission_profile(core::agent::PermissionProfile::Autonomous);
+
+    send_and_wait(agent, "Run independent parallel changes");
+
+    CHECK(provider->completed() == 6);
+    CHECK(provider->max_active() == core::agent::SubagentOrchestrator::kMaxParallelSubagents);
+}
+
 TEST_CASE("Agent runs independent explore subagents concurrently with a bounded fan-out",
           "[agent][orchestration][parallel]") {
     auto provider = std::make_shared<ParallelExploreProvider>();
@@ -1899,7 +1920,7 @@ TEST_CASE("Agent runs independent explore subagents concurrently with a bounded 
     CHECK(provider->completed() == 6);
     CHECK(permission_requests.load(std::memory_order_relaxed) == 0);
     CHECK(provider->max_active()
-          == core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents);
+          == core::agent::SubagentOrchestrator::kMaxParallelSubagents);
 
     const auto history = agent->get_history();
     CHECK(std::ranges::count_if(history, [](const core::llm::Message& message) {

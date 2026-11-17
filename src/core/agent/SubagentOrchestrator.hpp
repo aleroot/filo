@@ -51,7 +51,8 @@ struct AgentDefinition;
 class SubagentOrchestrator {
 public:
     static constexpr std::string_view kTaskToolName = "task";
-    static constexpr std::ptrdiff_t kMaxParallelReadOnlySubagents = 4;
+    /// Workers one agent runs at once (codex-rs DEFAULT_AGENT_MAX_THREADS).
+    static constexpr std::ptrdiff_t kMaxParallelSubagents = 6;
     /// Subagent levels below the top-level agent. A worker at this depth is
     /// refused the task tool, which bounds profiles that may delegate
     /// (allow_task_tool) from recursing without end.
@@ -87,6 +88,9 @@ public:
         /// The advisor the parent conversation runs. A worker inherits it and
         /// applies the same pairing check against its own model.
         std::string advisor = {};
+        /// The spawning conversation; a new worker forks it (fork_parent_history).
+        std::shared_ptr<const std::vector<core::llm::Message>> parent_history = {};
+        std::string parent_context_summary = {};
     };
 
     struct ExecutionRequest {
@@ -117,6 +121,7 @@ public:
         std::vector<core::llm::Tool> tools;
         bool allow_task_tool = false;
         bool read_only = false;
+        bool read_only_shell = false;
         int max_steps = 0;
         /// Run without the parent's project instructions, skill catalog and
         /// memories (see DelegatedAgentRunner::Request::isolated_context).
@@ -148,6 +153,11 @@ public:
         std::string_view json_args,
         const std::shared_ptr<core::llm::LLMProvider>& provider,
         const RunContext& context);
+
+    /// User messages and final assistant answers only (codex-rs
+    /// keep_forked_rollout_item).
+    [[nodiscard]] static std::vector<core::llm::Message> fork_parent_history(
+        const std::vector<core::llm::Message>& history);
 
     void clear_sessions();
     void reload_profiles(const core::config::AppConfig& app_config);
@@ -210,6 +220,8 @@ private:
         std::string_view initial_model,
         std::string& error_out);
 
+    [[nodiscard]] static bool runs_read_only(const Profile& profile,
+                                             const std::vector<core::llm::Tool>& tools);
     [[nodiscard]] std::vector<core::llm::Tool> build_tools_for_profile(
         const Profile& profile,
         std::string_view parent_mode) const;
@@ -238,9 +250,9 @@ private:
 
     mutable std::mutex sessions_mutex_;
     std::unordered_map<std::string, std::shared_ptr<TaskSession>> sessions_;
-    using ReadOnlySlots = std::counting_semaphore<kMaxParallelReadOnlySubagents>;
-    std::shared_ptr<ReadOnlySlots> read_only_slots_ =
-        std::make_shared<ReadOnlySlots>(kMaxParallelReadOnlySubagents);
+    using SubagentSlots = std::counting_semaphore<kMaxParallelSubagents>;
+    std::shared_ptr<SubagentSlots> subagent_slots_ =
+        std::make_shared<SubagentSlots>(kMaxParallelSubagents);
     std::timed_mutex serial_provider_mutex_;
     std::shared_future<void> pending_serial_run_;
 };

@@ -103,7 +103,7 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
     } else if (name == kActivateSkill) {
         accesses = no_tool_access();
     } else if (name == SubagentOrchestrator::kTaskToolName) {
-        accesses = all_tool_access();
+        accesses = delegated_tool_access();
     } else {
         accesses = all_tool_access();
     }

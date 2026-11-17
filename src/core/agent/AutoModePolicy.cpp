@@ -86,12 +86,11 @@ AutoModePolicy::execution_contract(const AutoModeDecision &decision) const {
                 "carrying all discovery "
                 "in the parent context.\n";
     if (decision.parallel_exploration) {
-      contract += "Issue independent read-only `task` calls together in one "
-                  "model response so "
-                  "Filo can execute them concurrently. Fan their concrete "
-                  "findings back into one "
-                  "writer; do not run concurrent mutating workers in the same "
-                  "checkout.\n";
+      contract += "Issue independent `task` calls together in one model "
+                  "response so Filo can execute them concurrently. Concurrent "
+                  "writing workers share this checkout, so give each a "
+                  "disjoint set of files; fan their results back here and "
+                  "review the combined diff.\n";
     }
   }
 

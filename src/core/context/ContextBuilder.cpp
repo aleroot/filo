@@ -78,7 +78,7 @@ namespace {
               "- Never stage, commit, push, or discard git state unless asked; never revert "
               "changes you did not make. Never print, log, or commit secrets.";
 
-    prompt += "\n\nYou can delegate complex background work via the `task` tool.";
+    prompt += "\n\nYou can delegate well-scoped, self-contained subtasks via the `task` tool.";
     prompt += " Use the `subagent_type` values listed in the task tool schema/description.";
     prompt += " Default profiles are `general` (broad multi-step work) and";
     prompt += " `explore` (fast read-only codebase search).";

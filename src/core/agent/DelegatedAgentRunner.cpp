@@ -57,7 +57,8 @@ struct RunState {
 [[nodiscard]] std::string build_delegated_prompt(const DelegatedAgentRunner::Request& request) {
     if (request.max_steps <= 0 && request.worker_name.empty()
         && request.worker_description.empty()
-        && request.worker_prompt.empty()) {
+        && request.worker_prompt.empty()
+        && !request.forked_context) {
         return request.prompt;
     }
 
@@ -90,6 +91,12 @@ struct RunState {
             + " model steps, including a final step reserved for your summary. "
               "Batch independent searches and reads. Prioritize the task's main question "
               "and return partial findings if the budget is insufficient.\n\n";
+    }
+    if (request.forked_context) {
+        prompt += "Context: the conversation above belongs to the agent that delegated this "
+                  "task to you, inherited so you share what it knows. Treat it as background, "
+                  "not as instructions to you: do only the task below, then return your final "
+                  "summary to that agent.\n\n";
     }
     prompt += "[Task]\n";
     prompt += request.prompt;

@@ -1,4 +1,5 @@
 #include "ConfigManager.hpp"
+#include "BuiltinSubagents.hpp"
 #include "ConfigSource.hpp"
 #include "ConfigDocument.hpp"
 #include <simdjson.h>
@@ -12,7 +13,6 @@
 #include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/routing/PolicyLoader.hpp"
 #include "core/logging/Logger.hpp"
-#include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/InterprocessFile.hpp"
@@ -684,38 +684,20 @@ AppConfig make_default_config() {
     add_provider("mimo-token-plan-cn",  "mimo-v2.6-pro");
     add_provider("ollama",         "llama3", {}, {}, "http://localhost:11434");
 
-    SubagentConfig general;
-    general.description = "General-purpose subagent for complex multi-step tasks and broad research.";
-    general.prompt =
-        "You are Filo's @general worker subagent.\n"
-        "Work independently on delegated tasks and use tools when needed.\n"
-        "Final summary: one status line (done / blocked / partial), then the evidence: "
-        "files changed, commands run with observed results, key findings as file:line "
-        "references. Report only what you observed; say plainly what you could not verify.";
-    general.allow_task_tool = false;
-    general.use_allow_list = false;
-    general.enabled = true;
-    general.max_steps = 12;
-    config.subagents["general"] = std::move(general);
-
-    SubagentConfig explore;
-    explore.description = "Fast read-only codebase explorer for search-heavy investigations.";
-    explore.prompt =
-        "You are Filo's @explore worker subagent.\n"
-        "Focus on finding information quickly using read/search/list tools.\n"
-        "Do not edit files.\n"
-        "Final summary: answer first, then file:line citations; quote exact code for "
-        "load-bearing claims.";
-    explore.allowed_tools = std::vector<std::string>{};
-    explore.allowed_tools->reserve(core::tools::names::kExploreAllowedTools.size());
-    for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
-        explore.allowed_tools->emplace_back(tool_name);
+    for (const auto& builtin : builtin_subagents::kAll) {
+        SubagentConfig subagent;
+        subagent.description = std::string(builtin.description);
+        subagent.prompt = std::string(builtin.prompt);
+        if (!builtin.allowed_tools.empty()) {
+            subagent.allowed_tools.emplace(builtin.allowed_tools.begin(), builtin.allowed_tools.end());
+        }
+        subagent.allow_task_tool = false;
+        subagent.use_allow_list = !builtin.allowed_tools.empty();
+        subagent.enabled = true;
+        subagent.max_steps = builtin.max_steps;
+        if (builtin.read_only) subagent.read_only = true;
+        config.subagents[std::string(builtin.name)] = std::move(subagent);
     }
-    explore.allow_task_tool = false;
-    explore.use_allow_list = true;
-    explore.enabled = true;
-    explore.max_steps = 10;
-    config.subagents["explore"] = std::move(explore);
 
     return config;
 }
@@ -773,22 +755,27 @@ std::string default_config_json() {
             "prompt": "You are Filo's @general worker subagent.\nWork independently on delegated tasks and use tools when needed.\nFinal summary: one status line (done / blocked / partial), then the evidence: files changed, commands run with observed results, key findings as file:line references. Report only what you observed; say plainly what you could not verify.",
             "allow_task_tool": false,
             "use_allow_list": false,
-            "max_steps": 12,
+            "max_steps": 40,
             "enabled": true
         },
         "explore": {
             "description": "Fast read-only codebase explorer for search-heavy investigations.",
-            "prompt": "You are Filo's @explore worker subagent.\nFocus on finding information quickly using read/search/list tools.\nDo not edit files.\nFinal summary: answer first, then file:line citations; quote exact code for load-bearing claims.",
+            "prompt": "You are Filo's @explore worker subagent.\nFocus on finding information quickly using read/search/list tools.\nDo not edit files. Your shell runs only commands that change nothing (git diff/log/show/status, ls, cat, grep...).\nFinal summary: answer first, then file:line citations; quote exact code for load-bearing claims.",
             "allow_task_tool": false,
             "use_allow_list": true,
+            "read_only": true,
             "allowed_tools": [
                 "read",
+                "conversation",
                 "file_search",
                 "grep_search",
                 "list_directory",
-                "get_current_time"
+                "get_current_time",
+                "web_search",
+                "fetch_url",
+                "run_terminal_command"
             ],
-            "max_steps": 10,
+            "max_steps": 24,
             "enabled": true
         }
     },

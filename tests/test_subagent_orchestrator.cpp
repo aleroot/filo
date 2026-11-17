@@ -742,7 +742,9 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     REQUIRE(names.contains("list_directory"));
 
     REQUIRE_FALSE(names.contains("write_file"));
-    REQUIRE_FALSE(names.contains("run_terminal_command"));
+    // Explore keeps a shell for git diff/log and friends; ShellTool restricts
+    // it to commands that change nothing, so the worker stays read-only.
+    REQUIRE(names.contains("run_terminal_command"));
     REQUIRE_FALSE(names.contains("task"));
     REQUIRE(names.contains("read_tool_result"));
     REQUIRE(orchestrator.task_is_read_only(
@@ -948,6 +950,34 @@ TEST_CASE("SubagentOrchestrator routes a configured execution profile through it
     CHECK(requests.front().model == "gpt-5.6-luna");
 }
 
+TEST_CASE("A worker without a provider override runs on the parent's provider instance",
+          "[agent][orchestration]") {
+    auto parent_provider = std::make_shared<RecordingProvider>();
+    auto registered_provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    constexpr std::string_view kProviderName = "test-inherited-provider-instance";
+    core::llm::ProviderManager::get_instance().register_provider(
+        std::string(kProviderName), registered_provider);
+
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+    const auto result = orchestrator.execute_task(
+        R"({"description":"inherit","prompt":"run task","subagent_type":"general","fork_turns":"none"})",
+        parent_provider,
+        {
+            .active_provider_name = std::string(kProviderName),
+            .active_model = "gpt-6.1-sol",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+    CHECK(registered_provider->requests_snapshot().empty());
+    REQUIRE(parent_provider->requests_snapshot().size() == 1);
+    CHECK(parent_provider->requests_snapshot().front().model == "gpt-6.1-sol");
+}
+
 TEST_CASE("SubagentOrchestrator fails clearly when provider override is unavailable", "[agent][orchestration]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
@@ -1021,4 +1051,120 @@ TEST_CASE("AUTO parent mode is not inherited by delegated workers",
     CHECK_THAT(system_text(requests[0]), !Catch::Matchers::ContainsSubstring("AUTO"));
     CHECK_THAT(system_text(requests[1]), Catch::Matchers::ContainsSubstring("BUILD"));
     CHECK_THAT(system_text(requests[1]), !Catch::Matchers::ContainsSubstring("AUTO"));
+}
+
+TEST_CASE("Subagent fork keeps the parent's requests and answers, not its tool traffic",
+          "[agent][orchestration][fork]") {
+    using core::llm::Message;
+    Message with_call{.role = "assistant", .content = "Let me look at the parser."};
+    with_call.tool_calls.push_back(core::llm::ToolCall{
+        .index = 0, .id = "call_1", .function = {.name = "read", .arguments = R"({"path":"p.cpp"})"}});
+    Message answer{.role = "assistant", .content = "The parser drops trailing commas."};
+    answer.reasoning_content = "private reasoning";
+    answer.continuation_items.push_back({.provider = "openai", .kind = "reasoning", .payload = "{}"});
+    const std::vector<Message> history{
+        Message{.role = "system", .content = "parent system prompt"},
+        Message{.role = "user", .content = "Fix the parser bug."},
+        with_call,
+        Message{.role = "tool", .content = "file body", .name = "read", .tool_call_id = "call_1"},
+        answer,
+        Message{.role = "assistant", .content = "   "},
+        Message{.role = "user", .content = "Now handle nested arrays too."},
+    };
+
+    const auto forked = core::agent::SubagentOrchestrator::fork_parent_history(history);
+    REQUIRE(forked.size() == 3);
+    CHECK(forked[0].role == "user");
+    CHECK(forked[0].content == "Fix the parser bug.");
+    CHECK(forked[1].role == "assistant");
+    CHECK(forked[1].content == "The parser drops trailing commas.");
+    CHECK(forked[1].reasoning_content.empty());
+    CHECK(forked[1].continuation_items.empty());
+    CHECK(forked[2].content == "Now handle nested arrays too.");
+    CHECK(std::ranges::none_of(forked, [](const Message& m) { return !m.tool_calls.empty(); }));
+}
+
+TEST_CASE("A new subagent starts from the parent's conversation unless fork_turns is none",
+          "[agent][orchestration][fork]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
+    const auto session_context = test_support::make_workspace_session_context();
+    const auto parent_history = std::make_shared<const std::vector<core::llm::Message>>(
+        std::vector<core::llm::Message>{
+            {.role = "user", .content = "parent-request: fix the parser"},
+            {.role = "assistant", .content = "parent-answer: trailing commas are dropped"},
+        });
+    const auto first_request_of = [&](std::string_view args) {
+        auto provider = std::make_shared<RecordingProvider>();
+        core::agent::SubagentOrchestrator orchestrator(tool_manager);
+        const auto result = orchestrator.execute_task(args, provider, {
+            .active_model = "gpt-4o",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+            .parent_history = parent_history,
+            .parent_context_summary = "",
+        });
+        REQUIRE_FALSE(result.contains("\"error\""));
+        const auto requests = provider->requests_snapshot();
+        REQUIRE_FALSE(requests.empty());
+        return requests.front();
+    };
+    const auto mentions = [](const core::llm::ChatRequest& request, std::string_view text) {
+        return std::ranges::any_of(request.messages, [&](const core::llm::Message& message) {
+            return message.content.contains(text);
+        });
+    };
+
+    const auto forked = first_request_of(
+        R"({"description":"scan","prompt":"find the comma handling","subagent_type":"explore"})");
+    CHECK(mentions(forked, "parent-request: fix the parser"));
+    CHECK(mentions(forked, "parent-answer: trailing commas are dropped"));
+    CHECK(mentions(forked, "Treat it as background"));
+    CHECK(mentions(forked, "find the comma handling"));
+
+    const auto fresh = first_request_of(
+        R"({"description":"scan","prompt":"find the comma handling","subagent_type":"explore","fork_turns":"none"})");
+    CHECK_FALSE(mentions(fresh, "parent-request: fix the parser"));
+    CHECK_FALSE(mentions(fresh, "Treat it as background"));
+    CHECK(mentions(fresh, "find the comma handling"));
+
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto invalid = orchestrator.execute_task(
+        R"({"description":"scan","prompt":"x","subagent_type":"explore","fork_turns":"3"})",
+        std::make_shared<RecordingProvider>(),
+        {.active_model = "gpt-4o", .parent_mode = "BUILD", .session_context = session_context,
+         .permission_check = {}});
+    CHECK_THAT(invalid, Catch::Matchers::ContainsSubstring("fork_turns must be"));
+}
+
+TEST_CASE("A read-only worker's shell runs only commands that change nothing",
+          "[agent][orchestration][shell]") {
+    auto context = test_support::make_workspace_session_context();
+    context.read_only_shell = true;
+    context.shell_session_id = core::context::worker_shell_session_id(
+        context.shell_session(), "task_0000abcd");
+    const auto marker = context.workspace_view().primary() / "filo-read-only-shell-marker.txt";
+    std::filesystem::remove(marker);
+
+    core::tools::ShellTool shell;
+    const auto mutating = shell.execute(
+        R"({"command":"touch filo-read-only-shell-marker.txt"})", context);
+    CHECK_THAT(mutating, Catch::Matchers::ContainsSubstring("This worker is read-only"));
+    CHECK_FALSE(std::filesystem::exists(marker));
+
+    const auto listing = shell.execute(R"({"command":"ls"})", context);
+    CHECK_THAT(listing, !Catch::Matchers::ContainsSubstring("This worker is read-only"));
+    shell.clear_session_state(context.shell_session());
+}
+
+TEST_CASE("Worker shells are nested under the session that spawned them",
+          "[agent][orchestration][shell]") {
+    using core::context::shell_belongs_to_session;
+    const auto worker = core::context::worker_shell_session_id("abc123", "task_0000abcd");
+    CHECK(worker == "abc123/task_0000abcd");
+    CHECK(shell_belongs_to_session("abc123", "abc123"));
+    CHECK(shell_belongs_to_session(worker, "abc123"));
+    CHECK_FALSE(shell_belongs_to_session("abc1234", "abc123"));
+    CHECK_FALSE(shell_belongs_to_session(worker, ""));
 }

@@ -1519,7 +1519,8 @@ TEST_CASE("Codex ultra follows the catalog's level and proactive delegation",
         .complete = true,
         .catalog_default_effort = "medium",
         .supported_efforts = {"low", "medium", "high", "xhigh", "max", "ultra"},
-        .ultra = UltraEffortProfile{.effort = "xhigh", .proactive_delegation = true},
+        .ultra = UltraEffortProfile{
+            .effort = "xhigh", .proactive_delegation = true, .explicit_delegation = true},
     };
     Tool task;
     task.function.name = "task";
@@ -1557,15 +1558,30 @@ TEST_CASE("Codex ultra follows the catalog's level and proactive delegation",
               == core::context::PromptStability::Dynamic);
     }
 
-    SECTION("no delegation text without ultra, a tuned model, or a delegation tool") {
+    SECTION("below ultra a tuned model delegates only on request, as in codex-rs") {
         auto other = request;
         other.effort = "max";
-        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
-        other = request;
+        const auto payload = prepared(other);
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Delegation only on request."));
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Do not call `task` unless"));
+        CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("Proactive delegation is active"));
+        other.effort.clear();
+        CHECK_THAT(prepared(other), Catch::Matchers::ContainsSubstring("Delegation only on request."));
+        CHECK_THAT(prepared(request), !Catch::Matchers::ContainsSubstring("Delegation only on request."));
+    }
+
+    SECTION("no delegation text for an untuned model, a suppressed mode, or no delegation tool") {
+        auto other = request;
         other.catalog_reasoning->ultra->proactive_delegation = false;
         CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
         other = request;
+        other.effort = "max";
+        other.catalog_reasoning->ultra->explicit_delegation = false;
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        other = request;
         other.tools.clear();
+        CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
+        other.effort = "max";
         CHECK_THAT(prepared(other), !Catch::Matchers::ContainsSubstring("[Delegation Mode]"));
         other = request;
         other.catalog_reasoning->ultra.reset();

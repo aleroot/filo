@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include "core/config/BuiltinSubagents.hpp"
 #include "core/config/ConfigManager.hpp"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <format>
@@ -805,12 +807,23 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE_FALSE(config.providers.contains("claude-fable"));
     REQUIRE_FALSE(config.providers.contains("claude-haiku"));
     REQUIRE_FALSE(config.providers.contains("claude-oauth"));
-    REQUIRE(config.subagents.contains("general"));
-    REQUIRE(config.subagents.contains("explore"));
-    REQUIRE(config.subagents.at("general").max_steps.has_value());
-    REQUIRE(config.subagents.at("general").max_steps.value() == 12);
-    REQUIRE(config.subagents.at("explore").use_allow_list.has_value());
-    REQUIRE(config.subagents.at("explore").use_allow_list.value());
+    // The generated config.json overrides the built-in table, so any drift
+    // between the two would silently change what new users run.
+    for (const auto& builtin : core::config::builtin_subagents::kAll) {
+        INFO(builtin.name);
+        REQUIRE(config.subagents.contains(std::string(builtin.name)));
+        const auto& subagent = config.subagents.at(std::string(builtin.name));
+        CHECK(subagent.description == builtin.description);
+        CHECK(subagent.prompt == builtin.prompt);
+        CHECK(subagent.max_steps == builtin.max_steps);
+        CHECK(subagent.read_only.value_or(false) == builtin.read_only);
+        CHECK(subagent.use_allow_list.value_or(false) == !builtin.allowed_tools.empty());
+        std::vector<std::string> configured = subagent.allowed_tools.value_or(std::vector<std::string>{});
+        std::vector<std::string> built_in(builtin.allowed_tools.begin(), builtin.allowed_tools.end());
+        std::ranges::sort(configured);
+        std::ranges::sort(built_in);
+        CHECK(configured == built_in);
+    }
     REQUIRE(config.router.enabled);
     REQUIRE(config.router.policies.contains("smart-code"));
     const fs::path generated_config = xdg_home / "filo" / "config.json";

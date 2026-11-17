@@ -28,6 +28,8 @@ struct ToolAccess {
         ReadAll,
         All,
         File,
+        /// A `task` worker: concurrent with other workers and reads, not with writes.
+        Delegated,
     };
 
     Kind kind = Kind::None;
@@ -43,6 +45,10 @@ struct ToolAccess {
 
     [[nodiscard]] static ToolAccess read_all() noexcept {
         return {.kind = Kind::ReadAll};
+    }
+
+    [[nodiscard]] static ToolAccess delegated() noexcept {
+        return {.kind = Kind::Delegated};
     }
 
     [[nodiscard]] static ToolAccess file_access(ToolFileOperation operation,
@@ -71,6 +77,10 @@ using ToolAccessSet = std::vector<ToolAccess>;
 
 [[nodiscard]] inline ToolAccessSet read_all_tool_access() {
     return {ToolAccess::read_all()};
+}
+
+[[nodiscard]] inline ToolAccessSet delegated_tool_access() {
+    return {ToolAccess::delegated()};
 }
 
 [[nodiscard]] inline bool tool_file_operation_writes(ToolFileOperation operation) noexcept {
@@ -126,6 +136,11 @@ using ToolAccessSet = std::vector<ToolAccess>;
     }
     if (left.kind == ToolAccess::Kind::All || right.kind == ToolAccess::Kind::All) {
         return true;
+    }
+    if (left.kind == ToolAccess::Kind::Delegated || right.kind == ToolAccess::Kind::Delegated) {
+        const ToolAccess& other = left.kind == ToolAccess::Kind::Delegated ? right : left;
+        return other.kind == ToolAccess::Kind::File
+            && tool_file_operation_writes(other.file.operation);
     }
     if (left.kind == ToolAccess::Kind::ReadAll
         && right.kind == ToolAccess::Kind::ReadAll) {

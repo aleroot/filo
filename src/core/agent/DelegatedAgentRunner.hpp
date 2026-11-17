@@ -96,6 +96,8 @@ public:
         /// prompt, and it neither recalls nor records memories. Files stay
         /// readable through tools; only what is put in front of it changes.
         bool isolated_context = false;
+        /// resume_state holds the spawning agent's conversation, not this worker's.
+        bool forked_context = false;
     };
 
     struct Result {

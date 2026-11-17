@@ -583,8 +583,8 @@ void Agent::request_stop() {
         provider->cancel();
     }
     const auto context = session_context_snapshot();
-    if (!context.session_id.empty()) {
-        skill_manager_.shell_sessions()->interrupt(context.session_id);
+    if (const auto shell = context.shell_session(); !shell.empty()) {
+        skill_manager_.shell_sessions()->interrupt(shell);
     }
 }
 
@@ -609,13 +609,13 @@ bool Agent::interrupt_running_tools() {
     // A shell command does not poll its predicate: kill it. Only when one is
     // actually running, so an idle session keeps its shell (cwd, env).
     const auto context = session_context_snapshot();
-    if (!context.session_id.empty()) {
+    if (const auto shell = context.shell_session(); !shell.empty()) {
         const auto shells = skill_manager_.shell_sessions();
         const auto commands = shells->active_commands();
         if (std::ranges::any_of(commands, [&](const auto& command) {
-                return command.session_id == context.session_id;
+                return command.session_id == shell;
             })) {
-            shells->interrupt(context.session_id);
+            shells->interrupt(shell);
         }
     }
     return true;
@@ -3319,7 +3319,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         std::thread([self, tool_calls_accum, tool_cost_attribution, text_callback,
                      tool_callback, done_callback, turn_callbacks, turn_state,
                      step_session_context,
-                     provider_name_snapshot]() {
+                     provider_name_snapshot,
+                     step_effort = shared_request->effort]() {
             // Counted because this thread is detached: a tool that never returns
             // must not be able to hang the turn that started it. A caller about to
             // destroy shared state can then wait for it within a bound.
@@ -3578,6 +3579,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::string active_provider_name_for_task;
             std::string active_model_for_task;
             std::string parent_mode_for_task;
+            std::shared_ptr<const std::vector<core::llm::Message>> parent_history_for_task;
+            std::string parent_summary_for_task;
+            const bool step_delegates = std::ranges::any_of(
+                *tool_calls_accum, [](const core::llm::ToolCall& call) {
+                    return call.function.name == SubagentOrchestrator::kTaskToolName;
+                });
             {
                 std::lock_guard lock(self->history_mutex_);
                 provider_for_task = turn_state->provider;
@@ -3588,6 +3595,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 active_model_for_task = turn_state->model;
                 parent_mode_for_task =
                     std::string(to_string(self->current_mode_));
+                if (step_delegates) {
+                    parent_history_for_task =
+                        std::make_shared<const std::vector<core::llm::Message>>(self->history_);
+                    parent_summary_for_task = self->context_summary_;
+                }
             }
 
             turn_state->deduplicator.begin_step();
@@ -3707,6 +3719,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      active_provider_name_for_task,
                      active_model_for_task,
                      parent_mode_for_task,
+                     step_effort,
+                     parent_history_for_task,
+                     parent_summary_for_task,
                      on_subagent_event = turn_callbacks.on_subagent_event]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
                         // Registered for exactly as long as the call executes,
@@ -3772,9 +3787,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 // summary, so it records into the same tracker
                                 // instead of one that is thrown away with it.
                                 .change_tracker = recovery_turn_state->change_tracker,
+                                .effort = step_effort,
                                 // The worker inherits the advisor and checks the
                                 // pairing against its own model.
                                 .advisor = recovery_turn_state->advisor_model,
+                                .parent_history = parent_history_for_task,
+                                .parent_context_summary = parent_summary_for_task,
                             };
 
                             result = self->orchestrator_.execute_task(

@@ -244,6 +244,44 @@ TEST_CASE("workspace-wide readers wait behind writes", "[agent][tools][parallel]
     REQUIRE(max_active.load(std::memory_order_acquire) == 1);
 }
 
+TEST_CASE("delegated workers run beside each other and beside reads, not beside parent writes",
+          "[agent][tools][parallel]") {
+    using core::agent::ToolAccess;
+    using core::agent::ToolFileOperation;
+    using core::agent::tool_access_sets_conflict;
+    const auto worker = core::agent::delegated_tool_access();
+    const core::agent::ToolAccessSet read_file{
+        ToolAccess::file_access(ToolFileOperation::Read, "/tmp/filo/a.txt")};
+    const core::agent::ToolAccessSet write_file{
+        ToolAccess::file_access(ToolFileOperation::Write, "/tmp/filo/a.txt")};
+
+    CHECK_FALSE(tool_access_sets_conflict(worker, worker));
+    CHECK_FALSE(tool_access_sets_conflict(worker, core::agent::read_all_tool_access()));
+    CHECK_FALSE(tool_access_sets_conflict(worker, read_file));
+    CHECK_FALSE(tool_access_sets_conflict(worker, core::agent::no_tool_access()));
+    CHECK(tool_access_sets_conflict(worker, write_file));
+    CHECK(tool_access_sets_conflict(write_file, worker));
+    CHECK(tool_access_sets_conflict(worker, core::agent::all_tool_access()));
+
+    std::atomic<int> active{0};
+    std::atomic<int> max_active{0};
+    std::vector<core::agent::ScheduledToolTask<int>> tasks;
+    tasks.push_back(counted_task(worker, active, max_active, 1));
+    tasks.push_back(counted_task(worker, active, max_active, 2));
+    tasks.push_back(counted_task(worker, active, max_active, 3));
+    core::agent::ToolCallScheduler<int> scheduler;
+    REQUIRE(scheduler.run(std::move(tasks)) == std::vector<int>{1, 2, 3});
+    REQUIRE(max_active.load(std::memory_order_acquire) >= 2);
+}
+
+TEST_CASE("the planner gives task calls delegated access", "[agent][tools][parallel]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto planned = core::agent::plan_tool_call(make_call("task-1", "task", "{}"), context);
+    REQUIRE(planned.accesses.size() == 1);
+    CHECK(planned.accesses.front().kind == core::agent::ToolAccess::Kind::Delegated);
+}
+
 TEST_CASE("tool deduplicator reuses same-step identical reads", "[agent][tools][read]") {
     core::agent::ToolCallDeduplicator dedup;
     dedup.begin_step();

@@ -4,12 +4,15 @@
 #include "AgentMode.hpp"
 #include "DelegatedAgentRunner.hpp"
 #include "DelegationBudget.hpp"
+#include "../config/BuiltinSubagents.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderFactory.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../logging/Logger.hpp"
 #include "../session/SessionStore.hpp"
 #include "../tools/TaskTool.hpp"
+#include "../tools/ToolManager.hpp"
+#include "../tools/shell/ShellSessions.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -21,6 +24,7 @@
 #include <cctype>
 #include <chrono>
 #include <format>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <ranges>
@@ -41,16 +45,16 @@ namespace {
     } while (true);
 }
 
-class ReadOnlySlot final {
+class SubagentSlot final {
 public:
-    explicit ReadOnlySlot(
-        std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>> slots)
+    explicit SubagentSlot(
+        std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelSubagents>> slots)
         : slots_(std::move(slots)) {}
 
-    ReadOnlySlot(const ReadOnlySlot&) = delete;
-    ReadOnlySlot& operator=(const ReadOnlySlot&) = delete;
+    SubagentSlot(const SubagentSlot&) = delete;
+    SubagentSlot& operator=(const SubagentSlot&) = delete;
 
-    ~ReadOnlySlot() {
+    ~SubagentSlot() {
         if (acquired_) slots_->release();
     }
 
@@ -65,13 +69,40 @@ public:
     }
 
 private:
-    std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>> slots_;
+    std::shared_ptr<std::counting_semaphore<SubagentOrchestrator::kMaxParallelSubagents>> slots_;
     bool acquired_ = false;
 };
 
 [[nodiscard]] bool is_write_destructive_tool(std::string_view tool_name) {
     return core::tools::names::is_write_destructive_tool(tool_name);
 }
+
+[[nodiscard]] bool is_terminal_tool(const core::llm::Tool& tool) {
+    return core::tools::names::is_terminal_tool(tool.function.name);
+}
+
+// A read-only profile keeps the shell, which then runs gated
+// (SessionContext::read_only_shell).
+[[nodiscard]] bool read_only_profile_keeps(const core::llm::Tool& tool) {
+    return tool.function.annotations.read_only_hint || is_terminal_tool(tool);
+}
+
+class WorkerShell final {
+public:
+    WorkerShell(std::shared_ptr<core::tools::shell::ShellSessions> sessions, std::string id)
+        : sessions_(std::move(sessions)), id_(std::move(id)) {}
+
+    WorkerShell(const WorkerShell&) = delete;
+    WorkerShell& operator=(const WorkerShell&) = delete;
+
+    ~WorkerShell() { sessions_->clear(id_); }
+
+    [[nodiscard]] const std::string& id() const noexcept { return id_; }
+
+private:
+    std::shared_ptr<core::tools::shell::ShellSessions> sessions_;
+    std::string id_;
+};
 
 [[nodiscard]] int sanitize_max_steps(int value, int fallback) {
     return DelegationBudget::sanitize(value, fallback);
@@ -100,12 +131,15 @@ private:
 }
 
 [[nodiscard]] DelegatedAgentRunner::PermissionCheck adapt_permission_check(
-    const SubagentOrchestrator::RunContext& context) {
+    const SubagentOrchestrator::RunContext& context,
+    bool read_only_shell) {
     if (!context.permission_check) return {};
 
-    return [permission_check = context.permission_check](
+    return [permission_check = context.permission_check, read_only_shell](
                std::string_view tool_name,
                std::string_view args) {
+        // ShellTool refuses what a read-only shell may not run; asking is moot.
+        if (read_only_shell && core::tools::names::is_terminal_tool(tool_name)) return true;
         return permission_check(
             std::string(tool_name),
             std::string(args));
@@ -139,50 +173,25 @@ SubagentOrchestrator::SubagentOrchestrator(
     , app_config_(app_config) {}
 
 std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_profiles() {
-    return {
-        Profile{
-            .name = "general",
-            .description = "General-purpose subagent for complex multi-step tasks and broad research.",
-            .prompt =
-                "You are Filo's @general worker subagent.\\n"
-                "Work independently on delegated tasks and use tools when needed.\\n"
-                "Final summary: one status line (done / blocked / partial), then the evidence: "
-                "files changed, commands run with observed results, key findings as file:line "
-                "references. Report only what you observed; say plainly what you could not verify.",
+    std::vector<Profile> profiles;
+    profiles.reserve(core::config::builtin_subagents::kAll.size());
+    for (const auto& builtin : core::config::builtin_subagents::kAll) {
+        profiles.push_back(Profile{
+            .name = std::string(builtin.name),
+            .description = std::string(builtin.description),
+            .prompt = std::string(builtin.prompt),
             .provider_override = "",
             .model_override = "",
             .response_format = std::nullopt,
-            .allowed_tools = {},
-            .use_allow_list = false,
+            .allowed_tools = {builtin.allowed_tools.begin(), builtin.allowed_tools.end()},
+            .use_allow_list = !builtin.allowed_tools.empty(),
             .allow_task_tool = false,
-            .max_steps = 12,
+            .max_steps = builtin.max_steps,
             .enabled = true,
-        },
-        Profile{
-            .name = "explore",
-            .description = "Fast read-only codebase explorer for search-heavy investigations.",
-            .prompt =
-                "You are Filo's @explore worker subagent.\\n"
-                "Focus on finding information quickly using read/search/list tools.\\n"
-                "Do not edit files.\\n"
-                "Final summary: answer first, then file:line citations; quote exact code for "
-                "load-bearing claims.",
-            .provider_override = "",
-            .model_override = "",
-            .response_format = std::nullopt,
-            .allowed_tools = [] {
-                std::unordered_set<std::string> tool_names;
-                for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
-                    tool_names.emplace(tool_name);
-                }
-                return tool_names;
-            }(),
-            .use_allow_list = true,
-            .allow_task_tool = false,
-            .max_steps = 10,
-            .enabled = true,
-        },
-    };
+            .read_only_tools = builtin.read_only,
+        });
+    }
+    return profiles;
 }
 
 core::llm::Tool SubagentOrchestrator::task_tool_definition(
@@ -220,6 +229,16 @@ core::llm::Tool SubagentOrchestrator::task_tool_definition(
                 "Optional Filo task_id returned by an earlier successful task call. "
                 "Omit this field when starting a new task; never invent an ID.",
             .required = false,
+        },
+        {
+            .name = "fork_turns",
+            .type = "string",
+            .description =
+                "Parent history a new subagent inherits. `all` (default) gives it this "
+                "conversation's user messages and your answers, so the prompt only needs the "
+                "task itself; `none` starts it with just the prompt. Ignored on resume.",
+            .required = false,
+            .schema = R"({"type":"string","enum":["all","none"],"description":"Parent history a new subagent inherits. `all` (default) gives it this conversation's user messages and your answers, so the prompt only needs the task itself; `none` starts it with just the prompt. Ignored on resume."})",
         },
         {
             .name = "max_steps",
@@ -265,6 +284,16 @@ std::string SubagentOrchestrator::execute_task(
     if (obj["prompt"].get(value) == simdjson::SUCCESS) prompt = std::string(value);
     if (obj["subagent_type"].get(value) == simdjson::SUCCESS) subagent_type = std::string(value);
     if (obj["task_id"].get(value) == simdjson::SUCCESS) task_id = core::utils::str::trim_ascii_copy(value);
+    bool fork_parent = true;
+    if (obj["fork_turns"].get(value) == simdjson::SUCCESS) {
+        const std::string fork_turns =
+            core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(value));
+        if (fork_turns == "none") {
+            fork_parent = false;
+        } else if (!fork_turns.empty() && fork_turns != "all") {
+            return render_error_json("fork_turns must be `all` or `none`.");
+        }
+    }
 
     const auto max_steps = DelegationBudget::parse(obj);
     if (!max_steps) return render_error_json(max_steps.error());
@@ -337,31 +366,29 @@ std::string SubagentOrchestrator::execute_task(
     }
     // A resume keeps an explicitly chosen budget unless this call overrides it.
     if (!max_steps->has_value() && session->max_steps > 0) plan->max_steps = session->max_steps;
-    auto read_only_slot = std::make_shared<ReadOnlySlot>(read_only_slots_);
-    if (plan->read_only
-        && !read_only_slot->acquire(context.cancellation_requested)) {
+    auto subagent_slot = std::make_shared<SubagentSlot>(subagent_slots_);
+    if (!subagent_slot->acquire(context.cancellation_requested)) {
         return render_error_json("Delegated task was cancelled while waiting to run.");
     }
 
     auto execution_provider = plan->provider;
     std::unique_lock serial_provider_lock(serial_provider_mutex_, std::defer_lock);
-    if (plan->read_only) {
-        if (execution_provider->capabilities().supports_parallel_requests) {
-            if (auto isolated = execution_provider->fork_for_parallel_request()) {
-                execution_provider = std::move(isolated);
-            }
-        } else {
-            if (!acquire_run_lock(serial_provider_lock, context.cancellation_requested)) {
-                return render_error_json("Delegated task was cancelled while waiting for its provider.");
-            }
-            if (pending_serial_run_.valid()
-                && pending_serial_run_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-                return render_error_json("The provider's previous worker is still stopping. Retry after it has stopped.");
-            }
+    if (execution_provider->capabilities().supports_parallel_requests) {
+        if (auto isolated = execution_provider->fork_for_parallel_request()) {
+            execution_provider = std::move(isolated);
+        }
+    } else {
+        if (!acquire_run_lock(serial_provider_lock, context.cancellation_requested)) {
+            return render_error_json("Delegated task was cancelled while waiting for its provider.");
+        }
+        if (pending_serial_run_.valid()
+            && pending_serial_run_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            return render_error_json("The provider's previous worker is still stopping. Retry after it has stopped.");
         }
     }
 
     std::optional<DelegatedAgentRunner::ResumeState> resume_state;
+    bool forked_context = false;
     {
         std::lock_guard session_lock(session->mutex);
         if (session->model.empty()) {
@@ -373,14 +400,34 @@ std::string SubagentOrchestrator::execute_task(
                 .context_summary = session->context_summary,
                 .mode = delegated_mode_name(context.parent_mode, plan->read_only),
             };
+        } else if (fork_parent && !plan->isolated) {
+            auto forked = context.parent_history
+                ? fork_parent_history(*context.parent_history)
+                : std::vector<core::llm::Message>{};
+            if (!forked.empty() || !context.parent_context_summary.empty()) {
+                forked_context = true;
+                resume_state = DelegatedAgentRunner::ResumeState{
+                    .messages = std::move(forked),
+                    .context_summary = context.parent_context_summary,
+                    .mode = delegated_mode_name(context.parent_mode, plan->read_only),
+                };
+            }
         }
     }
+
+    // Parallel workers must not queue on, or change the cwd of, the parent's shell.
+    const WorkerShell worker_shell(
+        tool_manager_.shell_sessions(),
+        core::context::worker_shell_session_id(context.session_context.shell_session(), session->id));
+    core::context::SessionContext worker_context = context.session_context;
+    worker_context.shell_session_id = worker_shell.id();
+    worker_context.read_only_shell = plan->read_only_shell;
 
     const auto result = DelegatedAgentRunner::run({
         .provider = std::move(execution_provider),
         .provider_name = plan->provider_name,
         .tool_manager = tool_manager_,
-        .session_context = context.session_context,
+        .session_context = worker_context,
         .mode = delegated_mode_name(context.parent_mode, plan->read_only),
         .model = plan->model_name,
         .response_format = plan->response_format,
@@ -403,13 +450,14 @@ std::string SubagentOrchestrator::execute_task(
         .change_tracker = context.change_tracker,
         .timeout = std::chrono::minutes(30),
         .cancellation_requested = context.cancellation_requested,
-        .permission_check = adapt_permission_check(context),
+        .permission_check = adapt_permission_check(context, plan->read_only_shell),
         .on_event = context.on_subagent_event,
         .effort = context.effort,
         .advisor = context.advisor,
         .execution_journal = context.execution_journal,
-        .execution_lease = read_only_slot,
+        .execution_lease = subagent_slot,
         .isolated_context = plan->isolated,
+        .forked_context = forked_context,
     });
     session->pending_run = result.settled;
     session->max_steps = plan->max_steps;
@@ -540,12 +588,9 @@ bool SubagentOrchestrator::task_is_read_only(
     std::string_view worker;
     if (object["subagent_type"].get(worker) != simdjson::SUCCESS) return false;
     const auto profile = find_profile(worker, workspace_roots);
-    if (!profile || profile->allow_task_tool) return false;
+    if (!profile) return false;
 
-    const auto tools = build_tools_for_profile(*profile, parent_mode);
-    return std::ranges::all_of(tools, [](const core::llm::Tool& tool) {
-        return tool.function.annotations.read_only_hint;
-    });
+    return runs_read_only(*profile, build_tools_for_profile(*profile, parent_mode));
 }
 
 std::expected<SubagentOrchestrator::ExecutionPlan, std::string>
@@ -579,7 +624,8 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
     }
 
     std::shared_ptr<core::llm::LLMProvider> resolved_provider = request.inherited_provider;
-    if (!provider_name.empty()) {
+    const bool reuses_inherited = resolved_provider && provider_name == request.inherited_provider_name;
+    if (!provider_name.empty() && !reuses_inherited) {
         try {
             resolved_provider =
                 core::llm::ProviderManager::get_instance().get_provider(provider_name);
@@ -620,10 +666,9 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
     }
 
     auto tools = build_tools_for_profile(*profile, request.parent_mode);
-    const bool read_only = !profile->allow_task_tool
-        && std::ranges::all_of(tools, [](const core::llm::Tool& tool) {
-            return tool.function.annotations.read_only_hint;
-        });
+    const bool read_only = runs_read_only(*profile, tools);
+    const bool read_only_shell = profile->read_only_tools
+        && std::ranges::any_of(tools, is_terminal_tool);
     const int max_steps = sanitize_max_steps(
         request.max_steps_override.value_or(0),
         profile->max_steps);
@@ -639,6 +684,7 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
         .tools = std::move(tools),
         .allow_task_tool = profile->allow_task_tool,
         .read_only = read_only,
+        .read_only_shell = read_only_shell,
         .max_steps = max_steps,
         .isolated = profile->isolated,
     };
@@ -674,8 +720,8 @@ void SubagentOrchestrator::apply_config_overrides(
                 .name = name,
                 .description = std::format("Custom subagent profile '{}'.", name),
                 .prompt = std::format(
-                    "You are Filo's @{} worker subagent.\\n"
-                    "Complete delegated tasks autonomously.\\n"
+                    "You are Filo's @{} worker subagent.\n"
+                    "Complete delegated tasks autonomously.\n"
                     "Final summary: status line first, then observed evidence — files, commands, "
                     "file:line findings.",
                     name),
@@ -736,13 +782,20 @@ std::string SubagentOrchestrator::build_task_description(
     const std::vector<Profile> profiles_snapshot = effective_profiles(workspace_roots);
 
     std::string description =
-        "Delegates work to a specialized background subagent. "
-        "Use this for complex multi-step research, broad file/code exploration, "
-        "or splitting ambiguous work while you stay focused on the primary user goal.\\n\\n"
-        "Available subagent execution profiles:\\n";
+        "Delegates a well-scoped, self-contained subtask to a subagent. Unlike an async "
+        "spawn, this call blocks until the subagent finishes and returns its result. To run "
+        "subagents in parallel, put all of their task calls in the SAME response; task calls "
+        "issued one per response run one after another. Delegation therefore saves time "
+        "only for independent subtasks issued together, or keeps bulky side work out of "
+        "your context.\n"
+        "Do the critical path yourself: never delegate the step your next action "
+        "depends on, work that is tightly coupled to what you are doing, or the core "
+        "of what the user asked for. Do not redo a subagent's work; verify only "
+        "surprising or load-bearing claims.\n\n"
+        "Available subagent execution profiles:\n";
 
     if (profiles_snapshot.empty()) {
-        description += "- none configured\\n";
+        description += "- none configured\n";
     } else {
         for (const auto& profile : profiles_snapshot) {
             const std::string_view provider = profile.provider_override.empty()
@@ -752,34 +805,54 @@ std::string SubagentOrchestrator::build_task_description(
                 ? "inherit parent"
                 : std::string_view(profile.model_override);
             description += std::format(
-                "- {}: {} [provider: {}; model: {}; model steps: {}{}{}{}]\\n",
+                "- {}: {} [provider: {}; model: {}; model steps: {}{}{}{}]\n",
                 profile.name,
                 profile.description,
                 provider,
                 model,
                 profile.max_steps,
-                profile.read_only_tools ? "; read-only tools" : "",
+                profile.read_only_tools ? "; read-only, shell limited to commands that change nothing" : "",
                 profile.allow_task_tool ? "; may delegate to subagents" : "",
                 profile.isolated ? "; fresh context without project instructions or memory" : "");
         }
     }
 
     description +=
-        "\\nWhen finished, the subagent returns a concise final result to this conversation. "
+        "\nWhen finished, the subagent returns a concise final result to this conversation. "
         "For a new task, omit task_id. To resume the same delegated thread later, pass "
         "the exact task_id returned by its earlier successful call; never invent one. "
         "Resume with this same task tool and the same subagent_type, prompt with follow-up "
         "instructions, and optionally a larger max_steps (up to 64). A partial status means "
         "the run used its budget; its findings and history are preserved. Do not pass task_id "
         "to delegate_task: that tool only resumes its own work_id values. "
-        "Each task should answer a concrete question with specific evidence. Split large "
-        "investigations into focused tasks, or request a larger max_steps budget. "
+        "A new subagent inherits this conversation (fork_turns defaults to `all`), so the "
+        "prompt can focus on the task: state the concrete output you need next. "
         "Select the matching profile with subagent_type. A profile's provider and model are "
-        "fixed by user configuration and cannot be overridden in a task prompt. For multiple "
-        "independent read-only investigations, issue several explore task calls together in one "
-        "response so Filo can run them concurrently.";
+        "fixed by user configuration and cannot be overridden in a task prompt. "
+        "Task calls in one response run concurrently, writers included; all subagents "
+        "share this checkout, so give parallel writing tasks disjoint sets of files and "
+        "have each list the files it changed.";
 
     return description;
+}
+
+std::vector<core::llm::Message> SubagentOrchestrator::fork_parent_history(
+    const std::vector<core::llm::Message>& history) {
+    std::vector<core::llm::Message> forked;
+    forked.reserve(history.size());
+    for (const auto& message : history) {
+        if (message.role == "user") {
+            core::llm::Message copy{.role = "user", .content = message.content};
+            copy.content_parts = message.content_parts;
+            copy.input_text = message.input_text;
+            copy.synthetic = message.synthetic;
+            forked.push_back(std::move(copy));
+        } else if (message.role == "assistant" && message.tool_calls.empty()
+                   && !core::utils::str::trim_ascii_copy(message.content).empty()) {
+            forked.push_back(core::llm::Message{.role = "assistant", .content = message.content});
+        }
+    }
+    return forked;
 }
 
 std::string SubagentOrchestrator::create_task_id() {
@@ -839,6 +912,15 @@ std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_
     return session;
 }
 
+bool SubagentOrchestrator::runs_read_only(const Profile& profile,
+                                          const std::vector<core::llm::Tool>& tools) {
+    if (profile.allow_task_tool) return false;
+    return profile.read_only_tools
+        || std::ranges::all_of(tools, [](const core::llm::Tool& tool) {
+               return tool.function.annotations.read_only_hint;
+           });
+}
+
 std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
     const Profile& profile,
     std::string_view parent_mode) const {
@@ -851,9 +933,7 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
         });
     }
     if (profile.read_only_tools) {
-        std::erase_if(tools, [](const core::llm::Tool& tool) {
-            return !tool.function.annotations.read_only_hint;
-        });
+        std::erase_if(tools, std::not_fn(read_only_profile_keeps));
     }
 
     std::erase_if(tools, [&](const core::llm::Tool& tool) {
@@ -883,7 +963,7 @@ std::string SubagentOrchestrator::render_success_json(
     int failed_tool_calls) const {
 
     const std::string output = std::format(
-        "task_id: {}\\n\\n<task_result>\\n{}\\n</task_result>",
+        "task_id: {}\n\n<task_result>\n{}\n</task_result>",
         session.id,
         result_text);
 

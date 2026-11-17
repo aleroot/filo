@@ -405,13 +405,16 @@ void append_function_call_output_item(std::string& payload,
     return std::nullopt;
 }
 
-/// Filo's wording of Codex's proactive multi-agent mode message, naming the
-/// delegation tools this request actually carries. Empty when ultra is not
-/// selected, the model is not tuned for it, or no delegation tool is offered.
-[[nodiscard]] std::string proactive_delegation_instructions(const ChatRequest& request) {
-    if (requested_reasoning_effort(request) != "ultra") return {};
+/// Codex's multi-agent mode message (effective_multi_agent_mode) in Filo's
+/// words: proactive under `ultra`, explicit-request-only otherwise.
+[[nodiscard]] std::string delegation_mode_instructions(const ChatRequest& request) {
     const auto& catalog = request.catalog_reasoning;
-    if (!catalog || !catalog->ultra || !catalog->ultra->proactive_delegation) return {};
+    if (!catalog || !catalog->ultra) return {};
+    const bool ultra = requested_reasoning_effort(request) == "ultra";
+    if (ultra ? !catalog->ultra->proactive_delegation
+              : !catalog->ultra->explicit_delegation) {
+        return {};
+    }
 
     std::string tools;
     for (const auto& tool : request.tools) {
@@ -422,6 +425,18 @@ void append_function_call_output_item(std::string& payload,
         tools += '`';
     }
     if (tools.empty()) return {};
+
+    if (!ultra) {
+        return std::format(
+            "\n\n[Delegation Mode]\n"
+            "Delegation only on request. Any earlier instruction encouraging proactive "
+            "delegation no longer applies. Do not call {} unless the user, Filo's AUTO "
+            "execution contract, or applicable project instructions or skills explicitly ask "
+            "for subagents, delegation, or parallel agent work. Requests for depth, "
+            "thoroughness, research, investigation, review, or detailed codebase analysis "
+            "are not such a request: do that work yourself with your own tools.\n",
+            tools);
+    }
 
     return std::format(
         "\n\n[Delegation Mode]\n"
@@ -1366,7 +1381,7 @@ void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
 
     // A Dynamic tail layer keeps the stable prefix cacheable when the user
     // toggles ultra mid-session.
-    if (auto delegation = proactive_delegation_instructions(req); !delegation.empty()) {
+    if (auto delegation = delegation_mode_instructions(req); !delegation.empty()) {
         if (!req.prompt_plan.empty()) {
             req.prompt_plan.append(core::context::ContextLayer{
                 .kind = core::context::ContextLayerKind::RuntimeInstructions,

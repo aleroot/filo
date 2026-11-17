@@ -96,6 +96,8 @@ struct UltraEffortProfile {
     /// The model is tuned to delegate work to subagents on its own initiative
     /// under `ultra`, rather than only when the user asks for it.
     bool proactive_delegation = false;
+    /// Outside `ultra`, delegate only on explicit request (codex-rs ExplicitRequestOnly).
+    bool explicit_delegation = false;
 };
 
 /**

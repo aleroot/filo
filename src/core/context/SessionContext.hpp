@@ -53,6 +53,15 @@ struct SessionContext {
     bool include_project_context = true;
     /// Subagent nesting level: 0 for a top-level session, +1 per delegation.
     int delegation_depth = 0;
+    /// Empty means session_id.
+    std::string shell_session_id;
+    /// Only commands the command policy allows without asking may run.
+    bool read_only_shell = false;
+
+    [[nodiscard]] std::string_view shell_session() const noexcept {
+        return shell_session_id.empty() ? std::string_view(session_id)
+                                        : std::string_view(shell_session_id);
+    }
 
     [[nodiscard]] std::string_view root_session() const noexcept {
         return root_session_id.empty() ? std::string_view(session_id)
@@ -79,5 +88,24 @@ struct SessionContext {
     core::workspace::WorkspaceSnapshot snapshot,
     SessionTransport transport = SessionTransport::unspecified,
     std::string session_id = {});
+
+inline constexpr char kWorkerShellSeparator = '/';
+
+[[nodiscard]] inline std::string worker_shell_session_id(std::string_view parent_shell,
+                                                         std::string_view worker_id) {
+    std::string id(parent_shell);
+    id += kWorkerShellSeparator;
+    id += worker_id;
+    return id;
+}
+
+/// True for the session's own shell and for its workers' shells.
+[[nodiscard]] inline bool shell_belongs_to_session(std::string_view shell_id,
+                                                   std::string_view session_id) noexcept {
+    return shell_id == session_id
+        || (!session_id.empty() && shell_id.size() > session_id.size()
+            && shell_id.starts_with(session_id)
+            && shell_id[session_id.size()] == kWorkerShellSeparator);
+}
 
 } // namespace core::context

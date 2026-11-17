@@ -143,7 +143,7 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
           "error would change the user's code or decisions.\n"
           "- Never stage, commit, push, or discard git state unless asked; never revert "
           "changes you did not make. Never print, log, or commit secrets."
-          "\n\nYou can delegate complex background work via the `task` tool."
+          "\n\nYou can delegate well-scoped, self-contained subtasks via the `task` tool."
           " Use the `subagent_type` values listed in the task tool schema/description."
           " Default profiles are `general` (broad multi-step work) and"
           " `explore` (fast read-only codebase search)."

@@ -64,10 +64,11 @@ namespace {
 
 // Mirrors codex-rs: `ultra` drives the model at `multi_agent_reasoning_effort`
 // (ModelInfo::resolve_reasoning_effort) and switches a `multi_agent_version:
-// v2` model to the proactive multi-agent mode (effective_multi_agent_mode).
+// v2` model to the proactive multi-agent mode (effective_multi_agent_mode);
+// every other effort selects the explicit-request-only mode.
 // A catalog `model_messages.multi_agent.mode` can replace that mode text
-// (`hint_text` for every mode, else `proactive`); an empty replacement
-// suppresses it. Replacement text is Codex-specific (it names Codex's tools),
+// (`hint_text` for every mode, else `proactive` / `explicit`); an empty
+// replacement suppresses it. Replacement text is Codex-specific (it names Codex's tools),
 // so Filo keeps only the decision and sends its own words.
 [[nodiscard]] std::optional<UltraEffortProfile> codex_ultra_profile(
     const catalog::JsonObjectView& model,
@@ -82,17 +83,26 @@ namespace {
         ultra.effort = core::utils::str::to_lower_ascii_copy(effort);
     }
     std::string version;
-    ultra.proactive_delegation = model.string("multi_agent_version", version)
+    const bool multi_agent_v2 = model.string("multi_agent_version", version)
         && core::utils::str::to_lower_ascii_copy(version) == "v2";
+    ultra.proactive_delegation = multi_agent_v2;
+    ultra.explicit_delegation = multi_agent_v2;
     simdjson::dom::object mode;
-    if (ultra.proactive_delegation
+    if (multi_agent_v2
         && model.raw().at_pointer("/model_messages/multi_agent/mode").get(mode)
                == simdjson::SUCCESS) {
         const catalog::JsonObjectView mode_view(mode);
-        std::string text;
-        if ((mode_view.string("hint_text", text) || mode_view.string("proactive", text))
-            && text.empty()) {
+        const auto replacement = [&](std::string_view field) -> std::optional<std::string> {
+            std::string text;
+            if (mode_view.string("hint_text", text)) return text;
+            if (mode_view.string(field, text)) return text;
+            return std::nullopt;
+        };
+        if (const auto text = replacement("proactive"); text && text->empty()) {
             ultra.proactive_delegation = false;
+        }
+        if (const auto text = replacement("explicit"); text && text->empty()) {
+            ultra.explicit_delegation = false;
         }
     }
     return ultra;

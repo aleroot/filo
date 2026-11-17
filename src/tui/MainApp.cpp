@@ -2194,7 +2194,7 @@ RunResult run(RunOptions opts) {
         std::vector<core::commands::ActiveTerminalInfo> terminals;
         const auto now = std::chrono::steady_clock::now();
         for (const auto& command : tool_manager.shell_sessions()->active_commands()) {
-            if (command.session_id != session_id) {
+            if (!core::context::shell_belongs_to_session(command.session_id, session_id)) {
                 continue;
             }
             terminals.push_back({
@@ -6502,7 +6502,8 @@ RunResult run(RunOptions opts) {
         const bool has_active_shell = std::ranges::any_of(
             tool_manager.shell_sessions()->active_commands(),
             [&](const auto& command) {
-                return command.session_id == target_session_id;
+                return core::context::shell_belongs_to_session(
+                    command.session_id, target_session_id);
             });
         return runtime->turn_active()
             || runtime->review_activity().active

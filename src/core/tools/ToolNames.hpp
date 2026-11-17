@@ -49,7 +49,7 @@ agent_tool_title(std::string_view tool_name) noexcept {
     return {};
 }
 
-inline constexpr std::array<std::string_view, 8> kExploreAllowedTools{
+inline constexpr std::array<std::string_view, 9> kExploreAllowedTools{
     kRead,
     kConversation,
     kFileSearch,
@@ -58,6 +58,7 @@ inline constexpr std::array<std::string_view, 8> kExploreAllowedTools{
     kGetCurrentTime,
     kWebSearch,
     kFetchUrl,
+    kRunTerminalCommand,
 };
 
 [[nodiscard]] constexpr bool is_web_access_tool(std::string_view tool_name) noexcept {

@@ -6,6 +6,7 @@
 #include "../context/SessionContext.hpp"
 #include "../landrun/LandrunPolicyCompiler.hpp"
 #include "../landrun/LandrunSettings.hpp"
+#include "../permissions/CommandPolicy.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../changes/TurnChangeTracker.hpp"
 #include <simdjson.h>
@@ -138,6 +139,11 @@ std::string ShellTool::execute_impl(
             core::utils::escape_json_string(*policy_error));
     }
 
+    // Enforced here: an autonomous permission profile never prompts.
+    if (context.read_only_shell && !core::permissions::shell_call_is_allowed(json_args)) {
+        return R"({"error":"This worker is read-only: its shell runs only commands that change nothing (for example git diff/log/show, ls, cat, grep). Use one of those, or report what needs a writing worker."})";
+    }
+
     // The shell is the escape hatch every path gate has: `cat AGENTS.md` reads
     // a file no path-taking tool would hand over. How that is prevented depends
     // on the host — the kernel subtracts the paths when it can, and only then is
@@ -162,7 +168,7 @@ std::string ShellTool::execute_impl(
     std::function<void(int)> before_dispatch;
     if (tracker) before_dispatch = [tracker](int group) { tracker->note_process_group(group); };
     const auto result = sessions_->run({
-        .session_id = context.session_id,
+        .session_id = std::string(context.shell_session()),
         .command = std::string(command_view),
         .working_dir = working_dir,
         .tool_call_id = std::string(tool_call_id),

@@ -78,7 +78,7 @@ TEST_CASE("AUTO orchestrates debugging and architecture work",
   CHECK_THAT(contract, ContainsSubstring("AUTO execution contract"));
   CHECK_THAT(contract, ContainsSubstring("one model response"));
   CHECK_THAT(contract,
-             ContainsSubstring("do not run concurrent mutating workers"));
+             ContainsSubstring("give each a disjoint set of files"));
   CHECK_THAT(contract, ContainsSubstring("completion hooks"));
 }
 

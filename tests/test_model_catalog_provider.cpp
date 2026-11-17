@@ -2596,26 +2596,40 @@ TEST_CASE("Codex catalog describes what ultra means for each model",
          "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"proactive":""}}}},
         {"slug":"custom-hint","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}],
          "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"hint_text":"Spawn agents."}}}},
-        {"slug":"no-ultra","supported_reasoning_levels":[{"effort":"max"}],"multi_agent_version":"v2"}
+        {"slug":"no-ultra","supported_reasoning_levels":[{"effort":"max"}],"multi_agent_version":"v2"},
+        {"slug":"explicit-suppressed","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}],
+         "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"explicit":""}}}},
+        {"slug":"hint-suppressed","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}],
+         "multi_agent_version":"v2","model_messages":{"multi_agent":{"mode":{"hint_text":"","explicit":"Ask first."}}}}
     ]})");
     REQUIRE(result.ok());
-    REQUIRE(result.models.size() == 5);
+    REQUIRE(result.models.size() == 7);
 
     const auto& tuned = result.models[0].reasoning.ultra;
     REQUIRE(tuned);
     CHECK(tuned->effort == "xhigh");
     CHECK(tuned->proactive_delegation);
+    CHECK(tuned->explicit_delegation);
 
     const auto& v1 = result.models[1].reasoning.ultra;
     REQUIRE(v1);
     CHECK_FALSE(v1->effort);
     CHECK_FALSE(v1->proactive_delegation);
+    CHECK_FALSE(v1->explicit_delegation);
 
     REQUIRE(result.models[2].reasoning.ultra);
     CHECK_FALSE(result.models[2].reasoning.ultra->proactive_delegation);
+    CHECK(result.models[2].reasoning.ultra->explicit_delegation);
     REQUIRE(result.models[3].reasoning.ultra);
     CHECK(result.models[3].reasoning.ultra->proactive_delegation);
+    CHECK(result.models[3].reasoning.ultra->explicit_delegation);
     CHECK_FALSE(result.models[4].reasoning.ultra);
+    REQUIRE(result.models[5].reasoning.ultra);
+    CHECK(result.models[5].reasoning.ultra->proactive_delegation);
+    CHECK_FALSE(result.models[5].reasoning.ultra->explicit_delegation);
+    REQUIRE(result.models[6].reasoning.ultra);
+    CHECK_FALSE(result.models[6].reasoning.ultra->proactive_delegation);
+    CHECK_FALSE(result.models[6].reasoning.ultra->explicit_delegation);
 
     auto& registry = ModelRegistry::instance();
     ModelInfo info = result.models[0];
@@ -2627,4 +2641,5 @@ TEST_CASE("Codex catalog describes what ultra means for each model",
     REQUIRE(round_tripped->reasoning.ultra);
     CHECK(round_tripped->reasoning.ultra->effort == "xhigh");
     CHECK(round_tripped->reasoning.ultra->proactive_delegation);
+    CHECK(round_tripped->reasoning.ultra->explicit_delegation);
 }

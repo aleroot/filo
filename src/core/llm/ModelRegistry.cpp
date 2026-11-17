@@ -2292,6 +2292,7 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
                     ultra.effort = std::move(ultra_effort);
                 }
                 get_json_bool(ultra_obj, "proactive_delegation", ultra.proactive_delegation);
+                get_json_bool(ultra_obj, "explicit_delegation", ultra.explicit_delegation);
                 info.reasoning.ultra = std::move(ultra);
             }
         }
@@ -2457,6 +2458,9 @@ std::string ModelRegistry::export_to_json() const {
                         writer.kv_bool(
                             "proactive_delegation",
                             info.reasoning.ultra->proactive_delegation);
+                        writer.comma().kv_bool(
+                            "explicit_delegation",
+                            info.reasoning.ultra->explicit_delegation);
                     }
                 }
                 writer.comma();
