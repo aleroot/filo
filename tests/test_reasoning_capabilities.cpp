@@ -49,6 +49,12 @@ TEST_CASE("OpenAI protocols own their reasoning capability policy", "[llm][effor
         // Verified against the live backend: GPT-6.1 rejects `none` and `minimal`.
         CHECK_FALSE(supports(*protocol, "gpt-6.1-terra", ReasoningCapability::Disable));
         CHECK_FALSE(supports(*protocol, "gpt-6.1-terra", ReasoningCapability::MinimalEffort));
+        // GPT-6.2 rejects `none` the same way. `minimal` is not a 6.2 value.
+        CHECK(supports(*protocol, "gpt-6.2-sol", ReasoningCapability::MaxEffort));
+        CHECK(supports(*protocol, "gpt-6.2-astra", ReasoningCapability::XHighEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-6.2-sol", ReasoningCapability::Disable));
+        CHECK_FALSE(supports(*protocol, "gpt-6.2-astra", ReasoningCapability::MinimalEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-6.2-sol", ReasoningCapability::UltraEffort));
     }
 
     // `ultra` is a Codex client mode, not a wire value: the API rejects it.

@@ -47,6 +47,12 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     
     // OpenAI (via new registry)
     REQUIRE(get_max_context_size("gpt-5.6-sol") == 1050000);
+    REQUIRE(get_max_context_size("gpt-6.2-sol") == 1050000);
+    REQUIRE(get_max_context_size("gpt-6.2") == 1050000);
+    REQUIRE(get_max_context_size("gpt-6.2-astra") == 1050000);
+    // A dated snapshot is not a curated id; the 6.2 prefix still wins over
+    // the 272k GPT-6 fallback.
+    REQUIRE(get_max_context_size("gpt-6.2-sol-2026-11-17") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-terra") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-luna") == 1050000);
@@ -1074,6 +1080,52 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
     CHECK(get_max_context_size("gpt-6.1-sol") == 272000);
     // An id the catalog has not published yet still gets the family's window.
     CHECK(get_max_context_size("gpt-6.9-preview") == 272000);
+
+    const auto sol62 = registry.lookup("gpt-6.2-sol");
+    REQUIRE(sol62);
+    CHECK(sol62->canonical_id == "gpt-6.2-sol");
+    CHECK(sol62->display_name == "GPT-6.2 Sol");
+    CHECK(sol62->context_window == 1050000);
+    CHECK_FALSE(sol62->max_context_window.has_value());
+    CHECK(sol62->max_output_tokens == 128000);
+    CHECK(sol62->knowledge_cutoff == "2026-06-01");
+    CHECK(sol62->reasoning.catalog_default_effort == "low");
+    CHECK(sol62->reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK_FALSE(sol62->reasoning.effort.supports(ReasoningCapability::Disable));
+    CHECK_FALSE(sol62->reasoning.effort.supports(ReasoningCapability::UltraEffort));
+    CHECK(sol62->pricing.input_per_mtok == Catch::Approx(2.0));
+    CHECK(sol62->pricing.output_per_mtok == Catch::Approx(10.0));
+    CHECK(sol62->pricing.cached_input_per_mtok == Catch::Approx(0.10));
+    CHECK(sol62->pricing.prompt_caching_write_per_mtok == Catch::Approx(2.50));
+    REQUIRE(sol62->pricing.long_context);
+    CHECK(sol62->pricing.long_context->threshold == 272000);
+    CHECK(sol62->pricing.long_context->input == Catch::Approx(4.0));
+    CHECK(sol62->pricing.long_context->output == Catch::Approx(15.0));
+    CHECK(sol62->pricing.long_context->cache_read == Catch::Approx(0.20));
+    CHECK(sol62->pricing.long_context->cache_write == Catch::Approx(5.0));
+    // Under the threshold the short rates apply; over it the whole request
+    // moves to the long rates.
+    CHECK(sol62->estimate_cost(TokenUsage{
+              .prompt_tokens = 200'000,
+              .completion_tokens = 0,
+          }) == Catch::Approx(0.40));
+    CHECK(sol62->estimate_cost(TokenUsage{
+              .prompt_tokens = 300'000,
+              .completion_tokens = 0,
+          }) == Catch::Approx(1.20));
+
+    const auto astra62 = registry.lookup("gpt-6.2-astra");
+    REQUIRE(astra62);
+    CHECK(astra62->knowledge_cutoff == "2026-05-18");
+    CHECK(astra62->pricing.input_per_mtok == Catch::Approx(8.0));
+    CHECK(astra62->pricing.output_per_mtok == Catch::Approx(40.0));
+    CHECK(astra62->pricing.cached_input_per_mtok == Catch::Approx(0.40));
+    REQUIRE(astra62->pricing.long_context);
+    CHECK(astra62->pricing.long_context->output == Catch::Approx(60.0));
+
+    const auto generation = registry.lookup("gpt-6.2");
+    REQUIRE(generation);
+    CHECK(generation->canonical_id == "gpt-6.2-sol");
 }
 
 TEST_CASE("A configured context window replaces the model's and is capped by its ceiling",

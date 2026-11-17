@@ -367,6 +367,22 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_gpt54.input_per_m  == Catch::Approx(2.50));
     REQUIRE(r_gpt54.output_per_m == Catch::Approx(10.00));
 
+    auto r_sol62 = rates_for_model("gpt-6.2-sol");
+    REQUIRE(r_sol62.input_per_m  == Catch::Approx(2.00));
+    REQUIRE(r_sol62.output_per_m == Catch::Approx(10.00));
+    auto r_astra62 = rates_for_model("gpt-6.2-astra");
+    REQUIRE(r_astra62.input_per_m  == Catch::Approx(8.00));
+    REQUIRE(r_astra62.output_per_m == Catch::Approx(40.00));
+    REQUIRE(rates_for_model("gpt-6.2").input_per_m == Catch::Approx(2.00));
+    core::llm::TokenUsage short_prompt;
+    short_prompt.prompt_tokens = 200'000;
+    core::llm::TokenUsage long_prompt;
+    long_prompt.prompt_tokens = 300'000;
+    // The flat table is the short rate. A prompt past 272k uses the card.
+    CHECK(estimate_usage_cost(short_prompt, "gpt-6.2-sol") == Catch::Approx(0.40));
+    CHECK(estimate_usage_cost(long_prompt, "gpt-6.2-sol") == Catch::Approx(1.20));
+    CHECK(estimate_usage_cost(long_prompt, "gpt-6.2-astra") == Catch::Approx(4.80));
+
     auto r_code = rates_for_model("grok-code-fast-1");
     REQUIRE(r_code.input_per_m  == Catch::Approx(0.20));
     REQUIRE(r_code.output_per_m == Catch::Approx(1.50));

@@ -376,9 +376,11 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            // The ChatGPT backend's default model, as the Codex CLI selects
-            // it (codex-rs models-manager: the first model by priority).
-            .default_model = "gpt-6.1-sol",
+            // Everyday GPT-6.2 model (API, 2026-11-17). Codex's bundled
+            // catalog still prioritizes gpt-6.1-sol; that file has not
+            // caught up, and a login with no model of its own should not
+            // stay on the previous generation.
+            .default_model = "gpt-6.2-sol",
         };
     }
     if (normalized == "grok" || normalized == "xai" || normalized == "x.ai") {
@@ -394,7 +396,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            .default_model = "gpt-6.1-sol",
+            .default_model = "gpt-6.2-sol",
         };
     }
     if (normalized == "google" || normalized == "gemini") {
@@ -648,7 +650,7 @@ AppConfig make_default_config() {
         config.providers[name] = std::move(p);
     };
 
-    add_provider("openai",         "gpt-5.6-sol");
+    add_provider("openai",         "gpt-6.2-sol");
     add_provider("mistral",        "mistral-vibe-cli-latest", "high");
     add_provider("grok",           "grok-4.6", "high", {}, {}, "responses");
     add_provider("grok-4-5",       "grok-4.5", {}, {}, {}, "responses");
@@ -722,7 +724,7 @@ std::string default_config_json() {
         "grok-fast":      { "model": "grok-4.20-non-reasoning" },
         "grok-mini":      { "model": "grok-3-mini",      "reasoning_effort": "high" },
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
-        "openai":         { "model": "gpt-5.6-sol" },
+        "openai":         { "model": "gpt-6.2-sol" },
         "mistral":        { "model": "mistral-vibe-cli-latest", "reasoning_effort": "high" },
         "claude":         { "model": "claude-sonnet-5" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
@@ -789,7 +791,7 @@ std::string default_config_json() {
                 "defaults": [
                     { "provider": "grok", "model": "grok-4.6", "weight": 5 },
                     { "provider": "grok-mini-fast", "model": "grok-3-mini-fast", "weight": 3 },
-                    { "provider": "openai", "model": "gpt-5.6-sol", "weight": 2 }
+                    { "provider": "openai", "model": "gpt-6.2-sol", "weight": 2 }
                 ],
                 "rules": [
                     {
@@ -803,7 +805,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
                             { "provider": "grok", "model": "grok-4.6", "retries": 1 },
-                            { "provider": "openai", "model": "gpt-5.6-sol", "retries": 1 }
+                            { "provider": "openai", "model": "gpt-6.2-sol", "retries": 1 }
                         ]
                     },
                     {
@@ -814,7 +816,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "grok", "model": "grok-4.6", "latency_bias_ms": 15 },
                             { "provider": "gemini", "model": "gemini-2.5-flash", "latency_bias_ms": 10 },
-                            { "provider": "openai", "model": "gpt-5.6-sol", "latency_bias_ms": 20 }
+                            { "provider": "openai", "model": "gpt-6.2-sol", "latency_bias_ms": 20 }
                         ]
                     },
                     {

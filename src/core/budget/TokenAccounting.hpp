@@ -64,6 +64,7 @@ namespace core::budget {
     if (model.find("claude-opus-4-8")  != std::string_view::npos) return   200'000;
     if (model.find("claude-sonnet-4-6") != std::string_view::npos) return 1'000'000;
     if (model.find("claude")           != std::string_view::npos) return   200'000;
+    if (model.find("gpt-6.2")          != std::string_view::npos) return 1'050'000;
     if (model.find("gpt-5.6")          != std::string_view::npos) return 1'050'000;
     if (model.find("gpt-5.4")          != std::string_view::npos) return   200'000;
     if (model.find("gpt-5")            != std::string_view::npos) return   200'000;
@@ -105,13 +106,19 @@ struct ModelRates {
     double output_per_m = 8.00;
 };
 
-/// Registry entry whose pricing is maintained as the authoritative rate card,
-/// cache-read rates included. Other vendors fall back to the table below.
+/// Registry entry whose pricing is maintained as the authoritative rate card.
+/// Anthropic and MiMo cards carry cache rates the flat table cannot. A card
+/// with a long-context schedule does too: the table below is the short rate
+/// only, so a priced schedule wins (GPT-6.2 bills the whole request at the
+/// long rate once input passes 272k). An unpriced card does not, so a model
+/// the registry knows but does not price still uses the table.
 [[nodiscard]] inline std::shared_ptr<const core::llm::ModelInfo> registry_priced_model(
     std::string_view model) noexcept {
     try {
         auto info = core::llm::ModelRegistry::instance().lookup(model);
-        if (info && (info->provider == "anthropic" || info->provider == "mimo")) {
+        if (!info || info->pricing.input_per_mtok <= 0.0) return nullptr;
+        if (info->provider == "anthropic" || info->provider == "mimo"
+            || info->pricing.long_context) {
             return info;
         }
     } catch (...) {}
@@ -155,6 +162,9 @@ inline constexpr RateRow kFallbackRates[] = {
     {"opus",             RateMatch::Contains, { 5.00, 25.00}},
     {"sonnet",           RateMatch::Contains, { 3.00, 15.00}},
     {"haiku",            RateMatch::Contains, { 1.00,  5.00}},
+    {"gpt-6.2-astra",    RateMatch::Contains, { 8.00, 40.00}},
+    {"gpt-6.2-sol",      RateMatch::Contains, { 2.00, 10.00}},
+    {"gpt-6.2",          RateMatch::Exact,    { 2.00, 10.00}},
     {"gpt-5.6-sol",      RateMatch::Contains, { 5.00, 30.00}},
     {"gpt-5.6",          RateMatch::Exact,    { 5.00, 30.00}},
     {"gpt-5.6-terra",    RateMatch::Contains, { 2.50, 15.00}},

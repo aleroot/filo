@@ -784,7 +784,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.5");
     REQUIRE(config.providers.at("grok-reasoning").wire_api == "responses");
     REQUIRE(config.providers.contains("openai"));
-    REQUIRE(config.providers.at("openai").model == "gpt-5.6-sol");
+    REQUIRE(config.providers.at("openai").model == "gpt-6.2-sol");
     REQUIRE(config.providers.contains("mistral"));
     REQUIRE(config.providers.at("mistral").model == "mistral-vibe-cli-latest");
     REQUIRE(config.providers.at("mistral").reasoning_effort == "high");

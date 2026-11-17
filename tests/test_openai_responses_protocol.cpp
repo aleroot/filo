@@ -200,6 +200,36 @@ TEST_CASE("OpenAIResponsesProtocol - clamps private Codex effort tiers",
                Catch::Matchers::ContainsSubstring(R"("reasoning":{"summary":"auto"})"));
 }
 
+TEST_CASE("OpenAIResponsesProtocol - GPT-6.2 drops rejected reasoning efforts",
+          "[openai][responses][serializer][effort]") {
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-6.2-sol";
+    req.messages.push_back(Message{.role = "user", .content = "Solve this."});
+
+    req.effort = "none";
+    CHECK_THAT(protocol.serialize(req),
+               !Catch::Matchers::ContainsSubstring(R"("effort")"));
+    req.effort = "off";
+    CHECK_THAT(protocol.serialize(req),
+               !Catch::Matchers::ContainsSubstring(R"("effort")"));
+    req.effort = "minimal";
+    CHECK_THAT(protocol.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"low"})"));
+    req.effort = "max";
+    CHECK_THAT(protocol.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+    req.effort = "ultra";
+    const std::string ultra = protocol.serialize(req);
+    CHECK_THAT(ultra, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+    CHECK_THAT(ultra, !Catch::Matchers::ContainsSubstring("ultra"));
+
+    req.model = "gpt-6.2-astra";
+    req.effort = "none";
+    CHECK_THAT(protocol.serialize(req),
+               !Catch::Matchers::ContainsSubstring(R"("effort")"));
+}
+
 TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
           "[openai][responses][serializer][vision]") {
     OpenAIResponsesProtocol protocol;
