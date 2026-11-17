@@ -10,7 +10,9 @@
 #include "core/changes/RecoveryStore.hpp"
 #include "core/changes/FileChangeJson.hpp"
 #include "core/changes/StoredDiff.hpp"
+#include "core/persistence/AmendedFile.hpp"
 #include "core/utils/FileStamp.hpp"
+#include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/ProcessUtils.hpp"
 #include "core/tools/ShellTool.hpp"
@@ -19,6 +21,7 @@
 #include "core/tools/ListDirectoryTool.hpp"
 #include "tui/DirectShellState.hpp"
 #include "TestSessionContext.hpp"
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
 
@@ -1280,7 +1283,10 @@ TEST_CASE("Recovery storage rejects unknown lifecycle phases before reconciliati
     CHECK(loaded->phase == core::changes::RecoveryPhase::Complete);
     CHECK_FALSE(store.load(storage.path));
     const auto path = store.directory() / "manifest.json";
+    // Saved compressed; a plain manifest, as older versions wrote, still loads.
     auto contents = read(path);
+    REQUIRE(core::utils::gzip::is_compressed(contents));
+    contents = core::utils::gzip::decompress(contents).value();
     const auto phase = contents.find("complete");
     REQUIRE(phase != std::string::npos);
     contents.replace(phase, 8, "unknown_phase");
@@ -1957,4 +1963,111 @@ TEST_CASE("Every turn of a session summarizes, records and reverts what it chang
     const auto seed = GENERATE(range(1u, 41u));
     INFO("seed " << seed);
     TurnSequence(seed).run(10);
+}
+
+// ---------------------------------------------------------------------------
+// What recovery writes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A recovery manifest amended by its log loads as last saved", "[changes][recovery]") {
+    TempDir dir, storage;
+    const auto checkpoint = storage.path / "checkpoint";
+    const core::changes::RecoveryStore store(checkpoint);
+    const std::string hash_a(64, 'a'), hash_b(64, 'b');
+    core::changes::RecoveryManifest manifest{.workspace = dir.path};
+    for (int i = 0; i < 50; ++i)
+        manifest.entries[dir.path / std::format("file-{}.txt", i)] = {.before = {hash_a, 0644}};
+    store.save(manifest);
+    REQUIRE(core::utils::gzip::is_compressed(read(checkpoint / "manifest.json")));
+    const auto snapshot = read(checkpoint / "manifest.json");
+
+    // Each later save appends what changed, and the snapshot stays as written.
+    manifest.groups.push_back(4242);
+    store.save(manifest);
+    auto& edited = manifest.entries[dir.path / "file-7.txt"];
+    edited.after = {hash_b, 0600};
+    edited.after_known = true;
+    manifest.entries.erase(dir.path / "file-9.txt");
+    manifest.entries[dir.path / "new.txt"] = {};
+    store.save(manifest, core::changes::RecoveryStore::Sync::Later);
+    manifest.phase = core::changes::RecoveryPhase::Complete;
+    store.save(manifest);
+    CHECK(read(checkpoint / "manifest.json") == snapshot);
+    REQUIRE(fs::exists(core::persistence::AmendedFile::log_path(checkpoint / "manifest.json")));
+
+    const auto check_loads_as = [&](const core::changes::RecoveryManifest& expected) {
+        auto loaded = core::changes::RecoveryStore(checkpoint).load(dir.path);
+        REQUIRE(loaded);
+        CHECK(loaded->phase == expected.phase);
+        CHECK(loaded->groups == expected.groups);
+        CHECK(loaded->entries == expected.entries);
+    };
+    check_loads_as(manifest);
+
+    SECTION("a record torn by a crash is ignored") {
+        std::ofstream(core::persistence::AmendedFile::log_path(checkpoint / "manifest.json"), std::ios::app) << "\x10";
+        check_loads_as(manifest);
+    }
+
+    SECTION("a plain manifest, as earlier versions wrote, still loads") {
+        fs::remove(core::persistence::AmendedFile::log_path(checkpoint / "manifest.json"));
+        put(checkpoint / "manifest.json", core::utils::gzip::decompress(snapshot).value());
+        auto first = manifest;
+        first.phase = core::changes::RecoveryPhase::Recording;
+        first.groups.clear();
+        first.entries.erase(dir.path / "new.txt");
+        first.entries[dir.path / "file-9.txt"] = {.before = {hash_a, 0644}};
+        first.entries[dir.path / "file-7.txt"] = {.before = {hash_a, 0644}};
+        check_loads_as(first);
+    }
+}
+
+TEST_CASE("Recovery stores each content once, sharing it across sessions", "[changes][recovery]") {
+    TempDir workspace, storage;
+    const auto root = core::changes::RecoveryStore::root_in(storage.path);
+    const auto file = workspace.path / "app.txt";
+    put(file, "contents worth keeping\n");
+    const auto stamp_of_object = [](const core::changes::RecoveryStore& store, const core::changes::RecoveryImage& image) {
+        return core::utils::FileStamp::of(store.directory().parent_path() / "objects" / image.hash);
+    };
+
+    const core::changes::RecoveryStore first(root / "aaaa0001" / "turn-1");
+    const auto stored = first.store_original(file, 1024);
+    REQUIRE(stored);
+    const auto object = stamp_of_object(first, stored->image);
+    REQUIRE(object.regular());
+    CHECK((object.mode & 0777) == 0600);
+
+    // Contents already stored are not written again.
+    const core::changes::RecoveryStore later(root / "aaaa0001" / "turn-2");
+    const auto again = later.store_original(file, 1024);
+    REQUIRE(again);
+    CHECK(again->image == stored->image);
+    CHECK(stamp_of_object(later, again->image) == object);
+
+    // Another session links the object it would otherwise copy.
+    const core::changes::RecoveryStore other(root / "bbbb0002" / "turn-1");
+    const auto shared = other.store_original(file, 1024);
+    REQUIRE(shared);
+    CHECK(shared->image == stored->image);
+    struct stat mine{}, theirs{};
+    REQUIRE(::stat((root / "aaaa0001" / "objects" / stored->image.hash).c_str(), &mine) == 0);
+    REQUIRE(::stat((root / "bbbb0002" / "objects" / stored->image.hash).c_str(), &theirs) == 0);
+    CHECK(mine.st_ino == theirs.st_ino);
+    CHECK(theirs.st_nlink == 2);
+
+    // Each session's retention removes only its own name for it.
+    fs::remove_all(root / "aaaa0001");
+    CHECK(other.original(shared->image).value_or("") == "contents worth keeping\n");
+
+    // New contents get an object of their own, whether cloned or copied, that
+    // later edits of the file leave alone.
+    put(file, "edited\n");
+    const auto edited = other.store_original(file, 1024);
+    REQUIRE(edited);
+    CHECK(edited->image != stored->image);
+    put(file, "edited again\n");
+    CHECK(other.original(edited->image).value_or("") == "edited\n");
+    CHECK(other.original(shared->image).value_or("") == "contents worth keeping\n");
+    CHECK_FALSE(other.store_original(file, 4));  // Over the limit: nothing stored.
 }

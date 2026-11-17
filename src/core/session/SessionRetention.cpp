@@ -5,6 +5,7 @@
 #include "SessionStore.hpp"
 #include "ThreadCatalog.hpp"
 #include "../changes/RecoveryStore.hpp"
+#include "../persistence/AmendedFile.hpp"
 #include "../utils/InterprocessFile.hpp"
 
 #include <algorithm>
@@ -82,8 +83,8 @@ std::optional<Clock::time_point> modified(const fs::path& path) {
 }
 
 /// Whether none of @p uses was written since @p cutoff. A directory counts as
-/// written when it, one of its entries or an entry's manifest is (a turn's
-/// manifest is rewritten while the turn runs). False when anything present
+/// written when it, one of its entries or an entry's manifest or manifest log
+/// is (a running turn keeps amending them). False when anything present
 /// cannot be dated, so what cannot be aged is kept.
 bool idle_since(const std::vector<fs::path>& uses, Clock::time_point cutoff) {
     std::vector<fs::path> dated;
@@ -95,6 +96,7 @@ bool idle_since(const std::vector<fs::path>& uses, Clock::time_point cutoff) {
         for (const auto& entry : *entries) {
             dated.push_back(entry);
             dated.push_back(entry / "manifest.json");
+            dated.push_back(core::persistence::AmendedFile::log_path(entry / "manifest.json"));
         }
     }
     bool any = false;

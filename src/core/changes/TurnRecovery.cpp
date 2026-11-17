@@ -148,7 +148,10 @@ void TurnRecovery::after(std::span<const fs::path> paths, std::span<const fs::pa
         entry.after_stamp = current->stamp.settled_identity(observed);
         entry.after_known = true;
     }
-    if (!paths.empty() || !created.empty()) store_.save(manifest_);
+    // What a tool did needs no sync of its own: see RecoveryStore::Sync.
+    if (!paths.empty() || !created.empty())
+        store_.save(manifest_, manifest_.phase == RecoveryPhase::Recording ? RecoveryStore::Sync::Later
+                                                                            : RecoveryStore::Sync::Now);
 }
 
 void TurnRecovery::record_absent_unlocked(std::span<const fs::path> paths) {

@@ -2,6 +2,7 @@
 
 #include "AcpSession.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/session/SessionStore.hpp"
 
 #include <atomic>
 #include <filesystem>
@@ -101,6 +102,8 @@ private:
     std::string id_;
     std::filesystem::path cwd_;
     std::filesystem::path sessions_dir_;
+    /// One store for every save, so each saves only what the turn added.
+    core::session::SessionStore store_;
     std::string provider_name_;  // guarded by state_mu_
     std::string created_at_;
     Options options_;

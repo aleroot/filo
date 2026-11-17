@@ -420,6 +420,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/Gzip.cpp
     src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp
+    src/core/utils/FileClone.cpp
     src/core/utils/FileStamp.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/utils/ImageHeader.cpp
@@ -500,7 +501,10 @@ set(FILO_CORE_SOURCES
     src/core/changes/TurnChangeTracker.cpp
     src/core/changes/TurnRevert.cpp
     src/core/changes/TurnRecovery.cpp
+    src/core/changes/ObjectStore.cpp
+    src/core/changes/RecoveryManifestJson.cpp
     src/core/changes/RecoveryStore.cpp
+    src/core/persistence/AmendedFile.cpp
     src/core/changes/WorkspaceMutationGate.cpp
     src/core/changes/WorkspaceInventory.cpp
     src/core/tools/ListDirectoryTool.cpp
@@ -756,6 +760,12 @@ add_executable(filo_context_benchmark EXCLUDE_FROM_ALL
 target_link_libraries(filo_context_benchmark PRIVATE filo_core)
 set_target_properties(filo_context_benchmark PROPERTIES FOLDER "Filo/Benchmarks")
 
+# Explicitly built, offline benchmark for the bytes Filo's persistence writes.
+add_executable(filo_disk_write_benchmark EXCLUDE_FROM_ALL
+    benchmarks/disk_writes.cpp)
+target_link_libraries(filo_disk_write_benchmark PRIVATE filo_core)
+set_target_properties(filo_disk_write_benchmark PROPERTIES FOLDER "Filo/Benchmarks")
+
 install(TARGETS filo
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     COMPONENT Runtime
@@ -901,6 +911,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_patch_export.cpp
     tests/test_conversation_changes.cpp
     tests/test_turn_revert.cpp
+    tests/test_amended_file.cpp
+    tests/test_object_store.cpp
     tests/test_diff_comparer.cpp
     tests/test_lampo_cli_session.cpp
     tests/test_turn_change_tracker.cpp
@@ -1182,6 +1194,8 @@ source_group(
         tests/test_turn_change_tracker.cpp
         tests/test_conversation_changes.cpp
         tests/test_turn_revert.cpp
+        tests/test_amended_file.cpp
+        tests/test_object_store.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
         tests/test_file_system_picker.cpp

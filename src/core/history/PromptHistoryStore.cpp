@@ -1,4 +1,5 @@
 #include "PromptHistoryStore.hpp"
+#include "core/persistence/AmendedFile.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -12,6 +13,11 @@
 #include <unordered_set>
 
 namespace core::history {
+
+namespace {
+/// Far above any history, below what would exhaust memory.
+constexpr std::size_t kMaxHistoryBytes = std::size_t{64} << 20;
+} // namespace
 
 // -----------------------------------------------------------------------------
 // PromptHistoryStore Implementation
@@ -52,38 +58,33 @@ bool PromptHistoryStore::load(std::string* error) {
 }
 
 bool PromptHistoryStore::load_unlocked(std::string* error) {
-    std::error_code ec;
-    if (!std::filesystem::exists(history_file_, ec)) {
-        // No history file yet — not an error.
-        return true;
-    }
-
-    std::ifstream in(history_file_, std::ios::binary);
-    if (!in) {
+    position_.reset();
+    auto contents = core::persistence::AmendedFile::read(history_file_, kMaxHistoryBytes);
+    if (!contents) {
         if (error) {
             *error = std::format("Cannot open history file '{}'", history_file_.string());
         }
         return false;
     }
-
-    const std::string content{
-        std::istreambuf_iterator<char>(in),
-        std::istreambuf_iterator<char>()};
-
-    if (content.empty()) {
+    if (!*contents) return true;  // No history file yet — not an error.
+    if ((*contents)->snapshot.empty()) {
         entries_.clear();
-        return true;
-    }
-
-    auto parsed = from_json(content);
-    if (!parsed.has_value()) {
-        if (error) {
-            *error = std::format("Failed to parse history file '{}'", history_file_.string());
+    } else {
+        auto parsed = from_json((*contents)->snapshot);
+        if (!parsed.has_value()) {
+            if (error) {
+                *error = std::format("Failed to parse history file '{}'", history_file_.string());
+            }
+            return false;
         }
-        return false;
+        entries_ = std::move(*parsed);
     }
-
-    entries_ = std::move(*parsed);
+    // Prompts recorded since the last save, replayed as they were added: the
+    // oldest are dropped exactly as saving each would have.
+    for (const auto& record : (*contents)->records) {
+        if (auto parsed = from_json(record); parsed && parsed->size() == 1) add(std::move(parsed->front()));
+    }
+    position_ = std::move((*contents)->position);
     return true;
 }
 
@@ -99,8 +100,9 @@ bool PromptHistoryStore::save(std::string* error) const {
 }
 
 bool PromptHistoryStore::save_unlocked(std::string* error) const {
-    const std::string json = to_json(entries_);
-    return core::utils::atomic_write_file(history_file_, json, error);
+    auto written = core::persistence::AmendedFile(history_file_).replace(to_json(entries_));
+    if (!written && error) *error = std::move(written.error());
+    return written.has_value();
 }
 
 bool PromptHistoryStore::append_and_save(std::string_view text, std::string* error) {
@@ -117,8 +119,18 @@ bool PromptHistoryStore::append_and_save(PromptHistoryEntry entry, std::string* 
         return false;
     }
     if (!load_unlocked(error)) return false;
+    // A repeat of the newest prompt of the same session is not added.
+    if (!entries_.empty() && entries_.back().text == entry.text
+        && entries_.back().session_id == entry.session_id) {
+        return true;
+    }
+    const std::string record = to_json({entry});
     add(std::move(entry));
-    return save_unlocked(error);
+    // A prompt is recorded as a change to the history, not a rewrite of all
+    // of it (up to max_entries prompts); the next save folds it in.
+    core::persistence::AmendedFile file(history_file_);
+    if (position_) file.adopt(*position_);
+    return file.amend(record, core::persistence::AmendedFile::Durability::Deferred) || save_unlocked(error);
 }
 
 bool PromptHistoryStore::rename_session_and_save(std::string_view from,

@@ -2,14 +2,22 @@
 
 #include "SessionStore.hpp"
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 
 namespace core::session {
 
 /// Append-only observable execution history, independent of resume snapshots.
-/// One JSON object per line; each fsynced append is serialized across processes.
+/// One JSON object per line; each append is serialized across processes. It
+/// is not synced: the journal is an audit record, not crash-recovery state.
 /// An interrupted final append is discarded on the next write, never earlier events.
+///
+/// The journal last appended to stays open between appends. Closing the last
+/// writable descriptor of a file makes macOS write its dirty pages out at
+/// once, so an open-append-close cycle rewrote a whole page per record
+/// (measured: 5.5x the journal's own size); held open, the page cache merges
+/// consecutive records into one write. Copies share the open journal.
 class ExecutionJournal final {
 public:
     static constexpr int kVersion = 1;
@@ -26,7 +34,9 @@ public:
                 std::string_view parent_tool_call_id, std::string_view event,
                 std::string_view payload, std::string* error = nullptr) const;
 private:
+    struct Open;
     std::filesystem::path root_;
+    std::shared_ptr<Open> open_;
 };
 
 } // namespace core::session

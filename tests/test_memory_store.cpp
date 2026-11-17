@@ -4,6 +4,7 @@
 #include "core/agent/RepositoryContextMessage.hpp"
 #include "core/memory/MemoryBackgroundService.hpp"
 #include "core/memory/MemoryStore.hpp"
+#include "core/persistence/AmendedFile.hpp"
 #include "core/tools/MemoryTool.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/tools/ToolSchema.hpp"
@@ -585,6 +586,62 @@ TEST_CASE("MemoryStore recall updates only entries included in the prompt",
             CHECK(entry.use_count == 11);
             CHECK(entry.last_used_at == "2026-03-01T00:00:00Z");
         }
+    }
+}
+
+TEST_CASE("A prompt recall is recorded as a change instead of rewriting the store", "[memory][recall]") {
+    TempDir dir{"filo_memory_store_recall_log"};
+    const auto path = dir.path / "memory.json";
+    const auto log = core::persistence::AmendedFile::log_path(path);
+    core::memory::MemoryStore store{path};
+    REQUIRE(store.remember("Recalled every turn.").ok);
+    REQUIRE(store.remember("Never recalled.").ok);
+    auto initial = store.load();
+    for (auto& entry : initial.entries) {
+        entry.last_used_at = "2026-01-01T00:00:00Z";
+        entry.use_count = 2;
+    }
+    REQUIRE(store.save(initial));
+    const auto recalled_id = std::ranges::find(initial.entries, std::string("Recalled every turn."),
+                                               &core::memory::MemoryEntry::content)->id;
+    const auto store_bytes = [&] {
+        std::ifstream input(path, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    };
+    const auto saved = store_bytes();
+
+    REQUIRE(store.record_prompt_recall({recalled_id, "no-such-id"}));
+    CHECK(store_bytes() == saved);
+    REQUIRE(std::filesystem::exists(log));
+    const auto counts = [&](const core::memory::MemoryState& state) {
+        std::pair<int, int> result;
+        for (const auto& entry : state.entries)
+            (entry.id == recalled_id ? result.first : result.second) = entry.use_count;
+        return result;
+    };
+    const auto once = store.load();
+    CHECK(counts(once) == std::pair{3, 2});
+    const auto recalled_at = std::ranges::find(once.entries, recalled_id, &core::memory::MemoryEntry::id)->last_used_at;
+    CHECK(recalled_at > "2026-01-01T00:00:00Z");
+
+    SECTION("the next save folds the recalls into the store and drops the log") {
+        const auto kept_log = [&] {
+            std::ifstream input(log, std::ios::binary);
+            return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        }();
+        REQUIRE(store.remember("A third memory.").ok);
+        CHECK_FALSE(std::filesystem::exists(log));
+        CHECK(counts(store.load()).first == 3);
+
+        // A crash between the save and removing the log leaves it behind:
+        // replaying it must not count the recall twice.
+        std::ofstream(log, std::ios::binary) << kept_log;
+        CHECK(counts(store.load()).first == 3);
+    }
+
+    SECTION("a record torn by a crash mid-append is skipped") {
+        std::ofstream(log, std::ios::binary | std::ios::app) << "\x20\0\0";
+        CHECK(counts(store.load()) == std::pair{3, 2});
     }
 }
 

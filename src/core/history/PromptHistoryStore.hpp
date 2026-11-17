@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/persistence/AmendedFile.hpp"
+
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -138,6 +140,8 @@ private:
 
     std::filesystem::path history_file_;
     std::vector<PromptHistoryEntry> entries_;
+    /// Where the last load left the file, so a prompt can be recorded after it.
+    std::optional<core::persistence::AmendedFile::Position> position_;
     std::size_t max_entries_ = 10000;  // Default: keep last 10k entries
 };
 

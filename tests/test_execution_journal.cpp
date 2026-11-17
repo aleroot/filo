@@ -99,6 +99,33 @@ TEST_CASE("Execution journal appends private ordered records and recovers a torn
     CHECK(core::utils::read_file(fixture.root / "untouched") == "original");
 }
 
+TEST_CASE("An execution journal held open follows the file another writer removed or replaced",
+          "[journal]") {
+    JournalFixture fixture;
+    auto journal = fixture.journal();
+    const auto other = fixture.journal();
+    REQUIRE(journal->append("abc123", "agent", "", "clear", "{}"));
+    const auto path = journal->path_for("abc123");
+
+    REQUIRE(other->remove("abc123"));
+    REQUIRE(journal->append("abc123", "agent", "", "message", R"({"n":1})"));
+    REQUIRE(lines(path).size() == 1);  // Into the new file, not the unlinked one.
+
+    const auto replacement = fixture.root / "replacement";
+    std::ofstream(replacement) << R"({"replaced":true})" << '\n';
+    std::filesystem::rename(replacement, path);
+    REQUIRE(journal->append("abc123", "agent", "", "message", R"({"n":2})"));
+    const auto records = lines(path);
+    REQUIRE(records.size() == 2);
+    CHECK(records.front() == R"({"replaced":true})");
+    CHECK_THAT(records.back(), Catch::Matchers::ContainsSubstring(R"("data":{"n":2})"));
+
+    // A copy appends through the same descriptor.
+    const auto copy = *journal;
+    REQUIRE(copy.append("abc123", "agent", "", "message", R"({"n":3})"));
+    CHECK(lines(path).size() == 3);
+}
+
 TEST_CASE("Execution journal serializes concurrent writers without interleaving", "[journal]") {
     JournalFixture fixture;
     std::atomic<int> failures = 0;

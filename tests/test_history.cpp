@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/history/PromptHistoryStore.hpp"
+#include "core/persistence/AmendedFile.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include <filesystem>
 #include <format>
@@ -265,6 +266,11 @@ struct TempHistoryFile {
         std::error_code ec;
         std::filesystem::remove(path, ec);
         std::filesystem::remove(core::utils::lock_path_for(path), ec);
+        std::filesystem::remove(log_path(), ec);
+    }
+    /// Prompts appended since the history was last saved whole.
+    [[nodiscard]] std::filesystem::path log_path() const {
+        return core::persistence::AmendedFile::log_path(path);
     }
 };
 
@@ -453,6 +459,7 @@ TEST_CASE("PromptHistoryStore persists entry scope and reads legacy files",
     }
 
     // Version 1 (and an older build rewriting version 2 without `meta`).
+    file.cleanup();
     {
         std::ofstream out(file.path);
         out << R"({"version":1,"entries":["old one","old two"]})";
@@ -505,8 +512,8 @@ TEST_CASE("PersistentPromptHistory empty history navigation", "[history]") {
 }
 
 TEST_CASE("PersistentPromptHistory save persists to disk", "[history]") {
-    auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_persist.json";
-    std::filesystem::remove(temp_path);
+    TempHistoryFile file("filo_test_history_persist");
+    const auto& temp_path = file.path;
     
     {
         auto store = std::make_shared<PromptHistoryStore>(temp_path);
@@ -521,14 +528,11 @@ TEST_CASE("PersistentPromptHistory save persists to disk", "[history]") {
         CHECK(store.size() == 1);
         CHECK(store.entries()[0] == "persisted prompt");
     }
-    
-    std::filesystem::remove(temp_path);
 }
 
 TEST_CASE("PersistentPromptHistory merges entries written by concurrent instances", "[history][concurrency]") {
-    auto temp_path = std::filesystem::temp_directory_path()
-        / std::format("filo_test_history_concurrent_{}.json", ::getpid());
-    std::filesystem::remove(temp_path);
+    TempHistoryFile file("filo_test_history_concurrent");
+    const auto& temp_path = file.path;
 
     auto first_store = std::make_shared<PromptHistoryStore>(temp_path);
     auto second_store = std::make_shared<PromptHistoryStore>(temp_path);
@@ -543,18 +547,11 @@ TEST_CASE("PersistentPromptHistory merges entries written by concurrent instance
     REQUIRE(loaded.size() == 2);
     CHECK(loaded.entries()[0] == "from first instance");
     CHECK(loaded.entries()[1] == "from second instance");
-
-    std::error_code ec;
-    std::filesystem::remove(temp_path, ec);
-    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
 }
 
 TEST_CASE("Prompt history remains valid under concurrent processes", "[history][concurrency]") {
-    auto temp_path = std::filesystem::temp_directory_path()
-        / std::format("filo_test_history_processes_{}.json", ::getpid());
-    std::error_code ec;
-    std::filesystem::remove(temp_path, ec);
-    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
+    TempHistoryFile file("filo_test_history_processes");
+    const auto& temp_path = file.path;
 
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
@@ -579,9 +576,37 @@ TEST_CASE("Prompt history remains valid under concurrent processes", "[history][
     PromptHistoryStore loaded(temp_path);
     REQUIRE(loaded.load());
     CHECK(loaded.size() == 50);
+}
 
-    std::filesystem::remove(temp_path, ec);
-    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
+TEST_CASE("Sending a prompt records it instead of rewriting the history", "[history]") {
+    TempHistoryFile file("filo_test_history_append");
+    PromptHistoryStore store(file.path);
+    store.set_max_entries(3);
+    REQUIRE(store.append_and_save("first"));
+    REQUIRE(store.append_and_save("second"));
+    REQUIRE(store.save());  // Whole: folds the appended prompts in.
+    CHECK_FALSE(std::filesystem::exists(file.log_path()));
+    const auto saved = core::utils::read_file(file.path).value();
+
+    REQUIRE(store.append_and_save("third"));
+    REQUIRE(store.append_and_save("third"));  // A repeat adds nothing.
+    REQUIRE(store.append_and_save("fourth"));
+    CHECK(core::utils::read_file(file.path) == saved);
+    REQUIRE(std::filesystem::exists(file.log_path()));
+
+    // Replayed in order, the recorded prompts drop the oldest as saving each
+    // would have; a record torn by a crash is skipped.
+    std::ofstream(file.log_path(), std::ios::app) << "\x40\0";
+    PromptHistoryStore loaded(file.path);
+    loaded.set_max_entries(3);
+    REQUIRE(loaded.load());
+    CHECK(loaded.entries() == std::vector<std::string>{"second", "third", "fourth"});
+
+    REQUIRE(loaded.remove_at_and_save(0));
+    CHECK_FALSE(std::filesystem::exists(file.log_path()));
+    PromptHistoryStore after(file.path);
+    REQUIRE(after.load());
+    CHECK(after.entries() == std::vector<std::string>{"third", "fourth"});
 }
 
 TEST_CASE("PromptHistoryStore handles corrupted JSON gracefully", "[history]") {

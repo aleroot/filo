@@ -3,6 +3,7 @@
 #include "SessionData.hpp"
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,8 +35,15 @@ struct SessionInfo {
 //   so a session keeps one path, lease and lock whether it was saved before
 //   compression (plain JSON, still read) or after; `gunzip -c < file` shows it.
 //
+// Incremental saves: a conversation grows by a turn at a time, so rewriting
+//   the whole file at every save wrote the conversation over and over —
+//   quadratic in its length. After its first save in a process, a store
+//   records only what changed (core::persistence::AmendedFile): the session
+//   without the messages it keeps unchanged, compressed.
+//
 // Concurrency safety:
-//   save()       — cross-process lock + unique fsynced temp file + atomic rename.
+//   save()       — cross-process lock; a durable record, or a whole snapshot
+//                  through a unique fsynced temp file + atomic rename.
 //   list/load    — read-only; safe for concurrent reads.
 //   remove()     — serialized with save and rejects actively leased sessions.
 // ---------------------------------------------------------------------------
@@ -154,10 +162,18 @@ private:
         const std::filesystem::path& path) const;
 
     [[nodiscard]] static std::string    to_json(const SessionData& data);
-    [[nodiscard]] static std::optional<SessionData> from_json(std::string_view json);
+    /// @p keep, when given, receives how many saved messages a log record
+    /// keeps; it is left alone when the document has none.
+    [[nodiscard]] static std::optional<SessionData> from_json(std::string_view json, std::size_t* keep = nullptr);
     bool ensure_dir(std::string* error = nullptr) const;
+    /// Appends what changed since this store's last save of the file at
+    /// @p path; false when only a whole snapshot can commit @p data.
+    [[nodiscard]] bool append(const std::filesystem::path& path, const SessionData& data,
+                              const std::vector<std::string>& messages) const;
 
+    struct Log;
     std::filesystem::path sessions_dir_;
+    std::shared_ptr<Log> log_;  ///< Shared by copies: they save the same files.
 };
 
 } // namespace core::session

@@ -13,7 +13,9 @@
 #include "core/tools/ReadToolResultTool.hpp"
 #include "core/tools/TodoTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/persistence/AmendedFile.hpp"
 #include "core/utils/Gzip.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
 #include <simdjson.h>
@@ -22,9 +24,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1445,4 +1449,151 @@ TEST_CASE("A damaged compressed session is skipped, not fatal", "[session][store
     const auto listed = store.list();
     REQUIRE(listed.size() == 1);
     CHECK(listed.front().session_id == "cccc0001");
+}
+
+// ---------------------------------------------------------------------------
+// Incremental saves
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::filesystem::path session_log(const std::filesystem::path& path) {
+    return core::persistence::AmendedFile::log_path(path);
+}
+
+/// One turn of conversation: what a save after it has to add.
+void add_turn(core::session::SessionData& data, int turn) {
+    data.messages.push_back({.role = "user", .content = std::format("Question {}", turn)});
+    data.messages.push_back({.role = "assistant", .content = std::format("Answer {}", turn)});
+    data.stats.turn_count = turn;
+    data.last_active_at = std::format("2026-03-22T11:{:02}:00Z", turn);
+}
+
+void check_same_conversation(const core::session::SessionData& loaded, const core::session::SessionData& saved) {
+    CHECK(loaded.name == saved.name);
+    CHECK(loaded.last_active_at == saved.last_active_at);
+    CHECK(loaded.stats.turn_count == saved.stats.turn_count);
+    CHECK(loaded.todos.size() == saved.todos.size());
+    REQUIRE(loaded.messages.size() == saved.messages.size());
+    for (std::size_t i = 0; i < saved.messages.size(); ++i) {
+        CHECK(loaded.messages[i].role == saved.messages[i].role);
+        CHECK(loaded.messages[i].content == saved.messages[i].content);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Saving a growing conversation appends the turn instead of rewriting the session",
+          "[session][incremental]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_incremental"};
+    const core::session::SessionStore store{tmp.path};
+    auto data = make_test_session("1c0e0001");
+    REQUIRE(store.save(data));
+    const auto path = store.compute_path(data);
+    const auto snapshot = read_saved_json(path);
+    CHECK_FALSE(std::filesystem::exists(session_log(path)));
+
+    for (int turn = 2; turn <= 4; ++turn) {
+        add_turn(data, turn);
+        REQUIRE(store.save(data));
+    }
+    // The snapshot is as first written; the log holds the three turns.
+    CHECK(read_saved_json(path) == snapshot);
+    REQUIRE(std::filesystem::exists(session_log(path)));
+    CHECK(std::filesystem::file_size(session_log(path)) < 2048);
+
+    // Another store, as after a restart, reads the snapshot and its log.
+    const core::session::SessionStore fresh{tmp.path};
+    auto loaded = fresh.load_by_id("1c0e0001");
+    REQUIRE(loaded);
+    check_same_conversation(*loaded, data);
+    const auto listed = fresh.list();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front().turn_count == 4);
+    CHECK(listed.front().last_active_at == data.last_active_at);
+
+    SECTION("an earlier message that changed is saved again from there") {
+        data.messages[1].content = "A corrected first answer";
+        data.name = "renamed";
+        data.todos.push_back({.id = "t1", .text = "Ship it"});
+        REQUIRE(store.save(data));
+        auto reloaded = fresh.load_by_id("1c0e0001");
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, data);
+        CHECK(fresh.list().front().name == "renamed");
+    }
+
+    SECTION("a shorter conversation, as after compaction, loses the messages it dropped") {
+        data.messages.resize(3);
+        REQUIRE(store.save(data));
+        auto reloaded = fresh.load_by_id("1c0e0001");
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, data);
+    }
+
+    SECTION("a record torn by a crash mid-append is ignored with everything after it") {
+        const auto size = std::filesystem::file_size(session_log(path));
+        auto last_turn = data;
+        add_turn(data, 5);
+        REQUIRE(store.save(data));
+        std::filesystem::resize_file(session_log(path), std::filesystem::file_size(session_log(path)) - 3);
+        CHECK(std::filesystem::file_size(session_log(path)) > size);
+        auto reloaded = fresh.load_by_id("1c0e0001");
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, last_turn);
+    }
+
+    SECTION("a save by another store replaces the snapshot, and the first store notices") {
+        add_turn(data, 5);
+        REQUIRE(fresh.save(data));  // Knows no earlier save: writes it whole.
+        CHECK_FALSE(std::filesystem::exists(session_log(path)));
+        add_turn(data, 6);
+        REQUIRE(store.save(data));  // Its log no longer amends this snapshot.
+        auto reloaded = core::session::SessionStore{tmp.path}.load_by_id("1c0e0001");
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, data);
+    }
+
+    SECTION("records of a snapshot since replaced are ignored") {
+        const auto stale = core::utils::read_file(session_log(path)).value();
+        add_turn(data, 5);
+        REQUIRE(fresh.save(data));
+        std::ofstream(session_log(path), std::ios::binary) << stale;
+        auto reloaded = core::session::SessionStore{tmp.path}.load_by_id("1c0e0001");
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, data);
+    }
+
+    SECTION("deleting the session deletes its log") {
+        REQUIRE(store.remove("1c0e0001"));
+        CHECK_FALSE(std::filesystem::exists(path));
+        CHECK_FALSE(std::filesystem::exists(session_log(path)));
+    }
+}
+
+TEST_CASE("A session log that outgrows its snapshot is folded into a new one",
+          "[session][incremental]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_fold"};
+    const core::session::SessionStore store{tmp.path};
+    auto data = make_test_session("1c0e0002");
+    REQUIRE(store.save(data));
+    const auto path = store.compute_path(data);
+    // Output that does not compress, so a few turns outgrow the snapshot.
+    std::mt19937_64 random(7);
+    const auto noise = [&] {
+        std::string text(96 * 1024, ' ');
+        for (auto& c : text) c = static_cast<char>('!' + random() % 90);
+        return text;
+    };
+    bool folded = false;
+    for (int turn = 2; turn <= 8 && !folded; ++turn) {
+        add_turn(data, turn);
+        data.messages.back().content = noise();
+        REQUIRE(store.save(data));
+        folded = !std::filesystem::exists(session_log(path));
+    }
+    CHECK(folded);
+    auto loaded = core::session::SessionStore{tmp.path}.load_by_id("1c0e0002");
+    REQUIRE(loaded);
+    check_same_conversation(*loaded, data);
 }

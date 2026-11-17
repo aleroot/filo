@@ -309,6 +309,7 @@ AgentSession::AgentSession(std::shared_ptr<core::agent::Agent> agent,
     , sessions_dir_(sessions_dir.empty()
                         ? core::session::SessionStore::default_sessions_dir()
                         : std::move(sessions_dir))
+    , store_(sessions_dir_)
     , provider_name_(std::move(provider_name))
     , created_at_(options.created_at.empty() ? core::session::SessionStore::now_iso8601()
                                              : options.created_at)
@@ -700,8 +701,7 @@ void AgentSession::save() const {
     data.handoff_summary = core::session::build_handoff_summary(data);
 
     std::string error;
-    core::session::SessionStore store(sessions_dir_);
-    if (!store.save(data, &error)) {
+    if (!store_.save(data, &error)) {
         core::logging::warn("ACP session save failed: {}", error);
     }
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../persistence/AmendedFile.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -128,6 +130,10 @@ public:
                                               std::string* error = nullptr) const;
     /// Records one user-turn recall for ids that were actually included in a
     /// submitted prompt. Inactive or out-of-scope entries are left untouched.
+    ///
+    /// A recall is recorded as a change to the store, not a rewrite of it (see
+    /// core::persistence::AmendedFile): it happens every turn, and the store
+    /// can be megabytes.
     [[nodiscard]] bool record_prompt_recall(
         const std::vector<std::string>& entry_ids,
         std::string* error = nullptr) const;
@@ -167,7 +173,11 @@ public:
     [[nodiscard]] std::filesystem::path path() const noexcept { return path_; }
 
 private:
-    [[nodiscard]] MemoryState load_unlocked(std::string* error = nullptr) const;
+    /// @p position, when given, receives where the store was read, so a
+    /// change can be recorded after it.
+    [[nodiscard]] MemoryState load_unlocked(
+        std::string* error = nullptr,
+        std::optional<core::persistence::AmendedFile::Position>* position = nullptr) const;
     [[nodiscard]] bool save_unlocked(const MemoryState& state,
                                      std::string* error = nullptr) const;
 

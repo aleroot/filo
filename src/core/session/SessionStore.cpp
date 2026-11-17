@@ -8,7 +8,13 @@
 #include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/persistence/AmendedFile.hpp"
+#include "core/utils/Crypto.hpp"
+#include "core/utils/FileStamp.hpp"
 #include <simdjson.h>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -93,8 +99,21 @@ constexpr std::size_t kMaxSessionBytes = std::size_t{1} << 30;
 // Construction
 // ---------------------------------------------------------------------------
 
+/// What a store last committed to each session file it saved, so the next
+/// save can append only the change (see save()).
+struct SessionStore::Log {
+    /// One message as saved: equal digests mean equal JSON.
+    using Digest = std::array<std::uint8_t, 32>;
+    struct Saved {
+        core::persistence::AmendedFile file;
+        std::vector<Digest> messages;
+    };
+    std::mutex mutex;
+    std::unordered_map<std::string, Saved> files;
+};
+
 SessionStore::SessionStore(std::filesystem::path sessions_dir)
-    : sessions_dir_(std::move(sessions_dir)) {}
+    : sessions_dir_(std::move(sessions_dir)), log_(std::make_shared<Log>()) {}
 
 // ---------------------------------------------------------------------------
 // Static helpers
@@ -530,14 +549,22 @@ std::string SessionStore::message_json(const core::llm::Message& message) {
     return out;
 }
 
-std::string SessionStore::to_json(const SessionData& data) {
+namespace {
+
+/// The session document: the whole conversation, or, for a log record, the
+/// messages from @p first on. @p extra holds members written last, so that
+/// the document still opens with its version. @p messages, when given, are
+/// the messages already serialized.
+std::string encode_session(const SessionData& data, std::string_view extra = {},
+                           std::size_t first = 0, const std::vector<std::string>* messages = nullptr) {
     std::string out;
     // Reserved for the whole session up front: doubling would copy a body
     // that grows with the conversation at every save, and the outgrown
     // blocks stay resident in the allocator's cache.
     std::size_t estimate = 4096 + data.context_summary.size() + data.handoff_summary.size();
-    for (const auto& msg : data.messages) {
-        estimate += 512 + core::llm::estimated_message_bytes(msg) + msg.input_text.size();
+    for (std::size_t i = first; i < data.messages.size(); ++i) {
+        estimate += messages ? (*messages)[i].size() + 1
+                             : 512 + core::llm::estimated_message_bytes(data.messages[i]) + data.messages[i].input_text.size();
     }
     out.reserve(estimate + estimate / 8);
 
@@ -577,9 +604,10 @@ std::string SessionStore::to_json(const SessionData& data) {
     out += '}';
     out += ",\"messages\":[";
 
-    for (std::size_t i = 0; i < data.messages.size(); ++i) {
-        if (i > 0) out += ',';
-        append_message_json(out, data.messages[i]);
+    for (std::size_t i = first; i < data.messages.size(); ++i) {
+        if (i > first) out += ',';
+        if (messages) out += (*messages)[i];
+        else append_message_json(out, data.messages[i]);
     }
 
     out += "],\"context_summary\":\"";
@@ -602,12 +630,22 @@ std::string SessionStore::to_json(const SessionData& data) {
         append_todo_json(out, data.todos[i]);
     }
 
-    out += "]}";
-
+    out += ']';
+    if (!extra.empty()) {
+        out += ',';
+        out += extra;
+    }
+    out += '}';
     return out;
 }
 
-std::optional<SessionData> SessionStore::from_json(std::string_view json) {
+} // namespace
+
+std::string SessionStore::to_json(const SessionData& data) {
+    return encode_session(data);
+}
+
+std::optional<SessionData> SessionStore::from_json(std::string_view json, std::size_t* keep) {
     try {
         simdjson::dom::parser parser;
         simdjson::dom::element doc;
@@ -628,6 +666,10 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
         }
         if (stored_version > SessionData::kVersion) {
             return std::nullopt;
+        }
+
+        if (uint64_t kept = 0; keep && doc["keep"].get(kept) == simdjson::SUCCESS) {
+            *keep = static_cast<std::size_t>(kept);
         }
 
         SessionData data;
@@ -769,6 +811,38 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
 // save
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// The log of a session may grow to the size of its snapshot, and at least
+/// this much, before a save writes a whole snapshot again.
+constexpr std::uint64_t kMinSessionLogBytes = 256 * 1024;
+
+} // namespace
+
+bool SessionStore::append(const std::filesystem::path& path, const SessionData& data,
+                          const std::vector<std::string>& messages) const {
+    std::lock_guard guard(log_->mutex);
+    const auto known = log_->files.find(path.string());
+    if (known == log_->files.end()) return false;
+    auto& saved = known->second;
+    // A record keeps the messages that did not change and carries the rest.
+    std::size_t keep = 0;
+    while (keep < messages.size() && keep < saved.messages.size()
+           && saved.messages[keep] == core::utils::crypto::sha256(messages[keep])) ++keep;
+    std::string record;
+    try {
+        record = core::utils::gzip::compress(
+            encode_session(data, std::format("\"keep\":{}", keep), keep, &messages), kSessionCompression);
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (!saved.file.amend(record)) return false;
+    saved.messages.resize(keep);
+    for (std::size_t i = keep; i < messages.size(); ++i)
+        saved.messages.push_back(core::utils::crypto::sha256(messages[i]));
+    return true;
+}
+
 bool SessionStore::save(const SessionData& data, std::string* error) const {
     if (!ensure_dir(error)) return false;
 
@@ -781,14 +855,29 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
         return false;
     }
 
-    std::string compressed;
-    try {
-        compressed = core::utils::gzip::compress(to_json(data), kSessionCompression);
-    } catch (const std::exception& e) {
-        if (error) *error = e.what();
-        return false;
+    std::vector<std::string> messages;
+    messages.reserve(data.messages.size());
+    for (const auto& message : data.messages) messages.push_back(message_json(message));
+    if (!append(target_path, data, messages)) {
+        std::string compressed;
+        try {
+            compressed = core::utils::gzip::compress(encode_session(data, {}, 0, &messages), kSessionCompression);
+        } catch (const std::exception& e) {
+            if (error) *error = e.what();
+            return false;
+        }
+        std::lock_guard guard(log_->mutex);
+        log_->files.erase(target_path.string());
+        core::persistence::AmendedFile file(target_path, kMinSessionLogBytes);
+        if (auto written = file.replace(compressed); !written) {
+            if (error) *error = std::move(written.error());
+            return false;
+        }
+        Log::Saved saved{.file = std::move(file)};
+        saved.messages.reserve(messages.size());
+        for (const auto& json : messages) saved.messages.push_back(core::utils::crypto::sha256(json));
+        log_->files.insert_or_assign(target_path.string(), std::move(saved));
     }
-    if (!core::utils::atomic_write_file(target_path, compressed, error)) return false;
     std::error_code recovery_ec;
     const auto recovery_root = std::filesystem::weakly_canonical(core::changes::RecoveryStore::session_root_in(sessions_dir_, data.session_id), recovery_ec);
     for (const auto& message : data.messages) {
@@ -1107,11 +1196,12 @@ private:
 // ── Persistent catalogue cache ──────────────────────────────────────────────
 //
 // Rows are keyed by file name and validated against (size, mtime) on every
-// listing, like git's index: unchanged files cost one stat(), changed files
-// one bounded scan. The cache is derived data — any damage just rebuilds it.
+// listing, and against the identity of the log amending the file, like git's
+// index: unchanged files cost two stat()s, changed files one bounded scan.
+// The cache is derived data — any damage just rebuilds it.
 
 constexpr std::string_view kCatalogueCacheName = ".catalog-cache";
-constexpr std::string_view kCatalogueMagic = "FILOCAT1";
+constexpr std::string_view kCatalogueMagic = "FILOCAT2";
 // A file modified within the timestamp granularity of our read could change
 // again without changing its mtime; such rows are served but not cached.
 constexpr auto kRacyWindow = std::chrono::seconds(2);
@@ -1119,6 +1209,7 @@ constexpr auto kRacyWindow = std::chrono::seconds(2);
 struct CatalogueRow {
     std::uint64_t size = 0;
     std::int64_t mtime_ns = 0;
+    std::uint64_t log_identity = 0;  ///< FileStamp identity; 0 when there is no log.
     bool valid = false;
     SessionInfo info;
 };
@@ -1179,6 +1270,7 @@ private:
         put_string(out, file_name);
         put_u64(out, row.size);
         put_u64(out, static_cast<std::uint64_t>(row.mtime_ns));
+        put_u64(out, row.log_identity);
         put_u64(out, row.valid ? 1U : 0U);
         put_string(out, row.info.session_id);
         put_string(out, row.info.name);
@@ -1209,6 +1301,7 @@ private:
         CatalogueRow row;
         row.size = reader.u64();
         row.mtime_ns = static_cast<std::int64_t>(reader.u64());
+        row.log_identity = reader.u64();
         row.valid = reader.u64() != 0;
         row.info.session_id = reader.string();
         row.info.name = reader.string();
@@ -1230,6 +1323,11 @@ private:
 
 std::optional<SessionInfo> SessionStore::read_session_header(
     const std::filesystem::path& path) const {
+    if (core::utils::FileStamp::of(core::persistence::AmendedFile::log_path(path)).exists()) {
+        // The snapshot's header may be older than the log's last record.
+        auto data = load_by_path(path);
+        return data ? std::optional(session_info_from_data(*data, path)) : std::nullopt;
+    }
     std::ifstream in(path, std::ios::binary);
     if (!in) return std::nullopt;
     const auto scan = [&path](std::istream& input) {
@@ -1262,9 +1360,30 @@ std::optional<SessionInfo> SessionStore::read_session_header(
 
 std::optional<SessionData> SessionStore::load_by_path(
     const std::filesystem::path& path) const {
-    const auto content = read_session_file(path);
-    if (!content.has_value()) return std::nullopt;
-    return from_json(*content);
+    auto contents = core::persistence::AmendedFile::read(path, kMaxSessionBytes);
+    if (!contents || !*contents) return std::nullopt;
+    auto& snapshot = (*contents)->snapshot;
+    if (core::utils::gzip::is_compressed(snapshot)) {
+        // Sessions saved before compression are plain JSON.
+        auto json = core::utils::gzip::decompress(snapshot, kMaxSessionBytes);
+        if (!json) return std::nullopt;
+        snapshot = std::move(*json);
+    }
+    auto data = from_json(snapshot);
+    // Each record keeps the first `keep` messages and carries the rest.
+    for (const auto& record : (*contents)->records) {
+        if (!data) break;
+        const auto json = core::utils::gzip::decompress(record, kMaxSessionBytes);
+        std::size_t keep = std::numeric_limits<std::size_t>::max();
+        auto amended = json ? from_json(*json, &keep) : std::nullopt;
+        if (!amended || keep > data->messages.size()) return std::nullopt;
+        auto messages = std::move(data->messages);
+        messages.resize(keep);
+        std::ranges::move(amended->messages, std::back_inserter(messages));
+        *data = std::move(*amended);
+        data->messages = std::move(messages);
+    }
+    return data;
 }
 
 bool SessionStore::compress_saved(const std::filesystem::path& path, std::string* error) const {
@@ -1335,21 +1454,25 @@ std::vector<SessionInfo> SessionStore::list() const {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 mtime.time_since_epoch()).count());
 
+        // Records amending the file change the row, too.
+        const auto log = core::utils::FileStamp::of(core::persistence::AmendedFile::log_path(path));
         CatalogueRow row;
         bool cacheable = true;
         if (auto it = cached.find(file_name);
             it != cached.end() && it->second.size == size
-            && it->second.mtime_ns == mtime_ns) {
+            && it->second.mtime_ns == mtime_ns && it->second.log_identity == log.identity) {
             row = std::move(it->second);
             ++cache_hits;
         } else {
             row.size = size;
             row.mtime_ns = mtime_ns;
+            row.log_identity = log.identity;
             if (auto info = read_session_header(path); info.has_value()) {
                 row.valid = true;
                 row.info = std::move(*info);
             }
-            cacheable = mtime <= racy_after;
+            cacheable = mtime <= racy_after
+                && (!log.exists() || log.settled_identity(std::chrono::system_clock::now()) != 0);
             changed = changed || cacheable;
         }
 
@@ -1502,13 +1625,18 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
                 return false;
             }
         }
-        std::filesystem::remove(p, ec);
+        std::filesystem::remove(core::persistence::AmendedFile::log_path(p), ec);
+        if (!ec) std::filesystem::remove(p, ec);
         if (ec) {
             if (error) {
                 *error = std::format("Cannot remove session file '{}': {}",
                                      p.string(), ec.message());
             }
             return false;
+        }
+        {
+            std::lock_guard guard(log_->mutex);
+            log_->files.erase(p.string());
         }
         // Unlinked while still held; only a process already waiting on one
         // could lock it afterwards, for a session that no longer exists.

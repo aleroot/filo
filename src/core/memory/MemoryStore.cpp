@@ -2,6 +2,7 @@
 
 #include "MemoryRelevance.hpp"
 #include "../context/SessionContext.hpp"
+#include "../persistence/AmendedFile.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/InterprocessFile.hpp"
@@ -31,6 +32,9 @@
 
 namespace core::memory {
 namespace {
+
+/// Far above any store, below what would exhaust memory.
+constexpr std::size_t kMaxStoreBytes = std::size_t{256} << 20;
 
 struct MarkdownMemoryCandidate {
     std::string content;
@@ -454,37 +458,71 @@ bool MemoryStore::record_prompt_recall(
 
     std::string local_error;
     std::string& read_error = error ? *error : local_error;
-    auto state = load_unlocked(&read_error);
+    std::optional<core::persistence::AmendedFile::Position> position;
+    auto state = load_unlocked(&read_error, &position);
     if (!read_error.empty()) return false;
 
-    bool changed = false;
     const std::string recalled_at = now_iso8601();
-    for (auto& entry : state.entries) {
-        if (entry.archived || !visible(entry)
-            || !std::ranges::contains(entry_ids, entry.id)) {
-            continue;
+    core::utils::JsonWriter record(256);
+    {
+        auto object = record.object();
+        record.kv_str("at", recalled_at).comma().key("ids");
+        auto ids = record.array();
+        bool first = true;
+        for (auto& entry : state.entries) {
+            if (entry.archived || !visible(entry)
+                || !std::ranges::contains(entry_ids, entry.id)) {
+                continue;
+            }
+            if (!first) record.comma();
+            first = false;
+            record.str(entry.id);
+            entry.last_used_at = recalled_at;
+            if (entry.use_count < std::numeric_limits<int>::max()) ++entry.use_count;
         }
-        entry.last_used_at = recalled_at;
-        if (entry.use_count < std::numeric_limits<int>::max()) ++entry.use_count;
-        changed = true;
+        if (first) return true;  // Nothing to record.
     }
-    return !changed || save_unlocked(state, error);
+    // A recall happens every turn, and the store can be megabytes: it is
+    // recorded as a change, which the next save of the store folds in. Usage
+    // statistics need no sync of their own.
+    core::persistence::AmendedFile file(path_);
+    if (position) file.adopt(std::move(*position));
+    return file.amend(record.view(), core::persistence::AmendedFile::Durability::Deferred)
+        || save_unlocked(state, error);
 }
 
-MemoryState MemoryStore::load_unlocked(std::string* error) const {
-    MemoryState state;
-    std::error_code ec;
-    if (!std::filesystem::exists(path_, ec)) {
-        return state;
-    }
+namespace {
 
-    std::ifstream file(path_, std::ios::binary);
-    if (!file) {
+/// Applies one recall record_prompt_recall recorded.
+void apply_recall(std::string_view record, std::vector<MemoryEntry>& entries) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    std::string_view at;
+    simdjson::dom::array ids;
+    if (parser.parse(record.data(), record.size()).get(doc) || doc["at"].get(at) || doc["ids"].get(ids)) return;
+    for (const auto id : ids) {
+        std::string_view key;
+        if (id.get(key)) continue;
+        const auto entry = std::ranges::find(entries, key, &MemoryEntry::id);
+        if (entry == entries.end()) continue;
+        entry->last_used_at = std::string(at);
+        if (entry->use_count < std::numeric_limits<int>::max()) ++entry->use_count;
+    }
+}
+
+} // namespace
+
+MemoryState MemoryStore::load_unlocked(
+    std::string* error, std::optional<core::persistence::AmendedFile::Position>* position) const {
+    MemoryState state;
+    auto contents = core::persistence::AmendedFile::read(path_, kMaxStoreBytes);
+    if (!contents) {
         if (error) *error = std::format("Cannot read memory store '{}'.", path_.string());
         return state;
     }
-    const std::string json((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
+    if (!*contents) return state;
+    if (position) *position = (*contents)->position;
+    const std::string& json = (*contents)->snapshot;
     if (json.empty()) {
         return state;
     }
@@ -537,6 +575,7 @@ MemoryState MemoryStore::load_unlocked(std::string* error) const {
             }
         }
     }
+    for (const auto& record : (*contents)->records) apply_recall(record, state.entries);
     return state;
 }
 
@@ -595,7 +634,10 @@ bool MemoryStore::save_unlocked(const MemoryState& state, std::string* error) co
     json += "]}";
 
     json.push_back('\n');
-    return core::utils::atomic_write_file(path_, json, error);
+    // Every state saved here was loaded with its recalls applied.
+    auto written = core::persistence::AmendedFile(path_).replace(json);
+    if (!written && error) *error = std::move(written.error());
+    return written.has_value();
 }
 
 MemorySettings MemoryStore::settings(std::string* error) const {

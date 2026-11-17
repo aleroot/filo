@@ -1,16 +1,31 @@
 #include "ExecutionJournal.hpp"
 #include "../utils/InterprocessFile.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/UniqueFd.hpp"
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace core::session {
-ExecutionJournal::ExecutionJournal(std::filesystem::path root) : root_(std::move(root)) {}
+
+/// The journal file this instance last appended to, still open.
+struct ExecutionJournal::Open {
+    std::mutex mutex;
+    std::filesystem::path path;
+    core::utils::UniqueFd fd;
+    void close() noexcept {
+        fd.reset();
+        path.clear();
+    }
+};
+
+ExecutionJournal::ExecutionJournal(std::filesystem::path root)
+    : root_(std::move(root)), open_(std::make_shared<Open>()) {}
 std::filesystem::path ExecutionJournal::default_root() {
     return root_in(SessionStore::default_sessions_dir());
 }
@@ -30,6 +45,10 @@ bool ExecutionJournal::remove(std::string_view id, std::string* error) const {
     // No journal can exist under an ID that cannot name one, so there is
     // nothing to remove; failing here would block deleting the session itself.
     if (target.empty()) return true;
+    {
+        std::lock_guard guard(open_->mutex);
+        if (open_->path == target) open_->close();
+    }
     std::error_code ec;
     if (!std::filesystem::exists(target, ec)) return !ec;
     const auto lock_path = core::utils::lock_path_for(target);
@@ -53,19 +72,38 @@ bool ExecutionJournal::append(std::string_view id, std::string_view actor,
     };
     const auto target = path_for(id);
     if (target.empty()) return fail("Invalid execution journal session ID.");
+    std::lock_guard guard(open_->mutex);
     std::error_code ec;
     std::filesystem::create_directories(root_, ec);
     if (ec) return fail(ec.message());
     auto lock = core::utils::InterprocessFileLock::acquire(
         core::utils::lock_path_for(target), error);
     if (!lock) return false;
-    const int fd = ::open(target.c_str(), O_CREAT | O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return fail(std::strerror(errno));
-    struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
     struct stat status{};
-    if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) || status.st_nlink != 1)
+    if (open_->path == target) {
+        // Another writer may have removed or replaced the file since: only a
+        // descriptor that is still the file at the path is written through.
+        struct stat named{};
+        if (::fstat(open_->fd.get(), &status) != 0 || ::lstat(target.c_str(), &named) != 0 ||
+            named.st_dev != status.st_dev || named.st_ino != status.st_ino)
+            open_->close();
+    }
+    if (open_->path != target) {
+        open_->close();
+        const int fd = ::open(target.c_str(), O_CREAT | O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) return fail(std::strerror(errno));
+        open_->fd.reset(fd);
+        open_->path = target;
+        if (::fchmod(fd, 0600) != 0) {
+            open_->close();
+            return fail(std::strerror(errno));
+        }
+    }
+    const int fd = open_->fd.get();
+    if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) || status.st_nlink != 1) {
+        open_->close();
         return fail("Execution journal must be a regular file with one link.");
-    if (::fchmod(fd, 0600) != 0) return fail(std::strerror(errno));
+    }
 
     // Newlines only occur between records: JSON strings escape them. Recover
     // a torn final record under the same lock as the append.
@@ -111,13 +149,10 @@ bool ExecutionJournal::append(std::string_view id, std::string_view actor,
         }
         written += static_cast<std::size_t>(count);
     }
-    if (::fsync(fd) != 0) return fail(std::strerror(errno));
-    // Persist the directory entry too when creating a journal. Some supported
-    // filesystems do not permit directory fsync, so this is best effort.
-    if (status.st_size == 0) {
-        const int directory = ::open(root_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY);
-        if (directory >= 0) { (void)::fsync(directory); ::close(directory); }
-    }
+    // No fsync: a record is in the page cache once written, so only a power
+    // loss or kernel panic can drop the tail, and the tail repair above copes
+    // with that. Syncing every small append rewrote a block per record — the
+    // journal wrote about seven times its own size.
     return true;
 }
 } // namespace core::session
