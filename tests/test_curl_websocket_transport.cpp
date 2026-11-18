@@ -266,9 +266,11 @@ public:
     explicit LoopbackWebSocketServer(std::vector<std::vector<std::string>> responses,
                                      std::vector<std::size_t> reconnect_after = {},
                                      bool fragment_messages = false,
-                                     std::chrono::milliseconds response_delay = {})
+                                     std::chrono::milliseconds response_delay = {},
+                                     int reject_handshakes = 0)
         : responses_(std::move(responses)), reconnect_after_(std::move(reconnect_after)),
-          fragment_messages_(fragment_messages), response_delay_(response_delay) {
+          fragment_messages_(fragment_messages), response_delay_(response_delay),
+          reject_handshakes_(reject_handshakes) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) throw std::runtime_error("socket failed");
 
@@ -319,6 +321,17 @@ private:
         client_fd_.store(client);
 
         const std::string headers = read_headers(client);
+        if (reject_handshakes_ > 0) {
+            // A transient handshake failure: refuse the upgrade, then let the
+            // client's next attempt through.
+            --reject_handshakes_;
+            (void)write_all(client,
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Length: 0\r\n"
+                "\r\n");
+            close_socket(client_fd_.exchange(-1));
+            return -2;
+        }
         const auto key = header_value(headers, "Sec-WebSocket-Key");
         if (!key.has_value()) return -1;
 
@@ -337,8 +350,12 @@ private:
         int client = -1;
         std::size_t group_index = 0;
         for (const auto& response_group : responses_) {
-            if (client < 0) client = accept_client();
-            if (client < 0) return;
+            while (client < 0) {
+                const int accepted = accept_client();
+                if (accepted == -1) return;
+                if (accepted >= 0) { client = accepted; break; }
+                // -2: a refused handshake; wait for the client's next attempt.
+            }
             auto payload = read_client_text_frame(client);
             if (!payload.has_value()) return;
             {
@@ -367,10 +384,26 @@ private:
     std::vector<std::size_t> reconnect_after_;
     bool fragment_messages_ = false;
     std::chrono::milliseconds response_delay_;
+    int reject_handshakes_ = 0;
     mutable std::mutex mutex_;
     std::vector<std::string> received_payloads_;
     std::thread thread_;
 };
+
+/// Retry accounting without the wait: one retry, no backoff, no jitter.
+/// The short watchdog makes a fallback to a dead endpoint fail the test
+/// quickly instead of waiting out the protocol's production deadlines.
+[[nodiscard]] core::llm::HttpStreamTransportOptions fast_ws_retry_options() {
+    core::llm::HttpStreamTransportOptions options;
+    options.retries.max_retries = 1;
+    options.retries.retry_only_before_output = false;
+    options.retries.initial_backoff = std::chrono::milliseconds(1);
+    options.retries.minimum_delay = std::chrono::milliseconds(0);
+    options.retries.jitter_ratio = 0;
+    options.timeouts.response_start = std::chrono::seconds(2);
+    options.timeouts.inactivity = std::chrono::seconds(2);
+    return options;
+}
 
 #endif
 
@@ -623,6 +656,124 @@ TEST_CASE("Codex WebSocket retries discard provisional output and rewarm a new c
     CHECK(payloads[2].find("inspect") != std::string::npos);
     CHECK(payloads[3].find("warm_new") != std::string::npos);
     CHECK(payloads[3].find("warm_old") == std::string::npos);
+#endif
+}
+
+TEST_CASE("Codex WebSocket retries a failure that names no error class",
+          "[transport][websocket][codex][regression][retry]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // The shapes a transient backend failure arrives as when it names no
+    // class: a wrapped HTTP status, or a response.failed without an error.
+    // codex-rs retries all of them; ending the turn here blocked the session.
+    std::string failure = R"({"type":"error","status":503})";
+    SECTION("wrapped HTTP status") {}
+    SECTION("wrapped status alias with a message") {
+        failure = R"({"type":"error","status_code":502,"error":{"message":"bad gateway"}})";
+    }
+    SECTION("response.failed without an error") {
+        failure = R"({"type":"response.failed","response":{"status":"failed"}})";
+    }
+    SECTION("response.failed with a null error") {
+        failure = R"({"type":"response.failed","response":{"error":null}})";
+    }
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"warm_old"}})"},
+        {failure},
+        {R"({"type":"response.completed","response":{"id":"warm_new"}})"},
+        {R"({"type":"response.output_text.delta","delta":"complete"})",
+         R"({"type":"response.completed","response":{"id":"resp_ok","usage":{"input_tokens":2,"output_tokens":1}}})"},
+    }, {1});
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", fast_ws_retry_options());
+    core::llm::ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.session_id = "ws-bare";
+    request.transport_turn_id = "ws-bare-turn";
+    request.messages = {{.role = "user", .content = "inspect"}};
+    std::string text;
+    int terminals = 0, resets = 0;
+    bool error = false;
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (chunk.reset_attempt) { ++resets; text.clear(); return; }
+        text += chunk.content;
+        terminals += chunk.is_final;
+        error |= chunk.is_error;
+    });
+    CHECK_FALSE(error);
+    CHECK(text == "complete");
+    CHECK(terminals == 1);
+    CHECK(resets == 1);
+    const auto payloads = server.received_payloads();
+    REQUIRE(payloads.size() == 4);
+    CHECK(payloads[0].find("generate\":false") != std::string::npos);
+    CHECK(payloads[2].find("generate\":false") != std::string::npos);
+    CHECK(payloads[3].find("warm_new") != std::string::npos);
+#endif
+}
+
+TEST_CASE("Codex WebSocket retries a refused handshake and stays enabled",
+          "[transport][websocket][codex][regression][retry]") {
+#if defined(_WIN32)
+    SKIP("loopback websocket transport test is POSIX-only");
+#else
+    if (!CurlWebSocketTransport::runtime_supports_url("ws://127.0.0.1/")) {
+        SKIP("WebSocket transport unavailable");
+    }
+    // One refused handshake is transient: codex-rs retries ConnectionFailed
+    // with backoff before falling back. It must not disable the transport for
+    // the provider's whole lifetime.
+    LoopbackWebSocketServer server({
+        {R"({"type":"response.completed","response":{"id":"warm_c"}})"},
+        {R"({"type":"response.output_text.delta","delta":"complete"})",
+         R"({"type":"response.completed","response":{"id":"resp_c","usage":{"input_tokens":2,"output_tokens":1}}})"},
+        {R"({"type":"response.output_text.delta","delta":"second"})",
+         R"({"type":"response.completed","response":{"id":"resp_c2"}})"},
+    }, {}, false, {}, /*reject_handshakes=*/1);
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        "http://127.0.0.1:" + std::to_string(server.port()), nullptr, "gpt-5.6-sol",
+        std::make_unique<core::llm::protocols::CodexResponsesProtocol>(),
+        core::config::ApiType::Unknown, "", nullptr, nullptr, "", fast_ws_retry_options());
+    core::llm::ChatRequest request;
+    request.model = "gpt-5.6-sol";
+    request.session_id = "ws-connect";
+    request.continuation_scope = "ws-connect";
+    request.transport_turn_id = "ws-connect:0";
+    request.messages = {{.role = "user", .content = "first question"}};
+    std::string text;
+    int resets = 0;
+    bool error = false;
+    provider->stream_response(request, [&](const auto& chunk) {
+        if (chunk.reset_attempt) { ++resets; return; }
+        error |= chunk.is_error;
+        text += chunk.content;
+    });
+    CHECK_FALSE(error);
+    CHECK(text == "complete");
+    CHECK(resets == 1);
+
+    // The transport survived: the next turn continues on the same socket.
+    request.transport_turn_id = "ws-connect:1";
+    request.messages.push_back({.role = "assistant", .content = "complete"});
+    request.messages.push_back({.role = "user", .content = "second question"});
+    text.clear();
+    provider->stream_response(request, [&](const auto& chunk) {
+        error |= chunk.is_error;
+        text += chunk.content;
+    });
+    CHECK_FALSE(error);
+    CHECK(text == "second");
+    const auto payloads = server.received_payloads();
+    REQUIRE(payloads.size() == 3);
+    CHECK(payloads[0].find("generate\":false") != std::string::npos);
+    CHECK(payloads[1].find("\"previous_response_id\":\"warm_c\"") != std::string::npos);
+    CHECK(payloads[2].find("\"previous_response_id\":\"resp_c\"") != std::string::npos);
 #endif
 }
 

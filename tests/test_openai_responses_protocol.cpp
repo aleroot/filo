@@ -1426,13 +1426,15 @@ TEST_CASE("Responses require completion and classify transient stream failures",
         R"({"type":"error","code":"invalid_prompt","message":"flat stop","param":null})");
     CHECK(flat_permanent.stream_error_type == "invalid_prompt");
     CHECK_FALSE(flat_permanent.retryable_stream_error);
+    // A failure without a class is transient: codex-rs parse_failed_response
+    // reports it as a stream error, and Stream retries with backoff.
     for (const auto* event : {R"({"type":"error","message":"no code"})",
                               R"({"type":"response.failed","response":{"status":"failed"}})",
                               R"({"type":"response.failed","response":{"error":null}})"}) {
         const auto bare = protocol.parse_event(event);
         CHECK(bare.stream_error);
         CHECK(bare.stream_error_type.empty());
-        CHECK_FALSE(bare.retryable_stream_error);
+        CHECK(bare.retryable_stream_error);
         CHECK(bare.done);
     }
 }
@@ -2197,6 +2199,47 @@ TEST_CASE("A failed response is classified by the class the backend names",
     CHECK(unknown.stream_error);
     CHECK(unknown.retryable_stream_error);
 
+    // A failure without a class is transient too: codex-rs parse_failed_response
+    // turns it into ApiError::Stream, which retries with backoff. A stated
+    // header delay still overrides the backoff.
+    const auto bare = codex.parse_event(
+        R"({"type":"response.failed","headers":{"Retry-After":"2"},"response":{"error":null}})");
+    CHECK(bare.stream_error);
+    CHECK(bare.retryable_stream_error);
+    CHECK(bare.rate_limit.retry_after == 2);
+
+    // The WebSocket wraps an HTTP failure as an `error` event. A status without
+    // a named class is a transport failure upstream retries, and the status
+    // names the failure when no message does (codex-rs
+    // map_wrapped_websocket_error_event, `status` aliased `status_code`).
+    const auto wrapped_status = codex.parse_event(R"({"type":"error","status":503})");
+    CHECK(wrapped_status.stream_error);
+    CHECK(wrapped_status.retryable_stream_error);
+    CHECK_THAT(wrapped_status.stream_error_message,
+               Catch::Matchers::ContainsSubstring("503"));
+    CHECK(codex.parse_event(R"({"type":"error","status_code":502})").retryable_stream_error);
+    const auto wrapped_advice = codex.parse_event(
+        R"({"type":"error","status":429,"headers":{"Retry-After":"3"}})");
+    CHECK(wrapped_advice.retryable_stream_error);
+    CHECK(wrapped_advice.rate_limit.retry_after == 3);
+    // Wrapped header values may be numbers, not only strings.
+    const auto numeric_advice = codex.parse_event(
+        R"({"type":"error","status":429,"headers":{"Retry-After":3}})");
+    CHECK(numeric_advice.retryable_stream_error);
+    CHECK(numeric_advice.rate_limit.retry_after == 3);
+    // A bare auth status retries like upstream: the retry re-reads credentials
+    // and the HTTPS fallback recovers sign-in. Only a named denial is terminal
+    // (codex-rs is_runtime_auth_denial).
+    CHECK(codex.parse_event(R"({"type":"error","status":401})").retryable_stream_error);
+    const auto revoked = codex.parse_event(
+        R"({"type":"error","status":403,"error":{"code":"runtime_instance_revoked","message":"revoked"}})");
+    CHECK(revoked.stream_error);
+    CHECK_FALSE(revoked.retryable_stream_error);
+    // A named terminal class wins over the wrapped status.
+    const auto wrapped_quota = codex.parse_event(
+        R"({"type":"error","status":503,"error":{"code":"usage_limit_reached","message":"limit"}})");
+    CHECK_FALSE(wrapped_quota.retryable_stream_error);
+
     // The classes a retry cannot fix stay terminal.
     for (const auto* code : {"usage_limit_reached", "usage_not_included",
                               "insufficient_quota", "invalid_prompt",
@@ -2213,6 +2256,8 @@ TEST_CASE("A failed response is classified by the class the backend names",
     OpenAIResponsesProtocol generic;
     CHECK_FALSE(generic.parse_event(
         R"({"type":"response.failed","response":{"error":{"code":"some_new_transient_class","message":"try later"}}})")
+        .retryable_stream_error);
+    CHECK_FALSE(generic.parse_event(R"({"type":"error","message":"no code"})")
         .retryable_stream_error);
     CHECK(generic.parse_event(
         R"({"type":"response.failed","response":{"error":{"code":"server_error","message":"try later"}}})")

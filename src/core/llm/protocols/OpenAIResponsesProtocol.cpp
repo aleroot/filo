@@ -947,6 +947,40 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     return text;
 }
 
+/// codex-rs json_headers_to_http_headers: the headers an event carries, as
+/// cpr sees them. A wrapped WebSocket event states its header values as
+/// strings, numbers or booleans.
+[[nodiscard]] cpr::Header json_headers(simdjson::dom::object object) {
+    cpr::Header headers;
+    for (const auto field : object) {
+        std::string_view text;
+        int64_t integer = 0;
+        double number = 0.0;
+        bool flag = false;
+        std::string value;
+        if (field.value.get(text) == simdjson::SUCCESS) value = std::string(text);
+        else if (field.value.get(integer) == simdjson::SUCCESS) value = std::to_string(integer);
+        else if (field.value.get(number) == simdjson::SUCCESS) value = std::format("{}", number);
+        else if (field.value.get(flag) == simdjson::SUCCESS) value = flag ? "true" : "false";
+        else continue;
+        headers[std::string(field.key)] = std::move(value);
+    }
+    return headers;
+}
+
+/// The HTTP status a WebSocket `error` event wraps, 0 when it states none.
+/// codex-rs WrappedWebsocketErrorEvent: `status`, aliased `status_code`.
+[[nodiscard]] int parse_wrapped_status(simdjson::dom::element doc) {
+    for (const auto key : {"status", "status_code"}) {
+        int64_t status = 0;
+        if (doc[key].get(status) == simdjson::SUCCESS
+            && status >= 100 && status <= 599) {
+            return static_cast<int>(status);
+        }
+    }
+    return 0;
+}
+
 [[nodiscard]] std::string parse_failed_message(simdjson::dom::element doc) {
     auto from_error_obj = [](simdjson::dom::object error_obj) -> std::string {
         std::string_view message;
@@ -979,6 +1013,11 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
         return std::string(top_message);
     }
 
+    // A wrapped status is the only clue a status-only error event carries;
+    // name it so the failure is not reported without any reason at all.
+    if (const int status = parse_wrapped_status(doc); status != 0) {
+        return "Responses API stream failed (HTTP " + std::to_string(status) + ").";
+    }
     return "Responses API stream failed.";
 }
 
@@ -1218,6 +1257,12 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
         || code == "budget_reached" || code == "model_not_found"
         || code == "inference_hook_denied" || code == "access_program_not_enabled"
         || code == "invalid_access_program" || code == "unsupported_access_program") {
+        return true;
+    }
+    // codex-rs is_runtime_auth_denial: a runtime identity the backend
+    // revoked or paused cannot be retried back to life.
+    if (code == "runtime_assertion_invalid" || code == "runtime_instance_paused"
+        || code == "runtime_instance_revoked" || code == "invalid_agent_instance_assertion") {
         return true;
     }
     // A request the backend rejected cannot be fixed by asking again. The
@@ -2131,20 +2176,7 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     cpr::Header headers;
                     simdjson::dom::object wrapped;
                     if (doc["headers"].get(wrapped) == simdjson::SUCCESS) {
-                        // codex-rs json_header_value: strings, numbers and booleans.
-                        for (const auto field : wrapped) {
-                            std::string_view text;
-                            int64_t integer = 0;
-                            double number = 0.0;
-                            bool flag = false;
-                            std::string value;
-                            if (field.value.get(text) == simdjson::SUCCESS) value = std::string(text);
-                            else if (field.value.get(integer) == simdjson::SUCCESS) value = std::to_string(integer);
-                            else if (field.value.get(number) == simdjson::SUCCESS) value = std::format("{}", number);
-                            else if (field.value.get(flag) == simdjson::SUCCESS) value = flag ? "true" : "false";
-                            else continue;
-                            headers[std::string(field.key)] = std::move(value);
-                        }
+                        headers = json_headers(wrapped);
                     }
                     usage_error = codex_usage_error_message(doc, headers);
                     if (usage_error) {
@@ -2351,10 +2383,14 @@ OpenAIResponsesProtocol::FailureVerdict CodexResponsesProtocol::classify_failure
         return {};
     }
     if (code.empty()) {
-        // No class at all: upstream treats the event as terminal unless the
-        // server states when to come back.
+        // No class at all is transient, not terminal: codex-rs
+        // parse_failed_response turns a failure without a parseable error
+        // into ApiError::Stream, and a WebSocket event that only wraps an
+        // HTTP status (map_wrapped_websocket_error_event) into a transport
+        // failure; both retry with backoff. A stated header delay still
+        // overrides the backoff.
         return {
-            .retryable = header_delay > 0,
+            .retryable = true,
             .retry_after_seconds = delay(std::nullopt),
         };
     }
@@ -2615,10 +2651,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         for (const auto key : {"headers", "response_headers"}) {
             simdjson::dom::object headers;
             if (doc[key].get(headers) != simdjson::SUCCESS) continue;
-            for (const auto field : headers) {
-                std::string_view value;
-                if (field.value.get(value) == simdjson::SUCCESS) advice[std::string(field.key)] = std::string(value);
-            }
+            for (const auto& [name, value] : json_headers(headers)) advice[name] = value;
         }
         const auto verdict = classify_failure(code, message, advice);
         result.retryable_stream_error = !stream_retry_vetoed_

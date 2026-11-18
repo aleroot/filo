@@ -1082,9 +1082,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             callback(StreamChunk::make_error("\n[WebSocket stream failed: " + error_message + "]"));
                             return;
                         }
-                        // A failed warmup or unsupported handshake can go directly
-                        // to HTTP. No generated model output has been committed.
-                        if (!frame.suppress_output && result.request_sent) {
+                        // A warmup that failed while streaming, or an unsupported
+                        // handshake, goes directly to HTTP: no generated model
+                        // output has been committed. A failed connection is
+                        // transient like a failed stream — codex-rs retries
+                        // ConnectionFailed with backoff before it falls back — so
+                        // one refused handshake must not disable the transport for
+                        // the provider's whole lifetime.
+                        const bool connect_failed =
+                            result.status == transport::WebSocketStreamResult::Status::ConnectFailed;
+                        if ((result.request_sent && !frame.suppress_output) || connect_failed) {
                             // A WebSocket response is committed server-side: the
                             // endpoint keeps serving it after the socket drops,
                             // so any delivered output blocks a restart here.

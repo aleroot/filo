@@ -3104,23 +3104,6 @@ std::string minimax_text_sse(const std::string& text, const std::string& stop_re
         "data: {\"type\":\"message_stop\"}\n\n";
 }
 
-// A complete Anthropic SSE turn carrying one structured tool_use block.
-std::string minimax_tool_sse() {
-    return
-        "event: message_start\n"
-        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
-        "event: content_block_start\n"
-        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n\n"
-        "event: content_block_delta\n"
-        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
-        "event: content_block_stop\n"
-        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
-        "event: message_delta\n"
-        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n"
-        "event: message_stop\n"
-        "data: {\"type\":\"message_stop\"}\n\n";
-}
-
 std::shared_ptr<providers::MiniMaxProvider> minimax_leak_test_provider(int port) {
     return std::make_shared<providers::MiniMaxProvider>(providers::MiniMaxProvider::Options{
         .base_url = std::format("http://127.0.0.1:{}/anthropic", port),
