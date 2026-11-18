@@ -412,11 +412,11 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("session_id") == "thread-123");
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
-    REQUIRE(headers.at("version") == "0.169.0");
+    REQUIRE(headers.at("version") == "0.170.0");
     // codex-rs get_codex_user_agent: the originator and version, then the
     // platform the client runs on.
     const auto& agent = headers.at("User-Agent");
-    REQUIRE_THAT(agent, Catch::Matchers::StartsWith("codex_cli_rs/0.169.0 ("));
+    REQUIRE_THAT(agent, Catch::Matchers::StartsWith("codex_cli_rs/0.170.0 ("));
     REQUIRE_THAT(agent, Catch::Matchers::ContainsSubstring(
                             core::utils::client_platform().architecture));
     REQUIRE_THAT(agent, Catch::Matchers::ContainsSubstring(
@@ -1642,6 +1642,94 @@ TEST_CASE("Codex sends the catalog verbosity alongside any structured-output for
 
     OpenAIResponsesProtocol public_openai;
     CHECK_THAT(public_openai.serialize(request), !Catch::Matchers::ContainsSubstring("verbosity"));
+}
+
+TEST_CASE("GPT-6.2 uses the bundled Codex deployment until the live catalog publishes one",
+          "[openai][responses][codex][gpt62]") {
+    CodexResponsesProtocol codex;
+    ChatRequest request;
+    request.model = "gpt-6.2-sol";
+    request.messages = {{.role = "user", .content = "hi"}};
+    request.tools.push_back(Tool{.function = {.name = "lookup", .description = "Look up data"}});
+
+    codex.prepare_request(request);
+    const auto payload = codex.serialize(request);
+    // rust-v0.170.0: Responses Lite, verbosity low, summary none, default effort low.
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"low","context":"all_turns"})"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("summary"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("text":{"verbosity":"low"})"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"additional_tools")"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("service_tier"));
+    simdjson::dom::parser parser;
+    CHECK(parser.parse(simdjson::padded_string(payload)).error() == simdjson::SUCCESS);
+
+    cpr::Header headers;
+    codex.prepare_headers(headers, request, "https://chatgpt.com/backend-api/codex");
+    CHECK(headers.at("x-openai-internal-codex-responses-lite") == "true");
+
+    const auto effort = codex.conversation_control_items(request);
+    REQUIRE(effort.size() == 1);
+    CHECK(effort[0].payload
+          == R"({"type":"configuration_update","reasoning":{"effort":"low"}})");
+
+    // Ultra is xhigh on the wire, with the same durable update.
+    request.effort = "ultra";
+    const auto ultra = codex.serialize(request);
+    CHECK_THAT(ultra, Catch::Matchers::ContainsSubstring(R"("effort":"xhigh")"));
+    CHECK_THAT(ultra, !Catch::Matchers::ContainsSubstring("ultra"));
+    const auto ultra_item = codex.conversation_control_items(request);
+    REQUIRE(ultra_item.size() == 1);
+    CHECK(ultra_item[0].payload
+          == R"({"type":"configuration_update","reasoning":{"effort":"xhigh"}})");
+
+    // A dated id still belongs to the family.
+    ChatRequest dated;
+    dated.model = "gpt-6.2-sol-2026-11-17";
+    dated.messages = {{.role = "user", .content = "hi"}};
+    codex.prepare_request(dated);
+    CHECK(dated.catalog_wire_protocol == "responses_lite");
+    CHECK(dated.catalog_verbosity == "low");
+
+    // Astra shares the deployment. The public API does not.
+    ChatRequest astra;
+    astra.model = "gpt-6.2-astra";
+    astra.messages = {{.role = "user", .content = "hi"}};
+    OpenAIResponsesProtocol public_api;
+    public_api.prepare_request(astra);
+    CHECK_FALSE(astra.catalog_wire_protocol.has_value());
+    codex.prepare_request(astra);
+    CHECK(astra.catalog_wire_protocol == "responses_lite");
+
+    // priority is offered, not the default. An unknown tier is dropped.
+    ChatRequest tier = request;
+    CHECK_THAT(codex.serialize(tier), !Catch::Matchers::ContainsSubstring("service_tier"));
+    tier.service_tier = "priority";
+    CHECK_THAT(codex.serialize(tier),
+               Catch::Matchers::ContainsSubstring(R"("service_tier":"priority")"));
+    tier.service_tier = "nope";
+    CHECK_THAT(codex.serialize(tier), !Catch::Matchers::ContainsSubstring("service_tier"));
+
+    // One fact from the live catalog replaces the whole seed.
+    ChatRequest live;
+    live.model = "gpt-6.2-sol";
+    live.messages = {{.role = "user", .content = "hi"}};
+    live.catalog_verbosity = "high";
+    codex.prepare_request(live);
+    CHECK(live.catalog_verbosity == "high");
+    CHECK_FALSE(live.catalog_wire_protocol.has_value());
+    CHECK_FALSE(live.catalog_supports_reasoning_effort_updates);
+    CHECK(codex.conversation_control_items(live).empty());
+
+    // The previous generation keeps its own request shape.
+    ChatRequest previous;
+    previous.model = "gpt-6.1-sol";
+    previous.messages = {{.role = "user", .content = "hi"}};
+    previous.effort = "low";
+    codex.prepare_request(previous);
+    CHECK_FALSE(previous.catalog_wire_protocol.has_value());
+    CHECK_THAT(codex.serialize(previous),
+               Catch::Matchers::ContainsSubstring(R"("summary":"auto")"));
 }
 
 TEST_CASE("Codex names a delegated worker in the header and the client metadata",

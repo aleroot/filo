@@ -162,11 +162,12 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // OpenAI GPT Models
     // -----------------------------------------------------------------------
-    // Codex serves GPT-6.2-Sol at 500k and GPT-6.2-Astra at 272k. The
-    // prefix table is first-substring-wins, so Astra precedes the
-    // generation, and "gpt-6.2" precedes "gpt-6".
+    // Codex rust-v0.170.0 serves GPT-6.2-Sol and the GPT-6.1 generation at
+    // 500k, and GPT-6.2-Astra at 272k. The prefix table is first-substring-wins,
+    // so Astra precedes its generation, and "gpt-6.2" / "gpt-6.1" precede "gpt-6".
     { "gpt-6.2-astra",     272000 },
     { "gpt-6.2",           500000 },
+    { "gpt-6.1",           500000 },
     { "gpt-6",             272000 },
     { "gpt-5.6",          1050000 },
     { "gpt-5.4",           200000 },
@@ -587,9 +588,10 @@ constexpr int32_t kCodexGpt6MaxContextWindow = 872'000;
 }
 
 // GPT-6.2 as the Codex CLI bundles it (codex-rs models-manager/models.json,
-// main a05444b). Sol is the default model: 500k window, priority 1. Astra
-// is 272k. Both may be configured up to 872k, and both offer `ultra`, which
-// the client drives at `xhigh` with multi-agent v2 delegation.
+// rust-v0.170.0, identical to main). Sol is the default model: 500k window,
+// priority 1. Astra is 272k. Both may be configured up to 872k, and both
+// offer `ultra`, which the client drives at `xhigh` with multi-agent v2
+// delegation.
 //
 // The public model pages publish a 1,050,000 window, 128k output, and the
 // prices below. The CLI does not use that window: the bundled catalog is
@@ -598,8 +600,11 @@ constexpr int32_t kCodexGpt6MaxContextWindow = 872'000;
 // prices, output cap, and knowledge cutoffs, which the catalog does not
 // carry. The API rejects reasoning effort `none`. Above 272k input tokens
 // the whole request is billed at double the input and cache rates and 1.5x
-// output. Deployment facts (Responses Lite, verbosity, the reasoning
-// summary, service tiers) stay on the live catalog.
+// output. Deployment facts (Responses Lite, verbosity low, reasoning summary
+// none, the priority service tier, durable effort updates) stay off this
+// card. CodexResponsesProtocol applies the bundled values when the live
+// catalog has not published them, which is how the CLI behaves before a
+// rich /models response replaces its seed.
 // https://developers.openai.com/api/docs/models/gpt-6.2-sol
 // https://developers.openai.com/api/docs/models/gpt-6.2-astra
 constexpr int32_t kGpt62MaxOutputTokens = 128'000;
@@ -672,7 +677,7 @@ std::vector<ModelInfo> build_openai_catalog() {
             "gpt-6.1-sol",
             {"gpt-6.1"},
             "GPT-6.1 Sol",
-            kCodexGpt6ContextWindow,
+            500'000,
             "low",
             /*offers_ultra=*/true),
         make_gpt6_model(

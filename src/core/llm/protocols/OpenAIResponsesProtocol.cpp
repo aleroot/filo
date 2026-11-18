@@ -6,6 +6,7 @@
 #include "../ModelCatalogProvider.hpp"
 #include "../../auth/CodexClientIdentity.hpp"
 #include "../Models.hpp"
+#include "../ModelRegistry.hpp"
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../../logging/Logger.hpp"
@@ -1723,13 +1724,69 @@ CodexResponsesProtocol::model_catalog(std::string_view provider_name) const {
     return std::make_unique<CodexModelCatalogProvider>(std::string(provider_name));
 }
 
+namespace {
+
+[[nodiscard]] bool gpt62_family(std::string_view model) noexcept {
+    return core::utils::ascii::istarts_with(model, "gpt-6.2");
+}
+
+/// A live catalog row has spoken about how this model is served. One published
+/// deployment fact is enough: the seed must not fill in the rest.
+[[nodiscard]] bool codex_deployment_published(const ChatRequest& request) noexcept {
+    if (request.catalog_wire_protocol && !request.catalog_wire_protocol->empty()) return true;
+    if (request.catalog_verbosity && !request.catalog_verbosity->empty()) return true;
+    if (request.catalog_service_tiers.has_value()) return true;
+    if (request.catalog_supports_reasoning_effort_updates) return true;
+    if (request.catalog_reasoning
+        && (request.catalog_reasoning->default_summary.has_value()
+            || request.catalog_reasoning->summary_supported.has_value())) {
+        return true;
+    }
+    return false;
+}
+
+/// codex-rs models.json at rust-v0.170.0 is the seed the CLI serves until a
+/// rich `/models` response replaces it. GPT-6.2's row is Responses Lite,
+/// verbosity `low`, reasoning summary `none`, durable effort updates, and an
+/// optional `priority` tier that is not the default.
+void apply_bundled_gpt62_deployment(ChatRequest& request) {
+    if (!gpt62_family(request.model) || codex_deployment_published(request)) return;
+
+    request.catalog_wire_protocol = "responses_lite";
+    request.catalog_verbosity = "low";
+    request.catalog_service_tiers = std::vector<std::string>{"priority"};
+    request.catalog_supports_reasoning_effort_updates = true;
+
+    if (!request.catalog_reasoning) {
+        auto info = core::llm::ModelRegistry::instance().lookup(request.model);
+        if (!info) info = core::llm::ModelRegistry::instance().lookup("gpt-6.2-sol");
+        if (info) request.catalog_reasoning = info->reasoning;
+    }
+    if (request.catalog_reasoning && !request.catalog_reasoning->default_summary) {
+        request.catalog_reasoning->default_summary = "none";
+        if (!request.catalog_reasoning->summary_supported) {
+            request.catalog_reasoning->summary_supported = true;
+        }
+    }
+}
+
+} // namespace
+
+void CodexResponsesProtocol::prepare_request(ChatRequest& request) {
+    apply_bundled_gpt62_deployment(request);
+    OpenAIResponsesProtocol::prepare_request(request);
+}
+
 std::vector<ContinuationItem> CodexResponsesProtocol::conversation_control_items(
     const ChatRequest& request) const {
     // codex-rs ModelInfo::supports_reasoning_effort_updates gates the whole
     // feature: a model that does not accept the item keeps its effort on the
-    // request parameter alone.
-    if (!request.catalog_supports_reasoning_effort_updates) return {};
-    const auto resolved = resolve_request_reasoning(request);
+    // request parameter alone. GPT-6.2's bundled seed accepts it when the
+    // live catalog has not said otherwise.
+    ChatRequest effective = request;
+    apply_bundled_gpt62_deployment(effective);
+    if (!effective.catalog_supports_reasoning_effort_updates) return {};
+    const auto resolved = resolve_request_reasoning(effective);
     if (resolved.effort.empty()) return {};
 
     std::string payload = R"({"type":"configuration_update","reasoning":{"effort":")";

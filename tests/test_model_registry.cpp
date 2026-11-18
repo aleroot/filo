@@ -1033,14 +1033,14 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
           "[llm][registry][openai][codex]") {
     const auto& registry = ModelRegistry::instance();
 
-    // codex-rs models-manager/models.json: the workhorse serves a 272k
-    // window and may be configured up to 872k.
+    // codex-rs models-manager/models.json (rust-v0.170.0): the 6.1
+    // generation serves a 500k window and may be configured up to 872k.
     const auto sol = registry.lookup("gpt-6.1-sol");
     REQUIRE(sol);
     CHECK(sol->canonical_id == "gpt-6.1-sol");
-    CHECK(sol->context_window == 272000);
+    CHECK(sol->context_window == 500000);
     CHECK(sol->max_context_window == 872000);
-    CHECK(sol->resolved_context_window() == 272000);
+    CHECK(sol->resolved_context_window() == 500000);
     CHECK(sol->tier == ModelTier::Reasoning);
     CHECK(sol->supports(ModelCapability::Vision));
     CHECK(sol->supports(ModelCapability::Reasoning));
@@ -1078,7 +1078,7 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
     REQUIRE(alias);
     CHECK(alias->canonical_id == "gpt-6.1-sol");
 
-    CHECK(get_max_context_size("gpt-6.1-sol") == 272000);
+    CHECK(get_max_context_size("gpt-6.1-sol") == 500000);
     // An id the catalog has not published yet still gets the family's window.
     CHECK(get_max_context_size("gpt-6.9-preview") == 272000);
 
@@ -1157,7 +1157,7 @@ TEST_CASE("A configured context window replaces the model's and is capped by its
     };
 
     // Without a configured limit the model card decides.
-    CHECK(provider(std::nullopt)->max_context_size() == 272000);
+    CHECK(provider(std::nullopt)->max_context_size() == 500000);
     // A narrower configuration replaces the window the card publishes.
     CHECK(provider(std::optional<int32_t>(100000))->max_context_size() == 100000);
     // A wider one is capped by the ceiling the model publishes.

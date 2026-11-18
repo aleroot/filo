@@ -247,6 +247,9 @@ public:
         const HttpResponse& response) const override;
 
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
+    /// Fills GPT-6.2's bundled Codex deployment (Responses Lite, verbosity,
+    /// summary, ultra) before the base adds delegation text.
+    void prepare_request(ChatRequest& request) override;
     void prepare_headers(cpr::Header& headers,
                          const ChatRequest& request,
                          std::string_view base_url) override;

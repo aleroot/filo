@@ -68,6 +68,8 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
         CHECK(context_window_for_model("gpt-6.2-sol")            ==   500'000);
         CHECK(context_window_for_model("gpt-6.2-astra")          ==   272'000);
         CHECK(context_window_for_model("gpt-6.2")                ==   500'000);
+        CHECK(context_window_for_model("gpt-6.1-sol")            ==   500'000);
+        CHECK(context_window_for_model("gpt-6-sol")              ==   272'000);
         CHECK(context_window_for_model("gpt-5.4")                == 200'000);
         CHECK(context_window_for_model("gpt-4o")                 == 128'000);
         CHECK(context_window_for_model("gpt-4o-mini")            == 128'000);
