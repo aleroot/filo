@@ -376,10 +376,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            // Everyday GPT-6.2 model (API, 2026-11-17). Codex's bundled
-            // catalog still prioritizes gpt-6.1-sol; that file has not
-            // caught up, and a login with no model of its own should not
-            // stay on the previous generation.
+            // Codex's bundled catalog lists gpt-6.2-sol first (priority 1).
             .default_model = "gpt-6.2-sol",
         };
     }

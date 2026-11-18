@@ -162,10 +162,11 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // OpenAI GPT Models
     // -----------------------------------------------------------------------
-    // GPT-6.2's published window is 1,050,000. It must precede the GPT-6
-    // prefix: legacy matching is first-substring-wins, and "gpt-6" is
-    // contained in "gpt-6.2".
-    { "gpt-6.2",          1050000 },
+    // Codex serves GPT-6.2-Sol at 500k and GPT-6.2-Astra at 272k. The
+    // prefix table is first-substring-wins, so Astra precedes the
+    // generation, and "gpt-6.2" precedes "gpt-6".
+    { "gpt-6.2-astra",     272000 },
+    { "gpt-6.2",           500000 },
     { "gpt-6",             272000 },
     { "gpt-5.6",          1050000 },
     { "gpt-5.4",           200000 },
@@ -585,15 +586,22 @@ constexpr int32_t kCodexGpt6MaxContextWindow = 872'000;
     };
 }
 
-// GPT-6.2 (public API, 2026-11-17). The effort ladder is the GPT-6 one.
-// Codex's bundled models.json (main, 126a0ee) still has no 6.2 row and still
-// serves GPT-6 / 6.1 a 272k window with an 872k ceiling, so that ceiling is
-// not copied here. The limits and prices are the model pages':
+// GPT-6.2 as the Codex CLI bundles it (codex-rs models-manager/models.json,
+// main a05444b). Sol is the default model: 500k window, priority 1. Astra
+// is 272k. Both may be configured up to 872k, and both offer `ultra`, which
+// the client drives at `xhigh` with multi-agent v2 delegation.
+//
+// The public model pages publish a 1,050,000 window, 128k output, and the
+// prices below. The CLI does not use that window: the bundled catalog is
+// what it serves for ChatGPT and for API-key sessions. Filo follows the
+// client for the window and the effort ladder, and keeps the published
+// prices, output cap, and knowledge cutoffs, which the catalog does not
+// carry. The API rejects reasoning effort `none`. Above 272k input tokens
+// the whole request is billed at double the input and cache rates and 1.5x
+// output. Deployment facts (Responses Lite, verbosity, the reasoning
+// summary, service tiers) stay on the live catalog.
 // https://developers.openai.com/api/docs/models/gpt-6.2-sol
 // https://developers.openai.com/api/docs/models/gpt-6.2-astra
-// The API rejects reasoning effort `none`. Above 272k input tokens the whole
-// request is billed at double the input and cache rates and 1.5x output.
-constexpr int32_t kGpt62ContextWindow = 1'050'000;
 constexpr int32_t kGpt62MaxOutputTokens = 128'000;
 constexpr int32_t kGpt62LongContextThreshold = 272'000;
 
@@ -618,20 +626,28 @@ constexpr int32_t kGpt62LongContextThreshold = 272'000;
     std::string canonical_id,
     std::vector<std::string> aliases,
     std::string display_name,
+    int32_t context_window,
     ModelPricing pricing,
     std::string knowledge_cutoff) {
     ModelInfo info = make_gpt6_model(
         std::move(canonical_id),
         std::move(aliases),
         std::move(display_name),
-        kGpt62ContextWindow,
+        context_window,
         "low",
-        /*offers_ultra=*/false);
-    info.max_context_window.reset();
+        /*offers_ultra=*/true);
     info.max_output_tokens = kGpt62MaxOutputTokens;
     info.max_reasoning_tokens = kGpt62MaxOutputTokens;
     info.pricing = std::move(pricing);
     info.knowledge_cutoff = std::move(knowledge_cutoff);
+    // codex-rs ModelInfo::resolve_reasoning_effort: `ultra` is not a wire
+    // value. These models drive it at multi_agent_reasoning_effort (`xhigh`)
+    // and switch a v2 model to proactive delegation.
+    info.reasoning.ultra = UltraEffortProfile{
+        .effort = "xhigh",
+        .proactive_delegation = true,
+        .explicit_delegation = true,
+    };
     return info;
 }
 
@@ -641,13 +657,15 @@ std::vector<ModelInfo> build_openai_catalog() {
         make_gpt62_model(
             "gpt-6.2-sol",
             {"gpt-6.2"},
-            "GPT-6.2 Sol",
+            "GPT-6.2-Sol",
+            500'000,
             gpt62_text_pricing(2.0, 10.0, 0.10, 2.50),
             "2026-06-01"),
         make_gpt62_model(
             "gpt-6.2-astra",
             {},
-            "GPT-6.2 Astra",
+            "GPT-6.2-Astra",
+            272'000,
             gpt62_text_pricing(8.0, 40.0, 0.40, 10.0),
             "2026-05-18"),
         make_gpt6_model(

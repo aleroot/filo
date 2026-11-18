@@ -64,7 +64,8 @@ namespace core::budget {
     if (model.find("claude-opus-4-8")  != std::string_view::npos) return   200'000;
     if (model.find("claude-sonnet-4-6") != std::string_view::npos) return 1'000'000;
     if (model.find("claude")           != std::string_view::npos) return   200'000;
-    if (model.find("gpt-6.2")          != std::string_view::npos) return 1'050'000;
+    if (model.find("gpt-6.2-astra") != std::string_view::npos) return   272'000;
+    if (model.find("gpt-6.2")          != std::string_view::npos) return   500'000;
     if (model.find("gpt-5.6")          != std::string_view::npos) return 1'050'000;
     if (model.find("gpt-5.4")          != std::string_view::npos) return   200'000;
     if (model.find("gpt-5")            != std::string_view::npos) return   200'000;

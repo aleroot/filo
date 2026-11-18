@@ -47,12 +47,13 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     
     // OpenAI (via new registry)
     REQUIRE(get_max_context_size("gpt-5.6-sol") == 1050000);
-    REQUIRE(get_max_context_size("gpt-6.2-sol") == 1050000);
-    REQUIRE(get_max_context_size("gpt-6.2") == 1050000);
-    REQUIRE(get_max_context_size("gpt-6.2-astra") == 1050000);
-    // A dated snapshot is not a curated id; the 6.2 prefix still wins over
-    // the 272k GPT-6 fallback.
-    REQUIRE(get_max_context_size("gpt-6.2-sol-2026-11-17") == 1050000);
+    REQUIRE(get_max_context_size("gpt-6.2-sol") == 500000);
+    REQUIRE(get_max_context_size("gpt-6.2") == 500000);
+    REQUIRE(get_max_context_size("gpt-6.2-astra") == 272000);
+    // A dated snapshot is not a curated id. Astra's prefix precedes the
+    // generation, and the generation precedes the 272k GPT-6 fallback.
+    REQUIRE(get_max_context_size("gpt-6.2-sol-2026-11-17") == 500000);
+    REQUIRE(get_max_context_size("gpt-6.2-astra-2026-11-17") == 272000);
     REQUIRE(get_max_context_size("gpt-5.6") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-terra") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-luna") == 1050000);
@@ -1084,15 +1085,20 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
     const auto sol62 = registry.lookup("gpt-6.2-sol");
     REQUIRE(sol62);
     CHECK(sol62->canonical_id == "gpt-6.2-sol");
-    CHECK(sol62->display_name == "GPT-6.2 Sol");
-    CHECK(sol62->context_window == 1050000);
-    CHECK_FALSE(sol62->max_context_window.has_value());
+    CHECK(sol62->display_name == "GPT-6.2-Sol");
+    CHECK(sol62->context_window == 500000);
+    CHECK(sol62->max_context_window == 872000);
+    CHECK(sol62->resolved_context_window() == 500000);
     CHECK(sol62->max_output_tokens == 128000);
     CHECK(sol62->knowledge_cutoff == "2026-06-01");
     CHECK(sol62->reasoning.catalog_default_effort == "low");
     CHECK(sol62->reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(sol62->reasoning.effort.supports(ReasoningCapability::UltraEffort));
     CHECK_FALSE(sol62->reasoning.effort.supports(ReasoningCapability::Disable));
-    CHECK_FALSE(sol62->reasoning.effort.supports(ReasoningCapability::UltraEffort));
+    REQUIRE(sol62->reasoning.ultra);
+    CHECK(sol62->reasoning.ultra->effort == "xhigh");
+    CHECK(sol62->reasoning.ultra->proactive_delegation);
+    CHECK(sol62->reasoning.ultra->explicit_delegation);
     CHECK(sol62->pricing.input_per_mtok == Catch::Approx(2.0));
     CHECK(sol62->pricing.output_per_mtok == Catch::Approx(10.0));
     CHECK(sol62->pricing.cached_input_per_mtok == Catch::Approx(0.10));
@@ -1116,6 +1122,9 @@ TEST_CASE("The GPT-6 generation carries the limits the Codex catalog publishes",
 
     const auto astra62 = registry.lookup("gpt-6.2-astra");
     REQUIRE(astra62);
+    CHECK(astra62->display_name == "GPT-6.2-Astra");
+    CHECK(astra62->context_window == 272000);
+    CHECK(astra62->max_context_window == 872000);
     CHECK(astra62->knowledge_cutoff == "2026-05-18");
     CHECK(astra62->pricing.input_per_mtok == Catch::Approx(8.0));
     CHECK(astra62->pricing.output_per_mtok == Catch::Approx(40.0));
