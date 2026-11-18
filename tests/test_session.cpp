@@ -1512,6 +1512,17 @@ TEST_CASE("Saving a growing conversation appends the turn instead of rewriting t
     CHECK(listed.front().turn_count == 4);
     CHECK(listed.front().last_active_at == data.last_active_at);
 
+    SECTION("the first save after reopening extends the existing log") {
+        const auto size = std::filesystem::file_size(session_log(path));
+        add_turn(data, 5);
+        REQUIRE(fresh.save(data));
+        CHECK(read_saved_json(path) == snapshot);
+        CHECK(std::filesystem::file_size(session_log(path)) > size);
+        auto reloaded = store.load_by_id(data.session_id);
+        REQUIRE(reloaded);
+        check_same_conversation(*reloaded, data);
+    }
+
     SECTION("an earlier message that changed is saved again from there") {
         data.messages[1].content = "A corrected first answer";
         data.name = "renamed";
@@ -1543,12 +1554,12 @@ TEST_CASE("Saving a growing conversation appends the turn instead of rewriting t
         check_same_conversation(*reloaded, last_turn);
     }
 
-    SECTION("a save by another store replaces the snapshot, and the first store notices") {
+    SECTION("a save by another store extends the log, and the first store notices") {
         add_turn(data, 5);
-        REQUIRE(fresh.save(data));  // Knows no earlier save: writes it whole.
-        CHECK_FALSE(std::filesystem::exists(session_log(path)));
+        REQUIRE(fresh.save(data));
+        CHECK(read_saved_json(path) == snapshot);
         add_turn(data, 6);
-        REQUIRE(store.save(data));  // Its log no longer amends this snapshot.
+        REQUIRE(store.save(data));  // Its remembered log end no longer matches.
         auto reloaded = core::session::SessionStore{tmp.path}.load_by_id("1c0e0001");
         REQUIRE(reloaded);
         check_same_conversation(*reloaded, data);
@@ -1557,7 +1568,8 @@ TEST_CASE("Saving a growing conversation appends the turn instead of rewriting t
     SECTION("records of a snapshot since replaced are ignored") {
         const auto stale = core::utils::read_file(session_log(path)).value();
         add_turn(data, 5);
-        REQUIRE(fresh.save(data));
+        std::filesystem::resize_file(session_log(path), stale.size() - 1);
+        REQUIRE(fresh.save(data));  // A torn log forces snapshot replacement.
         std::ofstream(session_log(path), std::ios::binary) << stale;
         auto reloaded = core::session::SessionStore{tmp.path}.load_by_id("1c0e0001");
         REQUIRE(reloaded);

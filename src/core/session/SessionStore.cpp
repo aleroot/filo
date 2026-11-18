@@ -822,8 +822,18 @@ constexpr std::uint64_t kMinSessionLogBytes = 256 * 1024;
 bool SessionStore::append(const std::filesystem::path& path, const SessionData& data,
                           const std::vector<std::string>& messages) const {
     std::lock_guard guard(log_->mutex);
-    const auto known = log_->files.find(path.string());
-    if (known == log_->files.end()) return false;
+    auto known = log_->files.find(path.string());
+    if (known == log_->files.end()) {
+        core::persistence::AmendedFile::Position position;
+        const auto previous = load_by_path(path, &position);
+        if (!previous || !position.log_bytes) return false;
+        Log::Saved baseline{.file = core::persistence::AmendedFile(path, kMinSessionLogBytes)};
+        baseline.file.adopt(std::move(position));
+        baseline.messages.reserve(previous->messages.size());
+        for (const auto& message : previous->messages)
+            baseline.messages.push_back(core::utils::crypto::sha256(message_json(message)));
+        known = log_->files.emplace(path.string(), std::move(baseline)).first;
+    }
     auto& saved = known->second;
     // A record keeps the messages that did not change and carries the rest.
     std::size_t keep = 0;
@@ -1359,7 +1369,7 @@ std::optional<SessionInfo> SessionStore::read_session_header(
 }
 
 std::optional<SessionData> SessionStore::load_by_path(
-    const std::filesystem::path& path) const {
+    const std::filesystem::path& path, core::persistence::AmendedFile::Position* position) const {
     auto contents = core::persistence::AmendedFile::read(path, kMaxSessionBytes);
     if (!contents || !*contents) return std::nullopt;
     auto& snapshot = (*contents)->snapshot;
@@ -1383,6 +1393,7 @@ std::optional<SessionData> SessionStore::load_by_path(
         *data = std::move(*amended);
         data->messages = std::move(messages);
     }
+    if (data && position) *position = std::move((*contents)->position);
     return data;
 }
 

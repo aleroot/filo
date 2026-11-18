@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../persistence/AmendedFile.hpp"
+
 #include "SessionData.hpp"
 #include <chrono>
 #include <filesystem>
@@ -159,7 +161,8 @@ private:
     [[nodiscard]] std::optional<SessionInfo> read_session_header(
         const std::filesystem::path& path) const;
     [[nodiscard]] std::optional<SessionData> load_by_path(
-        const std::filesystem::path& path) const;
+        const std::filesystem::path& path,
+        core::persistence::AmendedFile::Position* position = nullptr) const;
 
     [[nodiscard]] static std::string    to_json(const SessionData& data);
     /// @p keep, when given, receives how many saved messages a log record

@@ -18,9 +18,11 @@ struct ExecutionJournal::Open {
     std::mutex mutex;
     std::filesystem::path path;
     core::utils::UniqueFd fd;
+    bool directory_synced = false;
     void close() noexcept {
         fd.reset();
         path.clear();
+        directory_synced = false;
     }
 };
 
@@ -149,10 +151,15 @@ bool ExecutionJournal::append(std::string_view id, std::string_view actor,
         }
         written += static_cast<std::size_t>(count);
     }
-    // No fsync: a record is in the page cache once written, so only a power
-    // loss or kernel panic can drop the tail, and the tail repair above copes
-    // with that. Syncing every small append rewrote a block per record — the
-    // journal wrote about seven times its own size.
+    // Commit completed turns, not each event within the turn. A power loss
+    // can still lose the tail of an in-progress turn.
+    if (event == "turn_end") {
+        if (::fsync(fd) != 0) return fail(std::strerror(errno));
+        if (!open_->directory_synced) {
+            const core::utils::UniqueFd directory(::open(root_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+            open_->directory_synced = directory && ::fsync(directory.get()) == 0;
+        }
+    }
     return true;
 }
 } // namespace core::session

@@ -283,7 +283,7 @@ TEST_CASE("FILO_DISABLE_ULTRATHINK turns the keyword off", "[llm][effort][ultrat
         CHECK_FALSE(ultrathink_requested("ultrathink"));
     }
     for (const std::string_view off : {"0", "false", ""}) {
-        const test_support::ScopedEnvVar enabled(std::string(kDisableUltrathinkEnv), std::string(off));
+        const test_support::ScopedEnvVar enabled{std::string(kDisableUltrathinkEnv), std::string(off)};
         INFO(off);
         CHECK(ultrathink_requested("ultrathink"));
     }

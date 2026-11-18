@@ -10,7 +10,7 @@ namespace core::session {
 
 /// Append-only observable execution history, independent of resume snapshots.
 /// One JSON object per line; each append is serialized across processes. It
-/// is not synced: the journal is an audit record, not crash-recovery state.
+/// is synced at turn_end; power loss can lose the tail of an in-progress turn.
 /// An interrupted final append is discarded on the next write, never earlier events.
 ///
 /// The journal last appended to stays open between appends. Closing the last

@@ -131,12 +131,35 @@ TEST_CASE("An amended file never applies a log written for another snapshot", "[
         CHECK_FALSE(contents.position.log_bytes);  // And it is not extended either.
     }
 
+    SECTION("replacing with earlier bytes does not revive their stale log") {
+        REQUIRE(file.replace("two"));
+        std::ofstream(AmendedFile::log_path(path), std::ios::binary) << stale;
+        REQUIRE(file.replace("one"));
+        const auto contents = read_back(path);
+        CHECK(contents.snapshot == "one");
+        CHECK(contents.records.empty());
+    }
+
     SECTION("a new snapshot of the very bytes the log amends") {
-        // The log would amend the new snapshot too, so replace() drops it
-        // before writing: a crash in between still reads "one", unamended.
         REQUIRE(file.replace("one"));
         CHECK(read_back(path).records.empty());
     }
+}
+
+TEST_CASE("A failed equal-snapshot replacement preserves live amendments", "[persistence]") {
+    TempDir dir;
+    const auto original = dir.path / "state";
+    AmendedFile file(original);
+    REQUIRE(file.replace("base"));
+    REQUIRE(file.amend("saved amendment"));
+    // Both target names fit, but atomic_write_file's temporary name does not.
+    const auto path = dir.path / std::string(240, 's');
+    fs::rename(original, path);
+    fs::rename(AmendedFile::log_path(original), AmendedFile::log_path(path));
+    REQUIRE_FALSE(AmendedFile(path).replace("base"));
+    const auto contents = read_back(path);
+    CHECK(contents.snapshot == "base");
+    CHECK(contents.records == std::vector<std::string>{"saved amendment"});
 }
 
 TEST_CASE("An amended file refuses records once its log outgrows the snapshot", "[persistence]") {

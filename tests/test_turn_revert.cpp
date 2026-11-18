@@ -2004,6 +2004,19 @@ TEST_CASE("A recovery manifest amended by its log loads as last saved", "[change
     };
     check_loads_as(manifest);
 
+    SECTION("a large change is compressed and replays alongside plain records") {
+        for (int i = 0; i < 100; ++i)
+            manifest.entries[dir.path / std::format("added-{}.txt", i)] = {.before = {hash_b, 0600}};
+        store.save(manifest);
+        const auto persisted = core::persistence::AmendedFile::read(checkpoint / "manifest.json", 1 << 20);
+        REQUIRE(persisted);
+        REQUIRE(*persisted);
+        REQUIRE((*persisted)->records.size() == 4);
+        CHECK_FALSE(core::utils::gzip::is_compressed((*persisted)->records.front()));
+        CHECK(core::utils::gzip::is_compressed((*persisted)->records.back()));
+        check_loads_as(manifest);
+    }
+
     SECTION("a record torn by a crash is ignored") {
         std::ofstream(core::persistence::AmendedFile::log_path(checkpoint / "manifest.json"), std::ios::app) << "\x10";
         check_loads_as(manifest);

@@ -148,8 +148,15 @@ void RecoveryStore::save(const RecoveryManifest& manifest, Sync sync) const {
     // A manifest names every file a workspace inventory found, so rewriting it
     // for each tool call wrote megabytes a call: only the change is recorded.
     if (committed_ && committed_->workspace == manifest.workspace) {
-        const auto change = manifest_json::encode_change(*committed_, manifest);
+        auto change = manifest_json::encode_change(*committed_, manifest);
         if (!change && (sync == Sync::Later || manifest_file_.sync())) return;
+        // Keep the existing inventory placement: compression here could
+        // squeeze a large inventory into the log budget of a tiny base.
+        const bool new_inventory = committed_->roots.empty() && !manifest.roots.empty();
+        if (!new_inventory && change && change->size() >= 4096) {
+            auto compressed = core::utils::gzip::compress(*change, {.level = 1});
+            if (compressed.size() < change->size()) *change = std::move(compressed);
+        }
         if (change && manifest_file_.amend(*change, sync == Sync::Now ? Durability::Immediate : Durability::Deferred)) {
             committed_ = manifest;
             return;
@@ -176,7 +183,13 @@ std::expected<RecoveryManifest, std::string> RecoveryStore::load(const fs::path&
     auto result = manifest_json::decode(snapshot, workspace, kLimits);
     if (!result) return result;
     for (const auto& change : (*contents)->records) {
-        if (auto applied = manifest_json::apply_change(change, *result, kLimits); !applied)
+        std::optional<std::string> json;
+        if (core::utils::gzip::is_compressed(change)) {
+            auto decompressed = core::utils::gzip::decompress(change, 8 * kMaxFileBytes);
+            if (!decompressed) return std::unexpected("Invalid compressed recovery manifest change.");
+            json = std::move(*decompressed);
+        }
+        if (auto applied = manifest_json::apply_change(json ? *json : change, *result, kLimits); !applied)
             return std::unexpected(applied.error());
     }
     std::error_code marker_error;

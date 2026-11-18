@@ -5,7 +5,9 @@
 // proc_pid_rusage on macOS, /proc/self/io on Linux. Nothing outside the
 // temporary directory is touched.
 //
-//   filo_disk_write_benchmark [files] [file_kib] [sessions] [turns] [tools]
+//   filo_disk_write_benchmark [files] [file_kib] [sessions] [turns] [tools] [cold_resume] [small_edits]
+// Set cold_resume to 1 to reopen the session store each turn, or small_edits
+// to 1 to overwrite a few bytes in place rather than truncating each file.
 //
 // Defaults model a working day: a ~2,000-file workspace, several sessions of a
 // few turns, about twenty tool calls a turn, half of them shell commands; each
@@ -115,6 +117,9 @@ int main(int argc, char** argv) {
     const std::size_t turns = argument(argc, argv, 4, 4);
     const std::size_t tools = argument(argc, argv, 5, 20);
 
+    const bool cold_resume = argument(argc, argv, 6, 0) != 0;
+    const bool small_edits = argument(argc, argv, 7, 0) != 0;
+
     const auto base = fs::temp_directory_path() / std::format("filo-disk-writes-{}", ::getpid());
     const auto workspace = base / "workspace";
     g_data = base / "data";
@@ -172,7 +177,13 @@ int main(int argc, char** argv) {
     // apart and left out of the recovery figure.
     const auto edit = [&](const fs::path& target, std::string_view bytes) {
         const auto before = *bytes_written(false);
-        put(target, bytes);
+        if (small_edits) {
+            std::fstream file(target, std::ios::binary | std::ios::in | std::ios::out);
+            if (!file.write(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+                throw std::runtime_error("in-place edit failed");
+        } else {
+            put(target, bytes);
+        }
         edits_written += *bytes_written(false) - before;
     };
     for (std::size_t session = 0; session < sessions; ++session) {
@@ -223,6 +234,8 @@ int main(int argc, char** argv) {
             const auto before_journal = *bytes_written();
             for (std::size_t event = 0; event < tools * 2; ++event, ++appends)
                 static_cast<void>(journal.append(id, "agent", "", "message", payload));
+            if (!journal.append(id, "agent", "", "turn_end", "{}")) return 1;
+            ++appends;
             journal_written += *bytes_written() - before_journal;
 
             // What the conversation gained this turn, saved the way the TUI
@@ -235,7 +248,13 @@ int main(int argc, char** argv) {
             data.messages.push_back({.role = "user", .content = text(256)});
             ++data.stats.turn_count;
             data.last_active_at = core::session::SessionStore::now_iso8601();
-            if (!store.save(data)) std::cerr << "session save failed\n";
+            if (cold_resume) {
+                const core::session::SessionStore resumed(sessions_dir);
+                if (turn && !resumed.load_by_id(data.session_id)) return 1;
+                if (!resumed.save(data)) return 1;
+            } else if (!store.save(data)) {
+                return 1;
+            }
             ++saves;
             session_written += *bytes_written() - before_save;
         }

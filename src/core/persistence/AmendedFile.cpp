@@ -116,16 +116,32 @@ std::expected<void, std::string> AmendedFile::replace(std::string_view bytes,
     position_.reset();
     auto digest = core::utils::crypto::sha256_hex(bytes);
     std::error_code ec;
-    // A log amending a snapshot of these very bytes would amend the new one
-    // too. It goes first: the snapshot it amends already holds these bytes,
-    // so a crash before the new one lands leaves exactly them.
-    if (header_on_disk(log_) == header(digest) && !fs::remove(log_, ec) && ec)
-        return std::unexpected("Cannot remove " + log_.string() + ": " + ec.message());
+    const bool matching_log = header_on_disk(log_) == header(digest);
+    bool live_log = false;
+    if (matching_log && core::utils::FileStamp::of(snapshot_).size == bytes.size()) {
+        const auto current = core::utils::read_regular_file(snapshot_, bytes.size());
+        if (!current) return std::unexpected(current.error());
+        live_log = current->permissions.has_value() && current->bytes == bytes;
+    }
+    const auto remove_log = [&] {
+        fs::remove(log_, ec);
+        if (!ec) sync_directory(log_.parent_path());
+    };
+    // A stale log for the incoming bytes must not become live after rename.
+    if (matching_log && !live_log) {
+        remove_log();
+        if (ec) return std::unexpected("Cannot remove " + log_.string() + ": " + ec.message());
+    }
     std::string error;
+    // If the existing snapshot matches, keep its live amendments until this
+    // write succeeds. Until the log is removed the old state is still valid.
     if (!core::utils::atomic_write_file(snapshot_, bytes, &error, permissions)) return std::unexpected(error);
-    // Any other log amends the snapshot just replaced and is never applied
-    // again; removing it reclaims the space and lets this one be extended.
-    fs::remove(log_, ec);
+    if (live_log) {
+        remove_log();
+        if (ec) return std::unexpected("Cannot remove " + log_.string() + ": " + ec.message());
+    } else {
+        fs::remove(log_, ec);
+    }
     position_ = Position{.snapshot_identity = core::utils::FileStamp::of(snapshot_).identity,
                          .snapshot_bytes = bytes.size(),
                          .digest = std::move(digest),
