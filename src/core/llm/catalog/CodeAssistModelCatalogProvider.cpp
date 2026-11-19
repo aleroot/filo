@@ -19,10 +19,15 @@ namespace {
 // Ids the real hub client keeps out of its model picker: retired preview
 // chat builds, the superseded Gemini 2.5 Pro route, the Hydrogen worker
 // the Argon orchestrator offloads to (it is listed as "Gemini 4 Hydrogen
-// (Orchestrator)" but never offered for selection), and the editor's
-// tab-completion models (4096-token output, no display name).
+// (Orchestrator)" but never offered for selection), the 2.33.0 SKUs the hub
+// runs on its own (the `tieredModelIds` Hydrogen levels, which share
+// Hydrogen's display names and would fold into a second "Gemini 4 Hydrogen",
+// and the unnamed `-sonar` build), and the editor's tab-completion models
+// (4096-token output, no display name).
 constexpr std::string_view kDeniedModelIds[] = {
     "chat_20706", "chat_23310", "gemini-2.5-pro", "gemini-flash-worker-agy",
+    "gemini-4-hydrogen-sonar", "gemini-4-hydrogen-tiered-high",
+    "gemini-4-hydrogen-tiered-xhigh",
     "tab_flash_lite_preview", "tab_jump_flash_lite_preview"};
 
 [[nodiscard]] bool is_denied_model_id(std::string_view id) {

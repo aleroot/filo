@@ -23,7 +23,7 @@ constexpr int kClaudeMaxOutputTokens = 128000;
 constexpr int kGeminiMaxOutputTokens = 65536;
 
 // Per-wire-id constants snapshotted from `v1internal:fetchAvailableModels` as
-// served to the 2.32.1 hub client (2026-11-16). `model_enum` is telemetry-only
+// served to the 2.33.0 hub client (2026-11-18). `model_enum` is telemetry-only
 // (the backend does not require it) but the real client never omits it for the
 // ids it lists, so neither does Filo; an id absent from this snapshot simply
 // sends no label. `max_output_tokens` is the fixed `generationConfig.
@@ -35,21 +35,33 @@ struct WireProfileEntry {
 
 constexpr int kGemini4MaxOutputTokens = 262144;
 
-constexpr std::array<WireProfileEntry, 29> kWireProfiles{{
+constexpr std::array<WireProfileEntry, 37> kWireProfiles{{
     // Gemini 4 Argon — the frontier tier since the 2.27.0 client.
     {"gemini-4-argon-low", {"MODEL_PLACEHOLDER_M419", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-medium", {"MODEL_PLACEHOLDER_M418", kGeminiMaxOutputTokens}},
     {"gemini-4-argon-high", {"MODEL_PLACEHOLDER_M417", kGeminiMaxOutputTokens}},
+    // Gemini 4 Neon (2.33.0) — the catalog's defaultAgentModelId (`-high`).
+    {"gemini-4-neon-low", {"MODEL_PLACEHOLDER_M534", kGemini4MaxOutputTokens}},
+    {"gemini-4-neon-medium", {"MODEL_PLACEHOLDER_M533", kGemini4MaxOutputTokens}},
+    {"gemini-4-neon-high", {"MODEL_PLACEHOLDER_M532", kGemini4MaxOutputTokens}},
+    {"gemini-4-neon-xhigh", {"MODEL_PLACEHOLDER_M535", kGemini4MaxOutputTokens}},
     // Gemini 4 Hydrogen (2.32.1) — the first family sold at `xhigh`.
     {"gemini-4-hydrogen-low", {"MODEL_PLACEHOLDER_M527", kGemini4MaxOutputTokens}},
     {"gemini-4-hydrogen-medium", {"MODEL_PLACEHOLDER_M526", kGemini4MaxOutputTokens}},
     {"gemini-4-hydrogen-high", {"MODEL_PLACEHOLDER_M525", kGemini4MaxOutputTokens}},
     {"gemini-4-hydrogen-xhigh", {"MODEL_PLACEHOLDER_M528", kGemini4MaxOutputTokens}},
+    // 2.33.0 SKUs the hub runs itself (catalog `tieredModelIds`, no picker
+    // entry): the tiered Hydrogen levels and the unnamed `-sonar` build.
+    {"gemini-4-hydrogen-tiered-high", {"MODEL_PLACEHOLDER_M530", kGemini4MaxOutputTokens}},
+    {"gemini-4-hydrogen-tiered-xhigh", {"MODEL_PLACEHOLDER_M531", kGemini4MaxOutputTokens}},
+    {"gemini-4-hydrogen-sonar", {"MODEL_PLACEHOLDER_M578", kGeminiMaxOutputTokens}},
     // Ultra-plan only; listed `disabled` (and answered 404) for other plans.
     {"gemini-4-carbon-disabled", {"MODEL_PLACEHOLDER_M670", kGemini4MaxOutputTokens}},
     // "Orchestrator (Argon)" and the Hydrogen worker it offloads to. The
     // catalog lists both only to a >= 2.32 client.
     {"gemini-pro-orchestrator-g1-pro", {"MODEL_PLACEHOLDER_M668", kGeminiMaxOutputTokens}},
+    // "Orchestrator (Neon)" (2.33.0): Neon offloading routine steps to Hydrogen.
+    {"gemini-pro-orchestrator-neon", {"MODEL_PLACEHOLDER_M537", kGemini4MaxOutputTokens}},
     {"gemini-flash-worker-agy", {"MODEL_PLACEHOLDER_M669", kGemini4MaxOutputTokens}},
     // Gemini 3.8 Flash. `-tiered` is the SKU the hub's own agent runs: it
     // carries no display name and asks for a dynamic thinking budget.

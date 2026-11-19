@@ -1099,6 +1099,22 @@ TEST_CASE("Antigravity thinking families are one model whose effort picks the SK
                   .supports(ReasoningCapability::XHighEffort));
     }
 
+    SECTION("Gemini 4 Neon (2.33.0) is a four-level family up to xhigh") {
+        const Wire unset = wire_for(with_effort("gemini-4-neon", ""));
+        CHECK(unset.model == "gemini-4-neon-high");
+        CHECK(unset.model_enum == "MODEL_PLACEHOLDER_M532");
+        CHECK(wire_for(with_effort("gemini-4-neon", "low")).model == "gemini-4-neon-low");
+        const Wire top = wire_for(with_effort("gemini-4-neon", "max"));
+        CHECK(top.model == "gemini-4-neon-xhigh");
+        CHECK(top.model_enum == "MODEL_PLACEHOLDER_M535");
+        CHECK(protocol.reasoning_capabilities("gemini-4-neon")
+                  .supports(ReasoningCapability::XHighEffort));
+        const auto orchestrator = antigravity_wire_profile("gemini-pro-orchestrator-neon");
+        REQUIRE(orchestrator.has_value());
+        CHECK(orchestrator->model_enum == "MODEL_PLACEHOLDER_M537");
+        CHECK(orchestrator->max_output_tokens == 262144);
+    }
+
     SECTION("a configured variant id is the default level, not a pin") {
         CHECK(wire_for(with_effort("claude-opus-5-5-medium", "")).model
               == "claude-opus-5-5-medium");

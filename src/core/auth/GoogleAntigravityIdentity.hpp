@@ -11,11 +11,11 @@
  * live here so neither layer depends on the other for them.
  *
  * Format captured from the real darwin/arm64 `antigravity/hub` client:
- * `antigravity/hub/<version> (aidev_client; os_type=darwin; arch=arm64; cl=1021296516)`.
+ * `antigravity/hub/<version> (aidev_client; os_type=darwin; arch=arm64; cl=1023160026)`.
  * The client is a Go binary that fills `os_type=%s` and `arch` at run time
  * (runtime.GOOS / GOARCH), so they report this host in Go's spelling — a
  * Linux/amd64 host claiming darwin/arm64 is a combination no genuine client
- * sends. `cl` is the changelist the 2.32.1 `language_server` was built from;
+ * sends. `cl` is the changelist the 2.33.0 `language_server` was built from;
  * it must be bumped together with `kAntigravityClientVersion`, because a
  * version/changelist pair the shipped client never produced is a fingerprint.
  *
@@ -35,9 +35,9 @@ namespace core::auth::antigravity {
 
 inline constexpr std::string_view kAntigravityEndpoint = "https://daily-cloudcode-pa.googleapis.com";
 inline constexpr std::string_view kAntigravitySandboxEndpoint = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-inline constexpr std::string_view kAntigravityClientVersion = "2.32.1";
+inline constexpr std::string_view kAntigravityClientVersion = "2.33.0";
 /// Build changelist of the `language_server` shipped with kAntigravityClientVersion.
-inline constexpr std::string_view kAntigravityChangelist = "1021296516";
+inline constexpr std::string_view kAntigravityChangelist = "1023160026";
 
 // The OAuth client identity the genuine `antigravity/hub` client presents at
 // accounts.google.com — the `client_id` that appears as the `aud` of the

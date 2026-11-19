@@ -10,6 +10,7 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
+#include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/ClaudeModelTraits.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/tools/ReadTool.hpp"
@@ -186,6 +187,82 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
             CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
         }
     }
+}
+
+TEST_CASE("Gemini API web search grounds the session model with google_search",
+          "[integration][web][gemini]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex mutex;
+    server.Post(R"(/v1beta/models/([^/]+))", [&](const httplib::Request& request,
+                                                 httplib::Response& response) {
+        std::lock_guard lock(mutex);
+        received.push_back(request);
+        if (request.path.find("gemma") != std::string::npos) {
+            response.status = 400;
+            response.set_content(
+                R"({"error":{"code":400,"message":"Search Grounding is not supported.","status":"INVALID_ARGUMENT"}})",
+                "application/json");
+            return;
+        }
+        response.set_content(R"({"candidates":[{
+            "content":{"role":"model","parts":[{"text":"Rust 1.100 is out."}]},
+            "groundingMetadata":{
+              "groundingChunks":[{"web":{"uri":"https://blog.rust-lang.org/a","title":"Rust Blog"}}],
+              "groundingSupports":[{"segment":{"text":"Rust 1.100 is out"},"groundingChunkIndices":[0]}]}}]})",
+            "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+
+    const auto make_context = [&](std::string model, core::config::ApiType api_type,
+                                  std::string base_url) {
+        auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+            std::move(base_url),
+            core::auth::ApiKeyCredentialSource::as_query_param("test-gemini-key"),
+            model, std::make_unique<core::llm::protocols::GeminiProtocol>(),
+            api_type, "gemini");
+        return ToolInvocationContext{.session_context = test_support::make_workspace_session_context(),
+                                     .model_name = std::move(model), .provider = std::move(provider)};
+    };
+    const std::string base_url = std::format("http://127.0.0.1:{}/", port);
+    const auto backend = web::make_gemini_web_search_backend();
+    CHECK(backend->supports(make_context("gemini-2.5-flash", core::config::ApiType::Gemini, base_url)));
+    CHECK_FALSE(backend->supports(make_context("gpt-5", core::config::ApiType::OpenAI, base_url)));
+
+    const auto response = backend->search(
+        web::SearchRequest{.query = "rust release", .domains = {.blocked_domains = {"spam.example"}}},
+        make_context("gemini-2.5-flash", core::config::ApiType::Gemini, base_url));
+    INFO((response ? "success" : response.error()));
+    REQUIRE(response.has_value());
+    CHECK(response->backend == "gemini-google-search");
+    CHECK(response->answer == "Rust 1.100 is out.");
+    REQUIRE(response->results.size() == 1);
+    CHECK(response->results[0].url == "https://blog.rust-lang.org/a");
+    CHECK(response->results[0].snippet == "Rust 1.100 is out");
+
+    const auto rejected = backend->search(
+        web::SearchRequest{.query = "q"},
+        make_context("gemma-4", core::config::ApiType::Gemini, base_url));
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK_THAT(rejected.error(), Catch::Matchers::ContainsSubstring("HTTP 400 on gemma-4"));
+    CHECK_THAT(rejected.error(), Catch::Matchers::ContainsSubstring("Search Grounding is not supported."));
+
+    std::lock_guard lock(mutex);
+    REQUIRE(received.size() == 2);
+    const auto& actual = received[0];
+    CHECK(actual.path == "/v1beta/models/gemini-2.5-flash:generateContent");
+    CHECK(actual.get_header_value("x-goog-api-key") == "test-gemini-key");
+    CHECK_FALSE(actual.has_param("key"));
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(actual.body);
+    simdjson::dom::object search;
+    CHECK(doc["tools"].at(0)["google_search"].get(search) == simdjson::SUCCESS);
+    CHECK(doc["model"].error() == simdjson::NO_SUCH_FIELD);
+    CHECK_THAT(std::string(doc["contents"].at(0)["parts"].at(0)["text"].get_string().value()),
+               Catch::Matchers::ContainsSubstring("rust release -site:spam.example"));
 }
 
 TEST_CASE("Claude web search retries unforced when a model rejects forced tool choice",

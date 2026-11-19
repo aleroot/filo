@@ -39,6 +39,7 @@
 #include "core/tools/PythonManager.hpp"
 #include "core/tools/PythonInterpreterTool.hpp"
 #include <pybind11/embed.h>
+#include <simdjson.h>
 #endif
 #include <algorithm>
 #include <cerrno>
@@ -2161,6 +2162,89 @@ TEST_CASE("Grok web search response keeps url citations",
     REQUIRE(empty.has_value());
     CHECK(empty->answer == "No search results found.");
     CHECK(empty->results.empty());
+}
+
+TEST_CASE("Antigravity web search grounds one turn on the catalog's search model",
+          "[tools][web][antigravity]") {
+    using namespace core::tools::web;
+    const auto backend = make_antigravity_web_search_backend();
+    const auto context_for = [](std::string service_id) {
+        return core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("antigravity-web-search"),
+            .model_name = "gemini-4-neon",
+            .provider = std::make_shared<StaticMetadataProvider>(core::llm::ProviderMetadata{
+                .api_type = core::config::ApiType::Gemini,
+                .provider_name = "gemini-oauth",
+                .service_id = std::move(service_id),
+                .base_url = "https://daily-cloudcode-pa.googleapis.com",
+                .credential_source = std::make_shared<StaticCredentialSource>(),
+            }),
+        };
+    };
+    CHECK(backend->supports(context_for("gemini-antigravity")));
+    CHECK_FALSE(backend->supports(context_for("gemini")));
+    // The API-key backend takes the other side of the same split.
+    const auto api_backend = make_gemini_web_search_backend();
+    CHECK(api_backend->supports(context_for("gemini")));
+    CHECK_FALSE(api_backend->supports(context_for("gemini-antigravity")));
+
+    CHECK(antigravity_web_search_model(
+              R"({"models":{},"webSearchModelIds":["gemini-9-search"]})") == "gemini-9-search");
+    CHECK(antigravity_web_search_model(R"({"models":{}})") == kAntigravityDefaultWebSearchModel);
+
+    const SearchRequest request{
+        .query = "rust release",
+        .limit = 2,
+        .domains = {.allowed_domains = {"https://Rust-Lang.org/x"},
+                    .blocked_domains = {"spam.example"}},
+    };
+    simdjson::dom::parser parser;
+    const std::string payload =
+        antigravity_web_search_request_json(request, "gemini-3.5-flash-lite", "proj-1");
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(payload).get(doc) == simdjson::SUCCESS);
+    CHECK(std::string_view(doc["project"]) == "proj-1");
+    CHECK(std::string_view(doc["model"]) == "gemini-3.5-flash-lite");
+    CHECK(std::string_view(doc["requestType"]) == "agent");
+    CHECK(std::string_view(doc["requestId"]).starts_with("agent/"));
+    simdjson::dom::object search;
+    CHECK(doc["request"]["tools"].at(0)["googleSearch"].get(search) == simdjson::SUCCESS);
+    const std::string_view prompt = doc["request"]["contents"].at(0)["parts"].at(0)["text"];
+    CHECK_THAT(std::string(prompt), Catch::Matchers::ContainsSubstring(
+        "rust release (site:rust-lang.org) -site:spam.example"));
+
+    const std::string body = R"({"response":{"candidates":[{
+        "content":{"role":"model","parts":[{"thought":true,"text":"hmm"},{"text":"Rust 1.100 is out."}]},
+        "groundingMetadata":{
+          "groundingChunks":[
+            {"web":{"uri":"https://vertexaisearch.cloud.google.com/r/1","title":"rust-lang.org"}},
+            {"web":{"uri":"https://vertexaisearch.cloud.google.com/r/2","title":"spam.example"}},
+            {"web":{"uri":"https://vertexaisearch.cloud.google.com/r/3","title":"blog.rust-lang.org"}},
+            {"web":{"uri":"https://vertexaisearch.cloud.google.com/r/4","title":"rust-lang.org"}}],
+          "groundingSupports":[
+            {"segment":{"text":"Rust 1.100 is out"},"groundingChunkIndices":[0,2]},
+            {"segment":{"text":"Rust 1.100 is out"},"groundingChunkIndices":[0]}]}}]}})";
+    std::vector<std::string> seen;
+    const auto parsed = parse_antigravity_web_search_response(
+        body, request, [&](const std::vector<std::string>& urls) {
+            seen = urls;
+            return std::vector<std::string>{
+                "https://www.rust-lang.org/", "https://spam.example/", "https://blog.rust-lang.org/a",
+                "https://rust-lang.org.evil.example/"};
+        });
+    REQUIRE(parsed.has_value());
+    CHECK(seen.size() == 4);
+    CHECK(parsed->answer == "Rust 1.100 is out.");
+    REQUIRE(parsed->results.size() == 2);
+    CHECK(parsed->results[0].url == "https://www.rust-lang.org/");
+    CHECK(parsed->results[0].title == "rust-lang.org");
+    CHECK(parsed->results[0].snippet == "Rust 1.100 is out");
+    CHECK(parsed->results[1].url == "https://blog.rust-lang.org/a");
+
+    const auto empty = parse_antigravity_web_search_response(R"({"response":{}})", {.query = "q"});
+    REQUIRE(empty.has_value());
+    CHECK(empty->answer == "No search results found.");
+    CHECK_FALSE(parse_antigravity_web_search_response("not json", {.query = "q"}).has_value());
 }
 
 TEST_CASE("Z.ai web backends support GLM API endpoints only",

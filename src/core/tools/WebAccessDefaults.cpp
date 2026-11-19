@@ -16,6 +16,8 @@ WebAccess make_default_web_access() {
             make_anthropic_web_search_backend(),
             make_openai_web_search_backend(),
             make_grok_web_search_backend(),
+            make_antigravity_web_search_backend(),
+            make_gemini_web_search_backend(),
         },
         {
             make_zai_web_fetch_backend(),

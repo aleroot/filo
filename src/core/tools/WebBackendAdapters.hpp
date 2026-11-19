@@ -3,7 +3,10 @@
 #include "WebAccess.hpp"
 #include "../llm/MiniMaxEndpoints.hpp"
 
+#include <functional>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace core::tools::web {
 
@@ -68,6 +71,30 @@ struct MimoWebSearchOptions {
 [[nodiscard]] std::string minimax_web_search_request_json(const SearchRequest& request);
 [[nodiscard]] std::expected<SearchResponse, std::string>
 parse_minimax_web_search_response(std::string_view body, const SearchRequest& request);
+// Antigravity (Google account) search, as the hub's own search_web tool does
+// it: one Cloud Code Assist `generateContent` turn on the catalog's
+// `webSearchModelIds[0]` with only the `googleSearch` grounding tool; the
+// grounding chunks become the hits.
+inline constexpr std::string_view kAntigravityDefaultWebSearchModel = "gemini-3.5-flash-lite";
+[[nodiscard]] std::shared_ptr<IWebSearchBackend> make_antigravity_web_search_backend();
+[[nodiscard]] std::string antigravity_web_search_model(std::string_view catalog_body);
+[[nodiscard]] std::string antigravity_web_search_request_json(const SearchRequest& request,
+                                                              std::string_view model,
+                                                              std::string_view project);
+// Gemini API (API key) search: the same grounded turn on the public API,
+// `POST {base}/v1beta/models/{model}:generateContent` with `google_search`,
+// as the session model. The reply parses with
+// parse_antigravity_web_search_response (it accepts the bare response).
+[[nodiscard]] std::shared_ptr<IWebSearchBackend> make_gemini_web_search_backend();
+[[nodiscard]] std::string gemini_web_search_request_json(const SearchRequest& request);
+[[nodiscard]] std::string gemini_web_search_url(std::string_view base_url, std::string_view model);
+// Maps the grounding redirect URLs to the pages they point at (same order and size).
+using RedirectResolver =
+    std::function<std::vector<std::string>(const std::vector<std::string>&)>;
+[[nodiscard]] std::expected<SearchResponse, std::string>
+parse_antigravity_web_search_response(std::string_view body,
+                                      const SearchRequest& request,
+                                      const RedirectResolver& resolve = {});
 [[nodiscard]] std::shared_ptr<IWebFetchBackend> make_zai_web_fetch_backend();
 [[nodiscard]] std::shared_ptr<IWebFetchBackend> make_direct_web_fetch_backend();
 

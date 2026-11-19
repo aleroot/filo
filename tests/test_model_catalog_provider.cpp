@@ -2269,6 +2269,9 @@ TEST_CASE("CodeAssistModelCatalogProvider serves the hub fetchAvailableModels di
         "gemini-4-carbon-disabled": {"displayName": "Gemini 4 Carbon", "disabled": true,
                                      "tagTitle": "Unavailable"},
         "gemini-flash-worker-agy": {"displayName": "Gemini 4 Hydrogen (Orchestrator)"},
+        "gemini-4-hydrogen-tiered-high": {"displayName": "Gemini 4 Hydrogen (High)"},
+        "gemini-4-hydrogen-tiered-xhigh": {"displayName": "Gemini 4 Hydrogen (XHigh)"},
+        "gemini-4-hydrogen-sonar": {"supportsThinking": true},
         "tab_flash_lite_preview": {"maxOutputTokens": 4096}
       },
       "agentModelSorts": [{"groups": [{"modelIds": ["gemini-3.1-pro-low"]}]}],

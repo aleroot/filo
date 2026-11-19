@@ -524,6 +524,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ToolManager.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
+    src/core/tools/GeminiWebSearchBackend.cpp
     src/core/tools/DashScopeWebSearchBackend.cpp
     src/core/tools/DirectWebFetchBackend.cpp
     src/core/tools/KimiWebSearchBackend.cpp
