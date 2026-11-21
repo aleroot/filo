@@ -11302,27 +11302,9 @@ RunResult run(RunOptions opts) {
         // API key users: show raw remaining counts.
         Element rate_limit_el = text("");
         if (!rate_limit_info.usage_windows.empty()) {
-            const float max_util = rate_limit_info.max_window_utilization();
-            Color util_color = Color::Green;
-            if (max_util >= 0.90f)       util_color = Color::Red;
-            else if (max_util >= 0.75f)  util_color = ColorWarn;
-            else if (max_util >= 0.50f)  util_color = Color::Yellow;
-
-            std::string util_str;
-            for (const auto& w : rate_limit_info.usage_windows) {
-                const std::string pct_str =
-                    std::format("{:.0f}", w.utilization * 100.0f);
-                if (w.label == "overage" && pct_str == "0") {
-                    continue;
-                }
-                util_str += std::format(" {}:{}%", w.label, pct_str);
-            }
-            if (rate_limit_info.is_rate_limited
-                || rate_limit_info.unified_status == "rate_limited") {
-                util_str += " · Rate limited";
-                util_color = Color::Red;
-            }
-            rate_limit_el = text(util_str) | color(util_color);
+            // Each window carries its own severity colour, so a healthy 5h
+            // window is not painted with the 7d window's warning.
+            rate_limit_el = render_usage_window_status(rate_limit_info);
         } else if (rate_limit_info.requests_limit > 0 || rate_limit_info.tokens_limit > 0
                    || rate_limit_info.requests_remaining > 0 || rate_limit_info.tokens_remaining > 0) {
             if (is_subscription && rate_limit_info.tokens_limit > 0) {
@@ -11331,12 +11313,8 @@ RunResult run(RunOptions opts) {
                     1.0f - static_cast<float>(rate_limit_info.tokens_remaining)
                            / static_cast<float>(rate_limit_info.tokens_limit),
                     0.0f, 1.0f);
-                Color util_color = Color::Green;
-                if (token_util >= 0.90f)       util_color = Color::Red;
-                else if (token_util >= 0.75f)  util_color = ColorWarn;
-                else if (token_util >= 0.50f)  util_color = Color::Yellow;
                 rate_limit_el = text(std::format(" T:{:.0f}%", token_util * 100.0f))
-                                | color(util_color);
+                                | color(quota_utilization_color(token_util));
             } else {
                 // API key users: show raw remaining counts.
                 Color rate_color = Color::Green;

@@ -148,6 +148,59 @@ TEST_CASE("UsageDetailsPanel: helpers", "[usage_details_panel]") {
     }
 }
 
+TEST_CASE("Status bar colours each usage window by its own utilization",
+          "[usage_details_panel][status_footer]") {
+    using core::llm::protocols::UsageWindow;
+    const auto render = [](const core::llm::protocols::RateLimitInfo& info) {
+        auto element = tui::render_usage_window_status(info);
+        auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                            ftxui::Dimension::Fixed(1));
+        ftxui::Render(screen, element);
+        return screen;
+    };
+    // Screen::ToString() interleaves colour escapes, so read the cells.
+    const auto plain_row = [](ftxui::Screen& screen) {
+        std::string row;
+        for (int x = 0; x < screen.dimx(); ++x) row += screen.PixelAt(x, 0).character;
+        return row;
+    };
+
+    SECTION("a healthy window keeps its colour next to a strained one") {
+        core::llm::protocols::RateLimitInfo info;
+        info.usage_windows.push_back(UsageWindow{.label = "5h", .utilization = 0.22f});
+        info.usage_windows.push_back(UsageWindow{.label = "7d", .utilization = 0.76f});
+        auto screen = render(info);
+
+        CHECK(plain_row(screen).starts_with(" 5h:22% 7d:76%"));
+        // " 5h:22% 7d:76%": "5h:22%" spans columns 1-6, "7d:76%" columns 8-13.
+        for (int x = 1; x <= 6; ++x) {
+            CHECK(screen.PixelAt(x, 0).foreground_color == ftxui::Color(ftxui::Color::Green));
+        }
+        for (int x = 8; x <= 13; ++x) {
+            CHECK(screen.PixelAt(x, 0).foreground_color == tui::quota_utilization_color(0.76f));
+        }
+        CHECK(tui::quota_utilization_color(0.76f) != ftxui::Color(ftxui::Color::Green));
+    }
+
+    SECTION("rate limiting adds a red suffix without repainting the windows") {
+        core::llm::protocols::RateLimitInfo info;
+        info.usage_windows.push_back(UsageWindow{.label = "5h", .utilization = 0.30f});
+        info.usage_windows.push_back(UsageWindow{.label = "overage", .utilization = 0.0f});
+        info.unified_status = "rate_limited";
+        auto screen = render(info);
+
+        CHECK(plain_row(screen).starts_with(" 5h:30% · Rate limited"));
+        CHECK(screen.PixelAt(1, 0).foreground_color == ftxui::Color(ftxui::Color::Green));
+        CHECK(screen.PixelAt(9, 0).foreground_color == ftxui::Color(ftxui::Color::Red));
+    }
+
+    SECTION("severity thresholds") {
+        CHECK(tui::quota_utilization_color(0.49f) == ftxui::Color(ftxui::Color::Green));
+        CHECK(tui::quota_utilization_color(0.50f) == ftxui::Color(ftxui::Color::Yellow));
+        CHECK(tui::quota_utilization_color(0.90f) == ftxui::Color(ftxui::Color::Red));
+    }
+}
+
 TEST_CASE("Protocol reset parsing: Anthropic, Kimi, Grok, Zai, OpenAI", "[protocol_resets]") {
     SECTION("Anthropic on_response parses resets_at from headers") {
         core::llm::protocols::ClaudeProtocol protocol;

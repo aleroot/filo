@@ -23,6 +23,20 @@ namespace tui {
 [[nodiscard]] std::string human_window_title(std::string_view label);
 
 /**
+ * @brief Severity colour for a quota utilization ratio (0.0–1.0+):
+ *        green below 50%, yellow from 50%, warning from 75%, red from 90%.
+ */
+[[nodiscard]] ftxui::Color quota_utilization_color(float utilization);
+
+/**
+ * @brief Renders the status-bar usage windows (e.g. " 5h:22% 7d:76%"), each
+ *        window coloured by its own utilization, plus a red
+ *        " · Rate limited" suffix when the provider is blocking requests.
+ */
+[[nodiscard]] ftxui::Element render_usage_window_status(
+    const core::llm::protocols::RateLimitInfo& rate_limit_info);
+
+/**
  * @brief Renders a visual quota progress bar with color coding.
  */
 [[nodiscard]] ftxui::Element render_quota_progress_bar(float utilization, int width = 20);

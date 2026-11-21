@@ -26,14 +26,36 @@ using namespace ftxui;
     return std::format("{:.2f}B", static_cast<double>(count) / 1'000'000'000.0);
 }
 
-[[nodiscard]] ftxui::Color utilization_color(float utilization) {
+} // namespace
+
+ftxui::Color quota_utilization_color(float utilization) {
     if (utilization >= 0.90f) return ftxui::Color::Red;
     if (utilization >= 0.75f) return ftxui::Color(ColorWarn);
     if (utilization >= 0.50f) return ftxui::Color::Yellow;
     return ftxui::Color::Green;
 }
 
-} // namespace
+ftxui::Element render_usage_window_status(
+    const core::llm::protocols::RateLimitInfo& rate_limit_info) {
+    Elements items;
+    for (const auto& w : rate_limit_info.usage_windows) {
+        const std::string pct_str = std::format("{:.0f}", w.utilization * 100.0f);
+        if (w.label == "overage" && pct_str == "0") {
+            continue;
+        }
+        items.push_back(text(" "));
+        items.push_back(text(std::format("{}:{}%", w.label, pct_str))
+                        | ftxui::color(quota_utilization_color(w.utilization)));
+    }
+    if (rate_limit_info.is_rate_limited
+        || rate_limit_info.unified_status == "rate_limited") {
+        items.push_back(text(" · Rate limited") | ftxui::color(ftxui::Color::Red));
+    }
+    if (items.empty()) {
+        return text("");
+    }
+    return hbox(std::move(items));
+}
 
 std::string format_quota_reset_display(int64_t resets_at, int64_t now_seconds) {
     if (resets_at <= 0) return {};
@@ -106,7 +128,7 @@ Element render_quota_progress_bar(float utilization, int width) {
 
     return hbox({
         text("[") | ftxui::color(ColorTextMuted),
-        text(std::move(bar_filled)) | ftxui::color(utilization_color(utilization)),
+        text(std::move(bar_filled)) | ftxui::color(quota_utilization_color(utilization)),
         text(std::move(bar_empty)) | ftxui::color(ColorTextMuted),
         text("]") | ftxui::color(ColorTextMuted),
     });
@@ -155,7 +177,7 @@ Element render_usage_details_panel(
         for (const auto& w : rate_limit_info.usage_windows) {
             const float pct = w.utilization * 100.0f;
             const float remaining_pct = std::max(0.0f, 100.0f - pct);
-            const ftxui::Color col = utilization_color(w.utilization);
+            const ftxui::Color col = quota_utilization_color(w.utilization);
             const std::string title = human_window_title(w.label);
 
             const bool is_governing = (!rate_limit_info.unified_representative_claim.empty()
