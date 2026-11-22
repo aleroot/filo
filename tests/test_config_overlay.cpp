@@ -277,7 +277,7 @@ TEST_CASE("A damaged compressed bundle is rejected before creating state", "[con
     CHECK_FALSE(fs::exists(f.root / "state/filo/configs"));
 }
 
-TEST_CASE("Inherited credentials refresh only in isolated state and explicit logout stays local", "[config-overlay][oauth]") {
+TEST_CASE("Inherited credentials refresh in place and explicit logout stays local", "[config-overlay][oauth]") {
     Fixture f;
     auto expired = token("personal");
     expired.expires_at = 1;
@@ -287,8 +287,10 @@ TEST_CASE("Inherited credentials refresh only in isolated state and explicit log
     auto source = credential(f.manager.get_config_source(), flow);
     CHECK(source->get_auth().headers.at("Authorization") == "Bearer rotated");
     CHECK(flow->calls == 1);
-    CHECK(FileTokenStore(f.base.string()).load("claude")->access_token == "personal-access");
-    CHECK(FileTokenStore(f.manager.get_config_dir()).load("claude")->access_token == "rotated");
+    // Refresh tokens are single-use: the one login rotates where it lives and
+    // no second holder of it ever exists.
+    CHECK(FileTokenStore(f.base.string()).load("claude")->access_token == "rotated");
+    CHECK_FALSE(fs::exists(fs::path(f.manager.get_config_dir()) / "oauth_claude.json"));
     CHECK_FALSE(fs::exists(f.custom / "oauth_claude.json"));
     const auto personal = read(f.base / "oauth_claude.json");
     auto auth = core::auth::AuthenticationManager::create_with_defaults(f.manager.get_config_dir());
@@ -297,6 +299,83 @@ TEST_CASE("Inherited credentials refresh only in isolated state and explicit log
     CHECK(read(f.base / "oauth_claude.json") == personal);
     FileTokenStore(f.manager.get_config_dir()).save("claude", token("new-work-login"));
     CHECK(source->get_auth().headers.at("Authorization") == "Bearer new-work-login-access");
+}
+
+TEST_CASE("Opening a config folds duplicated logins back into one store", "[config-overlay][oauth]") {
+    Fixture f;
+    // The state is keyed by the source path; create it, then plant what
+    // earlier versions left there.
+    f.select(f.custom);
+    const fs::path state = f.manager.get_config_dir();
+    f.manager.set_config_override(std::nullopt);
+    FileTokenStore personal(f.base.string());
+    FileTokenStore overlay(state.string());
+    auto same_account = [](std::string refresh, int64_t expires_at) {
+        auto t = token("acct");
+        t.refresh_token = std::move(refresh);
+        t.access_token = "access-" + std::to_string(expires_at);
+        t.expires_at = expires_at;
+        return t;
+    };
+
+    // A stale copy of the personal login: the personal one is newer.
+    personal.save("openai-pkce", same_account("live", 2000));
+    overlay.save("openai-pkce", same_account("spent", 1000));
+    write(state / "oauth_openai-pkce.json.selected", "");
+    write(state / "codex_installation_id", "stale-copy");
+    // A copy the overlay refreshed: it is now the only live token of the chain.
+    personal.save("grok", same_account("spent", 1000));
+    overlay.save("grok", same_account("live", 3000));
+    write(state / "oauth_grok.json.selected", "");
+    // An unrefreshed copy of a login that carries no identity.
+    auto anonymous = token("");
+    personal.save("google", anonymous);
+    overlay.save("google", anonymous);
+    // Not provably the same login: another account, and an anonymous token
+    // with its own refresh token.
+    personal.save("claude", token("personal"));
+    overlay.save("claude", token("work"));
+    auto other = token("");
+    other.refresh_token = "other-chain";
+    personal.save("kimi", anonymous);
+    overlay.save("kimi", other);
+
+    f.select(f.custom);
+    for (const std::string id : {"openai-pkce", "grok", "google"}) {
+        INFO(id);
+        CHECK_FALSE(overlay.load(id));
+        CHECK_FALSE(fs::exists(state / ("oauth_" + id + ".json.selected")));
+        CHECK(f.manager.get_config_source()->credential_directory(id) == f.base);
+    }
+    CHECK(personal.load("openai-pkce")->refresh_token == "live");
+    CHECK(personal.load("grok")->refresh_token == "live");
+    CHECK_FALSE(fs::exists(state / "codex_installation_id"));
+    CHECK(overlay.load("claude")->account_id == "work");
+    CHECK(personal.load("claude")->account_id == "personal");
+    CHECK(overlay.load("kimi")->refresh_token == "other-chain");
+    CHECK(f.manager.get_config_source()->credential_directory("claude") == state);
+
+    // Signing out in the config stays local and stops the inheritance.
+    auto auth = core::auth::AuthenticationManager::create_with_defaults(state.string());
+    auth.logout("openai", false, f.manager.get_config_source().get());
+    CHECK(f.manager.get_config_source()->credential_directory("openai-pkce") == state);
+    CHECK(personal.load("openai-pkce")->refresh_token == "live");
+}
+
+TEST_CASE("A bundle carrying this machine's own login reads it in place", "[config-overlay][oauth]") {
+    Fixture f;
+    FileTokenStore(f.base.string()).save("claude", token("personal"));
+    FileTokenStore(f.custom.string()).save("claude", token("personal"));
+    const auto path = f.bundle();
+    f.select(path);
+    const fs::path state = f.manager.get_config_dir();
+    CHECK_FALSE(fs::exists(state / "oauth_claude.json"));
+    CHECK(f.manager.get_config_source()->credential_directory("claude") == f.base);
+    // Reopening an unchanged bundle does not reinstall the copy.
+    f.manager.set_config_override(std::nullopt);
+    f.select(path);
+    CHECK_FALSE(fs::exists(state / "oauth_claude.json"));
+    CHECK(f.manager.get_config_source()->credential_directory("claude") == f.base);
 }
 
 TEST_CASE("Corrupt or removed state credentials never fall through to the source or personal account", "[config-overlay][oauth]") {
@@ -915,7 +994,7 @@ TEST_CASE("Profile changes retain inherited hooks without applying the same prof
     CHECK(f.manager.get_config().hooks.stop.empty());
 }
 
-TEST_CASE("Concurrent instances share refresh state only for the same config", "[config-overlay][oauth]") {
+TEST_CASE("Concurrent instances of one login refresh it once, whatever config they run", "[config-overlay][oauth]") {
     Fixture f;
     bool inherited = false;
     SECTION("supplied credential") {}
@@ -948,8 +1027,10 @@ TEST_CASE("Concurrent instances share refresh state only for the same config", "
     REQUIRE(::waitpid(child, &status, 0) == child);
     REQUIRE(WIFEXITED(status));
     CHECK(WEXITSTATUS(status) == 0);
-    CHECK(read(log) == (inherited ? "refresh\nrefresh\n" : "refresh\n"));
-    if (inherited) CHECK(FileTokenStore(f.base.string()).load("claude")->access_token == "expired-access");
+    // A refresh token is single-use: a second refresh of the same login would
+    // have been rejected by the provider.
+    CHECK(read(log) == "refresh\n");
+    if (inherited) CHECK(FileTokenStore(f.base.string()).load("claude")->access_token == "rotated");
 }
 
 TEST_CASE("An empty override preserves the normal configuration resolution", "[config][config-overlay]") {

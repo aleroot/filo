@@ -1,6 +1,7 @@
 #include "ConfigSource.hpp"
 #include "ConfigDocument.hpp"
 #include "core/auth/FileTokenStore.hpp"
+#include "core/auth/IdTokenClaims.hpp"
 #include "core/portability/ConfigPortability.hpp"
 #include "core/utils/Base64.hpp"
 #include "core/utils/Crypto.hpp"
@@ -22,6 +23,20 @@ namespace fs = std::filesystem;
 using core::auth::FileTokenStore;
 using core::utils::JsonValue;
 using core::portability::ConfigOverlayFiles;
+
+fs::path credential_marker(const fs::path& directory, std::string_view id, std::string_view suffix) {
+    return directory / (FileTokenStore::file_name(id) + std::string(suffix));
+}
+
+/// Marks a login this state signed in or out on its own.
+fs::path selected_marker(const fs::path& directory, std::string_view id) {
+    return credential_marker(directory, id, ".selected");
+}
+
+/// Marks a login this state hands to the fallback store; see unify_logins.
+fs::path inherited_marker(const fs::path& directory, std::string_view id) {
+    return credential_marker(directory, id, ".inherited");
+}
 
 void write_private(const fs::path& path, std::string_view text) {
     if (fs::is_symlink(fs::symlink_status(path))) {
@@ -197,8 +212,9 @@ void reconcile_credentials(const fs::path& directory, const ConfigSource::Docume
     for (const auto& [id, _] : changed) locks.push_back(FileTokenStore(directory.string()).acquire_refresh_lock(id));
     const auto replace = [&](const std::string& id, const JsonValue* group) {
         const auto token_path = directory / FileTokenStore::file_name(id);
-        const auto marker = fs::path(token_path.string() + ".selected");
+        const auto marker = selected_marker(directory, id);
         if (group) write_private(marker, "");
+        fs::remove(inherited_marker(directory, id));
         // Publish the token last. A failed or interrupted companion update
         // leaves this account unavailable rather than mixing old credentials
         // with the replacement's device or client metadata.
@@ -230,13 +246,98 @@ void reconcile_credentials(const fs::path& directory, const ConfigSource::Docume
     }
 }
 
+/// Two tokens are one login when they share a refresh token, or when an
+/// account identity both carry agrees and nothing that both carry disagrees.
+/// Unknown is never "same": a login that cannot be proven shared stays put.
+bool same_login(const core::auth::OAuthToken& a, const core::auth::OAuthToken& b) {
+    if (a.access_token.empty() || b.access_token.empty()) return false;
+    if (!a.refresh_token.empty() && a.refresh_token == b.refresh_token) return true;
+    const auto conflict = [](std::string_view x, std::string_view y) {
+        return !x.empty() && !y.empty() && x != y;
+    };
+    if (conflict(a.issuer, b.issuer) || conflict(a.client_id, b.client_id)
+        || conflict(a.organization_id, b.organization_id) || conflict(a.team_id, b.team_id)
+        || conflict(a.principal_id, b.principal_id)) {
+        return false;
+    }
+    const auto subject = [](const core::auth::OAuthToken& token) {
+        return core::auth::parse_id_token_claims(token.access_token).subject;
+    };
+    const std::array<std::pair<std::string, std::string>, 4> identities{{
+        {a.account_id, b.account_id}, {a.user_id, b.user_id}, {a.email, b.email},
+        {subject(a), subject(b)}}};
+    bool proven = false;
+    for (const auto& [x, y] : identities) {
+        if (x.empty() || y.empty()) continue;
+        if (x != y) return false;
+        proven = true;
+    }
+    return proven;
+}
+
+/// One login lives in exactly one store.
+///
+/// Providers rotate refresh tokens on every refresh (OpenAI answers a second
+/// use with `refresh_token_reused`), so two stores holding the same login
+/// cannot both survive: whichever refreshes first silently kills the other.
+/// Earlier versions seeded config state by copying the fallback login, and a
+/// bundle exported from this machine carries a copy too. Every such duplicate
+/// is folded back into the fallback, keeping the most recently issued token
+/// (the only one of a rotation chain that can still be alive), and the state
+/// then reads that store in place.
+void unify_logins(const fs::path& state, const fs::path& fallback) {
+    std::error_code ec;
+    if (!fs::is_directory(fallback, ec) || fs::equivalent(state, fallback, ec)) return;
+    std::vector<std::string> ids;
+    for (const auto& entry : fs::directory_iterator(state)) {
+        if (!entry.is_regular_file()) continue;
+        const auto id = FileTokenStore::provider_id_from_file_name(entry.path().filename().string());
+        if (id && FileTokenStore::is_valid_provider_id(*id)) ids.push_back(*id);
+    }
+    for (const auto& id : ids) {
+        const auto name = FileTokenStore::file_name(id);
+        // Never create the fallback: an absent login has nothing to share.
+        if (!fs::exists(fallback / name)) continue;
+        FileTokenStore here(state.string());
+        FileTokenStore there(fallback.string());
+        // Compare before locking: a lock file is a write, and an unrelated
+        // login must leave the fallback untouched.
+        const auto shared = [&] {
+            const auto mine = here.load(id);
+            const auto theirs = there.load(id);
+            return mine && theirs && same_login(*mine, *theirs);
+        };
+        if (!shared()) continue;
+        // Same order everywhere: state, then fallback.
+        const auto here_lock = here.acquire_refresh_lock(id);
+        const auto there_lock = there.acquire_refresh_lock(id);
+        if (!shared()) continue;
+        const auto mine = here.load(id);
+        const auto theirs = there.load(id);
+        const auto companions = core::portability::credential_companion_files(id);
+        if (mine->expires_at > theirs->expires_at) {
+            // Companions first: a device id must never pair with another token.
+            for (const auto& companion : companions) {
+                if (fs::exists(state / companion)) {
+                    write_private(fallback / companion, read_regular_file(state / companion));
+                }
+            }
+            write_private(fallback / name, read_regular_file(state / name));
+        }
+        write_private(inherited_marker(state, id), "");
+        fs::remove(state / name);
+        fs::remove(selected_marker(state, id));
+        for (const auto& companion : companions) fs::remove(state / companion);
+    }
+}
+
 ConfigOverlayFiles read_validated_input(const fs::path& input) {
     auto files = read_input(input);
     for (const auto& [_, document] : files.configuration) ConfigDocument::validate(document);
     return files;
 }
 
-fs::path initialize_state(const fs::path& input, ConfigOverlayFiles& files) {
+fs::path initialize_state(const fs::path& input, const fs::path& fallback, ConfigOverlayFiles& files) {
     // The canonical source path is the entire identity of mutable state.
     const auto key = core::utils::Base64::encode_url(core::utils::crypto::sha256(input.string()));
     const auto home = fs::weakly_canonical(fs::absolute(state_home()));
@@ -254,6 +355,7 @@ fs::path initialize_state(const fs::path& input, ConfigOverlayFiles& files) {
     // snapshot over credentials installed by another process.
     files = read_validated_input(input);
     reconcile_credentials(directory, files.credentials);
+    unify_logins(directory, fallback);
     return directory;
 }
 } // namespace
@@ -276,7 +378,7 @@ std::shared_ptr<const ConfigSource> ConfigSource::open(const fs::path& input, co
     const auto fallback = fs::weakly_canonical(fallback_directory);
     // Reject invalid input before creating any runtime state.
     auto files = read_validated_input(path);
-    const auto state = initialize_state(path, files);
+    const auto state = initialize_state(path, fallback, files);
     std::vector<std::string> credential_files;
     for (const auto& [name, _] : files.credentials) credential_files.push_back(name);
     return std::shared_ptr<const ConfigSource>(new ConfigSource(
@@ -314,32 +416,26 @@ fs::path ConfigSource::resolve_file(std::string_view name) const {
 void ConfigSource::claim_credential(std::string_view id) const {
     verify_available();
     if (!FileTokenStore::is_valid_provider_id(id)) throw std::runtime_error("invalid credential id");
-    const auto marker = state_ / (FileTokenStore::file_name(id) + ".selected");
+    const auto marker = selected_marker(state_, id);
     if (!fs::exists(marker)) write_private(marker, "");
+    fs::remove(inherited_marker(state_, id));
 }
 
 fs::path ConfigSource::credential_directory(std::string_view id) const {
     verify_available();
     if (!FileTokenStore::is_valid_provider_id(id)) throw std::runtime_error("invalid credential id");
     const auto name = FileTokenStore::file_name(id);
+    // A login handed to the fallback is read there until this config signs
+    // in or out on its own.
+    if (fs::exists(inherited_marker(state_, id)) && !fs::exists(state_ / name)) return fallback_;
     const auto supplied = [&](std::string_view file) { return std::ranges::contains(credential_files_, file); };
     const auto companions = core::portability::credential_companion_files(id);
     const bool supplied_identity = supplied(name) || std::ranges::any_of(companions, supplied);
-    const auto owned = [&] {
-        return supplied_identity || fs::exists(state_ / name) || fs::exists(state_ / (name + ".selected"));
-    };
-    if (!owned() && fs::exists(fallback_ / name)) {
-        // Seed once under the same lock used by refresh and explicit login.
-        auto lock = FileTokenStore(state_.string()).acquire_refresh_lock(id);
-        if (!owned() && fs::exists(fallback_ / name)) {
-            for (const auto& companion : companions) {
-                if (!fs::exists(fallback_ / companion)) continue;
-                write_private(state_ / companion, read_regular_file(fallback_ / companion));
-            }
-            write_private(state_ / name, read_regular_file(fallback_ / name));
-            claim_credential(id);
-        }
-    }
+    const bool owned = supplied_identity || fs::exists(state_ / name)
+        || fs::exists(selected_marker(state_, id));
+    // Inherit the fallback login in place, refreshes included. Never copy it:
+    // a copied refresh token is a second holder of a single-use secret.
+    if (!owned) return fs::exists(fallback_ / name) ? fallback_ : state_;
     if (fs::exists(state_ / name)) claim_credential(id);
     return state_;
 }

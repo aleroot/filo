@@ -32,8 +32,12 @@ public:
         const std::filesystem::path& path);
 
     [[nodiscard]] std::filesystem::path resolve_file(std::string_view name) const;
-    /// Seed omitted credentials from the fallback once, without changing it.
-    /// Refreshes, explicit logins, and logout always use this config's state.
+    /// Where the login `id` lives: this config's state when it supplies the
+    /// login or signed in or out on its own, else the fallback store, used in
+    /// place. Refresh tokens are single-use, so an inherited login is never
+    /// copied: its refreshes rotate the fallback's token. Explicit logins and
+    /// logout still stay in this config's state; opening the config folds any
+    /// state copy of a fallback login back into one store (newest wins).
     [[nodiscard]] std::filesystem::path credential_directory(std::string_view id) const;
     void claim_credential(std::string_view id) const;
     void verify_available() const;

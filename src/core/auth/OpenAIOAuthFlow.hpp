@@ -76,6 +76,17 @@ public:
                                                  std::string_view token,
                                                  std::string_view token_type_hint);
 
+    /// Human-readable detail of an auth.openai.com error body. The endpoint
+    /// answers either RFC 6749 `{"error":"…","error_description":"…"}` or
+    /// the API shape `{"error":{"message":"…","code":"…"}}`.
+    static std::string error_detail(std::string_view body);
+
+    /// True when a refresh response means the saved refresh token is dead
+    /// (expired, reused, revoked, unknown) and only a new sign-in recovers.
+    /// A 401 from the token endpoint is always that: the request carried
+    /// nothing but the refresh token and the public client id.
+    static bool refresh_rejected(long status_code, std::string_view body);
+
 private:
     OAuthToken exchange_code(const std::string& code,
                              const std::string& redirect_uri,

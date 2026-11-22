@@ -1702,6 +1702,28 @@ TEST_CASE("OpenAIOAuthFlow uses JSON refresh and revocation payloads",
           == R"({"token":"refresh-token","token_type_hint":"refresh_token","client_id":"client"})");
 }
 
+TEST_CASE("OpenAIOAuthFlow reads the nested refresh error and treats it as terminal",
+          "[OpenAIOAuthFlow][reauthentication]") {
+    // Verbatim shape returned by auth.openai.com for a dead refresh token.
+    constexpr std::string_view body = R"({
+  "error": {
+    "message": "Could not validate your refresh token. Please try signing in again.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "invalid_refresh_token"
+  }
+})";
+    CHECK(OpenAIOAuthFlow::error_detail(body)
+          == "invalid_refresh_token: Could not validate your refresh token. "
+             "Please try signing in again.");
+    CHECK(OpenAIOAuthFlow::refresh_rejected(401, body));
+    CHECK(OpenAIOAuthFlow::refresh_rejected(400, R"({"error":{"code":"refresh_token_reused"}})"));
+    CHECK(OpenAIOAuthFlow::error_detail(R"({"error":"invalid_grant","error_description":"x"})")
+          == "invalid_grant: x");
+    CHECK_FALSE(OpenAIOAuthFlow::refresh_rejected(503, "upstream unavailable"));
+    CHECK_FALSE(OpenAIOAuthFlow::refresh_rejected(429, R"({"error":{"code":"rate_limited"}})"));
+}
+
 TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts account_id from access token JWT", "[OpenAIOAuthFlow]") {
     const std::string access_token =
         "eyJhbGciOiJub25lIn0."

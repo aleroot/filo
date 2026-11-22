@@ -123,12 +123,23 @@ constexpr std::string_view kCodexDefaultClientId = "app_EMoamEEZ73f0CkXaXp7hrann
         simdjson::dom::element doc = parser.parse(padded);
         std::string_view error;
         std::string_view description;
-        core::utils::json::ignore_error(doc["error"].get_string().get(error));
-        core::utils::json::ignore_error(doc["error_description"].get_string().get(description));
+        simdjson::dom::object nested;
+        if (doc["error"].get_object().get(nested) == simdjson::SUCCESS) {
+            core::utils::json::ignore_error(nested["code"].get_string().get(error));
+            core::utils::json::ignore_error(nested["message"].get_string().get(description));
+            if (error.empty()) {
+                core::utils::json::ignore_error(nested["type"].get_string().get(error));
+            }
+        } else {
+            core::utils::json::ignore_error(doc["error"].get_string().get(error));
+            core::utils::json::ignore_error(
+                doc["error_description"].get_string().get(description));
+        }
         if (!error.empty() && !description.empty()) {
             return std::string(error) + ": " + std::string(description);
         }
         if (!error.empty()) return std::string(error);
+        if (!description.empty()) return std::string(description);
     } catch (...) {
     }
     return "request rejected";
@@ -480,6 +491,21 @@ std::string OpenAIOAuthFlow::build_revoke_request_body(
         + ",\"client_id\":" + json_string(client_id) + "}";
 }
 
+std::string OpenAIOAuthFlow::error_detail(std::string_view body) {
+    return oauth_error_detail(body);
+}
+
+bool OpenAIOAuthFlow::refresh_rejected(long status_code, std::string_view body) {
+    // auth.openai.com answers 401 {"error":{"code":"invalid_refresh_token"}}
+    // for a token it does not accept (observed 2026-11-22); the
+    // refresh_token_* codes are the expired/reused/revoked variants.
+    return status_code == 401 || oauth_error_is_invalid_grant(body)
+        || body.contains("\"refresh_token_expired\"")
+        || body.contains("\"refresh_token_reused\"")
+        || body.contains("\"refresh_token_invalidated\"")
+        || body.contains("\"invalid_refresh_token\"");
+}
+
 OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
     int64_t req_time = now_unix_seconds();
 
@@ -491,8 +517,10 @@ OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
     );
 
     if (r.status_code != 200) {
-        if (oauth_error_is_invalid_grant(r.text)) {
-            throw OAuthRefreshRejected::by_provider("OpenAI");
+        if (refresh_rejected(r.status_code, r.text)) {
+            throw OAuthRefreshRejected(
+                "OpenAI rejected the saved refresh token ("
+                + oauth_error_detail(r.text) + "). Sign in again to continue.");
         }
         throw std::runtime_error("Token refresh failed ("
                                  + std::to_string(r.status_code) + "): "
