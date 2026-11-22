@@ -2,7 +2,9 @@
 #include "../landrun/LandrunSettings.hpp"
 
 #include "SteeringGuard.hpp"
+#include "ModelGuidance.hpp"
 #include "SteeringLoader.hpp"
+#include "WorkingRules.hpp"
 #include "../scm/ScmFactory.hpp"
 #include "../tools/SkillRegistry.hpp"
 #include "../utils/FileSystemUtils.hpp"
@@ -24,7 +26,8 @@ namespace {
     return session_context.workspace_view().primary();
 }
 
-[[nodiscard]] std::string build_runtime_prompt(std::string_view mode) {
+[[nodiscard]] std::string build_runtime_prompt(std::string_view mode,
+                                               const ModelGuidance* guidance) {
     std::string prompt =
         "You are Filo, an advanced AI coding assistant running in " + std::string(mode) + " mode.\n\n";
     if (mode == "AUTO") {
@@ -51,32 +54,12 @@ namespace {
                   "Verify your changes where possible. Ask clarifying questions only when truly needed.";
     }
 
-    // Shared doctrine, one line per rule. Kept deliberately compact: this rides
-    // in every request on every provider, so each sentence has to earn its tokens.
-    prompt += "\n\n[Working rules]\n"
-              "- Bias to action. Before ending a turn, check your last message: if it is a plan, "
-              "a promise of future work, or a question one tool call could answer, do the work "
-              "instead.\n"
-              "- Prefer one stated assumption over a blocking question; ask only when the answer "
-              "would change your approach. Persistence requests authorize effort, never broader "
-              "permissions.\n"
-              "- If the user describes a problem without asking for a change, investigate and "
-              "report findings; do not edit unless asked.\n"
-              "- \"Done\", \"fixed\", or \"verified\" requires evidence observed this session: "
-              "tool output, the file as it now reads, a passing command. If you did not check, "
-              "say so. Failures and skipped steps go in the first sentence; never present a "
-              "workaround as a fix.\n"
-              "- Batch independent tool calls in one block; sequence only real dependencies. "
-              "Prefer dedicated tools over shell (read, grep_search, apply_patch, python); "
-              "search before reading; read the smallest range that answers the question.\n"
-              "- Make the smallest correct change, in the file's existing style. No drive-by "
-              "refactors, speculative comments, or defensive code for states that cannot "
-              "happen.\n"
-              "- Lead replies with the outcome and keep them as short as the task allows; end "
-              "real work with a short recap that stands alone. Correct yourself only when the "
-              "error would change the user's code or decisions.\n"
-              "- Never stage, commit, push, or discard git state unless asked; never revert "
-              "changes you did not make. Never print, log, or commit secrets.";
+    if (guidance == nullptr) {
+        prompt += render_working_rules();
+    } else {
+        prompt += render_working_rules(guidance->rule_overrides);
+        prompt += guidance->instructions;
+    }
 
     prompt += "\n\nYou can delegate well-scoped, self-contained subtasks via the `task` tool.";
     prompt += " Use the `subagent_type` values listed in the task tool schema/description.";
@@ -243,6 +226,11 @@ ContextBuilder& ContextBuilder::with_mode(std::string_view mode) {
     return *this;
 }
 
+ContextBuilder& ContextBuilder::with_model_guidance(const ModelGuidance* guidance) noexcept {
+    model_guidance_ = guidance;
+    return *this;
+}
+
 ContextBuilder& ContextBuilder::with_memory_prompt(std::string prompt) {
     memory_prompt_ = std::move(prompt);
     return *this;
@@ -271,7 +259,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         ContextLayerKind::RuntimeInstructions,
         PromptStability::Stable,
         "runtime",
-        build_runtime_prompt(mode_));
+        build_runtime_prompt(mode_, model_guidance_));
 
     append_layer(
         layers,

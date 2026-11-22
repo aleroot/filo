@@ -441,6 +441,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/FileAccessScope.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/ModelGuidance.cpp
     src/core/context/PromptCode.cpp
     src/core/context/PromptPlan.cpp
     src/core/context/ContextWindowTracker.cpp
@@ -448,6 +449,7 @@ set(FILO_CORE_SOURCES
     src/core/context/SessionContext.cpp
     src/core/context/SteeringGuard.cpp
     src/core/context/SteeringLoader.cpp
+    src/core/context/WorkingRules.cpp
     src/core/code/CodeBlock.cpp
     src/core/code/InteractiveCodeRunner.cpp
     src/core/landrun/LandrunDriverFactory.cpp
@@ -830,6 +832,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_context_mentions.cpp
     tests/test_session_reference.cpp
     tests/test_context_builder.cpp
+    tests/test_model_guidance.cpp
     tests/test_steering_guard.cpp
     tests/test_context_window.cpp
     tests/test_openai_provider.cpp

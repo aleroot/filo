@@ -447,6 +447,7 @@ public:
     void set_active_model(std::string model) {
         std::lock_guard lock(history_mutex_);
         active_model_ = std::move(model);
+        retarget_prompt_unlocked(active_model_);
         refresh_context_window_snapshot_unlocked();
     }
 
@@ -716,6 +717,9 @@ private:
 
     void ensure_system_prompt();
     void refresh_stable_prompt_state_unlocked();
+    /// Write the stable prompt for @p model: rebuilt only when the model's
+    /// guidance profile differs from the one the prompt was written for.
+    void retarget_prompt_unlocked(std::string_view model);
 
     /// Rarely changing conversation state (the compaction summary): part of
     /// the prompt prefix every wire can cache.
@@ -859,6 +863,8 @@ private:
     std::vector<std::string> stable_memory_entry_ids_;
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;
+    /// The model guidance the stable prompt is written for; nullptr = shared doctrine.
+    const core::context::ModelGuidance* prompt_guidance_ = nullptr;
     core::context::ContextWindowSnapshot context_window_snapshot_;
     core::session::SessionEfficiencyController efficiency_controller_;
     HistoryCompactor history_compactor_;

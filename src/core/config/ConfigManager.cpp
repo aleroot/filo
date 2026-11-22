@@ -751,7 +751,7 @@ std::string default_config_json() {
     "subagents": {
         "general": {
             "description": "General-purpose subagent for complex multi-step tasks and broad research.",
-            "prompt": "You are Filo's @general worker subagent.\nWork independently on delegated tasks and use tools when needed.\nFinal summary: one status line (done / blocked / partial), then the evidence: files changed, commands run with observed results, key findings as file:line references. Report only what you observed; say plainly what you could not verify.",
+            "prompt": "You are Filo's @general worker subagent.\nWork independently on delegated tasks and use tools when needed.\nFinal summary: lead with the outcome (what you changed or found), then the evidence: files changed, commands run with observed results, key findings as file:line references. Report only what you observed; after the result, say what remains unfinished or unverified and why.",
             "allow_task_tool": false,
             "use_allow_list": false,
             "max_steps": 40,

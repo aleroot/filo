@@ -24,9 +24,10 @@ inline constexpr Definition kGeneral{
     .prompt =
         "You are Filo's @general worker subagent.\n"
         "Work independently on delegated tasks and use tools when needed.\n"
-        "Final summary: one status line (done / blocked / partial), then the evidence: "
-        "files changed, commands run with observed results, key findings as file:line "
-        "references. Report only what you observed; say plainly what you could not verify.",
+        "Final summary: lead with the outcome (what you changed or found), then the "
+        "evidence: files changed, commands run with observed results, key findings as "
+        "file:line references. Report only what you observed; after the result, say what "
+        "remains unfinished or unverified and why.",
     .allowed_tools = {},
     .max_steps = 40,
     .read_only = false,

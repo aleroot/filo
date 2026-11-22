@@ -2844,6 +2844,40 @@ TEST_CASE("Agent enforces per-turn model and tool constraints",
     CHECK(std::ranges::find(tool_names, std::string("task")) == tool_names.end());
 }
 
+TEST_CASE("Agent writes the prompt for the model each turn targets",
+          "[agent][turn][model_guidance]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    core::tools::ToolManager tool_manager;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_active_model("gpt-6.2-sol");
+
+    send_and_wait(agent, "this is broken");
+    send_and_wait(agent, "and this", core::agent::Agent::TurnCallbacks{
+        .model_override = "claude-opus-5-5",
+    });
+    send_and_wait(agent, "back to the active model");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 3);
+    const auto prompt = [&](std::size_t i) { return requests[i].prompt_plan.render(); };
+    constexpr std::string_view kGuidance = "[Model guidance]";
+    constexpr std::string_view kSharedRule = "do not edit unless asked";
+
+    CHECK(prompt(0).find(kGuidance) != std::string::npos);
+    CHECK(prompt(0).find(kSharedRule) == std::string::npos);
+    // The history's system message says the same as the plan.
+    CHECK(requests[0].messages[0].content.find(kGuidance) != std::string::npos);
+
+    CHECK(requests[1].model == "claude-opus-5-5");
+    CHECK(prompt(1).find(kGuidance) == std::string::npos);
+    CHECK(prompt(1).find(kSharedRule) != std::string::npos);
+
+    CHECK(prompt(2).find(kGuidance) != std::string::npos);
+}
+
 TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {
     auto provider = std::make_shared<RotatingToolLoopProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

@@ -7,6 +7,7 @@
 #include "../changes/FileChangeJson.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
+#include "../context/ModelGuidance.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/ToolCallAssembly.hpp"
@@ -832,6 +833,7 @@ void Agent::capture_turn_provider_snapshot_unlocked(
     turn_state.model = turn_callbacks.model_override.empty()
         ? active_model_
         : turn_callbacks.model_override;
+    retarget_prompt_unlocked(turn_state.model);
 }
 
 AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
@@ -1207,6 +1209,13 @@ void Agent::refresh_stable_prompt_state_unlocked() {
     refresh_context_window_snapshot_unlocked();
 }
 
+void Agent::retarget_prompt_unlocked(std::string_view model) {
+    const auto* guidance = core::context::find_model_guidance(model);
+    if (guidance == prompt_guidance_) return;
+    prompt_guidance_ = guidance;
+    refresh_stable_prompt_state_unlocked();
+}
+
 core::context::SessionContext Agent::session_context_snapshot() const {
     std::lock_guard lock(history_mutex_);
     return session_context_;
@@ -1296,6 +1305,7 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     stable_prompt_plan_ =
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
+            .with_model_guidance(prompt_guidance_)
             .with_memory_prompt(std::move(memory_projection.block))
             .include_project_context(session_context_.include_project_context)
             .include_project_facts(false)

@@ -10,6 +10,8 @@
 
 namespace core::context {
 
+struct ModelGuidance;
+
 // Mutable repository observations kept outside the cache-stable prompt plan.
 struct ProjectFactsSnapshot {
     std::string status;
@@ -34,6 +36,9 @@ public:
     explicit ContextBuilder(const SessionContext& session_context);
 
     ContextBuilder& with_mode(std::string_view mode);
+    // The profile of the model the prompt is written for (find_model_guidance);
+    // nullptr keeps the shared doctrine as written.
+    ContextBuilder& with_model_guidance(const ModelGuidance* guidance) noexcept;
     // Pre-rendered semantic memory block from MemorySystem. ContextBuilder
     // does not open a store: the composition root projects the prompt so the
     // assembler stays independent of persistence.
@@ -51,6 +56,7 @@ private:
     const SessionContext& session_context_;
     std::string memory_prompt_;
     std::string mode_ = "BUILD";
+    const ModelGuidance* model_guidance_ = nullptr;
     bool include_project_context_ = true;
     bool include_skill_catalog_ = true;
     bool include_project_facts_ = true;
