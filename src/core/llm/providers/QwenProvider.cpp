@@ -108,12 +108,18 @@ std::unique_ptr<protocols::ApiProtocolBase> QwenProvider::make_protocol(
     };
     const std::string effort = options.default_effort.empty() && (options.token_plan || options.responses)
         ? "high" : options.default_effort;
+    // Alibaba Model Studio (aliyuncs.com) serves qwen3.8 with all five effort
+    // tiers; QwenCloud hosts only offer low/medium/xhigh (Qwen Code presets).
+    const bool full_effort_ladder = !is_qwencloud_endpoint(options.base_url)
+        && (is_qwen_standard_endpoint(options.base_url)
+            || is_qwen_token_plan_endpoint(options.base_url));
     if (options.responses) {
         return std::make_unique<DashScopeResponsesProtocol>(DashScopeResponsesProtocol::Options{
             .default_effort = effort,
             .enable_hosted_tools = options.token_plan,
             .deployment = options.token_plan ? DashScopeDeployment::TokenPlan : DashScopeDeployment::Standard,
             .lifecycle = lifecycle,
+            .full_effort_ladder = full_effort_ladder,
         });
     }
     if (options.token_plan) {
@@ -121,10 +127,12 @@ std::unique_ptr<protocols::ApiProtocolBase> QwenProvider::make_protocol(
             .thinking_budget = options.thinking_budget,
             .default_effort = effort,
             .lifecycle = lifecycle,
+            .full_effort_ladder = full_effort_ladder,
         });
     }
     return std::make_unique<DashScopeProtocol>(options.thinking_budget, effort,
-                                             DashScopeDeployment::Standard, lifecycle);
+                                             DashScopeDeployment::Standard, lifecycle,
+                                             full_effort_ladder);
 }
 
 void QwenProvider::stream_response(const ChatRequest& request,

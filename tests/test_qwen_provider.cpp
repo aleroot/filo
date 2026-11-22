@@ -1124,6 +1124,58 @@ TEST_CASE("Qwen4-Max clamps medium to high and caps non-thinking output like Qwe
     CHECK_THAT(responses, !Catch::Matchers::ContainsSubstring("262144"));
 }
 
+TEST_CASE("Alibaba Model Studio forwards the full qwen3.8 effort ladder like Qwen Code",
+          "[qwen][serializer][thinking][effort]") {
+    const DashScopeTokenPlanProtocol alibaba({.full_effort_ladder = true});
+    const DashScopeTokenPlanProtocol qwencloud;
+    for (const auto model : {"qwen3.8-max", "qwen3.8-max-0902", "qwen3.8-flash"}) {
+        CAPTURE(model);
+        const auto caps = alibaba.reasoning_capabilities(model);
+        CHECK(resolve_reasoning_effort("high", caps).effective == "high");
+        CHECK(resolve_reasoning_effort("max", caps).effective == "max");
+        CHECK(resolve_reasoning_effort("medium", caps).effective == "medium");
+        CHECK(resolve_reasoning_effort("high", qwencloud.reasoning_capabilities(model)).effective
+              == "xhigh");
+
+        for (const auto effort : {"low", "medium", "high", "xhigh", "max"}) {
+            CAPTURE(effort);
+            auto request = make_simple_request(model);
+            request.effort = effort;
+            CHECK_THAT(alibaba.serialize(request), Catch::Matchers::ContainsSubstring(
+                std::string(R"("reasoning_effort":")") + effort + '"'));
+        }
+        auto high = make_simple_request(model);
+        high.effort = "high";
+        CHECK_THAT(qwencloud.serialize(high),
+                   Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"xhigh")"));
+        // The provider default stands for the model default, xhigh on qwen3.8.
+        CHECK_THAT(alibaba.serialize(make_simple_request(model)),
+                   Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"xhigh")"));
+    }
+    // qwen4-max keeps its own ladder on every host.
+    auto qwen4 = make_simple_request("qwen4-max");
+    qwen4.effort = "max";
+    CHECK_THAT(alibaba.serialize(qwen4),
+               Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"xhigh")"));
+}
+
+TEST_CASE("Kimi K3 on DashScope switches thinking with reasoning_effort only",
+          "[qwen][serializer][thinking][effort]") {
+    DashScopeProtocol protocol(0, "high");
+    auto request = make_simple_request("kimi-k3");
+    request.effort = "none";
+    const auto off = protocol.serialize(request);
+    require_valid_json(off);
+    CHECK_THAT(off, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+    CHECK_THAT(off, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+
+    request.effort = "low";
+    const auto low = protocol.serialize(request);
+    CHECK_THAT(low, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+    CHECK_THAT(low, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    CHECK_THAT(low, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+}
+
 TEST_CASE("Token Plan preserves a Qwen 3.8 budget without competing effort",
           "[qwen][serializer][thinking][effort]") {
     DashScopeTokenPlanProtocol protocol({.thinking_budget = 4096});

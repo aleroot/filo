@@ -86,16 +86,23 @@ public:
      *                         (qwen3.7-plus, qwen3-max, qwen3-plus, etc.).
      *                         Coder models and unknown aliases receive no
      *                         unsupported thinking fields.
+     * @param full_effort_ladder  Alibaba Model Studio hosts (aliyuncs.com)
+     *                         serve qwen3.8-max/flash with all five tiers
+     *                         (low/medium/high/xhigh/max), as Qwen Code's
+     *                         presets declare. QwenCloud hosts offer only
+     *                         low/medium/xhigh.
      */
     explicit DashScopeProtocol(int thinking_budget = 0,
                                std::string default_effort = {},
                                DashScopeDeployment deployment = DashScopeDeployment::Standard,
-                               DashScopeRequestLifecycle lifecycle = {})
+                               DashScopeRequestLifecycle lifecycle = {},
+                               bool full_effort_ladder = false)
         : OpenAIProtocol(/*stream_usage=*/true)  // DashScope supports usage in stream
         , thinking_budget_(thinking_budget)
         , default_effort_(std::move(default_effort))
         , deployment_(deployment)
-        , lifecycle_(std::move(lifecycle)) {}
+        , lifecycle_(std::move(lifecycle))
+        , full_effort_ladder_(full_effort_ladder) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "dashscope"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
@@ -103,7 +110,7 @@ public:
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<DashScopeProtocol>(
-            thinking_budget_, default_effort_, deployment_, lifecycle_);
+            thinking_budget_, default_effort_, deployment_, lifecycle_, full_effort_ladder_);
     }
 
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
@@ -182,6 +189,7 @@ private:
     DashScopeDeployment deployment_ = DashScopeDeployment::Standard;
     RateLimitInfo last_rate_limit_;  ///< Populated by on_response()
     DashScopeRequestLifecycle lifecycle_;
+    bool full_effort_ladder_ = false;
 };
 
 /**
@@ -201,6 +209,7 @@ public:
         bool enable_hosted_tools = true;
         DashScopeDeployment deployment = DashScopeDeployment::TokenPlan;
         DashScopeRequestLifecycle lifecycle = {};
+        bool full_effort_ladder = false; ///< See DashScopeProtocol.
     };
 
     DashScopeResponsesProtocol();
@@ -257,6 +266,7 @@ public:
         int thinking_budget = 0;
         std::string default_effort = "high";
         DashScopeRequestLifecycle lifecycle = {};
+        bool full_effort_ladder = false; ///< See DashScopeProtocol.
     };
 
     DashScopeTokenPlanProtocol();

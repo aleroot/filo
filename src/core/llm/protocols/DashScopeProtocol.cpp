@@ -61,6 +61,12 @@ struct ThinkingPolicy {
     // Qwen4-Max's declared ladder is low/high/xhigh; Qwen Code clamps a
     // legacy `medium` onto `high` instead of forwarding it.
     bool medium_maps_high = false;
+    // Alibaba Model Studio declares qwen3.8-max/flash with all five tiers, so
+    // `high` and `max` reach the wire unchanged (Qwen Code presets).
+    bool full_ladder = false;
+    // Kimi K3 turns thinking off with `reasoning_effort:"none"` and reads no
+    // `enable_thinking` (Qwen Code disableField:'reasoning_effort').
+    bool effort_only = false;
 };
 
 [[nodiscard]] std::string wire_model(std::string_view model) {
@@ -69,13 +75,16 @@ struct ThinkingPolicy {
     return id;
 }
 
-[[nodiscard]] ThinkingPolicy thinking_policy(std::string_view model) {
+[[nodiscard]] ThinkingPolicy thinking_policy(std::string_view model, bool full_ladder = false) {
     const std::string id = wire_model(model);
     if (qwen_model_supports_tiered_effort(id)) {
         const bool native_high = id.starts_with("qwen4")
             || id.starts_with("qwen-latest-series-invite-");
-        return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true,
-                false, native_high, qwen_model_is_qwen4_max(id)};
+        ThinkingPolicy policy{ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true,
+                              false, native_high, qwen_model_is_qwen4_max(id)};
+        policy.full_ladder = full_ladder
+            && (id.starts_with("qwen3.8-max") || id.starts_with("qwen3.8-flash"));
+        return policy;
     }
     if (id.starts_with("qwen3-coder")) return {};
     // Hosted GLM exposes a toggle, not native vendor effort tiers. GLM-5.3
@@ -89,7 +98,11 @@ struct ThinkingPolicy {
             || id.starts_with("deepseek-v4-pro-0813");
         return {ThinkingMode::VendorEffort, false, native_low, native_low};
     }
-    if (id.starts_with("kimi-k3")) return {ThinkingMode::VendorEffort, false, true};
+    if (id.starts_with("kimi-k3")) {
+        ThinkingPolicy policy{ThinkingMode::VendorEffort, false, true};
+        policy.effort_only = true;
+        return policy;
+    }
     if (id.starts_with("kimi-k2.7-code") || id.starts_with("kimi-k2-thinking")) {
         return {ThinkingMode::Toggle, true};
     }
@@ -103,8 +116,9 @@ struct ThinkingPolicy {
     return {};
 }
 
-[[nodiscard]] ReasoningCapabilities qwen_reasoning_capabilities(std::string_view model) {
-    const auto policy = thinking_policy(model);
+[[nodiscard]] ReasoningCapabilities qwen_reasoning_capabilities(std::string_view model,
+                                                                bool full_ladder = false) {
+    const auto policy = thinking_policy(model, full_ladder);
     if (policy.mode == ThinkingMode::None) return {};
     ReasoningCapabilities caps{policy.required ? ReasoningCapability::Required
                                                : ReasoningCapability::Disable};
@@ -112,6 +126,7 @@ struct ThinkingPolicy {
     caps = caps | ReasoningCapability::Effort | ReasoningCapability::MapsMinimalToLow;
     if (policy.mode == ThinkingMode::QwenEffort) {
         caps = caps | ReasoningCapability::XHighEffort;
+        if (policy.full_ladder) return caps | ReasoningCapability::MaxEffort;
         if (!policy.native_high) caps = caps | ReasoningCapability::MapsHighToXHigh;
         if (policy.medium_maps_high) caps = caps | ReasoningCapability::MapsMediumToHigh;
         return caps;
@@ -207,6 +222,7 @@ struct ThinkingPolicy {
         // into `xhigh`. Qwen4-Max clamps `medium` to `high` like Qwen Code;
         // other tiered routes forward it.
         if (effort == "minimal") return "low";
+        if (policy.full_ladder) return effort;
         if (effort == "medium" && policy.medium_maps_high) return "high";
         if (effort == "max") return "xhigh";
         if (effort == "high" && !policy.native_high) return "xhigh";
@@ -492,7 +508,7 @@ void DashScopeProtocol::prepare_request(ChatRequest& request) {
 }
 
 ReasoningCapabilities DashScopeProtocol::reasoning_capabilities(std::string_view model) const noexcept {
-    return qwen_reasoning_capabilities(model);
+    return qwen_reasoning_capabilities(model, full_effort_ladder_);
 }
 
 std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
@@ -577,20 +593,25 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
     }
 
     const std::string id = wire_model(req.model);
-    const auto policy = thinking_policy(req.model);
-    const bool mandatory = policy.required;
+    // Only an explicit turn effort takes the full ladder. The provider default
+    // (`high`) stands for "model default", which Qwen Code puts at xhigh for
+    // qwen3.8, so it keeps the compact mapping.
+    const auto policy = thinking_policy(req.model, full_effort_ladder_ && !req.effort.empty());
     const std::string effort = normalize_dashscope_effort(
         req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort), policy);
+    const bool mandatory = policy.required;
     if (policy.mode != ThinkingMode::None) {
-        if (policy.mode == ThinkingMode::QwenEffort) {
+        if (policy.mode == ThinkingMode::QwenEffort || policy.effort_only) {
             // The tiered Qwen family (qwen3.8-max/flash, qwen4*, the
             // latest-series previews) reads `reasoning_effort`; `enable_thinking`
             // is not its switch. Qwen Code turns an explicit disable into
             // `reasoning_effort:"none"` and drops `enable_thinking` for these
-            // models, so sending the toggle leaves thinking on.
+            // models, so sending the toggle leaves thinking on. Kimi K3 takes
+            // the same shape (Qwen Code disableField:'reasoning_effort').
             if (effort == "none") {
                 payload += R"(,"reasoning_effort":"none")";
-            } else if (req.effort.empty() && thinking_budget_ > 0) {
+            } else if (policy.mode == ThinkingMode::QwenEffort
+                       && req.effort.empty() && thinking_budget_ > 0) {
                 payload += R"(,"enable_thinking":true,"thinking_budget":)" + std::to_string(thinking_budget_);
             } else if (!effort.empty()) {
                 payload += R"(,"reasoning_effort":")" + effort + '"';
@@ -640,12 +661,13 @@ void DashScopeResponsesProtocol::prepare_request(ChatRequest& request) {
 
 ReasoningCapabilities DashScopeResponsesProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
-    return qwen_reasoning_capabilities(model);
+    return qwen_reasoning_capabilities(model, options_.full_effort_ladder);
 }
 
 std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const {
     ChatRequest effective = req;
-    const auto policy = thinking_policy(req.model);
+    const auto policy = thinking_policy(
+        req.model, options_.full_effort_ladder && !req.effort.empty());
     const std::string effort = normalize_dashscope_effort(
         req.effort.empty() ? std::string_view(options_.default_effort) : std::string_view(req.effort),
         policy);
@@ -814,7 +836,7 @@ DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol()
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(Options options)
     : DashScopeTokenPlanProtocol(options, std::make_unique<DashScopeProtocol>(
           options.thinking_budget, options.default_effort,
-          DashScopeDeployment::TokenPlan, options.lifecycle)) {}
+          DashScopeDeployment::TokenPlan, options.lifecycle, options.full_effort_ladder)) {}
 
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(
     Options options,
