@@ -1070,8 +1070,10 @@ TEST_CASE("Qwen 4 and latest-series previews take the tiered effort contract at 
         CHECK(resolve_reasoning_effort("high", caps).effective == "high");
         CHECK(resolve_reasoning_effort("max", caps).effective == "xhigh");
 
+        const bool qwen4_max = std::string_view(model) == "qwen4-max";
         for (const auto& [configured, expected] :
-             {std::pair{"minimal", "low"}, {"low", "low"}, {"medium", "medium"},
+             {std::pair{"minimal", "low"}, {"low", "low"},
+              {"medium", qwen4_max ? "high" : "medium"},
               {"high", "high"}, {"xhigh", "xhigh"}, {"max", "xhigh"}}) {
             CAPTURE(configured);
             auto request = make_simple_request(model);
@@ -1090,6 +1092,36 @@ TEST_CASE("Qwen 4 and latest-series previews take the tiered effort contract at 
     require_valid_json(responses);
     CHECK_THAT(responses, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"high"})"));
     CHECK_THAT(responses, !Catch::Matchers::ContainsSubstring(R"("effort":"xhigh")"));
+}
+
+TEST_CASE("Qwen4-Max clamps medium to high and caps non-thinking output like Qwen Code",
+          "[qwen][serializer][thinking][effort][qwen4]") {
+    DashScopeProtocol chat(0, "high");
+    auto request = make_simple_request("qwen4-max");
+    request.effort = "medium";
+    CHECK_THAT(chat.serialize(request),
+               Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    CHECK(resolve_reasoning_effort("medium", chat.reasoning_capabilities("qwen4-max")).effective
+          == "high");
+    // Other tiered routes still forward medium.
+    auto plus = make_simple_request("qwen4-plus");
+    plus.effort = "medium";
+    CHECK_THAT(chat.serialize(plus),
+               Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"medium")"));
+
+    request.max_tokens = 262144;
+    request.effort = "high";
+    CHECK_THAT(chat.serialize(request), Catch::Matchers::ContainsSubstring(R"("max_tokens":262144)"));
+    request.effort = "none";
+    const auto off = chat.serialize(request);
+    require_valid_json(off);
+    CHECK_THAT(off, Catch::Matchers::ContainsSubstring(R"("max_tokens":131072)"));
+    CHECK_THAT(off, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+
+    const auto responses = DashScopeResponsesProtocol({.default_effort = "high"}).serialize(request);
+    require_valid_json(responses);
+    CHECK_THAT(responses, Catch::Matchers::ContainsSubstring("131072"));
+    CHECK_THAT(responses, !Catch::Matchers::ContainsSubstring("262144"));
 }
 
 TEST_CASE("Token Plan preserves a Qwen 3.8 budget without competing effort",

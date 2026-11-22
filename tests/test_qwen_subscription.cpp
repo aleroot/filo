@@ -235,6 +235,35 @@ TEST_CASE("Qwen Subscription sends the thinking switch with a budget and no effo
     }
 }
 
+TEST_CASE("Qwen Subscription gives qwen4-max its own budget ladder",
+          "[qwen][subscription][thinking][qwen4]") {
+    CHECK(subscription::thinking_budget("low", "qwen4-max") == 4096);
+    CHECK(subscription::thinking_budget("", "qwen4-max") == 131072);
+    CHECK(subscription::thinking_budget("medium", "qwen4-max") == 131072);
+    CHECK(subscription::thinking_budget("high", "qwen4-max") == 131072);
+    CHECK(subscription::thinking_budget("xhigh", "qwen4-max") == 262144);
+    CHECK(subscription::thinking_budget("max", "qwen4-max-latest") == 262144);
+    CHECK_FALSE(subscription::thinking_budget("none", "qwen4-max"));
+    CHECK(subscription::thinking_budget("high", "qwen4-plus") == 32768);
+
+    const auto caps = protocols::QwenSubscriptionProtocol{}.reasoning_capabilities("qwen4-max");
+    CHECK(resolve_reasoning_effort("medium", caps).effective == "high");
+    CHECK(resolve_reasoning_effort("xhigh", caps).effective == "xhigh");
+    CHECK(resolve_reasoning_effort("max", caps).effective == "xhigh");
+
+    simdjson::dom::parser parser;
+    auto off = request_for("qwen4-max", "none");
+    off.max_tokens = 262144;
+    const auto off_body = parse(parser, protocols::QwenSubscriptionProtocol{}.serialize(off));
+    CHECK_FALSE(off_body["enable_thinking"].get_bool().value());
+    CHECK(off_body["max_tokens"].get_int64().value() == 131072);
+
+    auto on = request_for("qwen4-max", "high");
+    on.max_tokens = 262144;
+    const auto on_body = parse(parser, protocols::QwenSubscriptionProtocol{}.serialize(on));
+    CHECK(on_body["max_tokens"].get_int64().value() == 262144);
+}
+
 TEST_CASE("Qwen Subscription offers off, low, medium and high", "[qwen][subscription][thinking]") {
     const auto caps = protocols::QwenSubscriptionProtocol{}.reasoning_capabilities("qwen4-plus");
     CHECK(resolve_reasoning_effort("none", caps).effective == "off");

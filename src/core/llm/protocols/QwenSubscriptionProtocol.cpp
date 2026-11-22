@@ -14,7 +14,14 @@ namespace core::llm::protocols {
 namespace subscription = core::llm::qwen_subscription;
 
 ReasoningCapabilities QwenSubscriptionProtocol::reasoning_capabilities(
-    std::string_view) const noexcept {
+    std::string_view model) const noexcept {
+    // Qwen4-Max: low/high/xhigh budgets, medium shares the high budget and
+    // max falls back to xhigh.
+    if (qwen_model_is_qwen4_max(model)) {
+        return ReasoningCapability::Effort | ReasoningCapability::Disable
+            | ReasoningCapability::MapsMinimalToLow | ReasoningCapability::MapsMediumToHigh
+            | ReasoningCapability::XHighEffort;
+    }
     // Off plus three budgets. xhigh lands on the high budget and max, which
     // is not offered, falls back to high as well.
     return ReasoningCapability::Effort | ReasoningCapability::Disable
@@ -33,13 +40,22 @@ std::string QwenSubscriptionProtocol::serialize(const ChatRequest& req) const {
         ? Serializer::EmptyAssistantContentPolicy::EmptyString
         : Serializer::EmptyAssistantContentPolicy::EmptyStringWhenReasoning;
 
-    std::string payload = Serializer::serialize(req, options);
+    const std::string_view effort = req.effort.empty()
+        ? std::string_view(default_effort_) : std::string_view(req.effort);
+    const auto budget = subscription::thinking_budget(effort, req.model);
+    std::string payload;
+    if (const int cap = qwen_non_thinking_output_limit(req.model);
+        !budget && cap > 0 && req.max_tokens && *req.max_tokens > cap) {
+        ChatRequest bounded = req;
+        bounded.max_tokens = cap;
+        payload = Serializer::serialize(bounded, options);
+    } else {
+        payload = Serializer::serialize(req, options);
+    }
     if (!payload.ends_with('}')) return payload;
     payload.pop_back();
 
-    const std::string_view effort = req.effort.empty()
-        ? std::string_view(default_effort_) : std::string_view(req.effort);
-    if (const auto budget = subscription::thinking_budget(effort)) {
+    if (budget) {
         payload += R"(,"enable_thinking":true,"thinking_budget":)" + std::to_string(*budget);
     } else {
         payload += R"(,"enable_thinking":false)";

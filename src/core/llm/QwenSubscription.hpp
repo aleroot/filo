@@ -47,8 +47,10 @@ inline constexpr std::string_view kSignInRequiredMessage =
 [[nodiscard]] std::string display_plan(std::string_view member_type);
 
 /// Thinking budget the gateway reads for a Filo effort; nullopt disables thinking.
-/// Unset efforts use the route default (medium).
-[[nodiscard]] std::optional<int> thinking_budget(std::string_view effort);
+/// Unset efforts use the route default (medium). Qwen4-Max has its own table
+/// (low 4096, medium/high 131072, xhigh/max 262144), as in Qwen Code.
+[[nodiscard]] std::optional<int> thinking_budget(std::string_view effort,
+                                                 std::string_view model = {});
 
 /**
  * Message for a gateway error body, or nullopt when it carries none.

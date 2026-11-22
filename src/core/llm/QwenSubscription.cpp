@@ -1,5 +1,7 @@
 #include "QwenSubscription.hpp"
 
+#include "core/llm/QwenModelTraits.hpp"
+
 #include "core/utils/AsciiUtils.hpp"
 #include "core/utils/StringUtils.hpp"
 #include "core/utils/UriUtils.hpp"
@@ -73,11 +75,16 @@ std::string display_plan(std::string_view member_type) {
     return plan;
 }
 
-std::optional<int> thinking_budget(std::string_view effort) {
+std::optional<int> thinking_budget(std::string_view effort, std::string_view model) {
     const std::string value = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(effort));
     if (value == "none" || value == "off" || value == "disabled") return std::nullopt;
     if (value == "minimal" || value == "low") return 4096;
+    if (qwen_model_is_qwen4_max(model)) {
+        // The server maps 1-4096 to low, 4097-131072 to high and
+        // 131073-262144 to xhigh.
+        return value == "xhigh" || value == "max" || value == "ultra" ? 262144 : 131072;
+    }
     if (value == "high" || value == "xhigh" || value == "max" || value == "ultra") return 32768;
     // Qwen Code defaults every subscription model to medium.
     return 16384;

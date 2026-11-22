@@ -58,6 +58,9 @@ struct ThinkingPolicy {
     // Qwen4 and the invite-only latest-series previews accept `high` as its
     // own tier. Qwen 3.8's ladder still folds `high` into `xhigh`.
     bool native_high = false;
+    // Qwen4-Max's declared ladder is low/high/xhigh; Qwen Code clamps a
+    // legacy `medium` onto `high` instead of forwarding it.
+    bool medium_maps_high = false;
 };
 
 [[nodiscard]] std::string wire_model(std::string_view model) {
@@ -72,7 +75,7 @@ struct ThinkingPolicy {
         const bool native_high = id.starts_with("qwen4")
             || id.starts_with("qwen-latest-series-invite-");
         return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true,
-                false, native_high};
+                false, native_high, qwen_model_is_qwen4_max(id)};
     }
     if (id.starts_with("qwen3-coder")) return {};
     // Hosted GLM exposes a toggle, not native vendor effort tiers. GLM-5.3
@@ -110,6 +113,7 @@ struct ThinkingPolicy {
     if (policy.mode == ThinkingMode::QwenEffort) {
         caps = caps | ReasoningCapability::XHighEffort;
         if (!policy.native_high) caps = caps | ReasoningCapability::MapsHighToXHigh;
+        if (policy.medium_maps_high) caps = caps | ReasoningCapability::MapsMediumToHigh;
         return caps;
     }
     caps = caps | ReasoningCapability::MaxEffort | ReasoningCapability::MapsMediumToHigh;
@@ -200,8 +204,10 @@ struct ThinkingPolicy {
         // `max` and `minimal` are client names. Qwen4's native tiers are
         // low/high/xhigh (Qwen Code passes `high` through and clamps `max`
         // to `xhigh`). Qwen 3.8 still has no distinct `high` and folds it
-        // into `xhigh`. `medium` is forwarded; Qwen4's server maps it to high.
+        // into `xhigh`. Qwen4-Max clamps `medium` to `high` like Qwen Code;
+        // other tiered routes forward it.
         if (effort == "minimal") return "low";
+        if (effort == "medium" && policy.medium_maps_high) return "high";
         if (effort == "max") return "xhigh";
         if (effort == "high" && !policy.native_high) return "xhigh";
     }
@@ -518,7 +524,14 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     constexpr std::size_t kMaxRequestImages = 250;
     std::string payload;
     const auto images = count_image_inputs(req);
-    const int output_cap = qwen_endpoint_output_limit(req.model);
+    int output_cap = qwen_endpoint_output_limit(req.model);
+    if (const int non_thinking = qwen_non_thinking_output_limit(req.model);
+        non_thinking > 0
+        && normalize_dashscope_effort(
+               req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort),
+               thinking_policy(req.model)) == "none") {
+        output_cap = non_thinking;
+    }
     const bool cap_output = output_cap > 0 && req.max_tokens && *req.max_tokens > output_cap;
     if (images > kMaxRequestImages || cap_output) {
         ChatRequest bounded = req;
@@ -632,7 +645,12 @@ ReasoningCapabilities DashScopeResponsesProtocol::reasoning_capabilities(
 
 std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const {
     ChatRequest effective = req;
-    if (const int cap = qwen_endpoint_output_limit(req.model);
+    const auto policy = thinking_policy(req.model);
+    const std::string effort = normalize_dashscope_effort(
+        req.effort.empty() ? std::string_view(options_.default_effort) : std::string_view(req.effort),
+        policy);
+    const int non_thinking_cap = effort == "none" ? qwen_non_thinking_output_limit(req.model) : 0;
+    if (const int cap = non_thinking_cap > 0 ? non_thinking_cap : qwen_endpoint_output_limit(req.model);
         cap > 0 && effective.max_tokens && *effective.max_tokens > cap) {
         effective.max_tokens = cap;
     }
@@ -656,10 +674,6 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
         }
     }
 
-    const auto policy = thinking_policy(req.model);
-    const std::string effort = normalize_dashscope_effort(
-        req.effort.empty() ? std::string_view(options_.default_effort) : std::string_view(req.effort),
-        policy);
     const std::string effective_effort = effort.empty()
         ? (policy.native_high ? "high" : "xhigh")
         : effort;

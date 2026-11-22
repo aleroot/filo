@@ -163,8 +163,18 @@ std::optional<ModelInfo> qwen_hosted_model_info(std::string_view model) {
 int qwen_endpoint_output_limit(std::string_view model) {
     if (const auto* entry = hosted_entry(model)) return entry->output;
     // Thinking and the answer share this cap. 131072 is the non-thinking max.
-    if (wire_id(model).starts_with("qwen4-max")) return 262144;
+    if (qwen_model_is_qwen4_max(model)) return 262144;
     return 0;
+}
+
+int qwen_non_thinking_output_limit(std::string_view model) {
+    // Qwen Code QWEN4_NON_THINKING_OUTPUT_CAP: with thinking off the gateway
+    // rejects max_tokens above 131072.
+    return qwen_model_is_qwen4_max(model) ? 131072 : 0;
+}
+
+bool qwen_model_is_qwen4_max(std::string_view model) {
+    return wire_id(model).starts_with("qwen4-max");
 }
 
 int qwen_endpoint_context_window(std::string_view model) {

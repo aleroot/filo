@@ -27,6 +27,10 @@ namespace core::llm {
 [[nodiscard]] std::optional<ModelInfo> qwen_hosted_model_info(std::string_view model);
 [[nodiscard]] int qwen_endpoint_context_window(std::string_view model);
 [[nodiscard]] int qwen_endpoint_output_limit(std::string_view model);
+/// Output cap with thinking disabled, or 0 when it equals the endpoint cap.
+[[nodiscard]] int qwen_non_thinking_output_limit(std::string_view model);
+/// Qwen4-Max takes its own effort ladder (low/high/xhigh) and budget table.
+[[nodiscard]] bool qwen_model_is_qwen4_max(std::string_view model);
 
 /// Match official URL hosts exactly, including regional and QwenCloud hosts.
 [[nodiscard]] bool is_qwen_token_plan_endpoint(std::string_view base_url);
