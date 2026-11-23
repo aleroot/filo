@@ -207,6 +207,24 @@ std::optional<SessionReferenceToken> parse_session_reference_token(std::string_v
     };
 }
 
+std::vector<SessionReferenceSpan> scan_session_references(std::string_view input) {
+    std::vector<SessionReferenceSpan> spans;
+    core::context::PromptCodeCursor code(input);
+    for (std::size_t at = input.find(kSessionReferenceSigil); at != std::string_view::npos;
+         at = input.find(kSessionReferenceSigil, at + 1)) {
+        if (code.contains(at)) {
+            at = code.end_at(at) - 1;
+            continue;
+        }
+        auto token = parse_session_reference_token(input, at);
+        if (!token.has_value()) continue;
+        const std::size_t end = token->end - token->trailing_suffix.size();
+        spans.push_back({.begin = at, .end = end, .token = std::move(*token)});
+        at = spans.back().token.end - 1;
+    }
+    return spans;
+}
+
 std::optional<SessionData> resolve_session_reference(const SessionStore& store,
                                                      const SessionReferenceToken& token,
                                                      std::string_view current_session_id) {

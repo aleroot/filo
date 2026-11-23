@@ -589,7 +589,9 @@ Element render_picker_panel(std::string_view tag,
                             std::string_view input_text,
                             int selected_index,
                             int max_visible_items = kPickerMaxDisplayRows,
-                            std::string_view helper_prefix = "↑↓ navigate  ↵/Tab complete") {
+                            std::string_view helper_prefix = "↑↓ navigate  ↵/Tab complete",
+                            const ThemedColor& accent = ColorYellowDark,
+                            Color tag_fill = FillYellowDark) {
     const int total = static_cast<int>(rows.size());
     const auto [view_start, view_end] = picker_visible_range(total, selected_index, max_visible_items);
     const int above = view_start;
@@ -599,7 +601,7 @@ Element render_picker_panel(std::string_view tag,
     visible.reserve(static_cast<std::size_t>(view_end - view_start + 2));
     if (above > 0) {
         visible.push_back(hbox({
-            text(" ↑ ") | color(ColorYellowDark),
+            text(" ↑ ") | color(accent),
             text(std::format("{} more above", above)) | color(ColorTextMuted) | dim | xflex
         }));
     }
@@ -608,7 +610,7 @@ Element render_picker_panel(std::string_view tag,
     }
     if (below > 0) {
         visible.push_back(hbox({
-            text(" ↓ ") | color(ColorYellowDark),
+            text(" ↓ ") | color(accent),
             text(std::format("{} more below", below)) | color(ColorTextMuted) | dim | xflex
         }));
     }
@@ -626,8 +628,8 @@ Element render_picker_panel(std::string_view tag,
             make_prompt_box(std::move(input_line))
         }),
         prompt_body_height(input_text, 2),
-        graphic(ColorYellowDark),
-        FillYellowDark);
+        graphic(accent),
+        tag_fill);
 }
 
 // The running signal shared by the footer and the thread tabs: the tool rows'
@@ -1054,6 +1056,38 @@ Element render_mention_prompt_panel(const std::vector<MentionSuggestion>& sugges
 
     return render_picker_panel("FILES", std::move(rows), std::move(input_line),
                                input_text, selected_index);
+}
+
+Element render_inline_command_prompt_panel(
+    const std::vector<core::commands::InlineCommandSuggestion>& suggestions,
+    int selected_index,
+    std::string_view title,
+    Element input_line,
+    std::string_view input_text) {
+    std::vector<Element> rows;
+    rows.reserve(suggestions.size());
+    for (std::size_t i = 0; i < suggestions.size(); ++i) {
+        const auto& suggestion = suggestions[i];
+        auto row = hbox({
+            text(suggestion.current ? " ● " : "   ") | color(ColorPromptCommand),
+            text(suggestion.insertion) | ftxui::bold | size(WIDTH, GREATER_THAN, 12),
+            text("  "),
+            text(suggestion.description) | color(ColorTextMuted) | xflex,
+        });
+        rows.push_back(static_cast<int>(i) == selected_index
+                           ? std::move(row) | color(ColorPromptCommand) | bgcolor(TintPromptCommand)
+                           : std::move(row) | color(ColorText));
+    }
+
+    return render_picker_panel(title,
+                               std::move(rows),
+                               std::move(input_line),
+                               input_text,
+                               selected_index,
+                               kPickerMaxDisplayRows,
+                               "↑↓ navigate  ↵/Tab insert · applied on send",
+                               ColorPromptCommand,
+                               FillPromptCommand);
 }
 
 namespace {

@@ -82,6 +82,15 @@ const std::array kThemedInks{
     NamedColor{"ColorDiffAdd", tui::ColorDiffAdd},
     NamedColor{"ColorDiffDelete", tui::ColorDiffDelete},
     NamedColor{"ColorDiffHunk", tui::ColorDiffHunk},
+    NamedColor{"ColorPromptCommand", tui::ColorPromptCommand},
+    NamedColor{"ColorPromptFile", tui::ColorPromptFile},
+    NamedColor{"ColorPromptConversation", tui::ColorPromptConversation},
+    NamedColor{"ColorPromptAgent", tui::ColorPromptAgent},
+    NamedColor{"UltrathinkGradient[0]", tui::UltrathinkGradient[0]},
+    NamedColor{"UltrathinkGradient[1]", tui::UltrathinkGradient[1]},
+    NamedColor{"UltrathinkGradient[2]", tui::UltrathinkGradient[2]},
+    NamedColor{"UltrathinkGradient[3]", tui::UltrathinkGradient[3]},
+    NamedColor{"UltrathinkGradient[4]", tui::UltrathinkGradient[4]},
 };
 
 // A pseudo-terminal: the slave is what Filo talks to, the master plays the

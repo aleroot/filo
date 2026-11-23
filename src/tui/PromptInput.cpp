@@ -109,7 +109,8 @@ Element place_cursor_at_origin(Element child, Screen::Cursor::Shape shape) {
 
 class PromptInputBase : public ComponentBase, public InputOption {
 public:
-    explicit PromptInputBase(InputOption option) : InputOption(std::move(option)) {}
+    PromptInputBase(InputOption option, PromptInputStyler styler)
+        : InputOption(std::move(option)), styler_(std::move(styler)) {}
 
 private:
     static constexpr std::string_view kBracketedPasteStart = "\x1B[200~";
@@ -139,6 +140,69 @@ private:
 
     Element Text(std::string_view input) {
         return password() ? MaskedText(input) : text(input);
+    }
+
+    /// The styler's spans, sorted and without overlaps. A masked input shows
+    /// no styles: they would reveal where the tokens are.
+    std::vector<PromptInputSpan> Spans() {
+        if (!styler_ || password()) return {};
+        auto spans = styler_(*content, static_cast<std::size_t>(cursor_position()));
+        std::ranges::stable_sort(spans, {}, &PromptInputSpan::begin);
+        std::vector<PromptInputSpan> kept;
+        kept.reserve(spans.size());
+        for (auto& span : spans) {
+            if (span.begin >= span.end || !span.style) continue;
+            if (!kept.empty() && span.begin < kept.back().end) continue;
+            kept.push_back(std::move(span));
+        }
+        return kept;
+    }
+
+    /// One line as runs of text cut at every span edge and around the cursor
+    /// glyph. @p line_offset is the line's byte offset in the content.
+    template <typename ApplyFocus>
+    Element RenderLine(std::string_view line,
+                       std::size_t line_offset,
+                       const std::vector<PromptInputSpan>& spans,
+                       std::optional<std::size_t> cursor,
+                       const ApplyFocus& apply_focus) {
+        const std::size_t line_end = line_offset + line.size();
+        const auto first = std::ranges::upper_bound(spans, line_offset, {}, &PromptInputSpan::end);
+
+        std::vector<std::size_t> cuts{0, line.size()};
+        for (auto span = first; span != spans.end() && span->begin < line_end; ++span) {
+            cuts.push_back(std::clamp(span->begin, line_offset, line_end) - line_offset);
+            cuts.push_back(std::clamp(span->end, line_offset, line_end) - line_offset);
+        }
+        if (cursor.has_value() && *cursor < line.size()) {
+            cuts.push_back(*cursor);
+            cuts.push_back(glyph_next(line, *cursor));
+        }
+        std::ranges::sort(cuts);
+        const auto duplicates = std::ranges::unique(cuts);
+        cuts.erase(duplicates.begin(), duplicates.end());
+
+        Elements pieces;
+        auto span = first;
+        for (std::size_t i = 0; i + 1 < cuts.size(); ++i) {
+            const std::size_t from = cuts[i];
+            const std::size_t absolute = line_offset + from;
+            while (span != spans.end() && span->end <= absolute) ++span;
+
+            Element piece = Text(line.substr(from, cuts[i + 1] - from));
+            if (span != spans.end() && span->begin <= absolute) piece = piece | span->style;
+            if (cursor == from) piece = apply_focus(std::move(piece)) | reflect(cursor_box_);
+            pieces.push_back(std::move(piece));
+        }
+        if (!cursor.has_value()) {
+            return pieces.size() == 1 ? std::move(pieces.front())
+                 : pieces.empty()     ? Text("")
+                                      : hbox(std::move(pieces));
+        }
+        if (*cursor >= line.size()) {
+            pieces.push_back(apply_focus(text(" ")) | reflect(cursor_box_));
+        }
+        return hbox(std::move(pieces)) | xflex;
     }
 
     /// Current cursor position expressed as (line index, char-index within line).
@@ -220,32 +284,19 @@ private:
             elements.reserve(static_cast<size_t>(last_line - first_line + 1));
         }
 
+        const auto spans = Spans();
+        std::size_t line_offset = 0;
+        for (int i = 0; i < first_line; ++i) {
+            line_offset += lines[static_cast<size_t>(i)].size() + 1;
+        }
+
         for (int i = first_line; i <= last_line; ++i) {
             const auto& line = lines[static_cast<size_t>(i)];
-            if (i != cursor_line) {
-                elements.push_back(Text(line));
-                continue;
-            }
-
-            if (cursor_char_index >= static_cast<int>(line.size())) {
-                elements.push_back(hbox(Elements{
-                    Text(line),
-                    apply_focus(text(" ")) | reflect(cursor_box_),
-                }) | xflex);
-                continue;
-            }
-
-            const int glyph_start = cursor_char_index;
-            const int glyph_end = static_cast<int>(glyph_next(line, static_cast<size_t>(glyph_start)));
-            const std::string before = line.substr(0, glyph_start);
-            const std::string at     = line.substr(glyph_start, glyph_end - glyph_start);
-            const std::string after  = line.substr(glyph_end);
-
-            elements.push_back(hbox(Elements{
-                Text(before),
-                apply_focus(Text(at)) | reflect(cursor_box_),
-                Text(after),
-            }) | xflex);
+            const auto cursor = i == cursor_line
+                ? std::optional<std::size_t>(static_cast<std::size_t>(cursor_char_index))
+                : std::nullopt;
+            elements.push_back(RenderLine(line, line_offset, spans, cursor, apply_focus));
+            line_offset += line.size() + 1;
         }
 
         // Cap the reported height requirement.  The virtualized window above
@@ -723,6 +774,7 @@ private:
 
     bool Focusable() const final { return true; }
 
+    PromptInputStyler styler_;
     bool hovered_ = false;
     Box  box_;
     Box  cursor_box_;
@@ -737,10 +789,11 @@ private:
 
 Component PromptInput(StringRef content,
                       StringRef placeholder,
-                      InputOption option) {
+                      InputOption option,
+                      PromptInputStyler styler) {
     option.content = std::move(content);
     option.placeholder = std::move(placeholder);
-    return Make<PromptInputBase>(std::move(option));
+    return Make<PromptInputBase>(std::move(option), std::move(styler));
 }
 
 } // namespace tui

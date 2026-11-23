@@ -265,3 +265,54 @@ TEST_CASE("Context mention completion keeps directory quotes open for continued 
     REQUIRE(completed.text == R"(Inspect @"notes/debug log/)");
     REQUIRE(completed.cursor == completed.text.size());
 }
+
+TEST_CASE("scan_mentions finds the tokens a sent prompt expands, outside code",
+          "[context][mentions]") {
+    const std::string input =
+        R"(read @src/a.cpp, then @"my notes.txt" and mail a@b.com `@skip` @)";
+    const auto mentions = core::context::scan_mentions(input);
+    REQUIRE(mentions.size() == 2);
+
+    CHECK(mentions[0].raw_path == "src/a.cpp");
+    CHECK(input.substr(mentions[0].begin, mentions[0].end - mentions[0].begin) == "@src/a.cpp");
+    CHECK(input[mentions[0].token_end - 1] == ',');  // punctuation is not the path
+    CHECK_FALSE(mentions[0].quoted);
+
+    CHECK(mentions[1].raw_path == "my notes.txt");
+    CHECK(mentions[1].quoted);
+    CHECK(input.substr(mentions[1].begin, mentions[1].end - mentions[1].begin)
+          == R"(@"my notes.txt")");
+}
+
+TEST_CASE("classify_mention decides what a mention attaches, as expand_prompt does",
+          "[context][mentions]") {
+    const auto root = make_temp_dir("filo_classify_mention");
+    const auto workspace = root / "workspace";
+    write_text(workspace / "src" / "a.cpp", "int main() {}\n");
+    write_text(workspace / "shot.png", "x");
+    write_text(root / "outside.txt", "x");
+
+    const auto classify = [&](std::string_view prompt) {
+        const auto mentions = core::context::scan_mentions(prompt);
+        REQUIRE(mentions.size() == 1);
+        return core::context::classify_mention(mentions.front(), workspace);
+    };
+    using core::context::MentionTarget;
+    CHECK(classify("@src/a.cpp") == MentionTarget::File);
+    CHECK(classify("@src") == MentionTarget::Directory);
+    CHECK(classify("@shot.png") == MentionTarget::Image);
+    CHECK(classify("@../outside.txt") == MentionTarget::OutOfScope);
+    CHECK(classify("@here") == MentionTarget::Prose);
+    CHECK(classify("@explore") == MentionTarget::Subagent);
+    CHECK(classify(R"(@"missing.txt")") == MentionTarget::Missing);
+
+    CHECK(core::context::attaches_content(MentionTarget::Image));
+    CHECK_FALSE(core::context::attaches_content(MentionTarget::Missing));
+
+    // The sent prompt agrees: prose stays verbatim, a file is expanded.
+    const auto expanded = core::context::expand_mentions("@here look at @src/a.cpp", workspace);
+    CHECK(expanded.starts_with("@here look at "));
+    CHECK(expanded.find("int main()") != std::string::npos);
+
+    fs::remove_all(root);
+}

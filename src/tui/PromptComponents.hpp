@@ -5,6 +5,7 @@
 #include "DiffPreview.hpp"
 #include "CodeBlockRunner.hpp"
 #include "RewindPicker.hpp"
+#include "core/commands/InlineCommands.hpp"
 #include "core/llm/Models.hpp"
 #include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionReferenceCatalogue.hpp"
@@ -170,6 +171,15 @@ ftxui::Element render_mention_prompt_panel(const std::vector<MentionSuggestion>&
                                            int selected_index,
                                            ftxui::Element input_line,
                                            std::string_view input_text);
+
+/// The inline command picker: the commands a prompt can carry, or the values
+/// of one of them. @p title names what is listed ("INLINE COMMANDS", "EFFORT").
+ftxui::Element render_inline_command_prompt_panel(
+    const std::vector<core::commands::InlineCommandSuggestion>& suggestions,
+    int selected_index,
+    std::string_view title,
+    ftxui::Element input_line,
+    std::string_view input_text);
 
 /// The `#` conversation picker: title (query terms emphasised), turns and
 /// relative age, then id, `#N` shortcut, project, model and the local

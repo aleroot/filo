@@ -24,6 +24,7 @@
 #include "viewer/ExternalDiffViewerController.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
+#include "PromptHighlights.hpp"
 #include "QuestionDialogController.hpp"
 #include "ThreadModalHost.hpp"
 #include "PromptCacheWatch.hpp"
@@ -41,6 +42,8 @@
 #include "core/session/SessionData.hpp"
 #include "core/session/ThreadCatalog.hpp"
 #include "core/commands/GoalExecutor.hpp"
+#include "core/commands/InlineCommands.hpp"
+#include "core/workspace/PathVisibility.hpp"
 #include "core/goal/GoalEngine.hpp"
 #include "core/session/GoalManager.hpp"
 #include "core/session/SessionHandoff.hpp"
@@ -1228,6 +1231,7 @@ RunResult run(RunOptions opts) {
     PickerState mention_picker;
     PickerState session_reference_picker;
     PickerState command_picker;
+    PickerState inline_command_picker;
 
     // ── Prompt history ────────────────────────────────────────────────────────
     // Persistent history store for input prompts.
@@ -2782,6 +2786,7 @@ RunResult run(RunOptions opts) {
 
     auto reset_composer_chrome = [&]() {
         command_picker.clear();
+        inline_command_picker.clear();
         mention_picker.clear();
         session_reference_picker.clear();
         double_escape_state = {};
@@ -5737,18 +5742,19 @@ RunResult run(RunOptions opts) {
     std::function<bool()> open_steering_picker;
     std::function<bool(tui::MemoryMenuPage, std::string_view)> open_memory_picker;
 
-    auto open_command_option_picker = [&](std::string_view command_name) -> bool {
-        CommandOptionPickerState next;
-        next.active = true;
-        next.command_name = std::string(command_name);
-
+    // The values of the commands that take one of a closed set. The option
+    // picker lists them, and an inline command accepts exactly these values.
+    auto command_value_menu =
+        [&](std::string_view command_name) -> std::optional<CommandOptionPickerState> {
+        CommandOptionPickerState menu;
+        menu.command_name = std::string(command_name);
         if (command_name == "/effort") {
-            next.title = "EFFORT";
-            next.current_value = session_effort_value.empty()
+            menu.title = "EFFORT";
+            menu.current_value = session_effort_value.empty()
                 ? std::string("auto")
                 : session_effort_value;
-            next.help_text = "Esc closes this panel.";
-            next.options = {
+            menu.help_text = "Esc closes this panel.";
+            menu.options = {
                 {.value = "auto", .label = "Auto", .description = "Use the model catalog default for the selected model."},
                 {.value = "low", .label = "Low", .description = "Prefer faster, lighter reasoning when supported."},
                 {.value = "medium", .label = "Medium", .description = "Use balanced reasoning effort when supported."},
@@ -5757,47 +5763,63 @@ RunResult run(RunOptions opts) {
                 {.value = "max", .label = "Max", .description = "Request maximum effort; unsupported models fall back to high."},
                 {.value = "ultra", .label = "Ultra", .description = "Request maximum reasoning with automatic delegation when supported."},
             };
-            next.on_select = switch_effort;
+            menu.on_select = switch_effort;
         } else if (command_name == "/compression" || command_name == "/compress") {
-            next.title = "COMPRESSION";
-            next.current_value = normalize_compression_mode(
+            menu.title = "COMPRESSION";
+            menu.current_value = normalize_compression_mode(
                 config_manager.get_config().context_compression).value_or("off");
-            next.help_text = "Esc closes this panel.";
-            next.options = {
+            menu.help_text = "Esc closes this panel.";
+            menu.options = {
                 {.value = "off", .label = "Off", .description = "Keep tool outputs exact until the hard history-size clamp."},
                 {.value = "light", .label = "Light", .description = "Summarize only oversized read and shell outputs."},
                 {.value = "full", .label = "Full", .description = "Use read caching plus command-family summaries for common shell output."},
                 {.value = "ultra", .label = "Ultra", .description = "Use the tightest built-in budgets for high token pressure."},
             };
-            next.on_select = switch_compression;
-        } else if (command_name == "/memory") {
-            return open_memory_picker && open_memory_picker(tui::MemoryMenuPage::Overview, {});
+            menu.on_select = switch_compression;
         } else if (command_name == "/advisor") {
             // The provider owns the list: it knows which advisors it accepts
             // for the model this session runs.
             const auto [provider, model] = active_model_target();
             const auto support = advisor_capability(provider);
             if (!support) {
-                return false;
+                return std::nullopt;
             }
-            next.title = "ADVISOR";
-            next.current_value = session_advisor_value.empty()
+            menu.title = "ADVISOR";
+            menu.current_value = session_advisor_value.empty()
                 ? std::string("off")
                 : session_advisor_value;
-            next.help_text =
+            menu.help_text =
                 "The provider runs the advisor inside the turn. Esc closes this panel.";
-            next.options = {
+            menu.options = {
                 {.value = "off", .label = "No advisor",
                  .description = "Run every turn on the main model alone."},
             };
             for (const auto& choice : support->advisor_choices(model)) {
-                next.options.push_back({
+                menu.options.push_back({
                     .value = choice,
                     .label = choice,
                     .description = "Consult this model at the provider's decision points.",
                 });
             }
-            next.on_select = switch_advisor;
+            menu.on_select = switch_advisor;
+        } else {
+            return std::nullopt;
+        }
+        return menu;
+    };
+
+    auto open_command_option_picker = [&](std::string_view command_name) -> bool {
+        CommandOptionPickerState next;
+        next.active = true;
+        next.command_name = std::string(command_name);
+
+        if (auto menu = command_value_menu(command_name)) {
+            next = std::move(*menu);
+            next.active = true;
+        } else if (command_name == "/memory") {
+            return open_memory_picker && open_memory_picker(tui::MemoryMenuPage::Overview, {});
+        } else if (command_name == "/advisor") {
+            return false;
         } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
             next.title = "WORKSPACE";
             next.help_text = "Enter opens selection. Esc closes this panel.";
@@ -8227,6 +8249,175 @@ RunResult run(RunOptions opts) {
         }
     };
 
+    // ── Prompt tokens ────────────────────────────────────────────────────────
+    // What the draft will do on send — inline commands, `@` attachments, `#`
+    // conversations, `ultrathink` — coloured in the input (tui/PromptHighlights.hpp).
+
+    // The commands a prompt may carry anywhere. Their values are the option
+    // picker's (command_value_menu), so what the picker offers is exactly what
+    // a prompt may set; anything else after the name stays prose.
+    struct CachedInlineCatalog {
+        core::commands::InlineCommandCatalog catalog;
+        std::chrono::steady_clock::time_point built_at;
+    };
+    std::optional<CachedInlineCatalog> inline_catalog_cache;
+    auto inline_command_catalog = [&]() -> const core::commands::InlineCommandCatalog& {
+        constexpr auto kTtl = std::chrono::seconds(1);
+        const auto now = std::chrono::steady_clock::now();
+        if (inline_catalog_cache.has_value() && now - inline_catalog_cache->built_at < kTtl) {
+            return inline_catalog_cache->catalog;
+        }
+
+        std::vector<core::commands::InlineCommandSpec> specs;
+        const auto add_menu = [&](std::string_view name,
+                                  std::string_view description,
+                                  std::vector<core::commands::InlineCommandValue> extra) {
+            const auto menu = command_value_menu(name);
+            if (!menu.has_value()) return;
+            core::commands::InlineCommandSpec spec{
+                .name = std::string(name),
+                .description = std::string(description),
+                .values = {},
+                .current_value = menu->current_value,
+            };
+            for (const auto& option : menu->options) {
+                spec.values.push_back({.value = option.value, .description = option.description});
+            }
+            spec.values.append_range(std::move(extra));
+            specs.push_back(std::move(spec));
+        };
+        add_menu("/effort", "Reasoning effort for the turns that follow",
+                 {{.value = "off", .description = "Turn reasoning off where the model allows it."}});
+        add_menu("/compression", "How much tool output is condensed", {});
+        add_menu("/advisor", "The model the provider consults inside a turn", {});
+        specs.push_back({
+            .name = "/yolo",
+            .description = "Approve tool calls without asking",
+            .values = {
+                {.value = "on", .description = "Approve every tool call without asking."},
+                {.value = "off", .description = "Ask before tools that need approval."},
+            },
+            .current_value = is_yolo_mode_enabled() ? "on" : "off",
+        });
+
+        inline_catalog_cache = CachedInlineCatalog{
+            .catalog = core::commands::InlineCommandCatalog(std::move(specs)),
+            .built_at = now,
+        };
+        return inline_catalog_cache->catalog;
+    };
+
+    tui::PromptTokenCache prompt_token_cache;
+    auto prompt_tokens = [&](std::string_view prompt,
+                             std::size_t cursor) -> const std::vector<tui::PromptToken>& {
+        const auto base_dir = current_runtime->agent()->workspace_snapshot().primary();
+        // Built once per scan, on the first mention: reading .agentignore is
+        // only worth it when the draft names a file.
+        auto classify = [base_dir, visibility = std::optional<core::workspace::PathVisibility>{}](
+                            const core::context::MentionToken& mention) mutable {
+            if (!visibility.has_value()) {
+                visibility = core::workspace::AgentIgnorePathVisibilityFactory{}.for_root(base_dir);
+            }
+            return core::context::classify_mention(mention, base_dir, &*visibility);
+        };
+        const tui::PromptTokenSources sources{
+            .commands = &inline_command_catalog(),
+            .classify_mention = std::move(classify),
+            .conversation_title = [&](const core::session::SessionReferenceToken& token)
+                -> std::optional<std::string> {
+                if (auto row = session_reference_catalogue().resolve(token)) return row->title;
+                return std::nullopt;
+            },
+            .ultrathink = true,
+        };
+        return prompt_token_cache.tokens(prompt, cursor, sources);
+    };
+
+    // A command just changed a current value the chips show.
+    auto forget_prompt_tokens = [&]() {
+        inline_catalog_cache.reset();
+        prompt_token_cache.invalidate();
+    };
+
+    // The inline picker: command names typed mid-prompt, then their values.
+    struct InlineCommandSnapshot {
+        std::optional<core::commands::ActiveInlineCommand> active;
+        std::vector<core::commands::InlineCommandSuggestion> suggestions;
+    };
+
+    auto current_inline_command_snapshot = [&]() -> InlineCommandSnapshot {
+        InlineCommandSnapshot snapshot;
+        const auto& catalog = inline_command_catalog();
+        snapshot.active = core::commands::find_active_inline_command(
+            input_text,
+            static_cast<std::size_t>(std::max(input_cursor_position, 0)),
+            catalog);
+        if (snapshot.active.has_value()) {
+            snapshot.suggestions = core::commands::suggest_inline_commands(
+                *snapshot.active, catalog, kMaxAutocompleteSuggestions);
+        }
+        if (snapshot.suggestions.empty()) snapshot.active.reset();
+        return snapshot;
+    };
+
+    // A new list starts on the value the setting has now.
+    auto sync_inline_command_picker = [&](const InlineCommandSnapshot& snapshot) {
+        const std::string key = snapshot.active.has_value()
+            ? std::format("{}|{}", snapshot.active->replace_begin, snapshot.active->query)
+            : std::string{};
+        const bool fresh = key != inline_command_picker.key;
+        inline_command_picker.sync(key, static_cast<int>(snapshot.suggestions.size()));
+        if (!fresh) return;
+        const auto current = std::ranges::find_if(
+            snapshot.suggestions, &core::commands::InlineCommandSuggestion::current);
+        if (current != snapshot.suggestions.end()) {
+            inline_command_picker.selected =
+                static_cast<int>(current - snapshot.suggestions.begin());
+        }
+    };
+
+    auto inline_command_picker_visible = [&](const InlineCommandSnapshot& snapshot) {
+        return snapshot.active.has_value() && !inline_command_picker.suppressed;
+    };
+
+    // Enter completes a name, and a value that is not typed out yet; on a
+    // finished value it sends, so `/effort high` + Enter does not stall.
+    auto inline_command_accepts_on_enter = [&](const InlineCommandSnapshot& snapshot) {
+        const auto& active = *snapshot.active;
+        if (active.part == core::commands::ActiveInlineCommand::Part::Name) return true;
+        const auto& selected =
+            snapshot.suggestions[static_cast<std::size_t>(inline_command_picker.selected)];
+        const std::string_view typed = std::string_view(input_text).substr(
+            active.replace_begin, active.replace_end - active.replace_begin);
+        return selected.insertion != typed;
+    };
+
+    auto accept_selected_inline_command = [&]() -> bool {
+        auto snapshot = current_inline_command_snapshot();
+        sync_inline_command_picker(snapshot);
+        if (!inline_command_picker_visible(snapshot)) return false;
+        const auto& suggestion =
+            snapshot.suggestions[static_cast<std::size_t>(inline_command_picker.selected)];
+        const auto completed = core::commands::apply_inline_completion(
+            input_text, *snapshot.active, suggestion.insertion);
+        input_text = completed.text;
+        input_cursor_position = static_cast<int>(completed.cursor);
+        inline_command_picker.clear();
+        wake_ui();
+        return true;
+    };
+
+    auto inline_command_picker_title = [&](const InlineCommandSnapshot& snapshot) -> std::string {
+        if (snapshot.active->part == core::commands::ActiveInlineCommand::Part::Name) {
+            return "INLINE COMMANDS";
+        }
+        std::string title = snapshot.active->command.substr(1);
+        std::ranges::transform(title, title.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::toupper(ch));
+        });
+        return title;
+    };
+
     // ── Input component ──────────────────────────────────────────────────────
     auto input_option = InputOption();
     input_option.transform = [](InputState state) {
@@ -8482,6 +8673,21 @@ RunResult run(RunOptions opts) {
         };
 
         bind_memory_commands(ctx);
+
+        // Inline commands are applied first, each exactly as if typed on its
+        // own line; the rest of the prompt is what the model receives.
+        if (auto inline_commands = core::commands::extract_inline_commands(
+                text, inline_command_catalog());
+            !inline_commands.invocations.empty()) {
+            for (const auto& invocation : inline_commands.invocations) {
+                ctx.text = invocation.command_line();
+                cmd_executor.try_execute(ctx.text, ctx);
+            }
+            forget_prompt_tokens();
+            text = std::move(inline_commands.prompt);
+            if (text.empty()) return;
+            ctx.text = text;
+        }
         if (cmd_executor.try_execute(text, ctx)) return;
 
         // Only a prompt the user typed can say `ultrathink`: skill bodies and
@@ -8604,7 +8810,11 @@ RunResult run(RunOptions opts) {
         return false;
     };
 
-    auto input_component = PromptInput(&input_text, "Ask anything", input_option);
+    auto input_component = PromptInput(
+        &input_text, "Ask anything", input_option,
+        [&](std::string_view content, std::size_t cursor) {
+            return tui::prompt_input_spans(prompt_tokens(content, cursor));
+        });
     // One visible PromptInput, bound to the visible thread's composer. Drafts
     // for hidden threads live on ThreadRuntime and are exchanged on tab switch.
     // Question editors live on ThreadModalHost and are dispatched manually.
@@ -10378,6 +10588,30 @@ RunResult run(RunOptions opts) {
             }
         }
 
+        auto inline_snapshot = current_inline_command_snapshot();
+        sync_inline_command_picker(inline_snapshot);
+        if (inline_command_picker_visible(inline_snapshot)) {
+            const int count = static_cast<int>(inline_snapshot.suggestions.size());
+            if (event == Event::Tab
+                || (event == Event::Return && inline_command_accepts_on_enter(inline_snapshot))) {
+                return accept_selected_inline_command();
+            }
+            if (event == Event::ArrowDown) {
+                inline_command_picker.navigate_down(count);
+                return true;
+            }
+            if (event == Event::ArrowUp) {
+                inline_command_picker.navigate_up(count);
+                return true;
+            }
+            // Dismissed until the token changes, so prose that starts like a
+            // command can still be sent as typed.
+            if (event == Event::Escape) {
+                inline_command_picker.suppress();
+                return true;
+            }
+        }
+
         auto mention_snapshot = current_mention_snapshot();
         sync_mention_picker(mention_snapshot);
         if (!mention_snapshot.suggestions.empty()) {
@@ -10650,6 +10884,8 @@ RunResult run(RunOptions opts) {
         refresh_status_labels();
         auto command_snapshot = current_command_snapshot();
         sync_command_picker(command_snapshot);
+        auto inline_snapshot = current_inline_command_snapshot();
+        sync_inline_command_picker(inline_snapshot);
         auto mention_snapshot = current_mention_snapshot();
         sync_mention_picker(mention_snapshot);
         auto reference_snapshot = current_session_reference_snapshot();
@@ -11227,6 +11463,13 @@ RunResult run(RunOptions opts) {
                 bottom_el = render_command_prompt_panel(
                     command_snapshot.suggestions,
                     command_picker.selected,
+                    std::move(input_el),
+                    input_text);
+            } else if (inline_command_picker_visible(inline_snapshot)) {
+                bottom_el = render_inline_command_prompt_panel(
+                    inline_snapshot.suggestions,
+                    inline_command_picker.selected,
+                    inline_command_picker_title(inline_snapshot),
                     std::move(input_el),
                     input_text);
             } else if (mention_snapshot.active.has_value() && !mention_snapshot.suggestions.empty()) {

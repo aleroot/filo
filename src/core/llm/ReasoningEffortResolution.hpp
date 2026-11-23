@@ -2,9 +2,12 @@
 
 #include "ReasoningCapabilities.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace core::llm {
 
@@ -53,6 +56,10 @@ inline constexpr std::string_view kDisableUltrathinkEnv = "FILO_DISABLE_ULTRATHI
 /// fence, not part of a longer word, identifier, file name or path, and not in
 /// a prompt that starts with `/` (a command) or `!` (a shell command).
 [[nodiscard]] bool mentions_ultrathink(std::string_view prompt);
+
+/// The [begin, end) byte ranges of every occurrence mentions_ultrathink counts.
+[[nodiscard]] std::vector<std::pair<std::size_t, std::size_t>> ultrathink_spans(
+    std::string_view prompt);
 
 /// mentions_ultrathink() unless FILO_DISABLE_ULTRATHINK is set.
 [[nodiscard]] bool ultrathink_requested(std::string_view prompt);

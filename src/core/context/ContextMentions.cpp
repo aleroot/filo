@@ -281,7 +281,79 @@ void append_text_part(std::vector<core::llm::ContentPart>& parts, std::string_vi
     return attachment;
 }
 
+/// The mention whose '@' is at @p at (already known to be a token boundary),
+/// or nullopt when that '@' is plain text: an unclosed quote or no path.
+[[nodiscard]] std::optional<MentionToken> parse_mention_at(std::string_view input,
+                                                           std::size_t at) {
+    std::size_t cursor = at + 1;
+    if (cursor >= input.size()) return std::nullopt;
+
+    if (input[cursor] == '"' || input[cursor] == '\'') {
+        const char quote = input[cursor++];
+        const std::size_t close = input.find(quote, cursor);
+        if (close == std::string_view::npos || close == cursor) return std::nullopt;
+        return MentionToken{
+            .begin = at,
+            .end = close + 1,
+            .token_end = close + 1,
+            .raw_path = std::string(input.substr(cursor, close - cursor)),
+            .quoted = true,
+        };
+    }
+
+    auto parsed = parse_unquoted_mention(input, cursor);
+    if (parsed.raw_path.empty()) return std::nullopt;
+    return MentionToken{
+        .begin = at,
+        .end = parsed.token_end - parsed.trailing_suffix.size(),
+        .token_end = parsed.token_end,
+        .raw_path = std::move(parsed.raw_path),
+        .quoted = false,
+    };
+}
+
 } // namespace
+
+std::vector<MentionToken> scan_mentions(std::string_view input) {
+    std::vector<MentionToken> mentions;
+    PromptCodeCursor code(input);
+    for (std::size_t at = input.find('@'); at != std::string_view::npos;
+         at = input.find('@', at + 1)) {
+        if (code.contains(at)) {
+            at = code.end_at(at) - 1;
+            continue;
+        }
+        if (!is_mention_boundary(input, at)) continue;
+        if (auto mention = parse_mention_at(input, at)) {
+            at = mention->token_end - 1;
+            mentions.push_back(std::move(*mention));
+        }
+    }
+    return mentions;
+}
+
+MentionTarget classify_mention(const MentionToken& mention,
+                               const std::filesystem::path& base_dir,
+                               const core::workspace::PathVisibility* visibility) {
+    const std::filesystem::path resolved = resolve_mention_path(mention.raw_path, base_dir);
+    std::error_code ec;
+    if (!mention.quoted) {
+        // A bare `@word` is prose, not a file request, when it is a subagent
+        // tag or names nothing on disk (a GitHub handle, a decorator, `@here`).
+        if (is_reserved_subagent_mention(mention.raw_path)) return MentionTarget::Subagent;
+        if (!std::filesystem::exists(resolved, ec)) return MentionTarget::Prose;
+    }
+    if (visibility != nullptr && !visibility->is_visible(resolved)) return MentionTarget::Ignored;
+    if (is_image_file(resolved)) return MentionTarget::Image;
+    if (is_video_file(resolved)) return MentionTarget::Video;
+    if (!std::filesystem::path(mention.raw_path).is_absolute()
+        && !is_under_mention_root(base_dir, resolved)) {
+        return MentionTarget::OutOfScope;
+    }
+    if (std::filesystem::is_regular_file(resolved, ec)) return MentionTarget::File;
+    if (std::filesystem::is_directory(resolved, ec)) return MentionTarget::Directory;
+    return MentionTarget::Missing;
+}
 
 std::optional<ActiveMention> find_active_mention(std::string_view input,
                                                  std::size_t cursor) {
@@ -479,58 +551,25 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
-        const bool at_boundary = is_mention_boundary(input, i);
-        if (!at_boundary || i + 1 >= input.size()) {
+        const auto mention = is_mention_boundary(input, i)
+            ? parse_mention_at(input, i)
+            : std::nullopt;
+        if (!mention.has_value()) {
             append_plain_text(input.substr(i, 1));
             ++i;
             continue;
         }
 
-        std::size_t cursor = i + 1;
-        std::string raw_path;
-        std::string trailing_suffix;
-        bool quoted = false;
-        if (input[cursor] == '"' || input[cursor] == '\'') {
-            const char quote = input[cursor++];
-            quoted = true;
-            const std::size_t start = cursor;
-            while (cursor < input.size() && input[cursor] != quote) {
-                ++cursor;
-            }
-            if (cursor >= input.size()) {
-                append_plain_text(input.substr(i, 1));
-                ++i;
-                continue;
-            }
-            raw_path = std::string(input.substr(start, cursor - start));
-            ++cursor;
-        } else {
-            const auto parsed = parse_unquoted_mention(input, cursor);
-            raw_path = parsed.raw_path;
-            trailing_suffix = parsed.trailing_suffix;
-            cursor = parsed.token_end;
-        }
-
-        if (raw_path.empty()) {
-            append_plain_text(input.substr(i, 1));
-            ++i;
-            continue;
-        }
-
-        const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
-        // A bare `@word` is prose, not a file request, when it is a subagent
-        // tag or names nothing on disk (a GitHub handle, a decorator, `@here`):
-        // keep it verbatim. Quoted mentions are an explicit path request and
-        // still report a miss.
-        if (std::error_code ec;
-            !quoted
-            && (is_reserved_subagent_mention(raw_path)
-                || !std::filesystem::exists(resolved, ec))) {
+        const std::size_t cursor = mention->token_end;
+        const std::string_view raw_path = mention->raw_path;
+        const std::string trailing_suffix(input.substr(mention->end, cursor - mention->end));
+        const auto target = classify_mention(*mention, base_dir, &visibility);
+        if (target == MentionTarget::Prose || target == MentionTarget::Subagent) {
             append_plain_text(input.substr(i, cursor - i));
             i = cursor;
             continue;
         }
-        if (!visibility.is_visible(resolved)) {
+        if (target == MentionTarget::Ignored) {
             std::string expansion = render_ignored_path(raw_path);
             append_trailing_suffix(expansion, trailing_suffix);
             output.display_text += expansion;
@@ -539,11 +578,12 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
+        const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
         if (std::filesystem::path(raw_path).is_absolute()) {
             output.explicit_path_mentions.push_back(resolved);
         }
 
-        if (is_image_file(resolved)) {
+        if (target == MentionTarget::Image) {
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;
             output.content_parts.push_back(make_pinned_image_attachment(resolved));
@@ -552,7 +592,7 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
-        if (is_video_file(resolved)) {
+        if (target == MentionTarget::Video) {
             output.display_text += core::llm::describe_video_attachment(raw_path);
             output.display_text += trailing_suffix;
             output.content_parts.push_back(core::llm::ContentPart::make_video(

@@ -244,6 +244,7 @@ set(FILO_CORE_SOURCES
     src/tui/TextLayout.cpp
     src/tui/TerminalTheme.cpp
     src/tui/PromptInput.cpp
+    src/tui/PromptHighlights.cpp
     src/tui/PromptComponents.cpp
     src/tui/SettingsInput.cpp
     src/tui/QuestionDialog.cpp
@@ -549,6 +550,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/OneShotCompletion.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp
+    src/core/commands/InlineCommands.cpp
     src/core/commands/GoalExecutor.cpp
     src/core/commands/ReviewExecutor.cpp
     src/core/review/Git.cpp
@@ -882,6 +884,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_auto_classifier.cpp
     tests/test_complexity_scorer.cpp
     tests/test_prompt_input.cpp
+    tests/test_prompt_highlights.cpp
+    tests/test_inline_commands.cpp
     tests/test_http_response_lifecycle.cpp
     tests/test_stream_resilience.cpp
     tests/test_execution_journal.cpp
@@ -1174,6 +1178,8 @@ source_group(
         tests/test_router_provider.cpp
         tests/test_auto_classifier.cpp
         tests/test_prompt_input.cpp
+        tests/test_prompt_highlights.cpp
+        tests/test_inline_commands.cpp
         tests/test_session.cpp
         tests/test_session_retention.cpp
         tests/test_thread_catalog.cpp

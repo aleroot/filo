@@ -288,3 +288,14 @@ TEST_CASE("FILO_DISABLE_ULTRATHINK turns the keyword off", "[llm][effort][ultrat
         CHECK(ultrathink_requested("ultrathink"));
     }
 }
+
+TEST_CASE("ultrathink_spans locates each occurrence mentions_ultrathink counts",
+          "[llm][ultrathink]") {
+    const std::string prompt = "Ultrathink this, not `ultrathink` or ultrathinking, then ultrathink now";
+    const auto spans = core::llm::ultrathink_spans(prompt);
+    REQUIRE(spans.size() == 2);
+    CHECK(prompt.substr(spans[0].first, spans[0].second - spans[0].first) == "Ultrathink");
+    CHECK(prompt.substr(spans[1].first, spans[1].second - spans[1].first) == "ultrathink");
+    CHECK(core::llm::mentions_ultrathink(prompt));
+    CHECK(core::llm::ultrathink_spans("/effort high ultrathink").empty());
+}

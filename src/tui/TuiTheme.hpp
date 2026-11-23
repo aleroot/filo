@@ -116,6 +116,7 @@ struct ThemedColor {
 inline constexpr RgbColor FillYellowDark{255, 192, 32};
 inline constexpr RgbColor FillYellowBright{255, 246, 61};
 inline constexpr RgbColor FillWarn{255, 120, 30};
+inline constexpr RgbColor FillPromptCommand{110, 220, 245};
 
 // ---------------------------------------------------------------------------
 // Inks — text, borders and glyphs drawn on the terminal background. Light
@@ -153,6 +154,27 @@ inline constexpr ThemedColor FillSelection{ftxui::Color::GrayDark, RgbColor{224,
 inline constexpr ThemedColor ColorDiffAdd{RgbColor{120, 220, 130}, RgbColor{16, 120, 40}};
 inline constexpr ThemedColor ColorDiffDelete{RgbColor{255, 150, 130}, RgbColor{185, 45, 30}};
 inline constexpr ThemedColor ColorDiffHunk{RgbColor{145, 196, 255}, RgbColor{30, 90, 190}};
+
+// Prompt tokens: what a draft will do on send. Each kind is an ink with a tint
+// of the same hue behind it, so a token reads as a chip in the input without
+// taking a cell more than its text. Every ink reaches AA on its tint and on
+// the terminal background of its theme.
+inline constexpr ThemedColor ColorPromptCommand{RgbColor{110, 220, 245}, RgbColor{0, 105, 140}};
+inline constexpr ThemedColor TintPromptCommand{RgbColor{16, 58, 72}, RgbColor{214, 242, 250}};
+inline constexpr ThemedColor ColorPromptFile{RgbColor{150, 200, 255}, RgbColor{24, 84, 180}};
+inline constexpr ThemedColor TintPromptFile{RgbColor{22, 42, 74}, RgbColor{224, 234, 252}};
+inline constexpr ThemedColor ColorPromptConversation{RgbColor{214, 178, 255}, RgbColor{112, 52, 178}};
+inline constexpr ThemedColor TintPromptConversation{RgbColor{52, 30, 78}, RgbColor{240, 230, 253}};
+inline constexpr ThemedColor ColorPromptAgent{RgbColor{140, 228, 150}, RgbColor{16, 112, 44}};
+inline constexpr ThemedColor TintPromptAgent{RgbColor{20, 58, 30}, RgbColor{222, 244, 226}};
+// `ultrathink`, coloured glyph by glyph along these stops.
+inline constexpr ThemedColor UltrathinkGradient[] = {
+    {RgbColor{255, 130, 90}, RgbColor{184, 64, 20}},
+    {RgbColor{255, 205, 80}, RgbColor{148, 103, 0}},
+    {RgbColor{130, 225, 140}, RgbColor{16, 120, 40}},
+    {RgbColor{110, 190, 255}, RgbColor{30, 90, 190}},
+    {RgbColor{205, 150, 255}, RgbColor{120, 60, 190}},
+};
 
 #if defined(__APPLE__)
 inline constexpr auto UiBorderStyle = ftxui::LIGHT;

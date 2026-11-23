@@ -1669,7 +1669,7 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(std::min(ctx.text.size(), std::string::size_type{6})));
+        const std::string arg = trailing_arguments(ctx.text);
 
         if (arg.empty()) {
             if (ctx.open_model_picker_fn && ctx.open_model_picker_fn()) {
@@ -1703,8 +1703,7 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(
-            std::min(ctx.text.size(), std::string::size_type{8})));
+        const std::string arg = trailing_arguments(ctx.text);
 
         const std::string lowered = to_lower_ascii(arg);
         if (arg.empty() || lowered == "status"
@@ -1738,8 +1737,7 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(
-            std::min(ctx.text.size(), std::string::size_type{7})));
+        const std::string arg = trailing_arguments(ctx.text);
 
         if (arg.empty()) {
             if (ctx.open_command_option_picker_fn
@@ -1783,8 +1781,7 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(
-            std::min(ctx.text.size(), std::string::size_type{8})));
+        const std::string arg = trailing_arguments(ctx.text);
 
         if (arg.empty()) {
             if (ctx.open_command_option_picker_fn
@@ -2208,8 +2205,7 @@ public:
             return;
         }
 
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(
-            std::min(ctx.text.size(), std::string::size_type{5})));
+        const std::string arg = trailing_arguments(ctx.text);
         const std::string normalized = to_lower_ascii(arg);
 
         bool current = ctx.yolo_mode_enabled_fn();
@@ -2670,8 +2666,7 @@ public:
         }
 
         // Parse arguments
-        std::string_view arg = trim(std::string_view{ctx.text}.substr(
-            std::min(ctx.text.size(), std::string::size_type{8})));
+        const std::string arg = trailing_arguments(ctx.text);
 
         // Default: show recent history
         if (arg.empty() || arg == "show" || arg == "list") {
@@ -4038,8 +4033,7 @@ public:
             return;
         }
 
-        std::string_view argument = trim(std::string_view(ctx.text).substr(
-            std::min(ctx.text.size(), std::string::size_type{4})));
+        const std::string argument = trailing_arguments(ctx.text);
         std::optional<std::size_t> selected;
         if (!argument.empty()) {
             std::size_t number = 0;

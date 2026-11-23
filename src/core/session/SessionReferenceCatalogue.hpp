@@ -1,8 +1,10 @@
 #pragma once
 
+#include "SessionReference.hpp"
 #include "SessionStore.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,6 +43,12 @@ public:
                                                                  std::size_t max_results) const;
 
     [[nodiscard]] std::size_t project_size() const noexcept { return project_rows_.size(); }
+
+    /// The conversation @p token names, matched the way resolve_session_reference
+    /// loads it (id first, then a quoted name), without touching the disk.
+    /// nullopt for the current session, which the catalogue leaves out.
+    [[nodiscard]] std::optional<SessionReferenceSuggestion> resolve(
+        const SessionReferenceToken& token) const;
 
 private:
     [[nodiscard]] std::vector<SessionReferenceSuggestion> search_ordinal(int ordinal) const;

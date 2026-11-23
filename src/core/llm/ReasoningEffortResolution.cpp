@@ -164,26 +164,31 @@ std::optional<std::string> parse_effort_selection(std::string_view requested) {
     return std::nullopt;
 }
 
-bool mentions_ultrathink(std::string_view prompt) {
+std::vector<std::pair<std::size_t, std::size_t>> ultrathink_spans(std::string_view prompt) {
+    std::vector<std::pair<std::size_t, std::size_t>> found;
     // A prompt that starts with `/` is a command, and one that starts with `!`
     // a shell command; neither is a prompt the keyword can raise.
     const auto first = prompt.find_first_not_of(" \t\r\n");
     if (first != std::string_view::npos && (prompt[first] == '/' || prompt[first] == '!')) {
-        return false;
+        return found;
     }
     // ASCII lowering keeps byte offsets, so positions map back onto `prompt`.
     const std::string lowered = core::utils::str::to_lower_ascii_copy(prompt);
     auto at = lowered.find(kUltrathinkKeyword);
-    if (at == std::string::npos) return false;
+    if (at == std::string::npos) return found;
     const auto spans = code_spans(prompt);
     for (; at != std::string::npos; at = lowered.find(kUltrathinkKeyword, at + 1)) {
         const std::size_t end = at + kUltrathinkKeyword.size();
         const bool in_code = std::ranges::any_of(spans, [&](const auto& span) {
             return at >= span.first && end <= span.second;
         });
-        if (!in_code && is_instruction_occurrence(prompt, at, end)) return true;
+        if (!in_code && is_instruction_occurrence(prompt, at, end)) found.emplace_back(at, end);
     }
-    return false;
+    return found;
+}
+
+bool mentions_ultrathink(std::string_view prompt) {
+    return !ultrathink_spans(prompt).empty();
 }
 
 bool ultrathink_requested(std::string_view prompt) {

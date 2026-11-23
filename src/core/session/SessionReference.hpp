@@ -90,6 +90,17 @@ struct SessionReferenceToken {
     std::string_view input,
     std::size_t pos);
 
+/// A reference-shaped token found in a prompt. Whether it names a saved
+/// conversation is for a store or a catalogue to say.
+struct SessionReferenceSpan {
+    std::size_t begin = 0;  ///< the '#'
+    std::size_t end = 0;    ///< one past the id or the closing quote
+    SessionReferenceToken token;
+};
+
+/// Every reference-shaped token outside code, in order.
+[[nodiscard]] std::vector<SessionReferenceSpan> scan_session_references(std::string_view input);
+
 /// Loads the session @p token names, or nullopt when it names none or names
 /// @p current_session_id (a conversation cannot reference itself).
 [[nodiscard]] std::optional<SessionData> resolve_session_reference(

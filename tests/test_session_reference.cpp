@@ -1084,3 +1084,33 @@ TEST_CASE("tool metadata controls MCP exposure without a name allowlist",
         CHECK_THAT(response, ContainsSubstring("-32602"));
     }
 }
+
+TEST_CASE("scan_session_references finds reference-shaped tokens outside code",
+          "[session][reference]") {
+    const std::string input = R"(compare #a1b2c3d4, with #"Old plan" but not `#deadbeef` or #123)";
+    const auto spans = core::session::scan_session_references(input);
+    REQUIRE(spans.size() == 2);
+    CHECK(input.substr(spans[0].begin, spans[0].end - spans[0].begin) == "#a1b2c3d4");
+    CHECK(spans[0].token.target == "a1b2c3d4");
+    CHECK(input.substr(spans[1].begin, spans[1].end - spans[1].begin) == R"(#"Old plan")");
+    CHECK(spans[1].token.quoted);
+}
+
+TEST_CASE("the catalogue resolves a reference without loading the session",
+          "[session][reference]") {
+    std::vector<core::session::SessionInfo> sessions(3);
+    sessions[0] = {.session_id = "a1b2c3d4", .name = "Parser rewrite"};
+    sessions[1] = {.session_id = "deadbeef", .name = "Old plan"};
+    sessions[2] = {.session_id = "current1", .name = "This one"};
+    const core::session::SessionReferenceCatalogue catalogue{sessions, "", "current1"};
+
+    const auto resolve = [&](std::string_view prompt) {
+        const auto spans = core::session::scan_session_references(prompt);
+        REQUIRE(spans.size() == 1);
+        return catalogue.resolve(spans.front().token);
+    };
+    CHECK(resolve("#A1B2C3D4")->title == "Parser rewrite");
+    CHECK(resolve(R"(#"Old plan")")->session_id == "deadbeef");
+    CHECK_FALSE(resolve("#0badf00d").has_value());
+    CHECK_FALSE(resolve(R"(#"This one")").has_value());  // the current session
+}

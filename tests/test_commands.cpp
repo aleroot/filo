@@ -1180,6 +1180,27 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Set effort to low"));
     }
 
+    // The arguments are what follows the command word, wherever it starts:
+    // slicing at the name's length read " /effort high" as "t high".
+    SECTION("commands read their argument after leading whitespace") {
+        *effort_target = "";
+        *switch_target = "";
+        *profile_target = "";
+        *advisor_target = "";
+        ctx.text = "  /effort high";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*effort_target == "high");
+        ctx.text = "\t/model openai gpt-4o";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*switch_target == "openai gpt-4o");
+        ctx.text = " /profile work";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*profile_target == "work");
+        ctx.text = " /advisor opus";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*advisor_target == "opus");
+    }
+
     SECTION("/advisor reports the advisor and the accepted ones") {
         *mock_history = "";
         *option_picker_command = "";

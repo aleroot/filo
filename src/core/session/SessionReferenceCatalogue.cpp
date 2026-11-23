@@ -165,4 +165,21 @@ bool SessionReferenceCatalogue::contains_id(std::string_view session_id) const n
     return std::ranges::contains(sessions_, session_id, &SessionInfo::session_id);
 }
 
+std::optional<SessionReferenceSuggestion> SessionReferenceCatalogue::resolve(
+    const SessionReferenceToken& token) const {
+    const auto index_of = [&](auto&& matches) -> std::optional<std::size_t> {
+        const auto found = std::ranges::find_if(sessions_, matches);
+        if (found == sessions_.end()) return std::nullopt;
+        return static_cast<std::size_t>(found - sessions_.begin());
+    };
+    const std::string id = str::to_lower_ascii_copy(token.target);
+    auto index = index_of([&](const SessionInfo& info) { return info.session_id == id; });
+    if (!index.has_value() && token.quoted) {
+        // SessionStore::list() order is most recent first, as load_by_name scans.
+        index = index_of([&](const SessionInfo& info) { return info.name == token.target; });
+    }
+    if (!index.has_value()) return std::nullopt;
+    return row(*index);
+}
+
 } // namespace core::session
