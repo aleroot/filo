@@ -225,7 +225,7 @@ std::expected<TurnChanges, std::string> TurnRecovery::reconcile(
         auto inventory = workspace_inventory(manifest_.roots, kMaxWorkspaceFiles, [&](const auto& path) {
             return can_observe(path) && (!observable || observable(path));
         });
-        manifest_.partial |= !inventory.complete;
+        manifest_.partial |= inventory.partial();
         if (manifest_.phase == RecoveryPhase::Recording && manifest_.inventory_complete) {
             record_absent_unlocked(inventory.paths);
         }

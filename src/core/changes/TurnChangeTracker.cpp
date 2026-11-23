@@ -495,7 +495,7 @@ void TurnChangeTracker::observe_workspace_unlocked(Observation when) {
     }
     auto inventory = workspace_inventory(workspace_roots_, limits_.max_workspace_files,
         [&](const auto& path) { return observable_unlocked(path, true); });
-    partial_enumeration_ |= !inventory.complete;
+    partial_enumeration_ |= inventory.partial();
     if (when == Observation::Before) {
         workspace_observed_ = true;
         inventory_complete_ = inventory.complete;

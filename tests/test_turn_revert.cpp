@@ -14,6 +14,7 @@
 #include "core/utils/FileStamp.hpp"
 #include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
+#include "core/utils/MountTable.hpp"
 #include "core/utils/ProcessUtils.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -734,6 +735,57 @@ TEST_CASE("Native inventory respects exclusions symlinks and resource bounds wit
     auto limited = core::changes::workspace_inventory(roots, 1);
     CHECK_FALSE(limited.complete);
     CHECK(limited.paths.size() == 1);
+}
+
+TEST_CASE("The mount table names the deepest mount holding a path", "[changes][inventory][mounts]") {
+    using core::utils::MountTable;
+    const MountTable mounts({{.point = "/", .remote = false},
+                             {.point = "/Volumes/Data", .remote = true},
+                             {.point = "/Volumes/Data/disk", .remote = false}});
+    CHECK_FALSE(mounts.remote("/Users/me/project"));
+    CHECK(mounts.remote("/Volumes/Data"));
+    CHECK(mounts.remote("/Volumes/Data/Temp/a.txt"));
+    CHECK_FALSE(mounts.remote("/Volumes/DataX/Temp"));  // Component-wise, not a string prefix.
+    CHECK_FALSE(mounts.remote("/Volumes/Data/disk/file"));
+    CHECK(mounts.remote_mount_point("/Volumes/Data"));
+    CHECK_FALSE(mounts.remote_mount_point("/Volumes/Data/Temp"));
+    CHECK_FALSE(mounts.remote_mount_point("/Volumes/Data/disk"));
+    // This machine's own temporary directory is local.
+    TempDir dir;
+    CHECK_FALSE(MountTable::current().remote(fs::canonical(dir.path)));
+}
+
+TEST_CASE("Native inventory leaves network shares unwalked without making local files incomplete",
+          "[changes][inventory][mounts][regression]") {
+    TempDir local, share;
+    put(local.path / "src" / "a.cpp", "source\n");
+    put(local.path / "mnt" / "share-file", "remote\n");
+    put(share.path / "report.pdf", "remote\n");
+    const auto local_root = fs::canonical(local.path), share_root = fs::canonical(share.path);
+    const core::utils::MountTable mounts({{.point = "/", .remote = false},
+                                          {.point = share_root, .remote = true},
+                                          {.point = local_root / "mnt", .remote = true}});
+    const std::vector<fs::path> roots{local_root, share_root};
+    auto inventory = core::changes::workspace_inventory(roots, 100, {}, mounts);
+    CHECK(inventory.complete);
+    REQUIRE(inventory.paths.size() == 1);
+    CHECK(inventory.paths.front() == local_root / "src" / "a.cpp");
+    const std::set<fs::path> remote(inventory.remote.begin(), inventory.remote.end());
+    CHECK(remote == std::set<fs::path>{share_root, local_root / "mnt"});
+}
+
+TEST_CASE("Native inventory still lists local file roots and symlinked local roots",
+          "[changes][inventory][mounts][regression]") {
+    TempDir dir, other;
+    put(dir.path / "notes.diff", "patch\n");
+    put(other.path / "src" / "b.cpp", "source\n");
+    fs::create_directory_symlink(other.path, dir.path / "alias");
+    const std::vector<fs::path> roots{dir.path / "notes.diff", dir.path / "alias"};
+    auto inventory = core::changes::workspace_inventory(roots, 100);
+    CHECK_FALSE(inventory.partial());
+    CHECK(inventory.remote.empty());
+    CHECK(inventory.paths == std::vector<fs::path>{fs::canonical(dir.path / "notes.diff"),
+                                                   fs::canonical(other.path / "src" / "b.cpp")});
 }
 
 TEST_CASE("Writer exclusion follows overlapping native roots and leaves unrelated folders available",
