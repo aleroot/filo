@@ -274,6 +274,36 @@ TEST_CASE("ContextWindowTracker respects custom compaction thresholds but caps t
     CHECK(decision.should_compact);
 }
 
+TEST_CASE("Auto-compaction settings map to a share of the window, a fixed count or off",
+          "[context][window][auto-compact]") {
+    using core::context::CompactionTriggerPolicy;
+    using core::context::ContextWindowTracker;
+    constexpr int32_t kWindow = 262'144;  // kimi-for-coding
+
+    // A share of the window.
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(25'000, true, 40), kWindow)
+          == 104'857);
+    // An unknown window falls back to the default fixed count.
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(25'000, true, 40), 0)
+          == 25'000);
+    // Never set: the model-aware default.
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(25'000, false, 0), kWindow)
+          == 196'608);
+    // A fixed count stays capped by the default share.
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(400'000, true, 0), kWindow)
+          == 196'608);
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(100'000, true, 0), kWindow)
+          == 100'000);
+    CHECK(ContextWindowTracker::effective_compaction_threshold(
+              CompactionTriggerPolicy::from_setting(0, true, 0), kWindow)
+          == 0);
+}
+
 TEST_CASE("Context estimates do not count native replay snapshots twice", "[context][claude][hardening]") {
     std::vector<core::llm::Message> history{{.role = "assistant", .content = std::string(400, 'a')}};
     const auto estimate = core::context::ContextWindowTracker::estimate_tokens(history);

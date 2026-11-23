@@ -1531,9 +1531,12 @@ Element render_settings_panel(std::string_view scope_label,
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const bool selected = static_cast<int>(i) == selected_index;
         const auto& row = rows[i];
-        std::string label = std::format(" [{}] {}: {}", i + 1, row.label, row.value);
-        std::string description = row.description;
-        if (row.inherited) {
+        std::string label = std::format(" [{}] {}: {}", i + 1, row.label,
+                                        row.typed ? *row.typed + "\u2581" : row.value);
+        std::string description = row.typed
+            ? std::format("Custom value, e.g. {}.", row.custom_hint)
+            : row.description;
+        if (row.inherited && !row.typed) {
             description += " Current scope inherits this value.";
         }
 
@@ -1544,12 +1547,22 @@ Element render_settings_panel(std::string_view scope_label,
                                FillYellowDark));
     }
 
+    const auto* selected_row =
+        selected_index >= 0 && selected_index < static_cast<int>(rows.size())
+            ? &rows[static_cast<std::size_t>(selected_index)]
+            : nullptr;
+    const bool typing = selected_row && selected_row->typed;
+    const bool typable = selected_row && !selected_row->custom_hint.empty();
     return make_settings_frame(
         scope_label,
         category_label,
         scope_path,
-        "Tab: scope  Left/Right: change  Backspace: reset  Esc: categories",
-        "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.",
+        typing    ? "Type a value  Enter: save  Esc: cancel"
+        : typable ? "Tab: scope  Left/Right: change  E: custom  Backspace: reset  Esc: categories"
+                  : "Tab: scope  Left/Right: change  Backspace: reset  Esc: categories",
+        typing    ? "Enter saves the typed value. Esc keeps the current one."
+        : typable ? "Left/Right changes values. E types a custom value. Backspace resets to inherit."
+                  : "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.",
         status_message,
         std::move(rendered_rows),
         std::max(10, static_cast<int>(rows.size()) * 2 + (note.empty() ? 6 : 8)));

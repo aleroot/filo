@@ -737,6 +737,36 @@ TEST_CASE("render_settings_panel — a note renders above the settings",
     REQUIRE(note < output.find("Revert History: 7 days"));
 }
 
+TEST_CASE("render_settings_panel — a typable setting offers E and shows the text being typed",
+          "[tui][picker][settings]") {
+    const auto render = [](const std::vector<SettingsPanelRow>& rows) {
+        auto panel = render_settings_panel("User", "/tmp/settings.json", "Session", rows, 0, "");
+        auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(140),
+                                            ftxui::Dimension::Fixed(16));
+        ftxui::Render(screen, panel);
+        return strip_ansi(screen.ToString());
+    };
+
+    const auto picking = render({{.label = "Auto-Compaction",
+                                  .value = "40% of window",
+                                  .description = "Share of the window.",
+                                  .custom_hint = "35%"}});
+    REQUIRE_THAT(picking, Catch::Matchers::ContainsSubstring("E: custom"));
+    REQUIRE_THAT(picking, Catch::Matchers::ContainsSubstring("Auto-Compaction: 40% of window"));
+
+    const auto typing = render({{.label = "Auto-Compaction",
+                                 .value = "40% of window",
+                                 .description = "Share of the window.",
+                                 .custom_hint = "35%",
+                                 .typed = "400k"}});
+    REQUIRE_THAT(typing, Catch::Matchers::ContainsSubstring("Enter: save"));
+    REQUIRE_THAT(typing, Catch::Matchers::ContainsSubstring("Auto-Compaction: 400k"));
+    REQUIRE_THAT(typing, Catch::Matchers::ContainsSubstring("Custom value, e.g. 35%."));
+
+    const auto fixed = render({{.label = "Theme", .value = "Dark", .description = "Colours."}});
+    REQUIRE_THAT(fixed, !Catch::Matchers::ContainsSubstring("E: custom"));
+}
+
 TEST_CASE("render_settings_categories_panel — overview lists categories with counts",
           "[tui][picker][settings]") {
     std::vector<SettingsCategoryRow> categories = {

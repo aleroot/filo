@@ -122,6 +122,7 @@
 #include "core/review/ReviewTargets.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "tui/SettingsInput.hpp"
 #include "tui/TerminalTheme.hpp"
 #include <atomic>
 #include <cstdint>
@@ -897,9 +898,7 @@ RunResult run(RunOptions opts) {
         workspace_leases);
     agent->set_execution_journal(std::make_shared<core::session::ExecutionJournal>());
     agent->set_active_provider_name(active_provider_name);
-    agent->set_auto_compact_threshold(
-        config.auto_compact_threshold,
-        !config.auto_compact_threshold_explicit);
+    agent->apply_auto_compact_setting(config);
     agent->set_effort_level(session_effort_value);
 
     // ── Steering ─────────────────────────────────────────────────────────────
@@ -1407,6 +1406,8 @@ RunResult run(RunOptions opts) {
         std::string label;
         std::string description;
         std::vector<SettingsChoice> choices;
+        // Set when the value can also be typed (E in the panel).
+        std::optional<SettingsCustomInput> custom = std::nullopt;
     };
 
     struct SettingsPanelState {
@@ -1416,6 +1417,7 @@ RunResult run(RunOptions opts) {
         int category_selected = 0; // row within the category overview
         core::config::SettingsScope scope = core::config::SettingsScope::User;
         std::string status_message;
+        SettingsTextEntry text_entry; // typing a custom value for the selected row
     };
     SettingsPanelState settings_panel_state;
 
@@ -1605,18 +1607,21 @@ RunResult run(RunOptions opts) {
             .description = "Colours for a dark or light terminal. Auto asks the terminal at startup.",
             .choices = std::move(theme_choices),
         });
+        std::vector<SettingsChoice> auto_compact_choices;
+        for (const auto preset : auto_compact_presets()) {
+            auto_compact_choices.push_back(SettingsChoice{
+                .value = std::string(preset),
+                .label = describe_auto_compact_setting(preset),
+            });
+        }
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::AutoCompactThreshold,
             .category = "Session",
             .label = "Auto-Compaction",
-            .description = "Total tokens before the conversation is summarised. 0 = disabled.",
-            .choices = {
-                SettingsChoice{.value = "0",      .label = "Disabled"},
-                SettingsChoice{.value = "25000",  .label = "25k (Fast)"},
-                SettingsChoice{.value = "50000",  .label = "50k (Balanced)"},
-                SettingsChoice{.value = "100000", .label = "100k (Long)"},
-                SettingsChoice{.value = "200000", .label = "200k (Pro)"},
-            },
+            .description = "When the conversation is summarised, as a share of the model's "
+                           "context window. E types a custom share or token count.",
+            .choices = std::move(auto_compact_choices),
+            .custom = auto_compact_custom_input(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::ContextCompression,
@@ -2729,9 +2734,7 @@ RunResult run(RunOptions opts) {
         created->set_execution_journal(agent->execution_journal());
         created->set_active_provider_name(
             data.provider.empty() ? active_provider_name : data.provider);
-        created->set_auto_compact_threshold(
-            config.auto_compact_threshold,
-            !config.auto_compact_threshold_explicit);
+        created->apply_auto_compact_setting(config);
         created->set_effort_level(session_effort_value);
         created->set_active_model(data.model.empty() ? active_model_name : data.model);
         created->load_history(data.messages, data.context_summary, data.mode);
@@ -3730,9 +3733,7 @@ RunResult run(RunOptions opts) {
         ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
         ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
         apply_theme_setting(config.ui_theme);
-        agent->set_auto_compact_threshold(
-            config.auto_compact_threshold,
-            !config.auto_compact_threshold_explicit);
+        agent->apply_auto_compact_setting(config);
         prompt_cache_settings.store(core::agent::prompt_cache_guard_settings(config));
         agent->reload_subagent_profiles(config);
 
@@ -5262,7 +5263,7 @@ RunResult run(RunOptions opts) {
             case core::config::ManagedSettingKey::UiTheme:
                 return effective.ui_theme;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
-                return std::to_string(effective.auto_compact_threshold);
+                return core::config::auto_compact_setting_token(effective);
             case core::config::ManagedSettingKey::ContextCompression:
                 return effective.context_compression.empty()
                     ? std::string("off")
@@ -5315,6 +5316,9 @@ RunResult run(RunOptions opts) {
                 return choice.label;
             }
         }
+        if (definition.custom) {
+            return definition.custom->describe(value);
+        }
         return std::string(value);
     };
 
@@ -5341,6 +5345,10 @@ RunResult run(RunOptions opts) {
         config.prompt_cache_notice_seconds = after.prompt_cache_notice_seconds;
         config.prompt_cache_keep_warm = after.prompt_cache_keep_warm;
         prompt_cache_settings.store(core::agent::prompt_cache_guard_settings(after));
+        config.auto_compact_threshold = after.auto_compact_threshold;
+        config.auto_compact_threshold_explicit = after.auto_compact_threshold_explicit;
+        config.auto_compact_percent = after.auto_compact_percent;
+        agent->apply_auto_compact_setting(after);
 
         if (before.default_mode != after.default_mode) {
             const std::string desired_mode = normalize_mode(after.default_mode);
@@ -5937,6 +5945,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             settings_panel_state.active = true;
+            settings_panel_state.text_entry.cancel();
             settings_panel_state.open_category = std::nullopt;
             settings_panel_state.category_selected = std::clamp(
                 settings_panel_state.category_selected,
@@ -9408,6 +9417,7 @@ RunResult run(RunOptions opts) {
         std::optional<int> settings_selected_index;
         std::optional<core::config::SettingsScope> settings_scope;
         bool settings_reset = false;
+        std::optional<std::string> settings_custom_text;
         {
             std::lock_guard lock(ui_mutex);
             if (settings_panel_state.active) {
@@ -9434,7 +9444,19 @@ RunResult run(RunOptions opts) {
                     settings_panel_state.selected = 0;
                 };
 
-                if (event == Event::ArrowUp) {
+                auto& text_entry = settings_panel_state.text_entry;
+                if (text_entry.active()) {
+                    switch (text_entry.handle(event)) {
+                        case SettingsTextEntry::Outcome::Submitted:
+                            settings_custom_text = text_entry.text();
+                            break;
+                        case SettingsTextEntry::Outcome::Cancelled:
+                            settings_panel_state.status_message = "Custom value discarded.";
+                            break;
+                        case SettingsTextEntry::Outcome::Editing:
+                            break;
+                    }
+                } else if (event == Event::ArrowUp) {
                     move_selection(-1);
                 } else if (event == Event::ArrowDown) {
                     move_selection(1);
@@ -9457,6 +9479,18 @@ RunResult run(RunOptions opts) {
                 } else if (!overview
                            && (event == Event::Backspace || event == Event::Delete)) {
                     settings_reset = true;
+                } else if (!overview
+                           && (event == Event::Character('e') || event == Event::Character('E'))) {
+                    const auto& custom = settings_definitions[static_cast<std::size_t>(
+                        visible_settings[static_cast<std::size_t>(row_selection)])].custom;
+                    if (custom) {
+                        text_entry.begin();
+                        settings_panel_state.status_message = std::format(
+                            "Type a value ({}). Enter saves, Esc cancels.", custom->hint);
+                    } else {
+                        settings_panel_state.status_message =
+                            "This setting only takes the listed values.";
+                    }
                 } else if (event == Event::Escape) {
                     // Like /model: Esc walks one level up, and closes from the top.
                     if (overview) {
@@ -9478,7 +9512,8 @@ RunResult run(RunOptions opts) {
                 }
 
                 if (!overview
-                    && (settings_cycle_direction.has_value() || settings_reset)) {
+                    && (settings_cycle_direction.has_value() || settings_reset
+                        || settings_custom_text.has_value())) {
                     settings_selected_index =
                         visible_settings[static_cast<std::size_t>(row_selection)];
                     settings_scope = settings_panel_state.scope;
@@ -9495,7 +9530,16 @@ RunResult run(RunOptions opts) {
                 const auto scoped_value = managed_setting_value(
                     config_manager.get_settings_overlay(*settings_scope),
                     definition.key);
-                if (settings_reset) {
+                if (settings_custom_text.has_value() && definition.custom) {
+                    if (auto parsed = definition.custom->parse(*settings_custom_text)) {
+                        persist_settings_value(*settings_selected_index, std::move(parsed));
+                    } else {
+                        std::lock_guard lock(ui_mutex);
+                        settings_panel_state.status_message = std::format(
+                            "'{}' is not a valid {} value. Try {}.",
+                            *settings_custom_text, definition.label, definition.custom->hint);
+                    }
+                } else if (settings_reset) {
                     if (scoped_value.has_value()) {
                         persist_settings_value(*settings_selected_index, std::nullopt);
                     } else {
@@ -10655,6 +10699,7 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point review_activity_started_at =
             std::chrono::steady_clock::time_point::min();
         core::config::SettingsScope settings_panel_scope = core::config::SettingsScope::User;
+        std::optional<std::string> settings_panel_typed;
         bool                            local_model_picker_active   = false;
         int                             local_model_picker_selected = 0;
         std::string                     local_model_picker_dir;
@@ -10749,6 +10794,9 @@ RunResult run(RunOptions opts) {
                 : settings_panel_state.category_selected;
             settings_panel_scope = settings_panel_state.scope;
             settings_panel_status = settings_panel_state.status_message;
+            settings_panel_typed = settings_panel_state.text_entry.active()
+                ? std::optional<std::string>(settings_panel_state.text_entry.text())
+                : std::nullopt;
             authentication_recovery_active =
                 authentication_recovery_state.active.has_value()
                 && authentication_recovery_state.active->runtime
@@ -11000,6 +11048,8 @@ RunResult run(RunOptions opts) {
                         settings_definitions[static_cast<std::size_t>(index)];
                     const auto scoped_value =
                         managed_setting_value(scope_overlay, definition.key);
+                    const bool selected =
+                        static_cast<int>(settings_rows.size()) == settings_panel_selected;
                     settings_rows.push_back(SettingsPanelRow{
                         .label = definition.label,
                         .value = setting_choice_label(
@@ -11007,6 +11057,8 @@ RunResult run(RunOptions opts) {
                             scoped_value.value_or(effective_setting_value(definition.key))),
                         .description = definition.description,
                         .inherited = !scoped_value.has_value(),
+                        .custom_hint = definition.custom ? definition.custom->hint : "",
+                        .typed = selected ? settings_panel_typed : std::nullopt,
                     });
                 }
 

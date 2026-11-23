@@ -19,6 +19,8 @@
 #include "core/utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <limits>
 #include <format>
 #include <stdexcept>
 #include <set>
@@ -124,6 +126,31 @@ std::optional<std::int64_t> managed_count(const std::string& value) {
     return std::nullopt;
 }
 
+// Mirrors CompactionTriggerPolicy::kDefaultFixedTokenThreshold: the token
+// count that stands for "the model-aware default" and the fallback when a
+// model's window is unknown.
+constexpr int kDefaultAutoCompactTokens = 25'000;
+
+/// Applies a value normalize_auto_compact_setting accepts; anything else
+/// leaves @p config unchanged.
+void apply_auto_compact_setting(std::string_view value, AppConfig& config) {
+    const auto canonical = normalize_auto_compact_setting(value);
+    if (!canonical) return;
+    if (*canonical == "auto") {
+        config.auto_compact_threshold = kDefaultAutoCompactTokens;
+        config.auto_compact_threshold_explicit = false;
+        config.auto_compact_percent = 0;
+    } else if (canonical->ends_with('%')) {
+        config.auto_compact_threshold = kDefaultAutoCompactTokens;
+        config.auto_compact_threshold_explicit = true;
+        config.auto_compact_percent = std::stoi(canonical->substr(0, canonical->size() - 1));
+    } else {
+        config.auto_compact_threshold = std::stoi(*canonical);
+        config.auto_compact_threshold_explicit = true;
+        config.auto_compact_percent = 0;
+    }
+}
+
 const ManagedSettingDescriptor* managed_setting_descriptor(ManagedSettingKey key) {
     for (const auto& descriptor : kManagedSettingDescriptors) {
         if (descriptor.key == key) {
@@ -185,10 +212,7 @@ void apply_managed_setting_value(ManagedSettingKey key,
             config.ui_theme = value;
             break;
         case ManagedSettingKey::AutoCompactThreshold:
-            try {
-                config.auto_compact_threshold = std::stoi(value);
-                config.auto_compact_threshold_explicit = true;
-            } catch (...) {}
+            apply_auto_compact_setting(value, config);
             break;
         case ManagedSettingKey::ContextCompression:
             config.context_compression = value;
@@ -1267,6 +1291,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed,
     if (!doc["auto_compact_threshold"].get(threshold)) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
         parsed.auto_compact_threshold_explicit = true;
+        parsed.auto_compact_percent = 0;
+    } else if (!doc["auto_compact_threshold"].get(value)) {
+        apply_auto_compact_setting(value, parsed);
     }
     int64_t tool_output_token_limit = 0;
     if (!doc["tool_output_token_limit"].get(tool_output_token_limit)
@@ -1627,6 +1654,7 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (overlay.auto_compact_threshold_explicit || overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;
         base.auto_compact_threshold_explicit = overlay.auto_compact_threshold_explicit;
+        base.auto_compact_percent = overlay.auto_compact_percent;
     }
     if (overlay.tool_output_token_limit > 0) {
         base.tool_output_token_limit = overlay.tool_output_token_limit;
@@ -2229,6 +2257,46 @@ bool ConfigManager::persist_managed_setting(SettingsScope scope,
     load(cwd);
     if (error) error->clear();
     return true;
+}
+
+std::optional<std::string> normalize_auto_compact_setting(std::string_view token) {
+    std::string compact;
+    compact.reserve(token.size());
+    for (const char ch : token) {
+        if (std::isspace(static_cast<unsigned char>(ch)) || ch == '_' || ch == ',') continue;
+        compact.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    if (compact == "auto" || compact == "default") return std::string("auto");
+    if (compact == "off" || compact == "disabled" || compact == "none") return std::string("0");
+
+    const auto digits = [](std::string_view text) -> std::optional<std::int64_t> {
+        if (text.empty() || text.size() > 10
+            || text.find_first_not_of("0123456789") != std::string_view::npos) {
+            return std::nullopt;
+        }
+        return std::stoll(std::string(text));
+    };
+    if (compact.ends_with('%')) {
+        const auto percent = digits(std::string_view(compact).substr(0, compact.size() - 1));
+        if (!percent || *percent < 1 || *percent > 100) return std::nullopt;
+        return std::format("{}%", *percent);
+    }
+    std::int64_t multiplier = 1;
+    if (compact.ends_with('k')) multiplier = 1'000;
+    if (compact.ends_with('m')) multiplier = 1'000'000;
+    const auto count = digits(multiplier == 1
+        ? std::string_view(compact)
+        : std::string_view(compact).substr(0, compact.size() - 1));
+    if (!count) return std::nullopt;
+    const std::int64_t tokens = *count * multiplier;
+    if (tokens > std::numeric_limits<int>::max()) return std::nullopt;
+    return std::to_string(tokens);
+}
+
+std::string auto_compact_setting_token(const AppConfig& config) {
+    if (config.auto_compact_percent > 0) return std::format("{}%", config.auto_compact_percent);
+    if (!config.auto_compact_threshold_explicit) return "auto";
+    return std::to_string(config.auto_compact_threshold);
 }
 
 bool persist_model_defaults_overlay(

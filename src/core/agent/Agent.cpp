@@ -1221,6 +1221,13 @@ core::context::SessionContext Agent::session_context_snapshot() const {
     return session_context_;
 }
 
+void Agent::apply_auto_compact_setting(const core::config::AppConfig& app_config) {
+    set_auto_compact_policy(core::context::CompactionTriggerPolicy::from_setting(
+        app_config.auto_compact_threshold,
+        app_config.auto_compact_threshold_explicit,
+        app_config.auto_compact_percent));
+}
+
 void Agent::reload_subagent_profiles(const core::config::AppConfig& app_config) {
     std::lock_guard lock(history_mutex_);
     orchestrator_.reload_profiles(app_config);
@@ -4586,20 +4593,14 @@ bool Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
     {
         std::lock_guard lock(history_mutex_);
         if (compaction_in_progress_) return false;
-        threshold = auto_compact_threshold_;
-        const bool use_model_aware_default_threshold =
-            auto_compact_uses_model_window_default_;
+        threshold = auto_compact_policy_.configured_token_threshold;
         provider = provider_;
         model = active_model_;
         compaction = core::context::ContextWindowTracker::compaction_decision(
             history_,
             provider,
             model,
-            core::context::CompactionTriggerPolicy{
-                .configured_token_threshold = threshold,
-                .use_model_aware_default_threshold =
-                    use_model_aware_default_threshold,
-            });
+            auto_compact_policy_);
         if (threshold > 0 && compaction.should_compact) {
             plan = HistoryCompactionPlanner::plan(
                 history_,

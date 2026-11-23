@@ -23,6 +23,25 @@ struct CompactionTriggerPolicy {
     int configured_token_threshold = kDefaultFixedTokenThreshold;
     double context_usage_ratio = kDefaultContextUsageRatio;
     bool use_model_aware_default_threshold = true;
+
+    /// The policy an `auto_compact_threshold` setting describes: @p percent
+    /// (1-100) is a share of the model's window, else @p tokens is a fixed
+    /// count (capped by the default share) unless it was never set
+    /// explicitly, which selects the model-aware default. 0 tokens disables.
+    [[nodiscard]] static constexpr CompactionTriggerPolicy from_setting(
+        int tokens, bool explicit_tokens, int percent) noexcept {
+        if (percent > 0) {
+            return {
+                .configured_token_threshold = kDefaultFixedTokenThreshold,
+                .context_usage_ratio = static_cast<double>(percent) / 100.0,
+                .use_model_aware_default_threshold = true,
+            };
+        }
+        return {
+            .configured_token_threshold = tokens,
+            .use_model_aware_default_threshold = !explicit_tokens,
+        };
+    }
 };
 
 struct CompactionDecision {

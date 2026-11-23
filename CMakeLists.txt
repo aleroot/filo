@@ -245,6 +245,7 @@ set(FILO_CORE_SOURCES
     src/tui/TerminalTheme.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
+    src/tui/SettingsInput.cpp
     src/tui/QuestionDialog.cpp
     src/tui/QuestionDialogController.cpp
     src/tui/QuestionDialogView.cpp
@@ -923,6 +924,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
+    tests/test_settings_input.cpp
     tests/test_file_system_picker.cpp
     tests/test_question_dialog.cpp
     tests/test_history_component.cpp
@@ -1202,6 +1204,7 @@ source_group(
         tests/test_object_store.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
+        tests/test_settings_input.cpp
         tests/test_file_system_picker.cpp
         tests/test_question_dialog.cpp
         tests/test_history_component.cpp

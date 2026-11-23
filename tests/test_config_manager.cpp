@@ -1702,6 +1702,75 @@ TEST_CASE("An automatic cache notice in the workspace overrides a user's fixed l
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("Auto-compaction values are normalised to auto, off, a token count or a share",
+          "[config][managed-settings][auto-compact]") {
+    using core::config::normalize_auto_compact_setting;
+    CHECK(normalize_auto_compact_setting("auto") == "auto");
+    CHECK(normalize_auto_compact_setting(" Default ") == "auto");
+    CHECK(normalize_auto_compact_setting("off") == "0");
+    CHECK(normalize_auto_compact_setting("0") == "0");
+    CHECK(normalize_auto_compact_setting("40%") == "40%");
+    CHECK(normalize_auto_compact_setting(" 40 % ") == "40%");
+    CHECK(normalize_auto_compact_setting("100%") == "100%");
+    CHECK(normalize_auto_compact_setting("400000") == "400000");
+    CHECK(normalize_auto_compact_setting("400k") == "400000");
+    CHECK(normalize_auto_compact_setting("400,000") == "400000");
+    CHECK(normalize_auto_compact_setting("1M") == "1000000");
+    for (const std::string_view invalid :
+         {"", "%", "0%", "101%", "4.5%", "-5", "abc", "40%%", "k", "99999999999"}) {
+        CAPTURE(invalid);
+        CHECK_FALSE(normalize_auto_compact_setting(invalid).has_value());
+    }
+}
+
+TEST_CASE("A share of the window saved from /settings survives a reload and a workspace auto resets it",
+          "[config][managed-settings][auto-compact]") {
+    const fs::path sandbox = make_temp_dir("filo_managed_auto_compact_share");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    fs::create_directories(project_dir);
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    CHECK(core::config::auto_compact_setting_token(manager.get_config()) == "auto");
+
+    std::string error;
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::AutoCompactThreshold,
+                                            std::string("40%"), project_dir, &error));
+    REQUIRE(error.empty());
+    manager.load(project_dir);
+    CHECK(manager.get_config().auto_compact_percent == 40);
+    CHECK(manager.get_config().auto_compact_threshold_explicit);
+    CHECK(core::config::auto_compact_setting_token(manager.get_config()) == "40%");
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                            core::config::ManagedSettingKey::AutoCompactThreshold,
+                                            std::string("auto"), project_dir, &error));
+    REQUIRE(error.empty());
+    CHECK(manager.get_config().auto_compact_percent == 0);
+    CHECK_FALSE(manager.get_config().auto_compact_threshold_explicit);
+    CHECK(core::config::auto_compact_setting_token(manager.get_config()) == "auto");
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                            core::config::ManagedSettingKey::AutoCompactThreshold,
+                                            std::string("400000"), project_dir, &error));
+    CHECK(manager.get_config().auto_compact_percent == 0);
+    CHECK(manager.get_config().auto_compact_threshold == 400'000);
+    CHECK(core::config::auto_compact_setting_token(manager.get_config()) == "400000");
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::Workspace,
+                                            core::config::ManagedSettingKey::AutoCompactThreshold,
+                                            std::nullopt, project_dir, &error));
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::AutoCompactThreshold,
+                                            std::nullopt, project_dir, &error));
+    CHECK(core::config::auto_compact_setting_token(manager.get_config()) == "auto");
+    manager.load(project_dir);
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager parses flat top-level llama.cpp fields (README format)", "[config][llamacpp]") {
     const fs::path sandbox = make_temp_dir("filo_config_llamacpp_flat");
     const fs::path xdg_home = sandbox / "xdg";

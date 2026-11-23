@@ -299,6 +299,9 @@ struct AppConfig {
     std::string ui_theme;
     int         auto_compact_threshold = 0;
     bool        auto_compact_threshold_explicit = false;
+    // 1-100 when auto-compaction is a share of the model's context window
+    // (auto_compact_threshold then only applies when the window is unknown).
+    int         auto_compact_percent = 0;
     int         tool_output_token_limit = 0;
     // Learn from rejected/failed tool calls so a repeated argument mistake is
     // answered with a concrete correction instead of the same opaque error.
@@ -354,6 +357,15 @@ struct ProfileConfig {
     std::string_view default_model_selection,
     std::string_view specific_model = {},
     std::string* error = nullptr);
+
+/// Canonical form of an `auto_compact_threshold` value: "auto" (75% of the
+/// model's window), "0" (disabled), a token count, or "<1-100>%" of the
+/// window. Accepts "default", "off", "disabled", a k/m suffix ("400k") and
+/// stray spaces; nullopt when @p token is none of these.
+[[nodiscard]] std::optional<std::string> normalize_auto_compact_setting(std::string_view token);
+
+/// The canonical auto-compaction token @p config currently holds.
+[[nodiscard]] std::string auto_compact_setting_token(const AppConfig& config);
 
 /// The config.json Filo writes on first start. Anything that creates
 /// config.json itself must start from this, or the file would shadow the

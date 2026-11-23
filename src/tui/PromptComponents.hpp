@@ -26,6 +26,10 @@ struct SettingsPanelRow {
     std::string value;
     std::string description;
     bool inherited = false;
+    /// Example input when the value can also be typed (E); empty otherwise.
+    std::string custom_hint;
+    /// The text being typed for this row, if any.
+    std::optional<std::string> typed;
 };
 
 /// One row of the /settings category overview: the first navigation level,

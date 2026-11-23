@@ -428,10 +428,19 @@ public:
 
     void set_auto_compact_threshold(int threshold,
                                     bool use_model_aware_default_threshold) {
-        std::lock_guard lock(history_mutex_);
-        auto_compact_threshold_ = threshold;
-        auto_compact_uses_model_window_default_ = use_model_aware_default_threshold;
+        set_auto_compact_policy(core::context::CompactionTriggerPolicy{
+            .configured_token_threshold = threshold,
+            .use_model_aware_default_threshold = use_model_aware_default_threshold,
+        });
     }
+
+    void set_auto_compact_policy(core::context::CompactionTriggerPolicy policy) {
+        std::lock_guard lock(history_mutex_);
+        auto_compact_policy_ = policy;
+    }
+
+    /// Applies the `auto_compact_threshold` setting @p app_config holds.
+    void apply_auto_compact_setting(const core::config::AppConfig& app_config);
 
     void set_loop_limits(LoopLimits limits) {
         std::lock_guard lock(history_mutex_);
@@ -822,8 +831,10 @@ private:
     // Loop-breaker state
     static constexpr int kLoopBreakerThreshold = 3;
     int consecutive_failure_rounds_ = 0;
-    int auto_compact_threshold_ = 0;
-    bool auto_compact_uses_model_window_default_ = false;
+    core::context::CompactionTriggerPolicy auto_compact_policy_{
+        .configured_token_threshold = 0,
+        .use_model_aware_default_threshold = false,
+    };
     LoopLimits loop_limits_{};
 
     // Callbacks set by the TUI

@@ -28,11 +28,12 @@ JsonValue canonical_document(JsonValue document) {
 JsonValue settings_values(const JsonValue& settings) {
     auto values = settings;
     // settings.json writes managed numbers as strings; a word such as the
-    // automatic notice lead stays a string.
+    // automatic notice lead, or a share of the window ("40%"), stays a string.
     for (const std::string_view key :
          {"auto_compact_threshold", "prompt_cache_guard_tokens", "prompt_cache_notice_seconds"}) {
         if (const auto* number = settings.find(key);
-            number && number->is_string() && number->as_string() != kPromptCacheNoticeAutomatic) {
+            number && number->is_string() && !number->as_string().empty()
+            && number->as_string().find_first_not_of("0123456789") == std::string_view::npos) {
             values.set(std::string(key), JsonValue::integer(std::stoll(std::string(number->as_string()))));
         }
     }
@@ -76,8 +77,12 @@ void ConfigDocument::validate(const core::utils::JsonValue& root) {
         return integer(v) || (v.is_string() && !v.as_string().empty()
             && v.as_string().find_first_not_of("0123456789") == std::string_view::npos);
     };
-    check(root, {"auto_compact_threshold", "prompt_cache_guard_tokens"}, managed_count,
+    check(root, {"prompt_cache_guard_tokens"}, managed_count,
           "an integer or a numeric settings string");
+    check(root, {"auto_compact_threshold"}, [&](const JsonValue& v) {
+        return integer(v)
+            || (v.is_string() && normalize_auto_compact_setting(v.as_string()).has_value());
+    }, "an integer, a token count such as \"400k\", a share of the window such as \"40%\", or \"auto\"");
     check(root, {"prompt_cache_notice_seconds"}, [&](const JsonValue& v) {
         return managed_count(v) || (v.is_string() && v.as_string() == kPromptCacheNoticeAutomatic);
     }, "an integer, a numeric settings string or \"auto\"");

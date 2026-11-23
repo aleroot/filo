@@ -579,7 +579,7 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Activity Spinner | `ui_spinner` | `show`, `hide` |
 | Reasoning | `ui_reasoning` | `show`, `hide` |
 | Theme | `ui_theme` | `auto` (asks the terminal for its background at startup), `dark`, `light` |
-| Auto-Compaction | `auto_compact_threshold` | `0` (off), `25000`, `50000`, `100000`, `200000` |
+| Auto-Compaction | `auto_compact_threshold` | `auto` (default: 75% of the model's context window), a share of the window `25%`, `40%`, `50%`, `60%`, `90%` or any `1%`–`100%`, `0` (off), or a fixed token count such as `400000` / `400k` (capped at 75% of the window). In `/settings`, press `E` to type a custom value |
 | Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
 | Steering Mode | `steering_mode` | `default`, `fallback`, `none` |
 | Cold-Cache Guard | `prompt_cache_guard_tokens` | `0` (off), `50000`, `100000` (default), `200000` |
