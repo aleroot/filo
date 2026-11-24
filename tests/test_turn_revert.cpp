@@ -15,6 +15,7 @@
 #include "core/utils/Gzip.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/MountTable.hpp"
+#include "core/utils/PathUtils.hpp"
 #include "core/utils/ProcessUtils.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -784,8 +785,12 @@ TEST_CASE("Native inventory still lists local file roots and symlinked local roo
     auto inventory = core::changes::workspace_inventory(roots, 100);
     CHECK_FALSE(inventory.partial());
     CHECK(inventory.remote.empty());
-    CHECK(inventory.paths == std::vector<fs::path>{fs::canonical(dir.path / "notes.diff"),
-                                                   fs::canonical(other.path / "src" / "b.cpp")});
+    // The inventory is sorted by path and the two temp folders have random
+    // names, so expect that order rather than the order the roots were given.
+    std::vector<fs::path> expected{fs::canonical(dir.path / "notes.diff"),
+                                   fs::canonical(other.path / "src" / "b.cpp")};
+    std::ranges::sort(expected, core::utils::path::NativeLess{});
+    CHECK(inventory.paths == expected);
 }
 
 TEST_CASE("Writer exclusion follows overlapping native roots and leaves unrelated folders available",
