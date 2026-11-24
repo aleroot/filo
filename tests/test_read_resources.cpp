@@ -426,6 +426,8 @@ TEST_CASE("Unified read rejects read argument names written inside the path arra
     }
     CHECK_THAT(field(tool.execute(R"({"path":["source.txt","offset_line","limit_lines"]})", fixture.context()), "error"),
                ContainsSubstring(R"(path[1] "offset_line", path[2] "limit_lines" are read argument names)"));
+    CHECK_THAT(field(tool.execute(R"({"path":["first.txt","second.txt"],"limit_lines":1})", fixture.context()), "error"),
+               ContainsSubstring("A sliced read accepts one path"));
     // A string path is never reinterpreted, and ./ still names such a file.
     CHECK_THAT(tool.execute(R"({"path":"offset_line"})", fixture.context()), ContainsSubstring("unlucky name"));
     CHECK_THAT(tool.execute(R"({"path":["source.txt","./offset_line"]})", fixture.context()), ContainsSubstring("unlucky name"));

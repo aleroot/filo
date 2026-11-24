@@ -1,14 +1,13 @@
 #include "SessionHandoff.hpp"
 
 #include "../agent/RepositoryContextMessage.hpp"
+#include "../tools/PatchTargets.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <format>
-#include <optional>
-#include <sstream>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -65,54 +64,9 @@ void push_recent_limited(std::vector<std::string>& values,
     return core::utils::str::trim_ascii_copy(path.substr(pos + 1));
 }
 
-[[nodiscard]] std::optional<std::string> extract_patch_path(std::string_view line) {
-    if (!(line.starts_with("--- ") || line.starts_with("+++ "))) {
-        return std::nullopt;
-    }
-
-    std::string raw = core::utils::str::trim_ascii_copy(line.substr(4));
-    if (raw.empty()) {
-        return std::nullopt;
-    }
-
-    const auto tab_pos = raw.find('\t');
-    if (tab_pos != std::string::npos) {
-        raw.erase(tab_pos);
-        raw = core::utils::str::trim_ascii_copy(raw);
-    }
-
-    if (raw == "/dev/null") {
-        return std::nullopt;
-    }
-
-    if ((raw.starts_with("a/") || raw.starts_with("b/")) && raw.size() > 2) {
-        raw.erase(0, 2);
-    }
-
-    if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-        raw = raw.substr(1, raw.size() - 2);
-    }
-
-    if (raw.empty()) {
-        return std::nullopt;
-    }
-    return raw;
-}
-
 void capture_patch_paths(HandoffSignals& signals, std::string_view patch_text) {
-    std::istringstream lines{std::string(patch_text)};
-    std::string line;
-    while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-
-        const auto patch_path = extract_patch_path(line);
-        if (!patch_path.has_value()) {
-            continue;
-        }
-
-        append_unique_limited(signals.files_modified, basename_or_self(*patch_path), 8, 96);
+    for (const auto& path : core::tools::patch_target_paths(patch_text)) {
+        append_unique_limited(signals.files_modified, basename_or_self(path), 8, 96);
     }
 }
 

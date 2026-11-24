@@ -6,6 +6,7 @@
 #include "../config/ConfigManager.hpp"
 #include "../session/SessionHandoff.hpp"
 #include "../session/SessionStore.hpp"
+#include "../tools/PatchTargets.hpp"
 #include "../tools/ToolManager.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -193,23 +194,8 @@ void append_unique(std::vector<std::string>& values,
 void capture_apply_patch_paths(std::vector<std::string>& files,
                                const core::context::SessionContext& context,
                                std::string_view patch_text) {
-    std::size_t start = 0;
-    while (start < patch_text.size()) {
-        const auto end = patch_text.find('\n', start);
-        std::string_view line = patch_text.substr(
-            start,
-            end == std::string_view::npos ? patch_text.size() - start : end - start);
-        if (line.starts_with("+++ ") || line.starts_with("--- ")) {
-            std::string candidate = core::utils::str::trim_ascii_copy(line.substr(4));
-            if (candidate != "/dev/null" && !candidate.empty()) {
-                if ((candidate.starts_with("a/") || candidate.starts_with("b/")) && candidate.size() > 2) {
-                    candidate.erase(0, 2);
-                }
-                append_unique(files, resolved_path_string(context, candidate));
-            }
-        }
-        if (end == std::string_view::npos) break;
-        start = end + 1;
+    for (const auto& candidate : core::tools::patch_target_paths(patch_text)) {
+        append_unique(files, resolved_path_string(context, candidate));
     }
 }
 

@@ -483,6 +483,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/shell/ShellSessions.cpp
     src/core/tools/VerificationTool.cpp
     src/core/tools/ApplyPatchTool.cpp
+    src/core/tools/CodexPatch.cpp
     src/core/tools/PathVisibilityToolDecorator.cpp
     src/core/tools/FileSearchTool.cpp
     src/core/tools/ReadTool.cpp
@@ -804,6 +805,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_reasoning_capabilities.cpp
     tests/test_goal_graph.cpp
     tests/test_tools.cpp
+    tests/test_codex_patch.cpp
     tests/test_python_namespaces.cpp
     tests/test_tool_diff_utils.cpp
     tests/test_read_image.cpp

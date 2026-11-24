@@ -154,8 +154,14 @@ std::expected<Options, std::string> parse_options(std::string_view json) {
             options.cell = text;
         }
     }
-    if (options.paths.size() > 1 && (options.sliced || !options.cell.empty() || !options.expected_digest.empty()))
-        return std::unexpected("Selections and expected_digest require one resource.");
+    if (options.paths.size() > 1) {
+        if (options.sliced) {
+            return std::unexpected(
+                "A sliced read accepts one path. Drop offset_line and limit_lines to read several resources.");
+        }
+        if (!options.cell.empty()) return std::unexpected("select requires one resource.");
+        if (!options.expected_digest.empty()) return std::unexpected("expected_digest requires one resource.");
+    }
     return options;
 }
 

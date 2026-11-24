@@ -224,6 +224,9 @@ static ApplyResult apply_blocks(
                     match->similarity * 100.0,
                     match->start_line, match->end_line,
                     match->text);
+            } else {
+                msg += "The text is not in the file. Read it again before editing; "
+                       "it may have changed since you last saw it.\n";
             }
             msg += "Tips: ensure old_string is copied verbatim from the file, "
                    "preserving all indentation (spaces/tabs), punctuation, and "

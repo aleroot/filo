@@ -5,20 +5,13 @@
 namespace core::tools {
 
 /**
- * @brief Tool that applies a unified diff patch to the filesystem.
+ * @brief Applies a patch for every provider from the same tool.
  *
- * Exposed to MCP clients as @c apply_patch.
- *
- * ### Behaviour
- * - Delegates to the system @c patch binary (looked up once at startup at
- *   @c /usr/bin/patch or @c /usr/local/bin/patch).
- * - The patch content is written to a collision-safe temp file in @c /tmp
- *   (name includes PID + monotonic counter), then @c patch -p1 is run.
- * - @c working_dir sets the directory in which @c patch is invoked
- *   (@c -d flag), defaulting to filo's CWD.
- * - stdout + stderr from @c patch are captured and returned in @c output,
- *   which lists the patched file paths on success (useful for Lampo's diff
- *   UI to know which files changed).
+ * The patch text selects the format. An envelope that starts with
+ * `*** Begin Patch` is applied in-process by matching context lines. Anything
+ * else is a unified diff: hunk counts are checked first, then the system
+ * `patch -p1 -f -i` applies it. No provider has its own patch path.
+ * `working_dir` selects the directory and defaults to the session workspace.
  *
  * ### Result JSON
  * @code{.json}

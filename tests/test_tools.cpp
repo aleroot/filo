@@ -1564,6 +1564,45 @@ TEST_CASE("DeleteFileTool denies out-of-scope path when workspace is enforced", 
     std::filesystem::remove_all(workspace_root);
 }
 
+TEST_CASE("ApplyPatchTool denies a Codex patch that names a file outside the workspace", "[tools][workspace]") {
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_workspace_codex_" + std::to_string(getpid()));
+    const auto outside_file = std::filesystem::current_path()
+        / ("test_artifact_outside_codex_" + std::to_string(getpid()) + ".txt");
+    std::filesystem::remove_all(workspace_root);
+    std::filesystem::remove(outside_file);
+    std::filesystem::create_directories(workspace_root);
+    { std::ofstream ofs(outside_file); ofs << "outside\n"; }
+
+    const std::string patch =
+        "*** Begin Patch\n"
+        "*** Update File: " + outside_file.string() + "\n"
+        "@@\n"
+        "-outside\n"
+        "+patched\n"
+        "*** End Patch\n";
+    std::string escaped;
+    for (char c : patch) {
+        if (c == '\n') escaped += "\\n";
+        else if (c == '"') escaped += "\\\"";
+        else if (c == '\\') escaped += "\\\\";
+        else escaped += c;
+    }
+
+    ApplyPatchTool tool;
+    ScopedWorkspaceEnforcement scope(workspace_root);
+    const auto res = tool.execute(
+        "{\"patch\": \"" + escaped + "\", \"working_dir\": \"" + workspace_root.string() + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Access denied"));
+    std::ifstream ifs(outside_file);
+    std::string content((std::istreambuf_iterator<char>(ifs)), {});
+    REQUIRE_THAT(content, Catch::Matchers::ContainsSubstring("outside"));
+    REQUIRE_THAT(content, !Catch::Matchers::ContainsSubstring("patched"));
+
+    std::filesystem::remove(outside_file);
+    std::filesystem::remove_all(workspace_root);
+}
+
 // ---------------------------------------------------------------------------
 // MoveFileTool
 // ---------------------------------------------------------------------------
@@ -3492,6 +3531,7 @@ TEST_CASE("SearchReplaceTool suggests a near miss anywhere in a large file", "[t
         + R"(","edits":[{"old_string":"completely unrelated text","new_string":"x"}]})");
     CHECK_THAT(res, Catch::Matchers::ContainsSubstring("old_string not found"));
     CHECK_THAT(res, !Catch::Matchers::ContainsSubstring("Closest match"));
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("Read it again"));
 
     std::filesystem::remove(path);
 }
