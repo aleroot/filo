@@ -319,3 +319,49 @@ TEST_CASE("Old tool-result images are detached once newer ones fill the request 
     CHECK_FALSE(core::llm::request_has_image_input(omitted));
     CHECK(omitted.messages.back().content == "described");
 }
+
+TEST_CASE("An empty image never reaches the wire as an empty source",
+          "[llm][image][tool-media][anthropic][regression]") {
+    // Sessions saved before images were pinned name only the file. When a
+    // render is truncated, the next request sent `"data":""` and Anthropic
+    // refused it (400, "image cannot be empty") on every later turn.
+    Fixture fixture;
+    fixture.write("empty.png", "");
+    core::llm::ChatRequest req;
+    req.model = "claude-sonnet-4-5";
+    req.messages.push_back({.role = "user", .content = "look"});
+    req.messages.push_back({.role = "assistant", .tool_calls = {
+        {.id = "a", .function = {.name = "read", .arguments = "{}"}},
+        {.id = "b", .function = {.name = "read", .arguments = "{}"}}}});
+    req.messages.push_back(tool_message("a", R"({"kind":"image"})"));
+    req.messages.back().content_parts.push_back(
+        core::llm::ContentPart::make_image((fixture.root / "empty.png").string(), "image/png"));
+    req.messages.push_back(tool_message("b", R"({"kind":"image"})"));
+    auto pinned_empty = core::llm::ContentPart::make_image_url("data:image/png;base64,");
+    req.messages.back().content_parts.push_back(pinned_empty);
+
+    CHECK_FALSE(core::llm::encode_image_part(req.messages[2].content_parts[0]));
+    CHECK_FALSE(core::llm::encode_image_part(pinned_empty));
+
+    const auto payload = core::llm::protocols::AnthropicProtocol{}.serialize(req);
+    CHECK_THAT(payload, !ContainsSubstring(R"("data":"")"));
+    CHECK_THAT(payload, ContainsSubstring("[Attached image unavailable: " + (fixture.root / "empty.png").string()));
+}
+
+TEST_CASE("Pinned tool-result images cost their own bytes, not the file's",
+          "[llm][image][tool-media]") {
+    using core::llm::ContentPart;
+    Fixture fixture;
+    // Two pinned 6 MiB images whose files are gone: only the newer fits.
+    const std::string six_mib(6 * 1024 * 1024, 'x');
+    core::llm::ChatRequest req;
+    for (const auto* id : {"a", "b"}) {
+        req.messages.push_back(tool_message(id, "described"));
+        auto part = ContentPart::make_image((fixture.root / std::format("{}.png", id)).string(), "image/png");
+        part.url = "data:image/png;base64," + core::utils::Base64::encode(six_mib);
+        req.messages.back().content_parts.push_back(std::move(part));
+    }
+    core::llm::bound_tool_result_media(req);
+    CHECK(req.messages[0].content_parts.empty());
+    CHECK(req.messages[1].content_parts.size() == 1);
+}

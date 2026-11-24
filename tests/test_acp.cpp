@@ -315,6 +315,8 @@ TEST_CASE("ACP prompt blocks keep text, files and images apart", "[acp]") {
     REQUIRE(blocks->parts.size() == 1);
     CHECK(blocks->parts.front().type == core::llm::ContentPartType::Image);
     CHECK(std::filesystem::exists(blocks->parts.front().path));
+    // The bytes travel with the part: the next prompt reuses image-1.
+    CHECK(blocks->parts.front().url == "data:image/png;base64,aGk=");
     std::filesystem::remove_all(dir);
 }
 

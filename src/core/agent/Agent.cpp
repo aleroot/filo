@@ -23,6 +23,7 @@
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolArgumentUtils.hpp"
 #include "../tools/ToolPolicy.hpp"
+#include "../tools/read/ImageFile.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../tools/ToolSchema.hpp"
 #include "../utils/DetachedWorkTracker.hpp"
@@ -129,16 +130,19 @@ private:
 // The image a built-in `read` opened, as an input attached to its result.
 // Only the built-in tool may name a local file to send: its result is the
 // one this process wrote, never a remote server's.
+//
+// The bytes are pinned into the part: every later request resends the whole
+// history, and the file is often a scratch render the agent rewrites next
+// (or truncates, then fails to rewrite). A part that only named the path
+// would show the model a different image, or an empty one that fails every
+// request from then on.
 [[nodiscard]] std::optional<core::llm::ContentPart> read_image_input(
-    std::string_view tool_name, std::string_view result) {
-    if (!core::tools::names::is_read_tool(tool_name)
-        || core::utils::json::string_field(result, "kind") != "image") {
-        return std::nullopt;
-    }
-    auto path = core::utils::json::string_field(result, "path");
-    auto mime = core::utils::json::string_field(result, "mime_type");
-    if (path.empty() || !mime.starts_with("image/")) return std::nullopt;
-    return core::llm::ContentPart::make_image(std::move(path), std::move(mime));
+    std::string_view tool_name, std::string& result) {
+    if (!core::tools::names::is_read_tool(tool_name)) return std::nullopt;
+    auto image = core::tools::read::load_described_image(result);
+    if (!image) return std::nullopt;
+    return core::llm::ContentPart::make_pinned_image(
+        std::move(image->path), std::move(image->mime_type), image->bytes);
 }
 
 void sanitize_tool_arguments(core::llm::Message& message) {

@@ -296,8 +296,8 @@ private:
         });
     }
 
-    /// Journals and tool results of no saved conversation, idle since the
-    /// conversation cutoff.
+    /// Journals, tool results and media snapshots of no saved conversation,
+    /// idle since the conversation cutoff.
     void leftovers() {
         if (!sessions_cutoff_) return;
         const auto catalogue = Catalogue::scan(directory_);
@@ -308,12 +308,18 @@ private:
             expire(catalogue, id, {path}, *sessions_cutoff_,
                    [&](std::string* error) { return journal_.remove(id, error); }, report_.leftovers);
         });
-        each(subdirectories_of(SessionStore::tool_results_dir(directory_)), [&](const fs::path& path) {
-            const auto id = path.filename().string();
-            if (catalogue.session(id) || SessionStore::tool_results_dir(directory_, id) != path) return;
-            expire(catalogue, id, {path}, *sessions_cutoff_,
-                   [&](std::string* error) { return remove_tree(path, error); }, report_.leftovers);
-        });
+        const auto sweep_owned = [&](const fs::path& root, auto owned_by) {
+            each(subdirectories_of(root), [&](const fs::path& path) {
+                const auto id = path.filename().string();
+                if (catalogue.session(id) || owned_by(id) != path) return;
+                expire(catalogue, id, {path}, *sessions_cutoff_,
+                       [&](std::string* error) { return remove_tree(path, error); }, report_.leftovers);
+            });
+        };
+        sweep_owned(SessionStore::tool_results_dir(directory_),
+                    [&](std::string_view id) { return SessionStore::tool_results_dir(directory_, id); });
+        sweep_owned(SessionStore::media_dir(directory_),
+                    [&](std::string_view id) { return SessionStore::media_dir(directory_, id); });
     }
 
     /// Lock files of sessions and journals deleted before their locks were
@@ -389,6 +395,7 @@ StorageUsage measure_storage(const SessionStore& store, std::stop_token stop) {
     usage.revert_history = bytes_under(core::changes::RecoveryStore::root_in(directory), stop, usage.complete);
     usage.journals = bytes_under(ExecutionJournal::root_in(directory), stop, usage.complete);
     usage.tool_output = bytes_under(SessionStore::tool_results_dir(directory), stop, usage.complete);
+    usage.media = bytes_under(SessionStore::media_dir(directory), stop, usage.complete);
     return usage;
 }
 

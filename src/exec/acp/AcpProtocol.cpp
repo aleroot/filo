@@ -408,7 +408,7 @@ std::optional<PromptBlocks> parse_prompt(const core::utils::JsonValue& prompt,
             const auto mime = field_string(block, "mimeType");
             const auto data = field_string(block, "data");
             auto decoded = core::utils::Base64::decode(data);
-            if (!decoded || decoded->size() > kMaxImageBytes) {
+            if (!decoded || decoded->empty() || decoded->size() > kMaxImageBytes) {
                 append_text(blocks.text, "[image omitted]");
                 continue;
             }
@@ -417,7 +417,11 @@ std::optional<PromptBlocks> parse_prompt(const core::utils::JsonValue& prompt,
                 append_text(blocks.text, "[image omitted]");
                 continue;
             }
-            blocks.parts.push_back(core::llm::ContentPart::make_image(path.string(), mime));
+            // The next prompt's first image is image-1 again: the part keeps
+            // its own bytes so history never shows a later prompt's image.
+            blocks.parts.push_back(mime.starts_with("image/")
+                ? core::llm::ContentPart::make_pinned_image(path.string(), mime, *decoded)
+                : core::llm::ContentPart::make_image(path.string(), mime));
             continue;
         }
         if (type == "audio") {

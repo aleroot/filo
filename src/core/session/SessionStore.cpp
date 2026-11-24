@@ -1,6 +1,7 @@
 #include "SessionStore.hpp"
 #include "ExecutionJournal.hpp"
 #include "../changes/RecoveryStore.hpp"
+#include "../llm/MediaSnapshots.hpp"
 
 #include "ActiveSessionLease.hpp"
 #include "ThreadCatalog.hpp"
@@ -162,18 +163,37 @@ std::optional<std::string_view> SessionStore::session_id_from_filename(std::stri
     return name.substr(dash_pos + 1, dot_pos - dash_pos - 1);
 }
 
+namespace {
+
+/// @p kind_dir / @p session_id, or an empty path when the ID could not have
+/// named a directory there. Session-owned directories are only ever named
+/// through this, so a crafted ID can never point a removal elsewhere.
+[[nodiscard]] std::filesystem::path session_owned_dir(const std::filesystem::path& kind_dir,
+                                                      std::string_view session_id) {
+    if (session_id.empty() || session_id.size() > 80 || !std::ranges::all_of(session_id, [](unsigned char c) {
+            return std::isalnum(c) || c == '-' || c == '_';
+        })) return {};
+    return kind_dir / session_id;
+}
+
+} // namespace
+
 std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir) {
     return sessions_dir.parent_path() / "tool-results";
 }
 
 std::filesystem::path SessionStore::tool_results_dir(const std::filesystem::path& sessions_dir,
                                                      std::string_view session_id) {
-    // ToolResultStore names the directory after the session ID; an ID it
-    // would have rewritten never named one.
-    if (session_id.empty() || session_id.size() > 80 || !std::ranges::all_of(session_id, [](unsigned char c) {
-            return std::isalnum(c) || c == '-' || c == '_';
-        })) return {};
-    return tool_results_dir(sessions_dir) / session_id;
+    return session_owned_dir(tool_results_dir(sessions_dir), session_id);
+}
+
+std::filesystem::path SessionStore::media_dir(const std::filesystem::path& sessions_dir) {
+    return sessions_dir.parent_path() / "media";
+}
+
+std::filesystem::path SessionStore::media_dir(const std::filesystem::path& sessions_dir,
+                                              std::string_view session_id) {
+    return session_owned_dir(media_dir(sessions_dir), session_id);
 }
 
 std::filesystem::path SessionStore::canonicalize_working_dir(std::string_view dir) {
@@ -386,6 +406,11 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
                     core::utils::append_escaped(out, part.detail);
                     out += '"';
                 }
+                if (!part.snapshot.empty()) {
+                    out += ",\"snapshot\":\"";
+                    core::utils::append_escaped(out, part.snapshot);
+                    out += '"';
+                }
             }
             out += '}';
         }
@@ -534,6 +559,9 @@ void append_goal_graph_json(std::string& out,
             }
             if (part_el["detail"].get(sv) == simdjson::SUCCESS) {
                 part.detail = std::string(sv);
+            }
+            if (part_el["snapshot"].get(sv) == simdjson::SUCCESS) {
+                part.snapshot = std::string(sv);
             }
             msg.content_parts.push_back(std::move(part));
         }
@@ -865,9 +893,28 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
         return false;
     }
 
+    // A session owns the media it refers to: messages branched or rotated
+    // from another session are saved pointing at this session's own copies.
+    std::optional<core::llm::MediaSnapshots> media;
+    if (auto directory = media_dir(sessions_dir_, data.session_id); !directory.empty()) {
+        media.emplace(std::move(directory));
+    }
+    const auto owns_media = [&](const core::llm::Message& message) {
+        return !media || std::ranges::all_of(message.content_parts, [&](const core::llm::ContentPart& part) {
+            return media->owns(part);
+        });
+    };
     std::vector<std::string> messages;
     messages.reserve(data.messages.size());
-    for (const auto& message : data.messages) messages.push_back(message_json(message));
+    for (const auto& message : data.messages) {
+        if (owns_media(message)) {
+            messages.push_back(message_json(message));
+            continue;
+        }
+        auto owned = message;
+        for (auto& part : owned.content_parts) media->adopt(part);
+        messages.push_back(message_json(owned));
+    }
     if (!append(target_path, data, messages)) {
         std::string compressed;
         try {
@@ -1629,8 +1676,10 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
             if (error) *error = ec.message();
             return false;
         }
-        if (const auto results = tool_results_dir(sessions_dir_, session_id); !results.empty()) {
-            std::filesystem::remove_all(results, ec);
+        for (const auto& owned : {tool_results_dir(sessions_dir_, session_id),
+                                  media_dir(sessions_dir_, session_id)}) {
+            if (owned.empty()) continue;
+            std::filesystem::remove_all(owned, ec);
             if (ec) {
                 if (error) *error = ec.message();
                 return false;

@@ -1279,11 +1279,14 @@ TEST_CASE("KimiProtocol uploads local videos as files and serializes ms referenc
     std::atomic<int> uploads{0};
     std::string authorization;
     std::string content_type;
+    httplib::FormData uploaded;
     server.Post("/v1/files", [&](const httplib::Request& req, httplib::Response& res) {
-        ++uploads;
+        const auto upload = ++uploads;
         authorization = req.get_header_value("Authorization");
         content_type = req.get_header_value("Content-Type");
-        res.set_content(R"({"id":"file_kimi_video_123"})", "application/json");
+        uploaded = req.form.get_file("file");
+        res.set_content(std::format(R"({{"id":"file_kimi_video_{}"}})", upload == 1 ? "123" : "pinned"),
+                        "application/json");
     });
 
     const int port = server.bind_to_any_port("127.0.0.1");
@@ -1343,6 +1346,31 @@ TEST_CASE("KimiProtocol uploads local videos as files and serializes ms referenc
     REQUIRE_NOTHROW(protocol.prepare_media_uploads(cached_req, base_url, auth, requester));
     CHECK(uploads.load() == 1);
     CHECK(cached_req.messages[0].content_parts[0].url == "ms://file_kimi_video_123");
+
+    // A pinned video uploads the snapshot's bytes under the name it was
+    // attached with; the file it came from has since changed size and all.
+    const auto snapshot = dir / "0123abcd";
+    std::ofstream(snapshot, std::ios::binary) << "pinned-video";
+    auto pinned = ContentPart::make_video(video.string(), "video/mp4");
+    pinned.snapshot = snapshot.string();
+    ChatRequest pinned_req;
+    pinned_req.model = "kimi-k2.6";
+    pinned_req.messages.push_back(Message{.role = "user", .content_parts = {pinned}});
+    REQUIRE_NOTHROW(protocol.prepare_media_uploads(pinned_req, base_url, auth, requester));
+    CHECK(uploads.load() == 2);
+    CHECK(uploaded.content == "pinned-video");
+    CHECK(uploaded.filename == "recording.mp4");
+    CHECK(pinned_req.messages[0].content_parts[0].url == "ms://file_kimi_video_pinned");
+
+    // A video that can no longer be read is left to serialize as a note.
+    auto missing = ContentPart::make_video((dir / "gone.mp4").string(), "video/mp4");
+    ChatRequest missing_req;
+    missing_req.model = "kimi-k2.6";
+    missing_req.messages.push_back(Message{.role = "user", .content_parts = {missing}});
+    REQUIRE_NOTHROW(protocol.prepare_media_uploads(missing_req, base_url, auth, requester));
+    CHECK(uploads.load() == 2);
+    CHECK_THAT(protocol.serialize(missing_req),
+               Catch::Matchers::ContainsSubstring("[Attached video unavailable: " + (dir / "gone.mp4").string()));
 }
 
 TEST_CASE("Kimi protocol enriches a header-only 5h window with weekly usage",

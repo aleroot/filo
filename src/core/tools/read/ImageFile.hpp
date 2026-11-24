@@ -26,4 +26,17 @@ inline constexpr std::uint32_t kMaxImageDimension = 8000;
 [[nodiscard]] std::optional<std::string> read_image_file(std::string_view requested,
                                                          const std::filesystem::path& resolved);
 
+/// The image a `read_image_file` result describes, with its bytes.
+struct DescribedImage {
+    std::string path;
+    std::string mime_type;
+    std::string bytes;
+};
+
+/// The image @p result describes, read again so its bytes can be kept with
+/// the result, or nullopt when @p result describes no image. When the file
+/// no longer holds the image described (rewritten or emptied since), @p result
+/// is replaced by an error asking to read it again, and nullopt is returned.
+[[nodiscard]] std::optional<DescribedImage> load_described_image(std::string& result);
+
 } // namespace core::tools::read

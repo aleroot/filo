@@ -49,7 +49,7 @@ struct RetentionFixture {
     }
 
     /// A saved session last used @p idle ago, with a journal, a revert
-    /// checkpoint and an offloaded tool result.
+    /// checkpoint, an offloaded tool result and a media snapshot.
     core::session::SessionData session(std::string id, days idle, std::string name = {}) const {
         core::session::SessionData data;
         data.session_id = std::move(id);
@@ -60,11 +60,18 @@ struct RetentionFixture {
         REQUIRE(journal().append(data.session_id, "agent", "", "clear", "{}"));
         checkpoint(data.session_id);
         REQUIRE(results().store(data.session_id, "call-1", "output"));
+        snapshot(data.session_id);
         age(store.compute_path(data), idle);
         age(journal().path_for(data.session_id), idle);
         age(recovery(data.session_id), idle);
         age(tool_results(data.session_id), idle);
+        age(media(data.session_id), idle);
         return data;
+    }
+
+    void snapshot(std::string_view id) const {
+        fs::create_directories(media(id));
+        std::ofstream(media(id) / std::string(64, 'b')) << "video";
     }
 
     void checkpoint(std::string_view id) const {
@@ -85,11 +92,15 @@ struct RetentionFixture {
     [[nodiscard]] fs::path tool_results(std::string_view id) const {
         return SessionStore::tool_results_dir(sessions) / id;
     }
+    [[nodiscard]] fs::path media(std::string_view id) const {
+        return SessionStore::media_dir(sessions) / id;
+    }
     [[nodiscard]] bool stored(const core::session::SessionData& data) const {
         return fs::exists(store.compute_path(data));
     }
     [[nodiscard]] bool anything_of(std::string_view id) const {
-        return fs::exists(journal().path_for(id)) || fs::exists(recovery(id)) || fs::exists(tool_results(id));
+        return fs::exists(journal().path_for(id)) || fs::exists(recovery(id)) || fs::exists(tool_results(id))
+            || fs::exists(media(id));
     }
 
     core::session::RetentionReport run(RetentionPolicy policy) const {
@@ -202,7 +213,7 @@ TEST_CASE("Revert history of a session that is open but not yet saved is kept",
     CHECK(fs::exists(fixture.recovery(live.session_id)));
 }
 
-TEST_CASE("Journals and tool results of no conversation follow conversation retention",
+TEST_CASE("Journals, tool results and media of no conversation follow conversation retention",
           "[session][retention]") {
     RetentionFixture fixture;
     const auto kept = fixture.session("aaaa0001", days{5});
@@ -210,13 +221,17 @@ TEST_CASE("Journals and tool results of no conversation follow conversation rete
     REQUIRE(fixture.results().store("dddd0001", "call-1", "output"));
     REQUIRE(fixture.journal().append("dddd0002", "agent", "", "clear", "{}"));
     REQUIRE(fixture.results().store("dddd0002", "call-1", "output"));
+    fixture.snapshot("dddd0001");
+    fixture.snapshot("dddd0002");
     fixture.age(fixture.journal().path_for("dddd0001"), days{40});
     fixture.age(fixture.tool_results("dddd0001"), days{40});
+    fixture.age(fixture.media("dddd0001"), days{40});
 
     SECTION("Kept while conversations are") {
         fixture.run(RetentionPolicy{.sessions = std::nullopt, .revert_history = days{7}});
         CHECK(fs::exists(fixture.journal().path_for("dddd0001")));
         CHECK(fs::exists(fixture.tool_results("dddd0001")));
+        CHECK(fs::exists(fixture.media("dddd0001")));
     }
     SECTION("Deleted once idle past it") {
         const auto report = fixture.run(RetentionPolicy{.sessions = days{30}, .revert_history = days{7}});
@@ -224,11 +239,14 @@ TEST_CASE("Journals and tool results of no conversation follow conversation rete
         CHECK_FALSE(fs::exists(fixture.tool_results("dddd0001")));
         CHECK(fs::exists(fixture.journal().path_for("dddd0002")));  // Recent.
         CHECK(fs::exists(fixture.tool_results("dddd0002")));
-        CHECK(report.leftovers >= 2);
+        CHECK_FALSE(fs::exists(fixture.media("dddd0001")));
+        CHECK(fs::exists(fixture.media("dddd0002")));
+        CHECK(report.leftovers >= 3);
     }
     CHECK(fixture.stored(kept));
     CHECK(fs::exists(fixture.journal().path_for(kept.session_id)));
     CHECK(fs::exists(fixture.tool_results(kept.session_id)));
+    CHECK(fs::exists(fixture.media(kept.session_id)));
 }
 
 TEST_CASE("Stale lock files of deleted sessions are removed, live ones are not",
@@ -313,6 +331,7 @@ TEST_CASE("Storage usage adds up each kind of stored data", "[session][retention
         write_bytes(fixture.recovery("aaaa0001") / "objects" / "hash", 20);
         write_bytes(fixture.journal().path_for("aaaa0001"), 30);
         write_bytes(fixture.tool_results("aaaa0001") / "call-1", 40);
+        write_bytes(fixture.media("aaaa0001") / std::string(64, 'c'), 50);
         write_bytes(fixture.root / "outside", 5000);
         fs::create_symlink(fixture.root / "outside", fixture.recovery("aaaa0001") / "link");
         fs::create_symlink(fixture.root / "outside", fixture.sessions / "stray-link");
@@ -323,7 +342,8 @@ TEST_CASE("Storage usage adds up each kind of stored data", "[session][retention
         CHECK(usage.revert_history == 30);
         CHECK(usage.journals == 30);
         CHECK(usage.tool_output == 40);
-        CHECK(usage.total() == 200);
+        CHECK(usage.media == 50);
+        CHECK(usage.total() == 250);
         CHECK(usage.complete);
     }
     SECTION("a missing sessions directory holds nothing") {

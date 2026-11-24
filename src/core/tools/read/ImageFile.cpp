@@ -4,6 +4,7 @@
 #include "../../net/NetworkTraffic.hpp"  // format_bytes: unit-agnostic size text.
 #include "../../utils/AsciiUtils.hpp"
 #include "../../utils/ImageHeader.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include "../../utils/JsonWriter.hpp"
 #include <algorithm>
 #include <array>
@@ -93,6 +94,29 @@ std::optional<std::string> read_image_file(std::string_view requested,
                 requested, name, dimensions, format_bytes(size)));
     }
     return std::move(writer).take();
+}
+
+std::optional<DescribedImage> load_described_image(std::string& result) {
+    namespace json = core::utils::json;
+    if (json::string_field(result, "kind") != "image") return std::nullopt;
+    DescribedImage described{
+        .path = json::string_field(result, "path"),
+        .mime_type = json::string_field(result, "mime_type"),
+    };
+    const auto size = json::first_int64_field(result, {"bytes"});
+    if (described.path.empty() || !described.mime_type.starts_with("image/") || !size) return std::nullopt;
+
+    // One past the limit: a file that grew past it is not the one described.
+    std::ifstream input(described.path, std::ios::binary);
+    if (input) described.bytes = read_prefix(input, static_cast<std::size_t>(kMaxImageBytes) + 1);
+    const auto header = image::sniff(described.bytes);
+    if (!input.bad() && header && image::vision_mime_type(header->format) == described.mime_type
+        && described.bytes.size() == static_cast<std::uint64_t>(*size)) {
+        return described;
+    }
+    result = format_read_error(described.path, described.path,
+        "the file changed while it was being read and no longer holds the image described. Read it again.");
+    return std::nullopt;
 }
 
 } // namespace core::tools::read

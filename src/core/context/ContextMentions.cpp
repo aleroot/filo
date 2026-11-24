@@ -3,6 +3,7 @@
 #include "MentionSyntax.hpp"
 #include "PromptCode.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../llm/MediaSnapshots.hpp"
 #include "../session/SessionDigest.hpp"
 #include "../session/SessionReference.hpp"
 #include "../utils/MimeUtils.hpp"
@@ -595,9 +596,11 @@ ExpandedPrompt expand_prompt(std::string_view input,
         if (target == MentionTarget::Video) {
             output.display_text += core::llm::describe_video_attachment(raw_path);
             output.display_text += trailing_suffix;
-            output.content_parts.push_back(core::llm::ContentPart::make_video(
+            auto video = core::llm::ContentPart::make_video(
                 resolved.string(),
-                core::utils::mime::guess_type(resolved, false)));
+                core::utils::mime::guess_type(resolved, false));
+            if (options.media_snapshots != nullptr) options.media_snapshots->pin(video);
+            output.content_parts.push_back(std::move(video));
             append_text_part(output.content_parts, trailing_suffix);
             i = cursor;
             continue;

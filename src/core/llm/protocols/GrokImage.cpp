@@ -495,8 +495,8 @@ void prepare_grok_images(ChatRequest& request) {
                 } else {
                     continue;
                 }
-            } else if (!part.path.empty()) {
-                const auto loaded = load_image_file(part.path);
+            } else if (!part.media_file().empty()) {
+                const auto loaded = load_image_file(part.media_file());
                 if (loaded.kind == LoadKind::Unreadable) {
                     continue; // shared encoder emits the generic unavailable text
                 }

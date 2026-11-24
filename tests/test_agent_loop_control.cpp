@@ -8,6 +8,7 @@
 #include "core/context/SessionContext.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
+#include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/ClaudeProtocol.hpp"
 #include "core/memory/MemoryStore.hpp"
 #include "core/memory/MemorySystem.hpp"
@@ -18,6 +19,7 @@
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/tools/MemoryTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/TaskTool.hpp"
 #include "core/tools/VerificationTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
@@ -831,6 +833,66 @@ private:
     std::vector<std::string> write_arguments_;
     std::atomic<std::size_t> calls_{0};
 };
+
+// Asks `read` for one path, then answers.
+class ImageReadingProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        if (calls_.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "read-image";
+            tool_call.type = "function";
+            tool_call.function.name = "read";
+            tool_call.function.arguments = R"({"path":"shot.png"})";
+            core::llm::StreamChunk chunk;
+            chunk.tools = {std::move(tool_call)};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+        callback(core::llm::StreamChunk::make_content("seen"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+private:
+    std::atomic<int> calls_{0};
+};
+
+// The real `read`, after which the file is rewritten: what a render the
+// agent runs again, or a parallel call, does to a file it just read.
+class RewrittenReadTool final : public core::tools::Tool {
+public:
+    RewrittenReadTool(std::filesystem::path file, std::optional<std::string> rewrite)
+        : file_(std::move(file)), rewrite_(std::move(rewrite)) {}
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return read_.get_definition();
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string& arguments,
+        const core::context::SessionContext& context) override {
+        auto result = read_.execute(arguments, context);
+        if (rewrite_) std::ofstream(file_, std::ios::binary | std::ios::trunc) << *rewrite_;
+        return result;
+    }
+
+private:
+    core::tools::ReadTool read_;
+    std::filesystem::path file_;
+    std::optional<std::string> rewrite_;
+};
+
+[[nodiscard]] std::string png_bytes(std::uint32_t width, std::uint32_t height) {
+    std::string bytes("\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR", 16);
+    for (const auto value : {width, height})
+        for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<char>(value >> shift & 0xFF));
+    bytes += std::string("\x08\x06\0\0\0", 5);
+    return bytes;
+}
 
 class ToolThenTextCapturingProvider final : public core::llm::LLMProvider {
 public:
@@ -3137,6 +3199,74 @@ TEST_CASE("A turn publishes and records the net changes of its file tools",
     CHECK(std::ranges::count_if(history, [](const core::llm::Message& message) {
         return !message.turn_changes.empty();
     }) == 1);
+}
+
+TEST_CASE("An image read keeps the bytes it showed, whatever the file becomes",
+          "[agent][read][image][regression]") {
+    const auto temp_path =
+        std::filesystem::temp_directory_path() /
+        std::format("filo_pinned_read_image_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir temp(temp_path);
+    const auto file = std::filesystem::canonical(temp.path()) / "shot.png";
+    const auto original = png_bytes(4, 2);
+    std::ofstream(file, std::ios::binary) << original;
+
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const bool had_read = tool_manager.has_tool("read");
+    const auto run = [&](std::optional<std::string> rewrite) {
+        tool_manager.register_tool(std::make_shared<RewrittenReadTool>(file, std::move(rewrite)));
+        auto agent = std::make_shared<core::agent::Agent>(
+            std::make_shared<ImageReadingProvider>(), tool_manager,
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = temp.path(),
+                .enforce = true,
+                .version = 1,
+            }));
+        agent->set_permission_fn([](std::string_view, std::string_view) { return true; });
+        send_and_wait(agent, "Look at the render.");
+        const auto history = agent->get_history();
+        const auto tool = std::ranges::find_if(history, [](const core::llm::Message& message) {
+            return message.role == "tool";
+        });
+        REQUIRE(tool != history.end());
+        return *tool;
+    };
+
+    SECTION("rewritten after the read: history still sends what the model saw") {
+        const auto tool = run(std::nullopt);
+        REQUIRE(tool.content_parts.size() == 1);
+        CHECK(tool.content_parts[0].path == file.string());
+        CHECK(tool.content_parts[0].url
+              == "data:image/png;base64," + core::utils::Base64::encode(original));
+
+        // The render is truncated by its next run, which then fails.
+        { std::ofstream truncate(file, std::ios::binary | std::ios::trunc); }
+        core::llm::ChatRequest request;
+        request.model = "claude-sonnet-4-5";
+        request.messages.push_back({.role = "user", .content = "Look at the render."});
+        request.messages.push_back({.role = "assistant", .tool_calls = {
+            {.id = tool.tool_call_id, .function = {.name = "read", .arguments = "{}"}}}});
+        request.messages.push_back(tool);
+        const auto payload = core::llm::protocols::AnthropicProtocol{}.serialize(request);
+        CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("data":")" + core::utils::Base64::encode(original) + "\""));
+    }
+
+    SECTION("rewritten while it was read: the result says so, with no image") {
+        const auto tool = run(png_bytes(8, 8) + "different");
+        CHECK(tool.content_parts.empty());
+        CHECK_THAT(tool.content, Catch::Matchers::ContainsSubstring("changed while it was being read"));
+    }
+
+    SECTION("emptied while it was read: no empty image enters history") {
+        const auto tool = run(std::string{});
+        CHECK(tool.content_parts.empty());
+        CHECK_THAT(tool.content, Catch::Matchers::ContainsSubstring("Read it again"));
+    }
+
+    if (had_read) tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
+    else (void)tool_manager.unregister_tool("read");
 }
 
 TEST_CASE("Marking a turn reverted stamps the newest summary, and only once",

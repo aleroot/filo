@@ -68,7 +68,7 @@ struct Attachment {
     const auto mime = signature ? minimax_image_mime(*signature) : std::string_view{};
     if (mime.empty() || decoded_size(encoded->base64_data) > kMiniMaxImageMaxBytes) return attachment;
     if (encoded->mime_type != mime) {
-        part.url = "data:" + std::string(mime) + ";base64," + encoded->base64_data;
+        part.url = make_data_url(mime, encoded->base64_data);
         part.mime_type = mime;
     }
     attachment.mime = mime;
@@ -129,9 +129,9 @@ struct Attachment {
         inline_bytes = inline_url->base64_data.size();
         return std::nullopt;
     }
-    if (part.path.empty()) return std::string(kNote);
+    if (part.media_file().empty()) return std::string(kNote);
     std::error_code error;
-    const auto size = std::filesystem::file_size(part.path, error);
+    const auto size = std::filesystem::file_size(part.media_file(), error);
     const auto mime = part.mime_type.empty()
         ? core::utils::mime::guess_type(part.path, false) : part.mime_type;
     if (error || size > kMiniMaxVideoMaxBytes || !allowed_video_mime(mime)) {

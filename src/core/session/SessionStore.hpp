@@ -146,6 +146,16 @@ public:
     [[nodiscard]] static std::filesystem::path tool_results_dir(
         const std::filesystem::path& sessions_dir, std::string_view session_id);
 
+    /// Where the media snapshots of the sessions in @p sessions_dir live
+    /// (see core::llm::MediaSnapshots): `media/<session-id>/` beside it.
+    [[nodiscard]] static std::filesystem::path media_dir(
+        const std::filesystem::path& sessions_dir);
+
+    /// The media snapshot directory of session @p session_id, or an empty
+    /// path when that ID never names one.
+    [[nodiscard]] static std::filesystem::path media_dir(
+        const std::filesystem::path& sessions_dir, std::string_view session_id);
+
     /// The session ID a saved session's file name carries (`…-<id>.json`),
     /// or nullopt when @p file_name does not name a saved session.
     [[nodiscard]] static std::optional<std::string_view> session_id_from_filename(

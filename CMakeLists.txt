@@ -281,6 +281,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/QwenSubscription.cpp
     src/core/llm/ZaiModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
+    src/core/llm/MediaSnapshots.cpp
     src/core/llm/transport/StreamResilience.cpp
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
@@ -806,6 +807,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_python_namespaces.cpp
     tests/test_tool_diff_utils.cpp
     tests/test_read_image.cpp
+    tests/test_media_snapshots.cpp
     tests/test_read_resources.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
@@ -1120,6 +1122,7 @@ source_group(
         tests/test_tools.cpp
         tests/test_python_namespaces.cpp
         tests/test_read_image.cpp
+        tests/test_media_snapshots.cpp
         tests/test_read_resources.cpp
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp

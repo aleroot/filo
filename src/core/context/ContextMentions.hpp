@@ -12,6 +12,10 @@ namespace core::session {
 class SessionStore;
 }
 
+namespace core::llm {
+class MediaSnapshots;
+}
+
 namespace core::workspace {
 class PathVisibility;
 }
@@ -31,6 +35,10 @@ struct MentionExpansionOptions {
     /// Aggregate digest budget per prompt, across distinct conversations.
     std::size_t max_total_session_bytes = 64 * 1024;
     std::size_t max_session_references = 16;
+    /// Where attached videos are pinned, so later turns resend what was
+    /// attached; when null they are read from their file at each request.
+    /// Images are always pinned inline.
+    const core::llm::MediaSnapshots* media_snapshots = nullptr;
 };
 
 struct ActiveMention {

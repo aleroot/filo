@@ -591,17 +591,17 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     const bool can_upload_video = protocol_ && protocol_->supports_video_upload();
     for (const auto& msg : request.messages) {
         for (const auto& part : msg.content_parts) {
-            if (part.type != ContentPartType::Video || part.path.empty()) {
+            if (part.type != ContentPartType::Video || part.media_file().empty()) {
                 continue;
             }
-            const auto size = local_file_size(part.path);
-            if (!size.has_value()) {
-                errors.push_back("video input file is not readable: " + part.path);
+            // A video that can no longer be read is sent as a note saying so,
+            // as an image is: history is resent every turn, so refusing the
+            // request would refuse every later turn too.
+            const auto size = local_file_size(part.media_file());
+            if (!size.has_value() || *size == 0) {
                 continue;
             }
-            if (*size == 0) {
-                errors.push_back("video input file is empty: " + part.path);
-            } else if (*size > kMaxLocalVideoBytes) {
+            if (*size > kMaxLocalVideoBytes) {
                 errors.push_back(std::format(
                     "video input file '{}' is {} bytes, which exceeds the {} MB limit",
                     part.path,

@@ -83,14 +83,33 @@ enum class ContentPartType {
     Video,
 };
 
+/// `data:<mime>;base64,<payload>`: the one spelling of inline media.
+[[nodiscard]] inline std::string make_data_url(std::string_view mime_type,
+                                               std::string_view base64_payload) {
+    return std::format("data:{};base64,{}", mime_type, base64_payload);
+}
+
+/// One piece of a message. Media in conversation history is resent with
+/// every later request, so it must not depend on what its file holds then:
+/// a part that entered history keeps its own bytes, inline in `url` (images)
+/// or as an immutable copy at `snapshot` (videos, too large to inline).
 struct ContentPart {
     ContentPartType type = ContentPartType::Text;
     std::string text = {};
+    /// The file the user or tool named: what the part is called, and the
+    /// source of its bytes only while nothing pinned them.
     std::string path = {};
     std::string url = {};
     std::string media_id = {};
     std::string mime_type = {};
     std::string detail = "auto";
+    /// An immutable copy of `path` taken when the part entered history.
+    std::string snapshot = {};
+
+    /// The local file this part's bytes are read from.
+    [[nodiscard]] const std::string& media_file() const noexcept {
+        return snapshot.empty() ? path : snapshot;
+    }
 
     [[nodiscard]] static ContentPart make_text(std::string value) {
         return ContentPart{
@@ -108,6 +127,15 @@ struct ContentPart {
             .mime_type = std::move(mime),
             .detail = std::move(level),
         };
+    }
+
+    /// An image that carries @p bytes inline, whatever @p value holds later.
+    [[nodiscard]] static ContentPart make_pinned_image(std::string value,
+                                                       std::string mime,
+                                                       std::string_view bytes) {
+        auto part = make_image(std::move(value), std::move(mime));
+        part.url = make_data_url(part.mime_type, core::utils::Base64::encode(bytes));
+        return part;
     }
 
     [[nodiscard]] static ContentPart make_video(std::string value,
@@ -237,7 +265,7 @@ struct EncodedMediaPart {
         if (!url.empty()) {
             return url;
         }
-        return "data:" + mime_type + ";base64," + base64_data;
+        return make_data_url(mime_type, base64_data);
     }
 
     // Remote or provider references only. A data URL also keeps `url` so
@@ -342,7 +370,10 @@ struct InlineDataUrl {
             };
         }
         if (!(is_data_url_for_media(part.type, part.url) && !part.path.empty())) {
-            if (!is_media_reference_url(part.type, part.url)) {
+            if (!is_media_reference_url(part.type, part.url)
+                || (is_data_url_for_media(part.type, part.url) && part.url.ends_with(','))) {
+                // A data URL without bytes carries no media: every API
+                // rejects an empty source.
                 return std::nullopt;
             }
             return EncodedMediaPart{
@@ -356,11 +387,11 @@ struct InlineDataUrl {
         }
     }
 
-    if (part.path.empty()) {
+    if (part.media_file().empty()) {
         return std::nullopt;
     }
 
-    const std::filesystem::path path = part.path;
+    const std::filesystem::path path = part.media_file();
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec)) {
         return std::nullopt;
@@ -372,8 +403,10 @@ struct InlineDataUrl {
     }
 
     input.seekg(0, std::ios::end);
+    // An empty file is no image or video (a render being rewritten, a
+    // truncated download): an empty source fails the whole request.
     const std::streamoff size = input.tellg();
-    if (size < 0) {
+    if (size <= 0) {
         return std::nullopt;
     }
     if (part.type == ContentPartType::Video
@@ -383,15 +416,15 @@ struct InlineDataUrl {
     input.seekg(0, std::ios::beg);
 
     std::string bytes(static_cast<std::size_t>(size), '\0');
-    if (size > 0) {
-        input.read(bytes.data(), static_cast<std::streamsize>(size));
-        if (!input) {
-            return std::nullopt;
-        }
+    input.read(bytes.data(), static_cast<std::streamsize>(size));
+    if (!input) {
+        return std::nullopt;
     }
 
+    // The type comes from the name the part was given: a snapshot is named
+    // by its contents only.
     std::string mime_type = part.mime_type.empty()
-        ? core::utils::mime::guess_type(path, false)
+        ? core::utils::mime::guess_type(part.path, false)
         : part.mime_type;
     if (part.type == ContentPartType::Image && !mime_type.starts_with("image/")) {
         return std::nullopt;
@@ -905,8 +938,8 @@ inline constexpr std::uintmax_t kMaxToolResultImageBytes = 10 * 1024 * 1024;
 
 /// Detaches the oldest tool-result media once the newest exceed the budget
 /// above; each detached result says how to view the file again. An image is
-/// evicted only by newer ones, so while the files keep their size, once out
-/// it stays out and the rewritten prefix is stable across later requests.
+/// evicted only by newer ones, so once out it stays out and the rewritten
+/// prefix is stable across later requests.
 inline void bound_tool_result_media(ChatRequest& req) {
     std::size_t kept = 0;
     std::uintmax_t bytes = 0;
@@ -918,9 +951,18 @@ inline void bound_tool_result_media(ChatRequest& req) {
         });
         if (media.empty()) continue;
         for (const auto& part : media) {
-            // A file that vanished costs nothing: the serializer sends a note.
+            // Pinned bytes are what is sent, whatever the file holds now. A
+            // file that vanished costs nothing: the serializer sends a note.
             std::error_code ec;
-            const std::uintmax_t size = part.path.empty() ? part.url.size() : std::filesystem::file_size(part.path, ec);
+            std::uintmax_t size = 0;
+            if (const auto comma = part.url.find(',');
+                is_data_url_for_media(part.type, part.url) && comma != std::string::npos) {
+                size = (part.url.size() - comma - 1) / 4 * 3;
+            } else {
+                size = part.media_file().empty()
+                    ? part.url.size()
+                    : std::filesystem::file_size(part.media_file(), ec);
+            }
             const auto cost = ec ? 0 : size;
             full = full || kept == kMaxToolResultImages || bytes + cost > kMaxToolResultImageBytes;
             if (full) break;

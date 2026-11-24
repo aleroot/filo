@@ -567,6 +567,36 @@ TEST_CASE("HttpLLMProvider rejects large inline videos when provider has no uplo
         "can only inline videos up to 20 MB"));
 }
 
+TEST_CASE("HttpLLMProvider lets a video that can no longer be read through as a note",
+          "[kimi][video][validation][regression]") {
+    // History is resent every turn: refusing the request for a video that
+    // was emptied or deleted since it was attached refused every later turn.
+    const auto dir = make_temp_dir("filo_unreadable_video_validation");
+    const auto empty = dir / "emptied.mp4";
+    std::ofstream(empty, std::ios::binary | std::ios::trunc).close();
+
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content_parts = {
+            ContentPart::make_video(empty.string(), "video/mp4"),
+            ContentPart::make_video((dir / "deleted.mp4").string(), "video/mp4"),
+        },
+    });
+
+    HttpLLMProvider provider(
+        "https://api.moonshot.cn/v1",
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        "kimi-k2.6",
+        std::make_unique<KimiProtocol>());
+
+    CHECK(provider.validate_request(req).empty());
+    const auto payload = KimiProtocol{}.serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("[Attached video unavailable: " + empty.string()));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("data:video/mp4;base64,\""));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // KimiSerializer — optional parameters
 // ─────────────────────────────────────────────────────────────────────────────

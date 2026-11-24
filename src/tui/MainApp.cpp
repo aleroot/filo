@@ -62,6 +62,7 @@
 #include <ftxui/component/app.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
+#include "core/llm/MediaSnapshots.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelMetadata.hpp"
 #include "core/llm/ModelRegistry.hpp"
@@ -190,6 +191,7 @@ std::string describe_storage_usage(const core::session::StorageUsage& usage) {
         {usage.revert_history, "revert history " + format_bytes(usage.revert_history)},
         {usage.journals, "journals " + format_bytes(usage.journals)},
         {usage.tool_output, "tool output " + format_bytes(usage.tool_output)},
+        {usage.media, "media " + format_bytes(usage.media)},
     };
     std::ranges::stable_sort(parts, std::ranges::greater{}, &decltype(parts)::value_type::first);
     std::string text = std::format("On disk: {}{} — ", format_bytes(usage.total()),
@@ -8036,11 +8038,20 @@ RunResult run(RunOptions opts) {
                         std::format("\n\xe2\x84\xb9  {}\n", note));
                 }
             }
+            std::optional<core::llm::MediaSnapshots> media_snapshots;
+            if (session_store) {
+                if (auto directory = core::session::SessionStore::media_dir(
+                        session_store->sessions_dir(), runtime->session_id());
+                    !directory.empty()) {
+                    media_snapshots.emplace(std::move(directory));
+                }
+            }
             const auto expanded_prompt = core::context::expand_prompt(
                 text,
                 base_dir,
                 {.session_store = session_store.get(),
-                 .current_session_id = runtime->session_id()});
+                 .current_session_id = runtime->session_id(),
+                 .media_snapshots = media_snapshots ? &*media_snapshots : nullptr});
             // An absolute @ mention is an explicit user selection. Finder
             // drag-and-drop arrives through bracketed paste in this form.
             agent->grant_workspace_paths(expanded_prompt.explicit_path_mentions);

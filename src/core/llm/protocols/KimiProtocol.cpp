@@ -1226,17 +1226,17 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                                          const ProtocolRequester& requester) {
     for (auto& msg : request.messages) {
         for (auto& part : msg.content_parts) {
-            if (part.type != ContentPartType::Video || part.path.empty() || !part.url.empty()) {
+            const auto& file = part.media_file();
+            if (part.type != ContentPartType::Video || file.empty() || !part.url.empty()) {
                 continue;
             }
 
+            // One that can no longer be read is serialized as a note saying
+            // so (see HttpLLMProvider::validate_request).
             std::error_code ec;
-            const auto size = std::filesystem::file_size(part.path, ec);
-            if (ec) {
-                throw std::runtime_error("Video input file is not readable: " + part.path);
-            }
-            if (size == 0) {
-                throw std::runtime_error("Video input file is empty: " + part.path);
+            const auto size = std::filesystem::file_size(file, ec);
+            if (ec || size == 0) {
+                continue;
             }
             if (size > kMaxLocalVideoBytes) {
                 throw std::runtime_error(std::format(
@@ -1253,7 +1253,8 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                 throw std::runtime_error("Video input file does not have a video MIME type: " + part.path);
             }
 
-            const std::string cache_key = video_upload_cache_key(part.path, size, base_url, auth);
+            // A snapshot is named by its contents, so its key names them too.
+            const std::string cache_key = video_upload_cache_key(file, size, base_url, auth);
             if (auto cached_id = cached_video_upload_id(cache_key); cached_id.has_value()) {
                 part.url = "ms://" + *cached_id;
                 part.media_id = *cached_id;
@@ -1271,7 +1272,7 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
                 .url = append_path(base_url, "/files"),
                 .headers = multipart_headers(build_headers(auth)),
                 .multipart = cpr::Multipart{
-                    {"file", cpr::File{part.path}},
+                    {"file", cpr::File{file, std::filesystem::path(part.path).filename().string()}},
                     {"purpose", "video"},
                 },
                 .timeout = std::chrono::milliseconds{kVideoUploadTimeoutMs},

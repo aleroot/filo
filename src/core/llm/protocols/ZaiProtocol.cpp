@@ -1096,7 +1096,7 @@ namespace {
             std::string(mime),
             std::string(url.substr(semi + kBase64Marker.size())));
     }
-    if (!part.path.empty()) {
+    if (!part.media_file().empty()) {
         const auto encoded = encode_media_part(part);
         if (!encoded.has_value() || encoded->is_url_reference()) return std::nullopt;
         return std::make_pair(encoded->mime_type, encoded->base64_data);

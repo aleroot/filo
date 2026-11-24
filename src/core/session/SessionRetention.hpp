@@ -48,12 +48,13 @@ struct StorageUsage {
     std::uintmax_t revert_history = 0;  ///< File checkpoints behind `/revert`.
     std::uintmax_t journals = 0;        ///< Execution journals.
     std::uintmax_t tool_output = 0;     ///< Offloaded tool results.
+    std::uintmax_t media = 0;           ///< Snapshots of attached videos.
     std::size_t conversation_count = 0;
     /// False when something could not be measured or the measurement was
     /// stopped, so the figures are a lower bound.
     bool complete = true;
     [[nodiscard]] std::uintmax_t total() const noexcept {
-        return conversations + revert_history + journals + tool_output;
+        return conversations + revert_history + journals + tool_output + media;
     }
 };
 
