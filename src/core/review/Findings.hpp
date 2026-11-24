@@ -2,6 +2,8 @@
 
 #include "Types.hpp"
 
+#include "../llm/DisplaySection.hpp"
+
 #include <optional>
 #include <span>
 #include <string>
@@ -24,11 +26,24 @@ namespace core::review {
                                        std::span<const std::string> skipped_paths = {},
                                        std::span<const std::string> warnings = {});
 
-[[nodiscard]] std::string render_report(
-    const Report& report,
-    bool include_omitted_low_count = true);
+/// Evidence is a claim that code outside the patch was read. A turn that ran
+/// no tool cannot have read any, so its findings lose it whatever they say.
+void drop_unchecked_evidence(Report& report, int tools_run);
 
-/// Render low-severity findings for an optional expanded report disclosure.
-[[nodiscard]] std::string render_low_severity_findings(const Report& report);
+/// Short stable handle for a finding ("f-3c91a7e2"), derived from where it is
+/// and what it says, so a later prompt can point at it ("fix f-3c91a7e2").
+[[nodiscard]] std::string finding_id(const Finding& finding);
+
+/// The complete report as text: every finding with its reasons, low-severity
+/// notes included. This is what history keeps, so the model can still act on
+/// any of it in a later turn.
+[[nodiscard]] std::string render_report(const Report& report);
+
+/// The same report laid out for a transcript: a head section, one section per
+/// comment with its reasons behind a collapsed "Why this was flagged", and a
+/// tail holding review notes, @p trailer and the low-severity notes collapsed.
+[[nodiscard]] std::vector<core::llm::DisplaySection> render_report_sections(
+    const Report& report,
+    std::string_view trailer = {});
 
 } // namespace core::review

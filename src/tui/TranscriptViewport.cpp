@@ -46,6 +46,12 @@ std::size_t message_fingerprint(const UiMessage& msg) {
     add_text(msg.text);
     add_text(msg.secondary_text);
     add_text(msg.disclosure_text);
+    add_value(msg.sections.size());
+    for (const auto& section : msg.sections) {
+        add_text(section.markdown);
+        add_text(section.details_summary);
+        add_text(section.details_markdown);
+    }
     add_text(msg.icon);
     add_value(msg.repeat_count);
     add_value(msg.custom_color.has_value() ? 1U : 0U);

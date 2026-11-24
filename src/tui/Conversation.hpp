@@ -3,6 +3,7 @@
 #include "DiffPreview.hpp"
 #include "core/changes/FileChange.hpp"
 #include "core/changes/TurnRevert.hpp"
+#include "core/llm/DisplaySection.hpp"
 #include "Constants.hpp"
 #include "ReviewCard.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -125,7 +126,10 @@ struct UiMessage {
     std::string text;                    // Primary text content
     std::string secondary_text = {};          // Secondary/subtitle text
     std::string disclosure_text = {};         // Optional expandable details (collapsed by default)
-    std::string disclosure_summary = {};      // Label for an assistant-message disclosure
+    // Assistant messages laid out in parts (a review: one per comment, each
+    // with collapsed reasons). Replaces `text` in the transcript when set;
+    // `text` stays the complete plain form for search and copy.
+    std::vector<core::llm::DisplaySection> sections = {};
     std::string icon = {};                    // Custom icon override
     std::size_t repeat_count = 1;        // Number of collapsed consecutive duplicates
     
@@ -349,6 +353,11 @@ UiMessage make_user_message(std::string text, std::string timestamp = {});
 void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
                              std::string_view message_id,
                              std::string elapsed);
+
+/// Disclosure key of the details under section @p index of an assistant
+/// message laid out in sections (a review comment's "Why this was flagged").
+[[nodiscard]] std::string assistant_section_key(std::string_view message_id,
+                                                std::size_t index);
 
 /// Disclosure key of one file in a turn's file-change box.
 [[nodiscard]] std::string turn_file_change_key(std::string_view message_id,

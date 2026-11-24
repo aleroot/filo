@@ -149,6 +149,12 @@ void apply_defaults(Finding& finding) {
             if (const auto value = object_string_field(finding_object, "body"); value.has_value()) {
                 finding.body = *value;
             }
+            if (const auto value = object_string_field(finding_object, "rationale"); value.has_value()) {
+                finding.rationale = trim_ascii_copy(*value);
+            }
+            if (const auto value = object_string_field(finding_object, "evidence"); value.has_value()) {
+                finding.evidence = trim_ascii_copy(*value);
+            }
             if (const auto value = object_int_field(finding_object, "priority"); value.has_value()) {
                 finding.priority = static_cast<int>(*value);
             }
@@ -226,7 +232,11 @@ void apply_defaults(Finding& finding) {
         to_lower_ascii_copy(trim_ascii_copy(finding.title)));
 }
 
-void merge_steering_references(Finding& target, const Finding& source) {
+void merge_supporting_details(Finding& target, const Finding& source) {
+    // A duplicate that loses on severity may still be the one that explained
+    // itself; keep its reasons when the survivor has none.
+    if (target.rationale.empty()) target.rationale = source.rationale;
+    if (target.evidence.empty()) target.evidence = source.evidence;
     for (const auto& reference : source.steering_references) {
         const bool present = std::ranges::any_of(
             target.steering_references,
@@ -251,47 +261,133 @@ void merge_steering_references(Finding& target, const Finding& source) {
     return std::format("{}:{}-{}", path, finding.line_start, finding.line_end);
 }
 
-[[nodiscard]] std::string format_findings_block(const std::vector<Finding>& findings) {
-    std::vector<std::string> lines;
-    lines.reserve(findings.size() * 5);
+// One finding, split the way every surface needs it: the comment a reader
+// meets first, and the reasons behind it.
+struct FindingText {
+    std::string comment;
+    std::string rationale;
+    std::string evidence;
+    std::vector<std::string> guidance;
+    std::string id;
 
-    for (const auto& finding : findings) {
-        // Location first, on its own rule, so the reader anchors the comment to
-        // a file and line range before reading the prose.
-        lines.push_back("");
-        lines.push_back(std::format("── {} ──", format_location(finding)));
-
-        std::vector<std::string> tags;
-        tags.emplace_back(to_string(effective_severity(finding)));
-        if (finding.category.has_value() && *finding.category != Category::Other) {
-            tags.emplace_back(to_string(*finding.category));
-        }
-        const std::string title =
-            finding.title.empty() ? std::string("Untitled finding") : finding.title;
-        lines.push_back(std::format("[{}] {}", join(" · ", tags), title));
-
-        if (!finding.body.empty()) {
-            std::string_view body_view(finding.body);
-            std::size_t cursor = 0;
-            while (cursor <= body_view.size()) {
-                const std::size_t end = body_view.find('\n', cursor);
-                const std::string_view line = end == std::string_view::npos
-                    ? body_view.substr(cursor)
-                    : body_view.substr(cursor, end - cursor);
-                lines.emplace_back(line);
-                if (end == std::string_view::npos) break;
-                cursor = end + 1;
-            }
-        }
-        for (const auto& reference : finding.steering_references) {
-            lines.push_back(std::format(
-                "Project guidance [{}] ({}): “{}”",
-                reference.source_id,
-                reference.source_label,
-                reference.rule_excerpt));
-        }
+    [[nodiscard]] bool has_reasons() const noexcept {
+        return !rationale.empty() || !evidence.empty() || !guidance.empty();
     }
-    return join("\n", lines);
+};
+
+[[nodiscard]] FindingText describe_finding(const Finding& finding) {
+    std::vector<std::string> tags;
+    tags.emplace_back(to_string(effective_severity(finding)));
+    if (finding.category.has_value() && *finding.category != Category::Other) {
+        tags.emplace_back(to_string(*finding.category));
+    }
+    const std::string_view title =
+        finding.title.empty() ? std::string_view("Untitled finding") : finding.title;
+
+    // Location first, on its own rule, so the reader anchors the comment to a
+    // file and line range before reading the prose.
+    FindingText text{
+        .comment = std::format("── {} ──\n[{}] {}", format_location(finding), join(" · ", tags), title),
+        .rationale = finding.rationale,
+        .evidence = finding.evidence,
+        .guidance = {},
+        .id = finding_id(finding),
+    };
+    if (!finding.body.empty()) {
+        text.comment += '\n';
+        text.comment += finding.body;
+    }
+    for (const auto& reference : finding.steering_references) {
+        text.guidance.push_back(std::format(
+            "[{}] ({}): “{}”",
+            reference.source_id,
+            reference.source_label,
+            reference.rule_excerpt));
+    }
+    return text;
+}
+
+// The plain form: what the model reads back from history, and what a host
+// without display sections shows. Every reason stays, on labelled lines.
+[[nodiscard]] std::string plain_finding(const FindingText& text) {
+    std::string out = text.comment;
+    const auto append_line = [&out](std::string_view label, std::string_view value) {
+        out += '\n';
+        out += label;
+        out += value;
+    };
+    if (!text.rationale.empty()) append_line("Why flagged: ", text.rationale);
+    if (!text.evidence.empty()) append_line("Checked: ", text.evidence);
+    for (const auto& guidance : text.guidance) append_line("Project guidance ", guidance);
+    append_line("Finding ID: ", text.id);
+    return out;
+}
+
+// The body of the "Why this was flagged" disclosure.
+[[nodiscard]] std::string reasons_markdown(const FindingText& text) {
+    std::vector<std::string> paragraphs;
+    if (!text.rationale.empty()) paragraphs.push_back(text.rationale);
+    if (!text.evidence.empty()) paragraphs.push_back("**Checked:** " + text.evidence);
+    for (const auto& guidance : text.guidance) {
+        paragraphs.push_back("**Project guidance** " + guidance);
+    }
+    paragraphs.push_back(std::format("Finding ID: `{}`", text.id));
+    return join("\n\n", paragraphs);
+}
+
+using FindingRefs = std::vector<const Finding*>;
+
+[[nodiscard]] std::string format_findings_block(const FindingRefs& findings) {
+    std::vector<std::string> blocks;
+    blocks.reserve(findings.size());
+    for (const Finding* finding : findings) {
+        blocks.push_back(plain_finding(describe_finding(*finding)));
+    }
+    return join("\n\n", blocks);
+}
+
+// Low-severity notes are kept out of the main comment list on every surface.
+struct FindingsByVisibility {
+    FindingRefs visible;
+    FindingRefs low;
+};
+
+[[nodiscard]] FindingsByVisibility split_by_visibility(const Report& report) {
+    FindingsByVisibility out;
+    for (const auto& finding : report.findings) {
+        (effective_severity(finding) == Severity::Low ? out.low : out.visible)
+            .push_back(&finding);
+    }
+    return out;
+}
+
+[[nodiscard]] std::string report_summary(const Report& report) {
+    std::string summary = "# Review\n\n## Summary";
+    if (const auto verdict = trim_ascii_copy(report.overall_correctness); !verdict.empty()) {
+        summary += "\n\n**Overall correctness:** ";
+        summary += verdict;
+    }
+    if (const auto explanation = trim_ascii_copy(report.overall_explanation);
+        !explanation.empty()) {
+        summary += "\n\n";
+        summary += explanation;
+    }
+    return summary;
+}
+
+[[nodiscard]] std::string review_notes(const Report& report) {
+    if (report.warnings.empty()) return {};
+    std::string notes = "Review notes:";
+    for (const auto& warning : report.warnings) {
+        notes += "\n- ";
+        notes += warning;
+    }
+    return notes;
+}
+
+[[nodiscard]] std::string low_severity_label(std::size_t count) {
+    return count == 1 ? std::string("1 low-severity note")
+                      : std::format("{} low-severity notes", count);
 }
 
 } // namespace
@@ -449,10 +545,10 @@ Report aggregate_reports(std::span<const Report> reports,
         auto& existing = deduped[slot->second];
         if (severity_rank(effective_severity(finding))
             < severity_rank(effective_severity(existing))) {
-            merge_steering_references(finding, existing);
+            merge_supporting_details(finding, existing);
             existing = std::move(finding);
         } else {
-            merge_steering_references(existing, finding);
+            merge_supporting_details(existing, finding);
         }
     }
 
@@ -501,63 +597,75 @@ Report aggregate_reports(std::span<const Report> reports,
     return out;
 }
 
-std::string render_report(const Report& report, bool include_omitted_low_count) {
-    std::vector<std::string> sections;
-    sections.emplace_back("# Review");
+void drop_unchecked_evidence(Report& report, int tools_run) {
+    if (tools_run > 0) return;
+    for (auto& finding : report.findings) finding.evidence.clear();
+}
 
-    std::string summary = "## Summary";
-    const auto verdict = trim_ascii_copy(report.overall_correctness);
-    if (!verdict.empty()) {
-        summary += "\n\n**Overall correctness:** ";
-        summary += verdict;
+std::string finding_id(const Finding& finding) {
+    // FNV-1a over the same key that deduplicates findings: two findings the
+    // review would merge share an id, and nothing else does in practice.
+    std::uint32_t hash = 2166136261U;
+    for (const unsigned char byte : finding_dedupe_key(finding)) {
+        hash ^= byte;
+        hash *= 16777619U;
     }
-    const std::string explanation = trim_ascii_copy(report.overall_explanation);
-    if (!explanation.empty()) {
-        summary += "\n\n";
-        summary += explanation;
-    }
-    sections.push_back(std::move(summary));
+    return std::format("f-{:08x}", hash);
+}
 
-    std::vector<Finding> visible;
-    visible.reserve(report.findings.size());
-    int hidden_low = 0;
-    for (const auto& finding : report.findings) {
-        if (effective_severity(finding) == Severity::Low) {
-            ++hidden_low;
-            continue;
-        }
-        visible.push_back(finding);
+std::string render_report(const Report& report) {
+    const auto [visible, low] = split_by_visibility(report);
+    std::vector<std::string> sections{report_summary(report), "## Comments"};
+    sections.push_back(visible.empty() ? std::string("No actionable comments found.")
+                                       : format_findings_block(visible));
+    if (!low.empty()) {
+        sections.emplace_back("### Low-severity notes");
+        sections.push_back(format_findings_block(low));
     }
-    sections.emplace_back("## Comments");
-    if (visible.empty()) {
-        sections.emplace_back("No actionable comments found.");
-    } else {
-        sections.push_back(format_findings_block(visible));
-    }
-    if (hidden_low > 0 && include_omitted_low_count) {
-        sections.push_back(std::format(
-            "{} low-severity note(s) omitted.", hidden_low));
-    }
-    if (!report.warnings.empty()) {
-        std::string notes = "Review notes:\n";
-        for (const auto& warning : report.warnings) {
-            notes += "- ";
-            notes += warning;
-            notes.push_back('\n');
-        }
+    if (auto notes = review_notes(report); !notes.empty()) {
         sections.push_back(std::move(notes));
     }
     return join("\n\n", sections);
 }
 
-std::string render_low_severity_findings(const Report& report) {
-    std::vector<Finding> low;
-    for (const auto& finding : report.findings) {
-        if (effective_severity(finding) == Severity::Low) {
-            low.push_back(finding);
+std::vector<core::llm::DisplaySection> render_report_sections(const Report& report,
+                                                              std::string_view trailer) {
+    const auto [visible, low] = split_by_visibility(report);
+    std::vector<core::llm::DisplaySection> sections;
+    sections.reserve(visible.size() + 2);
+
+    std::string head = report_summary(report) + "\n\n## Comments";
+    if (visible.empty()) head += "\n\nNo actionable comments found.";
+    sections.push_back({.markdown = std::move(head)});
+
+    for (const Finding* finding : visible) {
+        auto text = describe_finding(*finding);
+        if (text.has_reasons()) {
+            sections.push_back({
+                .markdown = text.comment,
+                .details_summary = "Why this was flagged",
+                .details_markdown = reasons_markdown(text),
+            });
+        } else {
+            // Nothing to disclose: a box holding only the id would be noise.
+            sections.push_back({
+                .markdown = std::format("{}\n\nFinding ID: `{}`", text.comment, text.id),
+            });
         }
     }
-    return format_findings_block(low);
+
+    std::vector<std::string> tail;
+    if (auto notes = review_notes(report); !notes.empty()) tail.push_back(std::move(notes));
+    if (auto extra = trim_ascii_copy(trailer); !extra.empty()) tail.push_back(std::move(extra));
+    if (!tail.empty() || !low.empty()) {
+        core::llm::DisplaySection last{.markdown = join("\n\n", tail)};
+        if (!low.empty()) {
+            last.details_summary = low_severity_label(low.size());
+            last.details_markdown = format_findings_block(low);
+        }
+        sections.push_back(std::move(last));
+    }
+    return sections;
 }
 
 } // namespace core::review

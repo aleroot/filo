@@ -103,6 +103,8 @@ Ignore non-blocking issues such as style, formatting, typos, documentation, and 
 
 FORMATTING GUIDELINES:
 The finding description should be one paragraph.
+Keep the body to the problem and its fix; put the reasoning that proves it in "rationale" (for example: `Number("Wed, 18 Nov 2026 07:28:00 GMT")` is `NaN`, and `setTimeout` treats `NaN` as no delay). The reader sees the body first and opens the rationale only to check it, so the rationale must not repeat the body.
+Fill "evidence" only with what you actually read in this pass (a call site, a definition, a guard that is missing); never restate the patch or guess. Leave it empty when no tools were used.
 
 OUTPUT FORMAT:
 
@@ -113,7 +115,9 @@ OUTPUT FORMAT:
   "findings": [
     {
       "title": "<= 80 chars, imperative",
-      "body": "<valid Markdown explaining why this is a problem; cite files/lines/functions>",
+      "body": "<valid Markdown: what is wrong and the fix, in one short paragraph>",
+      "rationale": "<why this is a bug: the concrete trace from an input or state to the wrong behaviour, naming the values involved; 1-3 sentences>",
+      "evidence": "<what you confirmed by reading code outside the patch, citing path:line; empty string if you did not read beyond the patch>",
       "confidence_score": <float 0.0-1.0>,
       "priority": <int 0-3, optional>,
       "severity": "critical" | "high" | "medium" | "low",

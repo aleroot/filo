@@ -329,6 +329,83 @@ TEST_CASE("Opening one file shows only that file's diff", "[tui][turn_file_chang
     CHECK(text.find("guide-body-line") == std::string::npos);
 }
 
+namespace {
+
+[[nodiscard]] UiMessage sectioned_review_message() {
+    auto message = make_assistant_message("# Review\nplain form", "", false);
+    message.sections = {
+        {.markdown = "Review head"},
+        {.markdown = "First comment body",
+         .details_summary = "Why this was flagged",
+         .details_markdown = "first-rationale-text"},
+        {.markdown = "Second comment body",
+         .details_summary = "Why this was flagged",
+         .details_markdown = "second-rationale-text"},
+    };
+    return message;
+}
+
+} // namespace
+
+TEST_CASE("A sectioned message shows each comment with its reasons collapsed",
+          "[tui][review_sections]") {
+    const auto message = sectioned_review_message();
+    std::unordered_map<std::string, ftxui::Box> hitboxes;
+    ConversationRenderOptions options;
+    options.system_disclosure_hitboxes = &hitboxes;
+
+    const auto text = render_text({message}, options);
+    CHECK_THAT(text, ContainsSubstring("First comment body"));
+    CHECK_THAT(text, ContainsSubstring("Second comment body"));
+    const auto first = text.find("▶ Why this was flagged");
+    REQUIRE(first != std::string::npos);
+    CHECK(text.find("▶ Why this was flagged", first + 1) != std::string::npos);
+    CHECK(text.find("first-rationale-text") == std::string::npos);
+    // The sections replace the plain form rather than repeating it.
+    CHECK(text.find("plain form") == std::string::npos);
+    // Each disclosure is its own click target, under the comment it explains.
+    REQUIRE(hitboxes.contains(assistant_section_key(message.id, 1)));
+    REQUIRE(hitboxes.contains(assistant_section_key(message.id, 2)));
+    CHECK_FALSE(hitboxes.contains(assistant_section_key(message.id, 0)));
+    CHECK(hitboxes.at(assistant_section_key(message.id, 1)).y_min
+          < hitboxes.at(assistant_section_key(message.id, 2)).y_min);
+}
+
+TEST_CASE("Opening one comment's reasons leaves the others closed", "[tui][review_sections]") {
+    const auto message = sectioned_review_message();
+    std::unordered_map<std::string, bool> expanded{
+        {assistant_section_key(message.id, 2), true},
+    };
+    ConversationRenderOptions options;
+    options.system_disclosure_expanded = &expanded;
+
+    const auto text = render_text({message}, options);
+    CHECK_THAT(text, ContainsSubstring("▼ Why this was flagged"));
+    CHECK_THAT(text, ContainsSubstring("▶ Why this was flagged"));
+    CHECK_THAT(text, ContainsSubstring("second-rationale-text"));
+    CHECK(text.find("first-rationale-text") == std::string::npos);
+    CHECK(text.find("Second comment body") < text.find("second-rationale-text"));
+}
+
+TEST_CASE("A resumed review keeps its sections", "[tui][review_sections][session_replay]") {
+    core::session::SessionData data;
+    data.messages = {
+        core::llm::Message{.role = "user", .content = "[/review] changes", .synthetic = true},
+        core::llm::Message{
+            .role = "assistant",
+            .content = "# Review\nplain form",
+            .synthetic = true,
+            .display_sections = sectioned_review_message().sections,
+        },
+    };
+    const auto replayed = build_resumed_ui_messages(data);
+    const auto review = std::ranges::find_if(replayed, [](const UiMessage& message) {
+        return message.type == MessageType::Assistant;
+    });
+    REQUIRE(review != replayed.end());
+    CHECK(review->sections == sectioned_review_message().sections);
+}
+
 TEST_CASE("Messages without file changes draw no box", "[tui][turn_file_changes]") {
     const auto text = render_text({make_assistant_message("Just an answer.", "", false)});
     CHECK(text.find("changed") == std::string::npos);

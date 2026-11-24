@@ -8489,21 +8489,12 @@ RunResult run(RunOptions opts) {
             .append_history_fn = [origin_runtime, &append_runtime_history](const std::string& str) {
                 append_runtime_history(origin_runtime, str);
             },
-            .append_assistant_output_fn = [origin_runtime, &ui_mutex, &wake_ui](const std::string& str) {
-                std::lock_guard lock(ui_mutex);
-                append_ui_message(
-                    *origin_runtime->messages(),
-                    make_assistant_message(str, current_time_str(), false));
-                wake_ui();
-            },
-            .append_assistant_disclosure_output_fn =
+            .append_assistant_sections_fn =
                 [origin_runtime, &ui_mutex, &wake_ui](const std::string& text,
-                                                      const std::string& summary,
-                                                      const std::string& details) {
+                                                      std::vector<core::llm::DisplaySection> sections) {
                     std::lock_guard lock(ui_mutex);
                     auto message = make_assistant_message(text, current_time_str(), false);
-                    message.disclosure_summary = summary;
-                    message.disclosure_text = details;
+                    message.sections = std::move(sections);
                     append_ui_message(*origin_runtime->messages(), std::move(message));
                     wake_ui();
                 },

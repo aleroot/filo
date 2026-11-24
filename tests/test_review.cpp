@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "TestSessionContext.hpp"
@@ -454,12 +455,14 @@ TEST_CASE("aggregate_reports dedupes and prefers the higher severity", "[review]
     CHECK(merged.overall_correctness == "patch is incorrect");
 }
 
-TEST_CASE("render_report hides low-severity findings by default", "[review][findings]") {
+TEST_CASE("render_report keeps every finding and its reasons for history", "[review][findings]") {
     Report report;
     report.overall_explanation = "Mostly fine.";
     report.findings.push_back(Finding{
         .title = "Urgent bug",
         .body = "fix me",
+        .rationale = "Number(null) is 0, so the retry never waits.",
+        .evidence = "src/sleep.ts:3 calls setTimeout with no guard.",
         .severity = Severity::High,
         .absolute_file_path = "a.cpp",
         .line_start = 1,
@@ -478,9 +481,153 @@ TEST_CASE("render_report hides low-severity findings by default", "[review][find
     CHECK_THAT(rendered, ContainsSubstring("# Review"));
     CHECK_THAT(rendered, ContainsSubstring("## Summary"));
     CHECK_THAT(rendered, ContainsSubstring("## Comments"));
-    CHECK_THAT(rendered, ContainsSubstring("Urgent bug"));
-    CHECK_THAT(rendered, !ContainsSubstring("Nit"));
-    CHECK_THAT(rendered, ContainsSubstring("1 low-severity note(s) omitted"));
+    CHECK_THAT(rendered, ContainsSubstring("[high] Urgent bug\nfix me\n"
+                                           "Why flagged: Number(null) is 0, so the retry never waits.\n"
+                                           "Checked: src/sleep.ts:3 calls setTimeout with no guard.\n"
+                                           "Finding ID: " + finding_id(report.findings[0])));
+    // History is what a later turn acts on: a low note must survive there,
+    // not only behind a disclosure the model never sees.
+    CHECK_THAT(rendered, ContainsSubstring("### Low-severity notes"));
+    CHECK_THAT(rendered, ContainsSubstring("[low] Nit"));
+    CHECK(rendered.find("Urgent bug") < rendered.find("Low-severity notes"));
+}
+
+TEST_CASE("render_report_sections puts each comment's reasons behind its own disclosure",
+          "[review][findings]") {
+    Report report;
+    report.overall_correctness = "patch is incorrect";
+    report.warnings = {"Dropped 1 finding(s) whose location did not overlap the diff."};
+    report.findings = {
+        Finding{
+            .title = "Retries go out back to back",
+            .body = "Parse both forms of Retry-After.",
+            .rationale = "Number(\"Wed, 18 Nov 2026\") is NaN.",
+            .evidence = "src/api/sleep.ts:3 calls setTimeout(resolve, ms).",
+            .severity = Severity::High,
+            .category = Category::Bug,
+            .absolute_file_path = "src/api/retry.ts",
+            .line_start = 43,
+            .line_end = 44,
+            .steering_references = {{.source_id = "S1", .source_label = "AGENTS.md",
+                                     .rule_excerpt = "Back off on 429."}},
+        },
+        Finding{
+            .title = "Unexplained",
+            .body = "No reasons were given.",
+            .severity = Severity::Medium,
+            .absolute_file_path = "src/api/retry.ts",
+            .line_start = 50,
+            .line_end = 50,
+        },
+        Finding{
+            .title = "Rename variable",
+            .rationale = "wait reads like a verb.",
+            .severity = Severity::Low,
+            .absolute_file_path = "src/api/retry.ts",
+            .line_start = 43,
+            .line_end = 43,
+        },
+    };
+
+    const auto sections = render_report_sections(report, "\n\nReview was interrupted.");
+    REQUIRE(sections.size() == 4);
+
+    CHECK_THAT(sections[0].markdown, ContainsSubstring("**Overall correctness:** patch is incorrect"));
+    CHECK_THAT(sections[0].markdown, ContainsSubstring("## Comments"));
+    CHECK_FALSE(sections[0].has_details());
+
+    const auto& explained = sections[1];
+    CHECK(explained.markdown ==
+          "── src/api/retry.ts:43-44 ──\n[high · bug] Retries go out back to back\n"
+          "Parse both forms of Retry-After.");
+    CHECK(explained.details_summary == "Why this was flagged");
+    CHECK(explained.details_markdown ==
+          "Number(\"Wed, 18 Nov 2026\") is NaN.\n\n"
+          "**Checked:** src/api/sleep.ts:3 calls setTimeout(resolve, ms).\n\n"
+          "**Project guidance** [S1] (AGENTS.md): “Back off on 429.”\n\n"
+          "Finding ID: `" + finding_id(report.findings[0]) + "`");
+
+    // Nothing to disclose: no box, and the id stays reachable on the comment.
+    const auto& bare = sections[2];
+    CHECK_FALSE(bare.has_details());
+    CHECK_THAT(bare.markdown, ContainsSubstring("No reasons were given.\n\nFinding ID: `f-"));
+
+    const auto& tail = sections[3];
+    CHECK(tail.markdown ==
+          "Review notes:\n- Dropped 1 finding(s) whose location did not overlap the diff.\n\n"
+          "Review was interrupted.");
+    CHECK(tail.details_summary == "1 low-severity note");
+    CHECK_THAT(tail.details_markdown, ContainsSubstring("[low] Rename variable"));
+    CHECK_THAT(tail.details_markdown, ContainsSubstring("Why flagged: wait reads like a verb."));
+}
+
+TEST_CASE("render_report_sections of a clean review is a single section", "[review][findings]") {
+    Report report;
+    report.overall_correctness = "patch is correct";
+    const auto sections = render_report_sections(report);
+    REQUIRE(sections.size() == 1);
+    CHECK_THAT(sections[0].markdown, ContainsSubstring("No actionable comments found."));
+}
+
+TEST_CASE("finding_id is short, stable, and tells findings apart", "[review][findings]") {
+    const Finding finding{
+        .title = "Off-by-one",
+        .absolute_file_path = "/repo/src/a.cpp",
+        .line_start = 4,
+        .line_end = 6,
+    };
+    const auto id = finding_id(finding);
+    REQUIRE(id.size() == 10);
+    CHECK(id.starts_with("f-"));
+    CHECK(std::ranges::all_of(id.substr(2), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }));
+
+    // Wording of the body or reasons does not move the id; location and
+    // title (the dedupe key) do.
+    auto reworded = finding;
+    reworded.body = "different words";
+    reworded.rationale = "a reason";
+    CHECK(finding_id(reworded) == id);
+    auto moved = finding;
+    moved.line_start = 5;
+    CHECK(finding_id(moved) != id);
+}
+
+TEST_CASE("parse_review_json reads a finding's rationale and evidence", "[review][findings]") {
+    const auto parsed = parse_review_json(
+        R"({"findings":[{"title":"t","body":"b","rationale":"  why it breaks  ","evidence":"x.cpp:3 has no guard","severity":"high","code_location":{"absolute_file_path":"x.cpp","line_range":{"start":1,"end":1}}}],"overall_correctness":"patch is incorrect"})");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->findings.size() == 1);
+    CHECK(parsed->findings[0].rationale == "why it breaks");
+    CHECK(parsed->findings[0].evidence == "x.cpp:3 has no guard");
+}
+
+TEST_CASE("a duplicate that loses on severity still lends its reasons", "[review][findings]") {
+    Report first;
+    first.findings.push_back(Finding{
+        .title = "Null deref",
+        .rationale = "p is null when the cache misses.",
+        .evidence = "cache.cpp:9 returns nullptr.",
+        .severity = Severity::Medium,
+        .absolute_file_path = "src/a.cpp",
+        .line_start = 10,
+        .line_end = 12,
+    });
+    Report second;
+    second.findings.push_back(Finding{
+        .title = "Null deref",
+        .severity = Severity::High,
+        .absolute_file_path = "src/a.cpp",
+        .line_start = 10,
+        .line_end = 12,
+    });
+
+    const auto merged = aggregate_reports(std::array<Report, 2>{first, second});
+    REQUIRE(merged.findings.size() == 1);
+    CHECK(merged.findings[0].severity == Severity::High);
+    CHECK(merged.findings[0].rationale == "p is null when the cache misses.");
+    CHECK(merged.findings[0].evidence == "cache.cpp:9 returns nullptr.");
 }
 
 [[nodiscard]] std::string two_isolated_file_patch() {
@@ -918,6 +1065,64 @@ TEST_CASE("engine reviews independent groups concurrently with forked runners",
     CHECK(state->max_active.load(std::memory_order_acquire) >= 2);
 }
 
+namespace {
+
+// Answers every review unit with one finding that claims evidence, and says
+// whether the turn ran a tool: the engine must believe the claim only then.
+class EvidenceRunner final : public TurnRunner {
+public:
+    int tools_run = 0;
+
+    Response run(const Request& request) override {
+        Response response;
+        if (request.prompt.find("analysing risk") != std::string::npos) {
+            response.text = R"({"risks":[]})";
+            return response;
+        }
+        if (is_summary_request(request.prompt)) {
+            response.text = std::string(kSummaryJson);
+            return response;
+        }
+        response.text =
+            R"({"findings":[{"title":"Unchecked index","body":"Guard the index.","rationale":"i reaches size() on the last pass.","evidence":"vec.hpp:12 has no bounds check.","severity":"high","category":"bug","confidence_score":0.9,"code_location":{"absolute_file_path":"alpha.cpp","line_range":{"start":2,"end":2}}}],"overall_correctness":"patch is incorrect","overall_explanation":"bounds error","overall_confidence_score":0.9})";
+        response.tools_run = tools_run;
+        return response;
+    }
+};
+
+[[nodiscard]] std::string single_file_patch() {
+    return "diff --git a/alpha.cpp b/alpha.cpp\n"
+           "--- a/alpha.cpp\n"
+           "+++ b/alpha.cpp\n"
+           "@@ -1,1 +1,2 @@\n"
+           " int a = 0;\n"
+           "+int b = v[i];\n";
+}
+
+} // namespace
+
+TEST_CASE("engine keeps a finding's evidence only when its turn ran a tool",
+          "[review][engine]") {
+    const int tools_run = GENERATE(0, 2);
+    auto runner = std::make_unique<EvidenceRunner>();
+    runner->tools_run = tools_run;
+    Engine engine({.runner = std::move(runner)});
+
+    CampaignInput input;
+    input.snapshot.patch = single_file_patch();
+
+    const auto result = engine.run(input);
+    REQUIRE(result.error.empty());
+    REQUIRE(result.report.findings.size() == 1);
+    const auto& finding = result.report.findings.front();
+    CHECK(finding.rationale == "i reaches size() on the last pass.");
+    if (tools_run == 0) {
+        CHECK(finding.evidence.empty());
+    } else {
+        CHECK(finding.evidence == "vec.hpp:12 has no bounds check.");
+    }
+}
+
 TEST_CASE("AgentTurnRunner waits for a turn that continues through tool calls",
           "[review][engine][regression]") {
     auto& tool_manager = core::tools::ToolManager::get_instance();
@@ -942,6 +1147,7 @@ TEST_CASE("AgentTurnRunner waits for a turn that continues through tool calls",
     CHECK(response.error.empty());
     CHECK_FALSE(response.interrupted);
     CHECK(probe->executed.load(std::memory_order_acquire));
+    CHECK(response.tools_run == 1);
     CHECK(provider->calls.load(std::memory_order_acquire) == 2);
     REQUIRE(parse_review_json(response.text).has_value());
     CHECK_FALSE(agent->turn_in_progress());

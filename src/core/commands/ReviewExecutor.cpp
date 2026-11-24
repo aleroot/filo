@@ -9,6 +9,7 @@
 #include "../utils/StringUtils.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <format>
 #include <memory>
@@ -358,52 +359,49 @@ std::string build_custom_submission_prompt(std::string_view task) {
     return prompt;
 }
 
-using AssistantOutputCallback = std::function<void(const std::string&)>;
-using AssistantDisclosureOutputCallback =
-    std::function<void(const std::string&, const std::string&, const std::string&)>;
+/// A finished report in both of its forms: `text` is what history keeps and
+/// what a plain host prints; `sections` is how the transcript lays it out.
+struct RenderedReport {
+    std::string text;
+    std::vector<core::llm::DisplaySection> sections;
+};
 
-void append_review_report(const std::function<void(const std::string&)>& append_history,
-                          const AssistantOutputCallback& append_assistant,
-                          const AssistantDisclosureOutputCallback& append_disclosure,
-                          const core::review::Report& report,
-                          std::string_view extra_text = {}) {
-    std::string full_output = core::review::render_report(report);
-    full_output += extra_text;
-
-    const std::string low_notes =
-        core::review::render_low_severity_findings(report);
-    if (!low_notes.empty() && append_disclosure) {
-        std::string display = core::review::render_report(report, false);
-        display += extra_text;
-        const auto low_count = std::count_if(
-            report.findings.begin(), report.findings.end(), [](const auto& finding) {
-                return core::review::effective_severity(finding)
-                    == core::review::Severity::Low;
-            });
-        const std::string summary = low_count == 1
-            ? "1 low-severity note omitted"
-            : std::format("{} low-severity notes omitted", low_count);
-        append_disclosure(
-            display,
-            summary,
-            low_notes);
-    } else if (append_assistant) {
-        append_assistant(full_output);
-    } else {
-        append_history(std::format("\n{}\n", full_output));
-    }
+[[nodiscard]] RenderedReport render_review(const core::review::Report& report,
+                                           std::string_view trailer = {}) {
+    return {
+        .text = core::review::render_report(report) + std::string(trailer),
+        .sections = core::review::render_report_sections(report, trailer),
+    };
 }
+
+/// Where a report goes: the transcript's sectioned assistant message when the
+/// host has one, plain history otherwise. Captured by value because the agent
+/// review turn delivers its report from a callback after `ctx` is gone.
+struct ReviewOutput {
+    std::function<void(const std::string&)> history;
+    std::function<void(const std::string&, std::vector<core::llm::DisplaySection>)> sections;
+
+    explicit ReviewOutput(const CommandContext& ctx)
+        : history(ctx.append_history_fn),
+          sections(ctx.append_assistant_sections_fn) {}
+
+    void publish(RenderedReport report) const {
+        if (sections) {
+            sections(report.text, std::move(report.sections));
+        } else {
+            history(std::format("\n{}\n", report.text));
+        }
+    }
+};
 
 void run_agent_review_turn(const CommandContext& ctx,
                            std::string prompt,
                            bool allow_tools) {
     const auto set_review_activity_fn = ctx.set_review_activity_fn;
-    const auto append_assistant_output_fn = ctx.append_assistant_output_fn;
-    const auto append_assistant_disclosure_output_fn =
-        ctx.append_assistant_disclosure_output_fn;
     auto append_fn = ctx.append_history_fn;
     auto collected_output = std::make_shared<std::string>();
     auto interrupted = std::make_shared<bool>(false);
+    auto tools_run = std::make_shared<std::atomic<int>>(0);
 
     core::agent::Agent::TurnCallbacks review_callbacks{
         .min_context_utilization_for_rotation =
@@ -417,6 +415,10 @@ void run_agent_review_turn(const CommandContext& ctx,
     if (!allow_tools) {
         review_callbacks.allowed_tools = {"__filo_no_tools__"};
     }
+    review_callbacks.on_tool_finish = [tools_run](const core::llm::ToolCall&,
+                                                  const core::llm::Message&) {
+        tools_run->fetch_add(1, std::memory_order_relaxed);
+    };
 
     ctx.agent->send_message(
         std::move(prompt),
@@ -430,9 +432,9 @@ void run_agent_review_turn(const CommandContext& ctx,
         [append_fn,
          collected_output,
          interrupted,
+         tools_run,
          set_review_activity_fn,
-         append_assistant_output_fn,
-         append_assistant_disclosure_output_fn]() {
+         output = ReviewOutput(ctx)]() {
             const std::string raw = trim_ascii_copy(*collected_output);
             if (*interrupted || raw.find(core::review::kStopMarker) != std::string::npos) {
                 append_fn(
@@ -443,11 +445,10 @@ void run_agent_review_turn(const CommandContext& ctx,
                 return;
             }
 
-            const auto output = core::review::parse_review_output(raw);
-            append_review_report(append_fn,
-                                 append_assistant_output_fn,
-                                 append_assistant_disclosure_output_fn,
-                                 output);
+            auto report = core::review::parse_review_output(raw);
+            core::review::drop_unchecked_evidence(
+                report, tools_run->load(std::memory_order_relaxed));
+            output.publish(render_review(report));
             if (set_review_activity_fn) {
                 set_review_activity_fn(false, "");
             }
@@ -457,7 +458,7 @@ void run_agent_review_turn(const CommandContext& ctx,
 
 void persist_review_summary(const CommandContext& ctx,
                             std::string_view hint,
-                            std::string_view rendered) {
+                            const RenderedReport& report) {
     if (!ctx.agent) return;
     ctx.agent->append_history_message(core::llm::Message{
         .role = "user",
@@ -466,8 +467,9 @@ void persist_review_summary(const CommandContext& ctx,
     });
     ctx.agent->append_history_message(core::llm::Message{
         .role = "assistant",
-        .content = std::string(rendered),
+        .content = report.text,
         .synthetic = true,
+        .display_sections = report.sections,
     });
 }
 
@@ -592,17 +594,10 @@ void run_grouped_review(const CommandContext& ctx,
 
     auto result = engine.run(input);
 
-    const auto publish_report = [&](std::string extra_text, bool persist) {
-        std::string rendered = core::review::render_report(result.report);
-        rendered += extra_text;
-        if (persist) {
-            persist_review_summary(ctx, hint, rendered);
-        }
-        append_review_report(ctx.append_history_fn,
-                             ctx.append_assistant_output_fn,
-                             ctx.append_assistant_disclosure_output_fn,
-                             result.report,
-                             extra_text);
+    const auto publish_report = [&](std::string_view trailer) {
+        auto rendered = render_review(result.report, trailer);
+        persist_review_summary(ctx, hint, rendered);
+        ReviewOutput(ctx).publish(std::move(rendered));
     };
 
     if (result.interrupted) {
@@ -610,8 +605,7 @@ void run_grouped_review(const CommandContext& ctx,
             || !result.report.findings.empty();
         if (has_partial) {
             publish_report(
-                "\n\nReview was interrupted. Findings above cover the units that finished.",
-                true);
+                "\n\nReview was interrupted. Findings above cover the units that finished.");
         } else {
             ctx.append_history_fn(
                 "\nℹ  Review was interrupted. Re-run /review and wait for it to complete.\n");
@@ -629,7 +623,7 @@ void run_grouped_review(const CommandContext& ctx,
         return;
     }
 
-    publish_report({}, true);
+    publish_report({});
     if (set_review_activity_fn) {
         set_review_activity_fn(false, "");
     }

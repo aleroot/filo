@@ -254,6 +254,32 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
           == R"({"type":"reasoning","encrypted_content":"secret"})");
 }
 
+TEST_CASE("SessionStore round-trips an assistant message's display sections",
+          "[session][json]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_sections"};
+    core::session::SessionStore store{tmp.path};
+    auto data = make_test_session("sections01");
+    const std::vector<core::llm::DisplaySection> sections{
+        {.markdown = "# Review"},
+        {.markdown = "── a.cpp:1-2 ──\n[high] \"Quoted\" bug",
+         .details_summary = "Why this was flagged",
+         .details_markdown = "p is null.\n\nFinding ID: `f-0123abcd`"},
+    };
+    data.messages.push_back(core::llm::Message{
+        .role = "assistant",
+        .content = "# Review\n...",
+        .synthetic = true,
+        .display_sections = sections,
+    });
+
+    REQUIRE(store.save(data));
+    const auto loaded = store.load_by_id("sections01");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 3);
+    CHECK(loaded->messages[2].display_sections == sections);
+    CHECK(loaded->messages[0].display_sections.empty());
+}
+
 TEST_CASE("SessionStore round-trips messages with special JSON characters", "[session][json]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_esc"};
     core::session::SessionStore store{tmp.path};

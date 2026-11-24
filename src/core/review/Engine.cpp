@@ -303,6 +303,9 @@ CampaignResult Engine::run(const CampaignInput& input) const {
         }
 
         auto parsed = std::move(*parsed_json);
+        // `review_response` is the turn the JSON came from (possibly the
+        // tool-less retry), so its tool count is the one that vouches.
+        drop_unchecked_evidence(parsed, review_response.tools_run);
         const auto dropped = localize_findings(
             parsed.findings, group.files, input.snapshot.worktree_root);
         if (dropped > 0) {

@@ -30,6 +30,9 @@ public:
         std::string text;
         bool interrupted = false;
         std::string error;
+        /// Tool calls the turn completed. Zero means the answer could only
+        /// have come from the prompt, so nothing in it was checked in code.
+        int tools_run = 0;
     };
 
     virtual ~TurnRunner() = default;

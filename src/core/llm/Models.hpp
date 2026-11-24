@@ -27,6 +27,7 @@
 #include "ResponseFormat.hpp"
 #include "ReasoningCapabilities.hpp"
 #include "Advisor.hpp"
+#include "DisplaySection.hpp"
 
 namespace core::llm {
 
@@ -671,6 +672,9 @@ struct Message {
     // Display-only: net file changes of the agent turn this message ends.
     // Persisted for resume, never sent upstream.
     core::changes::TurnChanges turn_changes = {};
+    // Display-only: how the transcript lays this message out (e.g. one section
+    // per review comment). Persisted for resume, never sent upstream.
+    std::vector<DisplaySection> display_sections = {};
 };
 
 struct Tool {

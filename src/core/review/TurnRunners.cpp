@@ -55,6 +55,7 @@ struct TurnSink {
     std::string text;
     std::string status;
     bool interrupted = false;
+    int tools_run = 0;
 
     void append_text(const std::string& chunk) {
         std::lock_guard lock(mutex);
@@ -143,6 +144,10 @@ TurnRunner::Response AgentTurnRunner::run(const Request& request) {
     callbacks.on_status_log = [sink](const std::string& chunk) {
         sink->append_status(chunk);
     };
+    callbacks.on_tool_finish = [sink](const core::llm::ToolCall&, const core::llm::Message&) {
+        std::lock_guard lock(sink->mutex);
+        ++sink->tools_run;
+    };
     callbacks.effort_override = request.effort;
     callbacks.max_tokens_override = request.max_tokens;
     callbacks.max_steps_override = request.max_steps;
@@ -227,6 +232,7 @@ TurnRunner::Response AgentTurnRunner::run(const Request& request) {
         collected = sink->text;
         status = sink->status;
         interrupted = sink->interrupted;
+        response.tools_run = sink->tools_run;
     }
 
     response.text = trim_ascii_copy(collected);

@@ -1769,9 +1769,13 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         *mock_history = "";
         review_activity_events->clear();
         auto assistant_output = std::make_shared<std::string>();
-        ctx.append_assistant_output_fn = [assistant_output](const std::string& text) {
-            *assistant_output += text;
-        };
+        auto assistant_sections = std::make_shared<std::vector<core::llm::DisplaySection>>();
+        ctx.append_assistant_sections_fn =
+            [assistant_output, assistant_sections](const std::string& text,
+                                                   std::vector<core::llm::DisplaySection> sections) {
+                *assistant_output += text;
+                *assistant_sections = std::move(sections);
+            };
         auto provider = std::make_shared<CapturingReviewProvider>();
         ctx.agent = std::make_shared<core::agent::Agent>(
             provider,
@@ -1803,6 +1807,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         const std::string prompt_header = prompt.substr(0, review_task_pos);
         REQUIRE_THAT(prompt_header, !Catch::Matchers::ContainsSubstring("Use available tools to inspect"));
         REQUIRE_THAT(*assistant_output, Catch::Matchers::ContainsSubstring("No blocking issues found"));
+        // The transcript gets the same report laid out in sections.
+        REQUIRE_FALSE(assistant_sections->empty());
+        REQUIRE_THAT(assistant_sections->front().markdown,
+                     Catch::Matchers::ContainsSubstring("No blocking issues found"));
 
         fs::current_path(guard.old, ec);
         fs::remove_all(temp_dir, ec);

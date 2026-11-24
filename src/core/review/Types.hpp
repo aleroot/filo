@@ -136,6 +136,13 @@ struct SteeringReference {
 struct Finding {
     std::string title;
     std::string body = {};
+    /// Why this is a problem: the concrete trace from input to misbehaviour.
+    /// Shown behind "Why this was flagged" so the comment itself stays short.
+    std::string rationale = {};
+    /// What the reviewer confirmed in code beyond the patch, with path:line.
+    /// Kept only when the review turn actually ran a tool: a diff-only turn
+    /// cannot have checked anything outside the diff.
+    std::string evidence = {};
     std::optional<int> priority = {};
     std::optional<Severity> severity = {};
     std::optional<Category> category = {};

@@ -1955,6 +1955,10 @@ void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
     }
 }
 
+std::string assistant_section_key(std::string_view message_id, std::size_t index) {
+    return std::format("{}:section:{}", message_id, index);
+}
+
 std::string turn_file_change_key(std::string_view message_id, std::string_view path) {
     return std::format("file-change:{}:{}", message_id, path);
 }
@@ -2642,14 +2646,11 @@ namespace {
     return !msg.reasoning_text.empty();
 }
 
-[[nodiscard]] std::string assistant_disclosure_key(std::string_view message_id) {
-    return std::string(message_id) + ":assistant-disclosure";
-}
-
-[[nodiscard]] Element render_assistant_disclosure(
-    const UiMessage& msg,
-    const ConversationRenderOptions& options) {
-    const std::string key = assistant_disclosure_key(msg.id);
+// The collapsed details that follow a section, e.g. a review comment's
+// "Why this was flagged". The header is the click target.
+[[nodiscard]] Element render_section_details(const core::llm::DisplaySection& section,
+                                             const std::string& key,
+                                             const ConversationRenderOptions& options) {
     bool expanded = options.expand_system_details;
     if (options.system_disclosure_expanded != nullptr) {
         if (const auto it = options.system_disclosure_expanded->find(key);
@@ -2662,7 +2663,7 @@ namespace {
         ftxui::text("  "),
         ftxui::text(expanded ? "▼ " : "▶ ")
             | ftxui::color(ColorYellowDark),
-        ftxui::text(msg.disclosure_summary)
+        ftxui::text(section.details_summary)
             | ftxui::color(ColorYellowDark)
             | dim,
     });
@@ -2674,10 +2675,34 @@ namespace {
     std::vector<Element> rows;
     rows.push_back(std::move(header));
     if (expanded) {
+        // A separator in an hbox spans the row's full height, so the rule
+        // runs down the whole of the details rather than their first line.
         rows.push_back(hbox({
-            ftxui::text("  │ ") | ftxui::color(ColorTextMuted) | dim,
-            render_markdown(msg.disclosure_text, ColorTextSecondary) | xflex,
+            ftxui::text("  "),
+            ftxui::separatorLight() | ftxui::color(ColorTextMuted) | dim,
+            ftxui::text(" "),
+            render_markdown(section.details_markdown, ColorTextSecondary) | xflex,
         }) | xflex);
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
+// An assistant message laid out in sections: each one's markdown, then its
+// details directly beneath it so the toggle reads as part of that section.
+[[nodiscard]] Element render_assistant_sections(const UiMessage& msg,
+                                                const ConversationRenderOptions& options) {
+    std::vector<Element> rows;
+    for (std::size_t index = 0; index < msg.sections.size(); ++index) {
+        const auto& section = msg.sections[index];
+        if (section.markdown.empty() && !section.has_details()) continue;
+        if (!rows.empty()) rows.push_back(ftxui::text(""));
+        if (!section.markdown.empty()) {
+            rows.push_back(render_markdown(section.markdown, ColorText));
+        }
+        if (section.has_details()) {
+            rows.push_back(render_section_details(
+                section, assistant_section_key(msg.id, index), options));
+        }
     }
     return vbox(std::move(rows)) | xflex;
 }
@@ -3168,18 +3193,13 @@ Element render_assistant_message(const UiMessage& msg,
     // Provider text introduces the work that follows, so keep it before this
     // step's tool cards. This ordering also makes live and resumed transcripts
     // identical at provider-step boundaries.
-    if (!msg.text.empty()) {
+    if (!msg.text.empty() || !msg.sections.empty()) {
         if (has_reasoning) {
             elements.push_back(ftxui::text(""));
         }
-        elements.push_back(render_markdown(msg.text, ColorText));
-    }
-
-    if (!msg.disclosure_summary.empty() && !msg.disclosure_text.empty()) {
-        if (!msg.text.empty()) {
-            elements.push_back(ftxui::text(""));
-        }
-        elements.push_back(render_assistant_disclosure(msg, options));
+        elements.push_back(msg.sections.empty()
+            ? render_markdown(msg.text, ColorText)
+            : render_assistant_sections(msg, options));
     }
 
     // Tool calls belong to this provider step and follow its narration.
@@ -3193,8 +3213,7 @@ Element render_assistant_message(const UiMessage& msg,
     }
 
     if (!msg.turn_changes.empty()) {
-        if (has_reasoning || !msg.text.empty() || !msg.tools.empty()
-            || !msg.disclosure_summary.empty()) {
+        if (has_reasoning || !msg.text.empty() || !msg.tools.empty()) {
             elements.push_back(ftxui::text(""));
         }
         elements.push_back(render_turn_file_changes(msg, options));

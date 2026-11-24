@@ -351,6 +351,25 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         out += ",\"turn_changes\":";
         core::changes::append_turn_changes_json(out, msg.turn_changes);
     }
+    if (!msg.display_sections.empty()) {
+        out += ",\"display_sections\":[";
+        for (std::size_t i = 0; i < msg.display_sections.size(); ++i) {
+            const auto& section = msg.display_sections[i];
+            if (i > 0) out += ',';
+            out += "{\"markdown\":\"";
+            core::utils::append_escaped(out, section.markdown);
+            out += '"';
+            if (section.has_details()) {
+                out += ",\"details_summary\":\"";
+                core::utils::append_escaped(out, section.details_summary);
+                out += "\",\"details_markdown\":\"";
+                core::utils::append_escaped(out, section.details_markdown);
+                out += '"';
+            }
+            out += '}';
+        }
+        out += ']';
+    }
     if (!msg.tool_calls.empty()) {
         out += ",\"tool_calls\":[";
         for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
@@ -512,6 +531,23 @@ void append_goal_graph_json(std::string& out,
     simdjson::dom::object turn_changes_obj;
     if (msg_el["turn_changes"].get(turn_changes_obj) == simdjson::SUCCESS) {
         msg.turn_changes = core::changes::parse_turn_changes_json(turn_changes_obj);
+    }
+
+    simdjson::dom::array sections_arr;
+    if (msg_el["display_sections"].get(sections_arr) == simdjson::SUCCESS) {
+        for (simdjson::dom::element section_el : sections_arr) {
+            core::llm::DisplaySection section;
+            if (section_el["markdown"].get(sv) == simdjson::SUCCESS) {
+                section.markdown = std::string(sv);
+            }
+            if (section_el["details_summary"].get(sv) == simdjson::SUCCESS) {
+                section.details_summary = std::string(sv);
+            }
+            if (section_el["details_markdown"].get(sv) == simdjson::SUCCESS) {
+                section.details_markdown = std::string(sv);
+            }
+            msg.display_sections.push_back(std::move(section));
+        }
     }
 
     simdjson::dom::array tc_arr;
