@@ -1633,7 +1633,8 @@ RunResult run(RunOptions opts) {
             .key = core::config::ManagedSettingKey::ContextCompression,
             .category = "Session",
             .label = "Tool Compression",
-            .description = "How aggressively tool outputs are compacted before entering context.",
+            .description = "How tool output is compacted before it enters context. Light and above "
+                           "can select verbatim excerpts from oversized web search and fetched pages.",
             .choices = {
                 SettingsChoice{.value = "off",   .label = "Off"},
                 SettingsChoice{.value = "light", .label = "Light"},
@@ -5494,6 +5495,7 @@ RunResult run(RunOptions opts) {
         return std::format(
             "Compression: {}\n"
             "        Modes: {}\n"
+            "        Light and above can extract excerpts from oversized web results.\n"
             "        Use /compression <mode> or /compression to open the selector.",
             mode,
             kCompressionModeList);

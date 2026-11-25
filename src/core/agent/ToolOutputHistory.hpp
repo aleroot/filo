@@ -9,6 +9,7 @@ namespace core::agent::tool_output_history {
 struct Context {
     std::string_view tool_arguments;
     std::string_view session_id;
+    std::string_view task;
 };
 
 struct Limits {

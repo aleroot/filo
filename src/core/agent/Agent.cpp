@@ -3945,6 +3945,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             core::agent::tool_output_history::Context{
                                 .tool_arguments = tc.function.arguments,
                                 .session_id = session_context.session_id,
+                                .task = [&] {
+                                    for (const auto& message : self->history_ | std::views::reverse) {
+                                        if (message.role == "user" && !message.synthetic) return std::string_view(message.content);
+                                    }
+                                    return std::string_view{};
+                                }(),
                             });
                         if (compact_result.needs_recovery) {
                             if (auto stored = self->tool_result_store_.store(

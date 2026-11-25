@@ -1051,6 +1051,176 @@ TEST_CASE("ToolOutputHistory preserves error semantics when truncating", "[agent
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("original_chars":)"));
 }
 
+TEST_CASE("ToolOutputHistory packs an oversized web search as verbatim excerpts",
+          "[agent][tool-history]") {
+    std::string answer = "Intro line.\n";
+    for (int i = 0; i < 250; ++i) {
+        answer += "filler sentence about nothing " + std::to_string(i) + "\n";
+    }
+    answer += "prepare_for_history keeps the verbatim citation line.\n";
+    for (int i = 250; i < 500; ++i) {
+        answer += "filler sentence about nothing " + std::to_string(i) + "\n";
+    }
+    answer += "Closing line.\n";
+
+    std::string page;
+    for (int i = 0; i < 80; ++i) page += "page filler " + std::to_string(i) + "\n";
+    page += "exact snippet alpha-quota-77 remains.\n";
+    for (int i = 0; i < 80; ++i) page += "page tail " + std::to_string(i) + "\n";
+
+    const std::string long_url = "https://example.com/" + std::string(310, 'x') + "?source=exact";
+    std::string raw = std::string(R"({"backend":"test","answer":")")
+        + core::utils::escape_json_string(answer) + R"(","results":[)";
+    for (int i = 0; i < 6; ++i) {
+        if (i != 0) raw += ',';
+        raw += R"({"title":"Hit )" + std::to_string(i)
+            + R"(","url":")" + (i == 0 ? long_url : "https://example.com/hit-" + std::to_string(i))
+            + R"(","snippet":"short","content":")"
+            + core::utils::escape_json_string(i == 3 ? page : "brief")
+            + "\"}";
+    }
+    raw += "]}";
+
+    const auto prepared = core::agent::tool_output_history::prepare_for_history(
+        "web_search",
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 6000,
+            .head_chars = 3000,
+            .tail_chars = 1500,
+        },
+        "light",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"query":"prepare_for_history alpha-quota"})",
+            .session_id = "extract-web",
+        });
+
+    using core::agent::tool_output_history::clamp_for_history;
+    const core::agent::tool_output_history::Limits limits{6000, 3000, 1500};
+    const auto baseline = clamp_for_history("web_search", raw, limits, "off");
+    CHECK_THAT(baseline, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
+    CHECK(prepared.content.size() <= baseline.size());
+
+    // A useful excerpt is still rejected if its serialized representation
+    // exceeds the preview it would replace.
+    const core::agent::tool_output_history::Limits narrow_preview{6000, 32, 32};
+    CHECK(clamp_for_history("web_search", raw, narrow_preview, "light")
+          == clamp_for_history("web_search", raw, narrow_preview, "off"));
+
+    REQUIRE(raw.size() > 6000);
+    CHECK(prepared.needs_recovery);
+    CHECK(prepared.content.size() < raw.size());
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring(R"("compression":"extractive")"));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring("not a paraphrase"));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring(
+        "prepare_for_history keeps the verbatim citation line."));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring("exact snippet alpha-quota-77 remains."));
+    CHECK_THAT(prepared.content, !Catch::Matchers::ContainsSubstring("filler sentence about nothing 250"));
+    const std::string orion_page = std::string(R"({"url":"https://example.com/manual/0","content":")") + std::string(3000, 'x') + "Orion daily quota is V-48291." + std::string(3000, 'y') + "\"}";
+    const auto generic = core::agent::tool_output_history::Context{.tool_arguments = R"({"url":"https://example.com/manual/0"})"};
+    CHECK(clamp_for_history("fetch_url", orion_page, limits, "light", generic) == clamp_for_history("fetch_url", orion_page, limits, "off", generic));
+    auto asked = generic;
+    asked.task = "What is the daily quota for Orion?";
+    CHECK_THAT(clamp_for_history("fetch_url", orion_page, limits, "light", asked), Catch::Matchers::ContainsSubstring("Orion daily quota is V-48291."));
+
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring(long_url));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring("Closing line."));
+    for (int i = 1; i < 6; ++i) {
+        CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring(
+            "https://example.com/hit-" + std::to_string(i)));
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{prepared.content};
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(padded).get(document) == simdjson::SUCCESS);
+    std::string_view extract;
+    REQUIRE(document["extract"].get(extract) == simdjson::SUCCESS);
+    std::size_t cursor = 0;
+    while (cursor < extract.size()) {
+        const std::size_t end = extract.find('\n', cursor);
+        const std::size_t stop = end == std::string_view::npos ? extract.size() : end;
+        const std::string_view line = extract.substr(cursor, stop - cursor);
+        const auto bar = line.find(" | ");
+        if (bar != std::string_view::npos) {
+            std::string_view excerpt = line.substr(bar + 3);
+            if (excerpt.starts_with("...")) excerpt.remove_prefix(3);
+            if (excerpt.ends_with("...")) excerpt.remove_suffix(3);
+            if (!excerpt.empty()) {
+                CHECK((answer.find(excerpt) != std::string::npos
+                       || page.find(excerpt) != std::string::npos));
+            }
+        }
+        if (end == std::string_view::npos) break;
+        cursor = end + 1;
+    }
+}
+
+TEST_CASE("ToolOutputHistory packs an oversized fetched page around the query",
+          "[agent][tool-history]") {
+    std::string page = "# Token budgets\n";
+    for (int i = 0; i < 100; ++i) page += "nav filler " + std::to_string(i) + "\n";
+    page += "The fetch pack keeps this middle sentence about token budgets.\n";
+    for (int i = 0; i < 100; ++i) page += "footer filler " + std::to_string(i) + "\n";
+    const std::string raw = std::string(
+        R"({"url":"https://example.com/token-budgets","status_code":200,"content_type":"text/html","title":"Budgets","truncated":false,"content":")")
+        + core::utils::escape_json_string(page) + "\"}";
+    const auto prepared = core::agent::tool_output_history::prepare_for_history(
+        "fetch_url",
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 2000,
+            .head_chars = 1000,
+            .tail_chars = 500,
+        },
+        "light",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"url":"https://example.com/token-budgets"})",
+            .session_id = "extract-fetch",
+        });
+
+    REQUIRE(raw.size() > 2000);
+    CHECK(prepared.needs_recovery);
+    CHECK(prepared.content.size() < raw.size());
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring("https://example.com/token-budgets"));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring("Status: 200"));
+    CHECK_THAT(prepared.content, Catch::Matchers::ContainsSubstring(
+        "The fetch pack keeps this middle sentence about token budgets."));
+    CHECK_THAT(prepared.content, !Catch::Matchers::ContainsSubstring("nav filler 50"));
+}
+
+TEST_CASE("ToolOutputHistory leaves a pasted unified diff verbatim at both ends",
+          "[agent][tool-history]") {
+    std::string diff = "diff --git a/src/a.cpp b/src/a.cpp\n"
+                       "--- a/src/a.cpp\n"
+                       "+++ b/src/a.cpp\n"
+                       "@@ -1,2 +1,2 @@\n";
+    for (int i = 0; i < 80; ++i) diff += "+added line " + std::to_string(i) + "\n";
+    diff += "@@ -10,1 +10,1 @@\n trailing context\n";
+    const std::string raw = std::string(R"({"output":")")
+        + core::utils::escape_json_string(diff)
+        + R"(","exit_code":0})";
+    const std::string result = core::agent::tool_output_history::clamp_for_history(
+        "run_terminal_command",
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 800,
+            .head_chars = 400,
+            .tail_chars = 200,
+        },
+        "full",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"command":"cat changes"})",
+            .session_id = "extract-diff",
+        });
+
+    CHECK(result.size() < raw.size());
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
+    CHECK_THAT(result, !Catch::Matchers::ContainsSubstring("extractive"));
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("diff --git a/src/a.cpp"));
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("trailing context"));
+}
+
 TEST_CASE("ToolOutputHistory preserves large activate_skill payloads", "[agent][tool-history]") {
     const std::string large_skill =
         std::string(R"({"content":")") + std::string(300 * 1024, 's') + R"("})";

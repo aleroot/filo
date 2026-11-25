@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <mutex>
@@ -17,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace core::agent::tool_output_history {
@@ -1103,6 +1106,28 @@ FullCompressionCache& full_cache() {
     return result;
 }
 
+// A pasted unified diff is not the git-diff summary below. Three structural
+// markers is enough to refuse a lossy rewrite and keep a verbatim head/tail.
+[[nodiscard]] bool is_unified_diff(std::string_view text) {
+    int markers = 0;
+    int lines = 0;
+    std::size_t i = 0;
+    while (i < text.size() && lines < 200) {
+        const std::size_t end = text.find('\n', i);
+        const std::size_t stop = end == std::string_view::npos ? text.size() : end;
+        std::string_view line = text.substr(i, stop - i);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.starts_with("diff --git ") || line.starts_with("@@ ")
+            || line.starts_with("+++ ") || line.starts_with("--- ")) {
+            ++markers;
+        }
+        ++lines;
+        if (end == std::string_view::npos) break;
+        i = end + 1;
+    }
+    return markers >= 3;
+}
+
 [[nodiscard]] std::optional<std::string> full_compress_shell_output(
     std::string_view raw_output,
     Context context,
@@ -1116,6 +1141,9 @@ FullCompressionCache& full_cache() {
     const std::string family = command_family(command);
 
     if (family == "build-test" && is_build_test_diagnostic_output(*output, exit_code)) {
+        return std::nullopt;
+    }
+    if (family != "git-diff" && family != "git-diff-summary" && is_unified_diff(*output)) {
         return std::nullopt;
     }
 
@@ -1219,6 +1247,648 @@ FullCompressionCache& full_cache() {
             profile.label);
     }
     return std::nullopt;
+}
+
+// --- extractive pack -------------------------------------------------------
+// One forward pass keeps verbatim lines (citations, headings, query
+// hits) and drops the rest. Abstractive compression, a second model call,
+// is slower and can invent paths. This pack never paraphrases.
+
+constexpr std::string_view kExtractiveNotice =
+    "Verbatim excerpts from the whole output, not a paraphrase. "
+    "Dropped text stays on disk; read it with read_tool_result.\n";
+
+constexpr std::size_t kMaxScanLines = 200000;
+constexpr std::size_t kMaxHits = 3000;
+constexpr std::size_t kAnchorWindow = 8;
+constexpr std::size_t kExcerptChars = 220;
+
+[[nodiscard]] bool is_word_char(unsigned char c) noexcept {
+    return std::isalnum(c) != 0 || c == '_';
+}
+
+[[nodiscard]] std::string_view trim_view(std::string_view text) noexcept {
+    while (!text.empty()
+           && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty()
+           && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+[[nodiscard]] std::size_t utf8_start(std::string_view text, std::size_t pos) noexcept {
+    while (pos > 0 && pos < text.size()
+           && (static_cast<unsigned char>(text[pos]) & 0xC0U) == 0x80U) {
+        --pos;
+    }
+    return pos;
+}
+
+[[nodiscard]] std::size_t utf8_end(std::string_view text, std::size_t pos) noexcept {
+    while (pos > 0 && pos < text.size()
+           && (static_cast<unsigned char>(text[pos]) & 0xC0U) == 0x80U) {
+        --pos;
+    }
+    return pos;
+}
+
+[[nodiscard]] std::string clip_copy(std::string_view text, std::size_t max_chars) {
+    if (text.size() <= max_chars) return std::string(text);
+    const std::size_t end = utf8_end(text, max_chars);
+    std::string out(text.substr(0, end));
+    out += "...";
+    return out;
+}
+
+[[nodiscard]] bool is_heading_line(std::string_view trimmed) {
+    if (trimmed.starts_with('#')) return true;
+    return trimmed.size() >= 4 && trimmed.size() <= 80 && trimmed.ends_with(':')
+        && !trimmed.contains("http");
+}
+
+[[nodiscard]] bool contains_word(std::string_view lower, std::string_view term) {
+    std::size_t pos = 0;
+    while ((pos = lower.find(term, pos)) != std::string_view::npos) {
+        const bool left = pos == 0 || !is_word_char(static_cast<unsigned char>(lower[pos - 1]));
+        const std::size_t after = pos + term.size();
+        const bool right = after >= lower.size()
+            || !is_word_char(static_cast<unsigned char>(lower[after]));
+        if (left && right) return true;
+        pos = after;
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_stopword(std::string_view word) {
+    constexpr auto kStop = std::to_array<std::string_view>({
+        "the", "and", "for", "with", "from", "that", "this", "are", "was",
+        "were", "you", "your", "not", "but", "into", "about", "have", "has",
+        "http", "https", "www", "com",
+    });
+    return std::ranges::find(kStop, word) != kStop.end();
+}
+
+struct TermSet {
+    std::vector<std::string> terms;
+
+    void consider(std::string word) {
+        if (word.size() < 3 || word.size() > 64 || terms.size() >= 24) return;
+        if (std::ranges::all_of(word, [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            return;
+        }
+        if (is_stopword(word)) return;
+        if (std::ranges::find(terms, word) != terms.end()) return;
+        terms.push_back(std::move(word));
+    }
+
+    void add_text(std::string_view text) {
+        std::string word;
+        auto flush = [&] {
+            if (word.empty()) return;
+            for (char& c : word) {
+                const auto uc = static_cast<unsigned char>(c);
+                if (uc >= 'A' && uc <= 'Z') c = static_cast<char>(uc - 'A' + 'a');
+            }
+            consider(std::move(word));
+            word.clear();
+        };
+        for (const unsigned char c : text) {
+            if (is_word_char(c)) word.push_back(static_cast<char>(c));
+            else flush();
+        }
+        flush();
+    }
+
+    explicit TermSet(std::string_view tool_arguments) {
+        if (tool_arguments.empty()) return;
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(tool_arguments);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+            add_text(tool_arguments);
+            return;
+        }
+        simdjson::dom::object object;
+        if (doc.get(object) != simdjson::SUCCESS) {
+            add_text(tool_arguments);
+            return;
+        }
+        constexpr auto kPreferred = std::to_array<std::string_view>({
+            "query", "pattern", "command", "path", "url", "code", "prompt",
+        });
+        for (const auto key : kPreferred) {
+            if (const auto value = core::utils::json::optional_string_field(object, key)) {
+                add_text(*value);
+            }
+        }
+        for (const auto field : object) {
+            std::string_view value;
+            if (field.value.get(value) == simdjson::SUCCESS) add_text(value);
+        }
+    }
+
+    explicit TermSet(const Context& context) : TermSet(context.tool_arguments) {
+        add_text(context.task);
+    }
+
+    [[nodiscard]] int score(std::string_view lower) const {
+        int total = 0;
+        for (const auto& term : terms) {
+            if (term.size() >= 8) {
+                if (lower.contains(term)) total += 40;
+            } else if (contains_word(lower, term)) {
+                total += 24;
+            }
+        }
+        return total;
+    }
+
+    [[nodiscard]] std::size_t earliest_match(std::string_view lower) const {
+        std::size_t match = std::string_view::npos;
+        for (const auto& term : terms) {
+            const auto found = lower.find(term);
+            if (found != std::string_view::npos
+                && (match == std::string_view::npos || found < match)) {
+                match = found;
+            }
+        }
+        return match;
+    }
+
+    [[nodiscard]] std::string label() const {
+        std::string out;
+        for (const auto& term : terms) {
+            if (!out.empty()) out += ", ";
+            if (out.size() + term.size() > 180) break;
+            out += term;
+        }
+        return out;
+    }
+};
+
+[[nodiscard]] std::string fold_ascii(std::string_view text) {
+    std::string lower(text.size(), '\0');
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const auto uc = static_cast<unsigned char>(text[i]);
+        lower[i] = (uc >= 'A' && uc <= 'Z') ? static_cast<char>(uc - 'A' + 'a')
+                                            : static_cast<char>(uc);
+    }
+    return lower;
+}
+
+[[nodiscard]] std::string excerpt_text(std::string_view text, const TermSet& terms) {
+    if (text.size() <= kExcerptChars) return std::string(text);
+    const std::string lower = fold_ascii(text);
+    const std::size_t match = terms.earliest_match(lower);
+    std::size_t begin = 0;
+    if (match != std::string_view::npos && match > 40) begin = utf8_start(text, match - 40);
+    std::size_t end = std::min(text.size(), begin + kExcerptChars);
+    if (end < text.size()) end = utf8_end(text, end);
+    if (end <= begin) end = std::min(text.size(), begin + 1);
+    std::string out;
+    if (begin > 0) out += "...";
+    out.append(text.substr(begin, end - begin));
+    if (end < text.size()) out += "...";
+    return out;
+}
+
+struct Span {
+    std::size_t number = 0;
+    std::size_t part = 0;
+    std::string_view text;
+    int score = 0;
+    bool anchor = false;
+};
+
+struct Collected {
+    std::vector<Span> spans;
+    std::size_t lines = 0;
+    bool stopped = false;
+};
+
+[[nodiscard]] Collected collect_spans(std::string_view text,
+                                      const TermSet& terms,
+                                      bool prose) {
+    Collected out;
+    std::vector<Span> head;
+    std::vector<Span> hits;
+    std::array<Span, kAnchorWindow> tail{};
+    std::size_t tail_count = 0;
+    std::size_t tail_next = 0;
+    std::unordered_set<std::uint64_t> seen_hits;
+    std::string folded;
+    head.reserve(kAnchorWindow);
+    hits.reserve(64);
+    folded.reserve(256);
+
+    auto push_span = [&](std::size_t number, std::size_t part, std::string_view piece) {
+        piece = trim_view(piece);
+        if (piece.empty()) return;
+        folded.assign(piece.begin(), piece.end());
+        for (char& c : folded) {
+            const auto uc = static_cast<unsigned char>(c);
+            if (uc >= 'A' && uc <= 'Z') c = static_cast<char>(uc - 'A' + 'a');
+        }
+        const std::string_view lower(folded);
+        const int score = terms.score(lower) + (is_heading_line(piece) ? 20 : 0);
+        Span span{
+            .number = number,
+            .part = part,
+            .text = piece,
+            .score = score,
+            .anchor = false,
+        };
+        if (head.size() < kAnchorWindow) {
+            span.anchor = true;
+            head.push_back(span);
+            return;
+        }
+        span.anchor = true;
+        tail[tail_next] = span;
+        tail_next = (tail_next + 1) % kAnchorWindow;
+        if (tail_count < kAnchorWindow) ++tail_count;
+        if (score <= 0 || hits.size() >= kMaxHits) return;
+        if (!seen_hits.insert(fnv1a64(piece)).second) return;
+        span.anchor = false;
+        hits.push_back(span);
+    };
+
+    std::size_t cursor = 0;
+    std::size_t number = 1;
+    while (cursor < text.size()) {
+        if (number > kMaxScanLines) {
+            out.stopped = true;
+            break;
+        }
+        const std::size_t end = text.find('\n', cursor);
+        const std::size_t stop = end == std::string_view::npos ? text.size() : end;
+        std::string_view line = text.substr(cursor, stop - cursor);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (prose && line.size() > 320) {
+            std::size_t start = 0;
+            std::size_t part = 0;
+            while (start < line.size() && part < 80) {
+                const auto dot = line.find(". ", start);
+                const std::size_t sentence_end =
+                    dot == std::string_view::npos ? line.size() : dot + 1;
+                push_span(number, part, line.substr(start, sentence_end - start));
+                ++part;
+                if (dot == std::string_view::npos) {
+                    start = line.size();
+                    break;
+                }
+                start = dot + 2;
+            }
+            if (start < line.size()) push_span(number, part, line.substr(start));
+        } else {
+            push_span(number, 0, line);
+        }
+        ++out.lines;
+        ++number;
+        if (end == std::string_view::npos) break;
+        cursor = end + 1;
+    }
+
+    std::vector<Span> all = head;
+    all.insert(all.end(), hits.begin(), hits.end());
+    const std::size_t tail_begin = tail_count < kAnchorWindow ? 0 : tail_next;
+    for (std::size_t n = 0; n < tail_count; ++n) {
+        all.push_back(tail[(tail_begin + n) % kAnchorWindow]);
+    }
+    std::ranges::sort(all, [](const Span& a, const Span& b) {
+        if (a.number != b.number) return a.number < b.number;
+        return a.part < b.part;
+    });
+    for (const Span& span : all) {
+        if (!out.spans.empty()
+            && out.spans.back().number == span.number
+            && out.spans.back().part == span.part) {
+            Span& prev = out.spans.back();
+            prev.anchor = prev.anchor || span.anchor;
+            prev.score = std::max(prev.score, span.score);
+            continue;
+        }
+        out.spans.push_back(span);
+    }
+    return out;
+}
+
+[[nodiscard]] std::string span_label(const Span& span) {
+    std::string label = "L";
+    label += std::to_string(span.number);
+    if (span.part > 0) {
+        label += '.';
+        label += std::to_string(span.part);
+    }
+    return label;
+}
+
+[[nodiscard]] std::string render_section(std::string_view label,
+                                         std::string_view text,
+                                         const TermSet& terms,
+                                         bool prose,
+                                         std::size_t budget) {
+    if (budget < 80 || text.empty()) return {};
+    const Collected collected = collect_spans(text, terms, prose);
+    const std::vector<Span>& spans = collected.spans;
+    if (spans.empty()) return {};
+    const bool any_hit = std::ranges::any_of(spans, [](const Span& span) {
+        return span.score > 0;
+    });
+    // Few ordinary lines are already a head and a tail. Packing them would
+    // drop the tail the byte preview keeps.
+    if (!any_hit && spans.size() < kAnchorWindow) return {};
+
+    std::size_t used = label.size() + 64;
+    if (collected.stopped) used += 48;
+    if (used >= budget) return {};
+
+    std::vector<char> chosen(spans.size(), 0);
+    std::vector<std::string> excerpts(spans.size());
+    auto cost_of = [&](std::size_t index) {
+        if (excerpts[index].empty()) excerpts[index] = excerpt_text(spans[index].text, terms);
+        return excerpts[index].size() + span_label(spans[index]).size() + 4;
+    };
+    auto take = [&](std::size_t index, std::size_t limit) {
+        if (chosen[index] != 0) return;
+        const std::size_t cost = cost_of(index);
+        if (used + cost > limit) return;
+        chosen[index] = 1;
+        used += cost;
+    };
+
+    std::vector<std::size_t> ranked;
+    ranked.reserve(spans.size());
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        if (spans[i].score > 0) ranked.push_back(i);
+    }
+    std::ranges::sort(ranked, [&](std::size_t a, std::size_t b) {
+        if (spans[a].score != spans[b].score) return spans[a].score > spans[b].score;
+        if (spans[a].number != spans[b].number) return spans[a].number < spans[b].number;
+        return spans[a].part < spans[b].part;
+    });
+    // Keep both boundaries even when keyword matches could fill the section.
+    const std::size_t anchor_cap = used + (budget - used) / 4;
+    take(0, anchor_cap);
+    take(spans.size() - 1, anchor_cap);
+    for (const std::size_t index : ranked) take(index, budget);
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        if (spans[i].anchor) take(i, budget);
+    }
+
+    std::string body;
+    std::size_t kept = 0;
+    std::unordered_set<std::uint64_t> emitted;
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        if (chosen[i] == 0) continue;
+        if (!emitted.insert(fnv1a64(spans[i].text)).second) continue;
+        body += span_label(spans[i]);
+        body += " | ";
+        body += excerpts[i];
+        body += '\n';
+        ++kept;
+    }
+    if (kept == 0) return {};
+
+    std::string header(label);
+    header += " (";
+    header += std::to_string(kept);
+    header += " excerpts from ";
+    header += std::to_string(collected.lines);
+    header += " lines):\n";
+    if (collected.stopped) header += "[stopped scanning after 200000 lines]\n";
+    return header + body;
+}
+
+[[nodiscard]] std::string wrap_extractive(std::string_view tool_name,
+                                          std::string_view raw_output,
+                                          std::string_view extract,
+                                          std::string_view error) {
+    core::utils::JsonWriter writer(768 + extract.size() + error.size());
+    {
+        auto object = writer.object();
+        writer.kv_bool("compressed", true).comma()
+              .kv_str("compression", "extractive").comma()
+              .kv_str("tool", tool_name).comma()
+              .kv_num("original_chars", static_cast<int64_t>(raw_output.size())).comma()
+              .kv_num("kept_chars", static_cast<int64_t>(extract.size())).comma()
+              .kv_str("digest_fnv1a64", digest_hex(raw_output));
+        if (!error.empty()) {
+            writer.comma().kv_str("error", error);
+        }
+        writer.comma().kv_str("extract", extract);
+    }
+    return std::move(writer).take();
+}
+
+[[nodiscard]] std::optional<std::string> finish_extract(std::string_view tool_name,
+                                                        std::string_view raw_output,
+                                                        std::string extract,
+                                                        std::string_view error) {
+    if (extract.empty()) return std::nullopt;
+    std::string wrapped = wrap_extractive(tool_name, raw_output, extract, error);
+    if (wrapped.size() >= raw_output.size()) return std::nullopt;
+    return wrapped;
+}
+
+struct WebHit {
+    std::string title;
+    std::string url;
+    std::string snippet;
+    std::string content;
+};
+
+[[nodiscard]] std::optional<std::string> pack_web_search(std::string_view raw_output,
+                                                         const Context& context,
+                                                         const CompressionProfile& profile) {
+    std::string backend;
+    std::string answer;
+    std::vector<WebHit> hits;
+    {
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(raw_output);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+        simdjson::dom::object object;
+        if (doc.get(object) != simdjson::SUCCESS) return std::nullopt;
+        simdjson::dom::array results;
+        if (object["results"].get(results) != simdjson::SUCCESS) return std::nullopt;
+        if (const auto value = core::utils::json::optional_string_field(object, "backend")) {
+            backend = *value;
+        }
+        if (const auto value = core::utils::json::optional_string_field(object, "answer")) {
+            answer = *value;
+        }
+        for (simdjson::dom::element item : results) {
+            simdjson::dom::object hit;
+            std::string_view url;
+            if (item.get(hit) != simdjson::SUCCESS || hit["url"].get(url) != simdjson::SUCCESS
+                || url.empty()) {
+                continue;
+            }
+            WebHit row;
+            row.url = std::string(url);
+            if (const auto title = core::utils::json::optional_string_field(hit, "title")) {
+                row.title = *title;
+            }
+            if (const auto snippet = core::utils::json::optional_string_field(hit, "snippet")) {
+                row.snippet = *snippet;
+            }
+            if (const auto content = core::utils::json::optional_string_field(hit, "content")) {
+                row.content = *content;
+            }
+            hits.push_back(std::move(row));
+        }
+    }
+    if (hits.empty() && answer.empty()) return std::nullopt;
+
+    const TermSet terms(context.tool_arguments);
+    const std::size_t budget = std::max<std::size_t>(profile.limits.max_chars, 512);
+    std::string prefix = "[extractive web_search]\n";
+    prefix += kExtractiveNotice;
+    if (!backend.empty()) {
+        prefix += "Backend: ";
+        prefix += backend;
+        prefix += '\n';
+    }
+    const std::string matched = terms.label();
+    if (!matched.empty()) {
+        prefix += "Matched terms: ";
+        prefix += matched;
+        prefix += '\n';
+    }
+    prefix += "Results: ";
+    prefix += std::to_string(hits.size());
+    prefix += "\n\nCitations:\n";
+
+    const std::size_t citation_budget = std::max<std::size_t>(budget / 2, 240);
+    std::size_t shown = 0;
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        std::string block = std::to_string(i + 1);
+        block += ". ";
+        block += clip_copy(hits[i].title, 140);
+        block += "\n   ";
+        block += hits[i].url;
+        block += '\n';
+        if (!hits[i].snippet.empty()) {
+            block += "   ";
+            block += clip_copy(hits[i].snippet, 160);
+            block += '\n';
+        }
+        if (prefix.size() + block.size() > citation_budget) continue;
+        prefix += block;
+        ++shown;
+    }
+    if (shown < hits.size()) {
+        prefix += "[";
+        prefix += std::to_string(hits.size() - shown);
+        prefix += " more results omitted]\n";
+    }
+    prefix += '\n';
+    if (prefix.size() >= budget) prefix.resize(utf8_end(prefix, budget));
+
+    std::size_t pages = 0;
+    for (const auto& hit : hits) {
+        if (!hit.content.empty()) ++pages;
+    }
+    std::string body;
+    if (prefix.size() + 80 < budget) {
+        const std::size_t remain = budget - prefix.size();
+        if (!answer.empty()) {
+            body += render_section(
+                "Answer", answer, terms, true, pages == 0 ? remain : remain * 3 / 5);
+        }
+        if (pages > 0) {
+            const std::size_t each = std::max<std::size_t>(
+                160, body.size() < remain ? (remain - body.size()) / pages : 160);
+            for (const auto& hit : hits) {
+                if (hit.content.empty()) continue;
+                if (body.size() >= remain) break;
+                const std::string page_label = "Page " + hit.url;
+                body += render_section(
+                    page_label, hit.content, terms, true,
+                    std::min(each, remain - body.size()));
+            }
+        }
+    }
+    if (body.empty() && shown == 0) return std::nullopt;
+    return finish_extract(
+        core::tools::names::kWebSearch, raw_output, prefix + body, {});
+}
+
+[[nodiscard]] std::optional<std::string> pack_fetch(std::string_view raw_output,
+                                                    const Context& context,
+                                                    const CompressionProfile& profile) {
+    std::string url;
+    std::string content_type;
+    std::string title;
+    std::string content;
+    int64_t status = 0;
+    bool have_status = false;
+    bool source_truncated = false;
+    {
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(raw_output);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+        simdjson::dom::object object;
+        if (doc.get(object) != simdjson::SUCCESS) return std::nullopt;
+        if (object["error"].error() == simdjson::SUCCESS) return std::nullopt;
+        if (const auto value = core::utils::json::optional_string_field(object, "url")) url = *value;
+        if (const auto value = core::utils::json::optional_string_field(object, "content_type")) {
+            content_type = *value;
+        }
+        if (const auto value = core::utils::json::optional_string_field(object, "title")) title = *value;
+        if (const auto value = core::utils::json::optional_string_field(object, "content")) {
+            content = *value;
+        }
+        have_status = object["status_code"].get(status) == simdjson::SUCCESS;
+        core::utils::json::ignore_error(object["truncated"].get(source_truncated));
+    }
+    if (url.empty() && content.empty()) return std::nullopt;
+
+    TermSet terms(context);
+    terms.add_text(url);
+    terms.add_text(title);
+    const std::size_t budget = std::max<std::size_t>(profile.limits.max_chars, 512);
+    std::string prefix = "[extractive fetch_url]\n";
+    prefix += kExtractiveNotice;
+    if (!url.empty()) {
+        prefix += "URL: ";
+        prefix += url;
+        prefix += '\n';
+    }
+    if (have_status) {
+        prefix += "Status: ";
+        prefix += std::to_string(status);
+        prefix += '\n';
+    }
+    if (!content_type.empty()) {
+        prefix += "Content-Type: ";
+        prefix += content_type;
+        prefix += '\n';
+    }
+    if (!title.empty()) {
+        prefix += "Title: ";
+        prefix += title;
+        prefix += '\n';
+    }
+    if (source_truncated) prefix += "Source page was truncated before this pack.\n";
+    const std::string matched = terms.label();
+    if (!matched.empty()) {
+        prefix += "Matched terms: ";
+        prefix += matched;
+        prefix += '\n';
+    }
+    prefix += '\n';
+    if (prefix.size() >= budget) return std::nullopt;
+    std::string body = render_section(
+        "Page", content, terms, true, budget - prefix.size());
+    if (body.empty()) return std::nullopt;
+    return finish_extract(core::tools::names::kFetchUrl, raw_output, prefix + body, {});
 }
 
 } // namespace
@@ -1419,7 +2089,20 @@ HistoryOutput prepare_for_history(
             writer.kv_str("tail", tail);
         }
     }
-    return {std::move(writer).take(), true};
+    std::string preview = std::move(writer).take();
+    if (profile.mode != CompressionMode::Off) {
+        std::optional<std::string> packed;
+        if (tool_name == core::tools::names::kWebSearch) {
+            packed = pack_web_search(raw_output, context, profile);
+        } else if (tool_name == core::tools::names::kFetchUrl) {
+            packed = pack_fetch(raw_output, context, profile);
+        }
+        // Both representations get the same recovery reference downstream.
+        if (packed && packed->size() <= preview.size() && packed->size() < raw_output.size()) {
+            return {std::move(*packed), true};
+        }
+    }
+    return {std::move(preview), true};
 }
 
 } // namespace core::agent::tool_output_history
