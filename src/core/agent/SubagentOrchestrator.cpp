@@ -158,6 +158,11 @@ std::vector<std::string> SubagentOrchestrator::ExecutionPlan::allowed_tool_names
         names.push_back(std::string(SubagentOrchestrator::kTaskToolName));
     }
     names.push_back(std::string(core::tools::names::kReadToolResult));
+    for (const auto& name : supplemental_tools) {
+        if (std::ranges::find(names, name) == names.end()) {
+            names.push_back(name);
+        }
+    }
     return names;
 }
 
@@ -672,6 +677,11 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
     const int max_steps = sanitize_max_steps(
         request.max_steps_override.value_or(0),
         profile->max_steps);
+    std::vector<std::string> supplemental;
+    const std::string review_tool{core::tools::names::kReview};
+    if (!profile->use_allow_list || profile->allowed_tools.contains(review_tool)) {
+        supplemental.push_back(review_tool);
+    }
 
     return ExecutionPlan{
         .worker_name = profile->name,
@@ -686,6 +696,7 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
         .read_only = read_only,
         .read_only_shell = read_only_shell,
         .max_steps = max_steps,
+        .supplemental_tools = std::move(supplemental),
         .isolated = profile->isolated,
     };
 }

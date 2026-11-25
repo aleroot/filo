@@ -33,6 +33,7 @@
 #include "core/utils/Base64.hpp"
 #include "core/utils/PathUtils.hpp"
 #include "GoalExecutor.hpp"
+#include "IssueQueueExecutor.hpp"
 #include "ModelInUseNotice.hpp"
 #include "ReviewExecutor.hpp"
 #include "core/review/ReviewTargets.hpp"
@@ -1515,7 +1516,7 @@ public:
             "  /fork               Branch the current conversation into a new session\n"
             "  /rewind             Restore and branch from an earlier prompt\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
-            "  /goal [action]      Set or manage the session goal (plan/run/graph)\n"
+            "  /goal [action]      Set a goal, or run /goal issues to fix open issues one at a time\n"
             "  /todo [action]      Manage session-backed todo items\n"
             "  /memory [action]    Manage durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
@@ -3144,6 +3145,30 @@ public:
             return;
         }
 
+        if (action == "issues" || action == "issue") {
+            int max_issues = 8;
+            const std::string request = trim_copy(remainder);
+            if (!request.empty()) {
+                std::string_view number = request;
+                if (number.starts_with("max")) number = trim(number.substr(3));
+                int parsed = 0;
+                const auto* end = number.data() + number.size();
+                const auto parsed_result = std::from_chars(number.data(), end, parsed);
+                if (parsed_result.ec != std::errc{} || parsed_result.ptr != end
+                    || parsed < 1 || parsed > 20) {
+                    ctx.append_history_fn(
+                        "\nℹ  Usage: /goal issues [N]\n"
+                        "   N is 1 to 20 (default 8). Each issue is fixed, reviewed, and published on its own branch.\n");
+                    return;
+                }
+                max_issues = parsed;
+            }
+            auto work = [ctx, max_issues] { IssueQueueExecutor::run(ctx, max_issues); };
+            if (ctx.dispatch_async_fn) ctx.dispatch_async_fn(std::move(work));
+            else work();
+            return;
+        }
+
         const bool is_plan = action == "plan" || action == "decompose";
         const bool is_run = action == "run" || action == "start" || action == "go";
         const bool is_replan = action == "replan";
@@ -3230,6 +3255,7 @@ public:
                 ctx.append_history_fn(
                     "\nℹ  Usage: /goal <objective>\n"
                     "   Graph actions: plan <objective>, run, pause, replan [reason], graph.\n"
+                    "   Issue queue: issues [N].\n"
                     "   Other actions: show, set <objective>, done [note], blocked [note], resume [note], clear.\n");
                 return;
             }

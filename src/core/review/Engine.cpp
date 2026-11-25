@@ -1,6 +1,7 @@
 #include "Engine.hpp"
 
 #include "Findings.hpp"
+#include "MergePolicy.hpp"
 #include "Prompt.hpp"
 #include "ReviewSteering.hpp"
 #include "SummaryPrompt.hpp"
@@ -32,10 +33,7 @@ namespace {
 [[nodiscard]] int count_blocking(const Report& report) noexcept {
     int blocking = 0;
     for (const auto& finding : report.findings) {
-        const auto severity = effective_severity(finding);
-        if (severity == Severity::Critical || severity == Severity::High) {
-            ++blocking;
-        }
+        if (blocks_merge(finding)) ++blocking;
     }
     return blocking;
 }

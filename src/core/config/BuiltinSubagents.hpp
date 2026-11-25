@@ -48,6 +48,33 @@ inline constexpr Definition kExplore{
     .read_only = true,
 };
 
-inline constexpr std::array kAll{kGeneral, kExplore};
+inline constexpr std::array kCodeReviewAllowedTools{
+    core::tools::names::kReview,
+    core::tools::names::kRead,
+    core::tools::names::kConversation,
+    core::tools::names::kFileSearch,
+    core::tools::names::kGrepSearch,
+    core::tools::names::kListDirectory,
+    core::tools::names::kGetCurrentTime,
+    core::tools::names::kRunTerminalCommand,
+};
+
+// The review tool runs the campaign. This profile only reports its result,
+// so the step budget stays small and the worker cannot edit the tree.
+inline constexpr Definition kCodeReview{
+    .name = "code-review",
+    .description = "Read-only reviewer. Runs the review tool and splits findings into blocking and follow-ups.",
+    .prompt =
+        "You are Filo's @code-review worker.\n"
+        "Call the review tool once. Do not edit files.\n"
+        "Repeat the tool's blocking findings and follow-ups. Do not invent findings it did not return.\n"
+        "If the tool says the review is incomplete or failed, say so and do not call the tree clean.\n"
+        "Final summary: blocking count, follow-up count, then each finding as severity, path:line, and title.",
+    .allowed_tools = kCodeReviewAllowedTools,
+    .max_steps = 8,
+    .read_only = true,
+};
+
+inline constexpr std::array kAll{kGeneral, kExplore, kCodeReview};
 
 } // namespace core::config::builtin_subagents

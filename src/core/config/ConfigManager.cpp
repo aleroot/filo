@@ -800,6 +800,25 @@ std::string default_config_json() {
             ],
             "max_steps": 24,
             "enabled": true
+        },
+        "code-review": {
+            "description": "Read-only reviewer. Runs the review tool and splits findings into blocking and follow-ups.",
+            "prompt": "You are Filo's @code-review worker.\nCall the review tool once. Do not edit files.\nRepeat the tool's blocking findings and follow-ups. Do not invent findings it did not return.\nIf the tool says the review is incomplete or failed, say so and do not call the tree clean.\nFinal summary: blocking count, follow-up count, then each finding as severity, path:line, and title.",
+            "allow_task_tool": false,
+            "use_allow_list": true,
+            "read_only": true,
+            "allowed_tools": [
+                "review",
+                "read",
+                "conversation",
+                "file_search",
+                "grep_search",
+                "list_directory",
+                "get_current_time",
+                "run_terminal_command"
+            ],
+            "max_steps": 8,
+            "enabled": true
         }
     },
     "router": {

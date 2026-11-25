@@ -405,6 +405,21 @@ public:
     run_read_only_goal_task(std::string_view description,
                             std::string_view prompt);
 
+    /// Run a general (read_only false) or explore subagent whose workspace
+    /// primary is `workspace`. Used by the issue queue so a fix lands in a
+    /// worktree instead of the session checkout. A workspace that is already
+    /// the primary is accepted.
+    [[nodiscard]] std::expected<std::string, std::string>
+    run_workspace_task(std::string_view description,
+                       std::string_view prompt,
+                       const std::filesystem::path& workspace,
+                       bool read_only);
+
+    /// Asks the session permission gate the same way a tool call would.
+    /// True when the call may proceed. A headless session with no gate allows it.
+    [[nodiscard]] bool confirm_tool_call(std::string_view tool_name,
+                                         std::string_view arguments);
+
     // -----------------------------------------------------------------------
     // Permission gate — set by the TUI to approve/deny dangerous tool calls.
     // When null, all tool calls are executed without approval (headless mode).

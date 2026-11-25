@@ -526,6 +526,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/MemoryTool.cpp
     src/core/tools/TodoTool.cpp
     src/core/tools/ReadToolResultTool.cpp
+    src/core/tools/ReviewTool.cpp
     src/core/tools/ConversationTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolManager.cpp
@@ -555,6 +556,7 @@ set(FILO_CORE_SOURCES
     src/core/commands/CommandExecutor.cpp
     src/core/commands/InlineCommands.cpp
     src/core/commands/GoalExecutor.cpp
+    src/core/commands/IssueQueueExecutor.cpp
     src/core/commands/ReviewExecutor.cpp
     src/core/review/Git.cpp
     src/core/review/Plan.cpp
@@ -564,6 +566,7 @@ set(FILO_CORE_SOURCES
     src/core/review/Annotations.cpp
     src/core/review/TurnRunners.cpp
     src/core/review/Engine.cpp
+    src/core/review/RunReview.cpp
     src/core/review/ReviewSteering.cpp
     src/core/review/SummaryPrompt.cpp
     src/core/commands/SkillCommandLoader.cpp
@@ -581,6 +584,8 @@ set(FILO_CORE_SOURCES
     src/core/goal/GoalPlanner.cpp
     src/core/goal/GoalScheduler.cpp
     src/core/goal/GoalEngine.cpp
+    src/core/goal/IssueQueue.cpp
+    src/core/goal/IssueHost.cpp
     src/core/session/TodoManager.cpp
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
@@ -804,6 +809,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_verification.cpp
     tests/test_reasoning_capabilities.cpp
     tests/test_goal_graph.cpp
+    tests/test_issue_queue.cpp
     tests/test_tools.cpp
     tests/test_codex_patch.cpp
     tests/test_python_namespaces.cpp

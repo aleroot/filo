@@ -123,6 +123,9 @@ public:
         bool read_only = false;
         bool read_only_shell = false;
         int max_steps = 0;
+        /// Agent-served tools (review) the profile may call. They are not in
+        /// ToolManager, so the allow-list built from that registry misses them.
+        std::vector<std::string> supplemental_tools;
         /// Run without the parent's project instructions, skill catalog and
         /// memories (see DelegatedAgentRunner::Request::isolated_context).
         bool isolated = false;

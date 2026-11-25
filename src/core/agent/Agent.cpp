@@ -21,6 +21,7 @@
 #include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../tools/ReviewTool.hpp"
 #include "../tools/ToolArgumentUtils.hpp"
 #include "../tools/ToolPolicy.hpp"
 #include "../tools/read/ImageFile.hpp"
@@ -685,6 +686,29 @@ Agent::run_verification_recipe(std::string_view recipe_id,
 std::expected<std::string, std::string>
 Agent::run_read_only_goal_task(std::string_view description,
                                std::string_view prompt) {
+  return run_workspace_task(
+      description, prompt, session_context_snapshot().workspace_view().primary(), true);
+}
+
+std::expected<std::string, std::string>
+Agent::run_workspace_task(std::string_view description,
+                          std::string_view prompt,
+                          const std::filesystem::path& workspace,
+                          bool read_only) {
+  std::error_code directory_error;
+  if (workspace.empty() || !std::filesystem::is_directory(workspace, directory_error)) {
+    return std::unexpected("worker workspace is not a directory");
+  }
+  auto context = session_context_snapshot();
+  if (!context.set_workspace_primary(workspace)) {
+    std::error_code equivalent_error;
+    if (!std::filesystem::equivalent(
+            context.workspace_view().primary(), workspace, equivalent_error)
+        || equivalent_error) {
+      return std::unexpected("could not point the worker at its workspace");
+    }
+  }
+
   std::shared_ptr<core::llm::LLMProvider> provider;
   std::shared_ptr<core::memory::MemorySystem> memory_system;
   std::string provider_name;
@@ -707,7 +731,7 @@ Agent::run_read_only_goal_task(std::string_view description,
           .provider_name = std::move(provider_name),
           .model_name = std::move(model_name),
           .parent_mode = std::move(parent_mode),
-          .session_context = session_context_snapshot(),
+          .session_context = std::move(context),
           .tool_call_id = std::format(
               "goal-explore-{}",
               next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed)),
@@ -718,7 +742,12 @@ Agent::run_read_only_goal_task(std::string_view description,
           .cancellation_requested = [this] { return is_stop_requested(); },
           .memory_system = std::move(memory_system),
           .execution_journal = execution_journal(),
+          .read_only = read_only,
       });
+}
+
+bool Agent::confirm_tool_call(std::string_view tool_name, std::string_view arguments) {
+  return check_permission(std::string(tool_name), std::string(arguments));
 }
 
 bool Agent::is_turn_current(const std::shared_ptr<TurnState>& turn_state) const {
@@ -2669,6 +2698,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 .function = read_tool_result_tool_.get_definition(),
             });
         }
+        if (tool_is_allowed_for_turn(core::tools::names::kReview, turn_callbacks)) {
+            request.tools.push_back(core::llm::Tool{
+                .function = core::tools::review_tool_definition(),
+            });
+        }
     }
 
     if (turn_state->memory_disabled_for_turn) {
@@ -3408,6 +3442,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     resolved_definitions[i] = self->todo_tool_.get_definition();
                 } else if (tc.function.name == core::tools::names::kReadToolResult) {
                     resolved_definitions[i] = self->read_tool_result_tool_.get_definition();
+                } else if (tc.function.name == core::tools::names::kReview) {
+                    resolved_definitions[i] = core::tools::review_tool_definition();
                 } else {
                     resolved_definitions[i] =
                         self->skill_manager_.get_tool_definition(tc.function.name);
@@ -3828,6 +3864,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             result = self->read_tool_result_tool_.execute(
                                 tc.function.arguments,
                                 session_context);
+                        } else if (tc.function.name == core::tools::names::kReview) {
+                            result = core::tools::execute_review_tool(
+                                *self,
+                                tc.function.arguments,
+                                tool_cancelled);
                         } else {
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,
