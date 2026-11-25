@@ -5,6 +5,7 @@
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
 #include "../../auth/CodexClientIdentity.hpp"
+#include "../../llm/CatalogToolMode.hpp"
 #include "../../utils/StringUtils.hpp"
 
 #include <simdjson.h>
@@ -186,6 +187,10 @@ namespace {
         info.supports_reasoning_effort_updates =
             model.optional_boolean("supports_reasoning_effort_updates")
                 .value_or(false);
+        std::string tool_mode;
+        if (model.string("tool_mode", tool_mode)) {
+            info.tool_mode = catalog_tool_mode_from_string(tool_mode);
+        }
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

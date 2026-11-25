@@ -2351,3 +2351,146 @@ TEST_CASE("A failed response is classified by the class the backend names",
         R"({"type":"response.failed","response":{"error":{"code":"server_error","message":"try later"}}})")
         .retryable_stream_error);
 }
+
+namespace {
+
+[[nodiscard]] std::vector<std::string> tool_names(simdjson::dom::array tools) {
+    std::vector<std::string> names;
+    for (const auto tool : tools) {
+        std::string_view type;
+        std::string_view name;
+        (void)tool["type"].get(type);
+        (void)tool["name"].get(name);
+        names.push_back(std::string(type) + "/" + std::string(name));
+    }
+    return names;
+}
+
+[[nodiscard]] ChatRequest code_mode_request() {
+    ChatRequest req;
+    req.model = "gpt-6.2-sol";
+    req.messages.push_back(Message{.role = "user", .content = "Fix the build."});
+    req.tools.push_back(Tool{.function = {
+        .name = "read",
+        .description = "Read a file.",
+        .parameters = {{"path", "string", "File path.", true}},
+    }});
+    return req;
+}
+
+} // namespace
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+TEST_CASE("A code_mode_only model is offered exec and wait in place of its tools",
+          "[openai][responses][serializer][exec]") {
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req = code_mode_request();
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    const auto payload = protocol.serialize(req);
+    REQUIRE(parser.parse(simdjson::padded_string(payload)).get(doc) == simdjson::SUCCESS);
+    simdjson::dom::array tools;
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    CHECK(tool_names(tools) == std::vector<std::string>{"custom/exec", "function/wait"});
+    // The script declares the tool the model no longer sees directly.
+    CHECK_THAT(std::string(std::string_view(tools.at(0)["description"])),
+               Catch::Matchers::ContainsSubstring("declare const tools: { read(args: {"));
+    CHECK(std::string_view(tools.at(0)["format"]["syntax"]) == "lark");
+    CHECK(bool(doc["parallel_tool_calls"]));
+
+    // A live catalog row that says `direct` wins over the curated card.
+    req.catalog_tool_mode = CatalogToolMode::Direct;
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(req))).get(doc) == simdjson::SUCCESS);
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    CHECK(tool_names(tools) == std::vector<std::string>{"function/read"});
+
+    // A model trained on direct tools keeps them.
+    ChatRequest direct = code_mode_request();
+    direct.model = "gpt-5";
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(direct))).get(doc) == simdjson::SUCCESS);
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    CHECK(tool_names(tools) == std::vector<std::string>{"function/read"});
+}
+
+#endif
+
+#ifndef FILO_ENABLE_JAVASCRIPT
+TEST_CASE("A build without JavaScript offers a code_mode_only model its tools directly",
+          "[openai][responses][serializer][exec]") {
+    OpenAIResponsesProtocol protocol;
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(code_mode_request()))).get(doc)
+            == simdjson::SUCCESS);
+    simdjson::dom::array tools;
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    CHECK(tool_names(tools) == std::vector<std::string>{"function/read"});
+}
+#endif
+
+TEST_CASE("A request without tools offers no script either",
+          "[openai][responses][serializer][exec]") {
+    // The final-step handoff clears the tools: the model must answer, not run code.
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req = code_mode_request();
+    req.tools.clear();
+    const auto payload = protocol.serialize(req);
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("tools")"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("name":"exec")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("parallel_tool_calls":false)"));
+}
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+TEST_CASE("Responses Lite carries exec and wait in the functions namespace",
+          "[openai][responses][codex][serializer][exec]") {
+    // codex-rs core/tests/suite/responses_lite.rs: one `functions` namespace
+    // holding exec and wait, and no top-level function or custom tool.
+    CodexResponsesProtocol protocol;
+    ChatRequest req = code_mode_request();
+    req.catalog_wire_protocol = "responses_lite";
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(req))).get(doc) == simdjson::SUCCESS);
+    const auto first = doc["input"].at(0);
+    CHECK(std::string_view(first["type"]) == "additional_tools");
+    CHECK(std::string_view(first["tools"].at(0)["name"]) == "functions");
+    simdjson::dom::array nested;
+    REQUIRE(first["tools"].at(0)["tools"].get(nested) == simdjson::SUCCESS);
+    CHECK(tool_names(nested) == std::vector<std::string>{"custom/exec", "function/wait"});
+}
+
+#endif
+
+TEST_CASE("An exec call is parsed as a custom call and replayed with its output",
+          "[openai][responses][parser][exec]") {
+    OpenAIResponsesProtocol protocol;
+    const auto parsed = protocol.parse_event(
+        R"json({"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_9","name":"exec","input":"text(\"hi\")"}})json");
+    REQUIRE(parsed.chunks.size() == 1);
+    REQUIRE(parsed.chunks[0].tools.size() == 1);
+    const ToolCall call = parsed.chunks[0].tools[0];
+    CHECK(call.type == "custom");
+    CHECK(call.id == "call_9");
+    CHECK(call.function.name == "exec");
+    CHECK(call.function.arguments == R"json({"source":"text(\"hi\")"})json");
+
+    // The provisional snapshot is not a call yet.
+    CHECK(protocol.parse_event(
+        R"({"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_9","name":"exec","input":""}})")
+              .chunks.empty());
+
+    ChatRequest req = code_mode_request();
+    req.messages.push_back(Message{.role = "assistant", .tool_calls = {call}});
+    req.messages.push_back(Message{
+        .role = "tool",
+        .content = "Script completed\nWall time 0.1 seconds\nOutput:\nhi",
+        .name = "exec",
+        .tool_call_id = "call_9",
+    });
+    const auto payload = protocol.serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"json({"type":"custom_tool_call","call_id":"call_9","name":"exec","input":"text(\"hi\")"})json"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"({"type":"custom_tool_call_output","call_id":"call_9","output":"Script completed\nWall time 0.1 seconds\nOutput:\nhi"})"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"function_call_output","call_id":"call_9")"));
+}

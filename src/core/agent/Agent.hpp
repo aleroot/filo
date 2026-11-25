@@ -14,6 +14,7 @@
 #include "../session/ExecutionJournal.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../session/TodoManager.hpp"
+#include "../tools/ExecTool.hpp"
 #include "../tools/ReadToolResultTool.hpp"
 #include "../tools/TodoTool.hpp"
 #include "../tools/ToolManager.hpp"
@@ -28,6 +29,7 @@
 #include "PromptCacheTracker.hpp"
 #include "SubagentEvents.hpp"
 #include "SubagentOrchestrator.hpp"
+#include "ToolApproval.hpp"
 #include "ToolCallDeduplicator.hpp"
 #include "ToolResultStore.hpp"
 
@@ -661,6 +663,57 @@ private:
                                      bool executed_ok,
                                      std::string& result);
 
+    /// Everything an approved tool call needs to run, besides itself.
+    struct ToolCallScope {
+        core::context::SessionContext session_context;
+        std::shared_ptr<core::llm::LLMProvider> provider;
+        std::string provider_name;
+        std::string model;
+        std::string parent_mode;
+        std::string effort;
+        std::shared_ptr<const std::vector<core::llm::Message>> parent_history;
+        std::string parent_summary;
+        TurnState* turn_state = nullptr;
+        const TurnCallbacks* turn_callbacks = nullptr;
+        /// The request this step answered: its tools are all a script may call.
+        std::shared_ptr<const core::llm::ChatRequest> request;
+        std::function<void(const std::string&, const std::string&)> tool_trace;
+        std::function<bool()> cancelled;
+    };
+
+    /// The argument contract of @p tool_name, wherever the tool is served.
+    [[nodiscard]] std::optional<core::tools::ToolDefinition>
+    resolve_tool_definition(const std::string& tool_name);
+    /// `exec`, and `wait` when no real tool has that name: the harness a
+    /// script model is shown instead of the tools its script calls.
+    [[nodiscard]] bool is_script_harness_call(const std::string& tool_name) const;
+    /// Runs one call that already cleared every gate.
+    [[nodiscard]] std::string dispatch_tool(const core::llm::ToolCall& call,
+                                            const ToolCallScope& scope);
+    /// AUTO's observation of a finished call, direct or nested in a script,
+    /// and the prompt refresh after a memory write. Reads the raw result.
+    void note_tool_result(const core::llm::ToolCall& call,
+                          const std::optional<core::tools::ToolDefinition>& definition,
+                          const std::string& result,
+                          TurnState& turn_state);
+    /// The PostToolUse hooks of a finished call, given the result as the
+    /// model will read it.
+    void run_post_tool_hooks(const core::llm::ToolCall& call,
+                             const core::llm::Message& message,
+                             const core::context::SessionContext& session_context,
+                             const std::shared_ptr<core::changes::TurnChangeTracker>& change_tracker);
+    /// The PreToolUse hook, then the permission check: the gates a direct
+    /// call and a call from an `exec` script both pass.
+    [[nodiscard]] ToolApproval approve_tool_call(
+        const core::llm::ToolCall& call,
+        std::string_view permission_mode,
+        const core::context::SessionContext& session_context,
+        const std::shared_ptr<core::changes::TurnChangeTracker>& change_tracker);
+    /// Runs an `exec` script through a ScriptToolHost wired to the members
+    /// above, so its nested calls take the same path as direct ones.
+    [[nodiscard]] std::string run_tool_script(const core::llm::ToolCall& call,
+                                              const ToolCallScope& scope);
+
     // Freeze provider selection (and the conversation generation) into the turn
     // state so a live model switch applies to the next user turn, not halfway
     // through a tool-use/result exchange. Caller must hold history_mutex_.
@@ -731,7 +784,16 @@ private:
         core::llm::protocols::RateLimitInfo rate_limit,
         std::function<void(const std::string&)> status_log_callback);
 
-    void journal_unlocked(std::string_view event, std::string_view payload) const noexcept;
+    /// @p parent_tool_call_id names the call an event belongs to; empty means
+    /// this agent's own parent (the `task` call that spawned it, if any).
+    void journal_unlocked(std::string_view event,
+                          std::string_view payload,
+                          std::string_view parent_tool_call_id = {}) const noexcept;
+    /// A tool call or result, journaled under its own lock. A call made by an
+    /// `exec` script names that script's call as its parent.
+    void journal_tool_event(std::string_view event,
+                            const core::llm::Message& message,
+                            std::string_view parent_tool_call_id = {}) const noexcept;
     void journal_message_unlocked(const core::llm::Message& message) const noexcept;
     std::shared_ptr<core::session::ExecutionJournal> execution_journal_;
     std::string journal_actor_ = "agent";
@@ -812,6 +874,8 @@ private:
     core::tools::TodoTool todo_tool_;
     ToolResultStore tool_result_store_;
     core::tools::ReadToolResultTool read_tool_result_tool_;
+    // What `store()` keeps between this conversation's exec scripts.
+    core::tools::ToolScriptStore tool_script_store_;
     std::shared_ptr<core::memory::MemorySystem> memory_system_;
     // Parent's tracker when this agent runs as a delegated worker; null for an
     // agent that owns its turns. Fixed at construction: it is read from the

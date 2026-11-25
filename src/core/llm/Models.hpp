@@ -18,6 +18,7 @@
 #include "../changes/FileChange.hpp"
 #include "../tools/Tool.hpp"
 #include "../tools/StrictToolSchema.hpp"
+#include "CatalogToolMode.hpp"
 #include "../tools/ToolSchema.hpp"
 #include "../context/PromptPlan.hpp"
 #include "../utils/Base64.hpp"
@@ -759,6 +760,9 @@ struct ChatRequest {
     /// same reason as the other catalog fields: discovery is provider-scoped
     /// and never reaches the global registry.
     bool catalog_supports_reasoning_effort_updates = false;
+    /// Live catalog's `tool_mode`, when the row names one. Unset: the curated
+    /// card decides. A row that names `direct` turns the code harness off.
+    std::optional<CatalogToolMode> catalog_tool_mode = {};
     /// A provider-side advisor: the provider runs a second model inside this
     /// turn, on its own credential. Only the provider's wire knows how to
     /// declare one, so the request carries the specification and the

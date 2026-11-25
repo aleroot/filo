@@ -166,6 +166,11 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
     if (discovered.max_tool_calls != 32) {
         baseline.max_tool_calls = discovered.max_tool_calls;
     }
+    // A live row that names a tool mode replaces the curated one. A row that
+    // says nothing must not clear a model that was trained for code mode.
+    if (discovered.tool_mode != CatalogToolMode::Unspecified) {
+        baseline.tool_mode = discovered.tool_mode;
+    }
 
     for (auto& alias : discovered.aliases) {
         if (std::ranges::find(baseline.aliases, alias)

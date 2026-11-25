@@ -195,6 +195,9 @@ void apply_live_catalog_metadata(ChatRequest& request,
     }
     request.catalog_supports_reasoning_effort_updates =
         live->supports_reasoning_effort_updates;
+    if (live->tool_mode != CatalogToolMode::Unspecified) {
+        request.catalog_tool_mode = live->tool_mode;
+    }
 }
 
 /// The endpoint named the routing token of the turn: the next request of the

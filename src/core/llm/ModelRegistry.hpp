@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ReasoningCapabilities.hpp"
+#include "CatalogToolMode.hpp"
 #include "../utils/AtomicSharedPtr.hpp"
 
 #include <array>
@@ -305,6 +306,11 @@ struct ModelInfo {
     /// like `service_tiers`: a refresh must not publish one deployment's
     /// answer as a fact about every later lookup of that id.
     bool supports_reasoning_effort_updates = false;
+    /// How this model was trained to call tools (Codex `tool_mode`). A model
+    /// fact, unlike the deployment fields above: the public API and the
+    /// ChatGPT backend train the same slug the same way. Unspecified keeps
+    /// direct function tools.
+    CatalogToolMode tool_mode = CatalogToolMode::Unspecified;
     /// Provider-advertised automatic compaction threshold, when supplied.
     std::optional<int32_t> auto_compact_token_limit = {};
     

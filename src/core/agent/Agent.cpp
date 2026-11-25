@@ -36,6 +36,7 @@
 #include "RepositoryContextMessage.hpp"
 #include "SemanticHistoryEditor.hpp"
 #include "ToolCallPlanner.hpp"
+#include "ScriptToolHost.hpp"
 #include "ToolCallScheduler.hpp"
 #include "ToolOutputHistory.hpp"
 #include "ToolRecovery.hpp"
@@ -510,17 +511,34 @@ std::shared_ptr<core::session::ExecutionJournal> Agent::execution_journal() cons
     return execution_journal_;
 }
 
-void Agent::journal_unlocked(std::string_view event, std::string_view payload) const noexcept {
+void Agent::journal_unlocked(std::string_view event,
+                             std::string_view payload,
+                             std::string_view parent_tool_call_id) const noexcept {
     if (!execution_journal_) return;
     try {
         std::string error;
         if (!execution_journal_->append(session_context_.session_id, journal_actor_,
-                journal_parent_tool_call_id_, event, payload, &error))
+                parent_tool_call_id.empty() ? std::string_view(journal_parent_tool_call_id_)
+                                            : parent_tool_call_id,
+                event, payload, &error))
             core::logging::warn("Execution history could not be saved: {}", error);
     } catch (const std::exception& error) {
         core::logging::warn("Execution history could not be saved: {}", error.what());
     } catch (...) {
         core::logging::warn("Execution history could not be saved: unknown error");
+    }
+}
+
+void Agent::journal_tool_event(std::string_view event,
+                               const core::llm::Message& message,
+                               std::string_view parent_tool_call_id) const noexcept {
+    std::lock_guard lock(history_mutex_);
+    if (!execution_journal_) return;
+    try {
+        journal_unlocked(event, core::session::SessionStore::message_json(message),
+                         parent_tool_call_id);
+    } catch (...) {
+        core::logging::warn("Execution history tool event could not be encoded.");
     }
 }
 
@@ -1502,6 +1520,7 @@ void Agent::clear_history() {
         ++conversation_generation_;
         journal_unlocked("clear", "{}");
         history_.clear();
+        tool_script_store_.clear();
         context_summary_.clear();
         project_facts_snapshot_.reset();
         consecutive_failure_rounds_ = 0;
@@ -2070,8 +2089,225 @@ std::optional<core::llm::Message> Agent::last_user_turn() const {
 }
 
 // ---------------------------------------------------------------------------
+// Tool dispatch
+// ---------------------------------------------------------------------------
+
+std::optional<core::tools::ToolDefinition> Agent::resolve_tool_definition(
+    const std::string& tool_name) {
+    namespace names = core::tools::names;
+    if (tool_name == names::kExec) return core::tools::exec_argument_definition();
+    if (tool_name == names::kWait && !skill_manager_.get_tool_definition(tool_name)) {
+        return core::tools::ToolDefinition{
+            .name = std::string(names::kWait),
+            .description = "There is no running script to resume.",
+        };
+    }
+    if (tool_name == SubagentOrchestrator::kTaskToolName) {
+        return orchestrator_.task_tool_definition(
+            session_context_snapshot().workspace_view().ordered_roots()).function;
+    }
+    if (tool_name == names::kWriteTodos) return todo_tool_.get_definition();
+    if (tool_name == names::kReadToolResult) return read_tool_result_tool_.get_definition();
+    if (tool_name == names::kReview) return core::tools::review_tool_definition();
+    return skill_manager_.get_tool_definition(tool_name);
+}
+
+bool Agent::is_script_harness_call(const std::string& tool_name) const {
+    namespace names = core::tools::names;
+    if (tool_name == names::kExec) return true;
+    return tool_name == names::kWait && !skill_manager_.get_tool_definition(tool_name);
+}
+
+std::string Agent::dispatch_tool(const core::llm::ToolCall& call, const ToolCallScope& scope) {
+    namespace names = core::tools::names;
+    const std::string& name = call.function.name;
+    const std::string& arguments = call.function.arguments;
+    if (name == names::kExec) return run_tool_script(call, scope);
+    if (name == names::kWait && is_script_harness_call(name)) {
+        return R"({"error":"exec runs every script to completion, so there is no running cell to wait on. Read the result exec returned."})";
+    }
+    if (name == SubagentOrchestrator::kTaskToolName) {
+        // A direct call snapshots the conversation before the batch. A script
+        // decides to delegate only while it runs, so it snapshots then.
+        auto parent_history = scope.parent_history;
+        auto parent_summary = scope.parent_summary;
+        if (!parent_history) {
+            std::lock_guard lock(history_mutex_);
+            parent_history = std::make_shared<const std::vector<core::llm::Message>>(history_);
+            parent_summary = context_summary_;
+        }
+        SubagentOrchestrator::RunContext run_context{
+            .active_provider_name = scope.provider_name,
+            .active_model = scope.model,
+            .parent_mode = scope.parent_mode,
+            // The conversation the worker is spawned from: the endpoint is
+            // told which thread owns it.
+            .parent_conversation_scope = conversation_scope().empty()
+                ? scope.session_context.session_id
+                : conversation_scope(),
+            // The turn that spawns the worker, and the root of the tree it
+            // belongs to: the endpoint is told which turn owns the worker.
+            .parent_turn_id = scope.turn_state->transport_turn_id,
+            .root_turn_id = root_turn_id(),
+            .session_context = scope.session_context,
+            .permission_check = [this](const std::string& tool_name, const std::string& args) {
+                return check_permission(tool_name, args);
+            },
+            .parent_tool_call_id = call.id,
+            .on_subagent_event = scope.turn_callbacks->on_subagent_event,
+            // Propagate the parent's stop request (Esc, /stop) and a tool
+            // interrupt (Ctrl+C) to the delegated worker, so cancelling a turn
+            // or this call also cancels the running subagent.
+            .cancellation_requested = scope.cancelled,
+            .memory_system = memory_system_,
+            .execution_journal = execution_journal(),
+            // The worker's edits belong to this turn's summary, so it records
+            // into the same tracker instead of one that is thrown away with it.
+            .change_tracker = scope.turn_state->change_tracker,
+            .effort = scope.effort,
+            // The worker inherits the advisor and checks the pairing against
+            // its own model.
+            .advisor = scope.turn_state->advisor_model,
+            .parent_history = std::move(parent_history),
+            .parent_context_summary = std::move(parent_summary),
+        };
+        return orchestrator_.execute_task(arguments, scope.provider, run_context);
+    }
+    if (name == names::kWriteTodos) return todo_tool_.execute(arguments, scope.session_context);
+    if (name == names::kReadToolResult) {
+        return read_tool_result_tool_.execute(arguments, scope.session_context);
+    }
+    if (name == names::kReview) {
+        return core::tools::execute_review_tool(*this, arguments, scope.cancelled);
+    }
+    return skill_manager_.execute_tool(
+        name,
+        arguments,
+        core::tools::ToolInvocationContext{
+            .session_context = scope.session_context,
+            .tool_call_id = call.id,
+            .provider_name = scope.provider_name,
+            .model_name = scope.model,
+            .provider = scope.provider,
+            .cancellation_requested = scope.cancelled,
+            .session_stats = session_stats_registry_,
+            .change_tracker = scope.turn_state->change_tracker,
+        });
+}
+
+void Agent::note_tool_result(const core::llm::ToolCall& call,
+                             const std::optional<core::tools::ToolDefinition>& definition,
+                             const std::string& result,
+                             TurnState& turn_state) {
+    if (turn_state.auto_turn) {
+        // A script declares itself destructive so the batch takes the writer
+        // lease, but whether it wrote anything is what its nested calls,
+        // observed one by one, report.
+        const bool script = call.function.name == core::tools::names::kExec;
+        auto_turn_coordinator_.observe_tool(
+            *turn_state.auto_turn,
+            AutoToolObservation{
+                .name = call.function.name,
+                .arguments = call.function.arguments,
+                .result = result,
+                .succeeded = !recovery::result_indicates_error(result),
+                .mutation_hint = !script && definition.has_value()
+                    && definition->annotations.destructive_hint,
+                .trusted_verification_receipts =
+                    definition.has_value() && definition->trusted_verification_receipts,
+            });
+    }
+    if (core::tools::MemoryTool::committed_mutation(
+            call.function.name, call.function.arguments, result)) {
+        refresh_system_prompt();
+    }
+}
+
+void Agent::run_post_tool_hooks(
+    const core::llm::ToolCall& call,
+    const core::llm::Message& message,
+    const core::context::SessionContext& session_context,
+    const std::shared_ptr<core::changes::TurnChangeTracker>& change_tracker) {
+    // A hook is a shell command Filo did not scope, and it runs detached: it
+    // can rewrite what the tool just wrote, or create files no scope names.
+    // The turn says so, and takes one more look before it reports.
+    if (core::hooks::dispatch(
+            core::hooks::HookEvent::PostToolUse,
+            build_tool_hook_payload(call, &message),
+            session_context, {}, change_tracker) > 0
+        && change_tracker) {
+        change_tracker->note_unscoped_mutation("a post-tool hook");
+    }
+}
+
+ToolApproval Agent::approve_tool_call(
+    const core::llm::ToolCall& call,
+    std::string_view permission_mode,
+    const core::context::SessionContext& session_context,
+    const std::shared_ptr<core::changes::TurnChangeTracker>& change_tracker) {
+    const auto hook = core::hooks::run_pre_tool_use(
+        build_tool_hook_payload(call), session_context, {}, change_tracker);
+    if (!hook.allowed) return ToolApproval{.hook_block = hook.reason};
+    const bool read_only_task = call.function.name == SubagentOrchestrator::kTaskToolName
+        && orchestrator_.task_is_read_only(
+            call.function.arguments,
+            std::string(permission_mode),
+            session_context.workspace_view().ordered_roots());
+    return ToolApproval{
+        .approved = hook.approved || read_only_task
+            || check_permission(call.function.name, call.function.arguments),
+        .read_only_task = read_only_task,
+    };
+}
+
+std::string Agent::run_tool_script(const core::llm::ToolCall& call, const ToolCallScope& scope) {
+    const auto source = core::tools::source_from_arguments(call.function.arguments);
+    if (!source) return R"({"error":"exec needs a script."})";
+    const auto& offered = scope.request->tools;
+    ScriptToolHost host(NestedToolServices{
+        .offered = offered,
+        .session_context = scope.session_context,
+        .resolve = [this](const std::string& name) { return resolve_tool_definition(name); },
+        .approve = [this, &scope](const core::llm::ToolCall& nested) {
+            return approve_tool_call(nested, scope.parent_mode, scope.session_context,
+                                     scope.turn_state->change_tracker);
+        },
+        .execute = [this, &scope](const core::llm::ToolCall& nested,
+                                  const std::optional<core::tools::ToolDefinition>& definition) {
+            if (scope.tool_trace) scope.tool_trace(nested.function.name, nested.function.arguments);
+            core::llm::Message message{
+                .role = "tool",
+                .content = dispatch_tool(nested, scope),
+                .name = nested.function.name,
+                .tool_call_id = nested.id,
+            };
+            note_tool_result(nested, definition, message.content, *scope.turn_state);
+            run_post_tool_hooks(nested, message, scope.session_context,
+                                scope.turn_state->change_tracker);
+            return message;
+        },
+        .on_start = [this, &scope, &call](const core::llm::ToolCall& nested) {
+            journal_tool_event("tool_start",
+                               core::llm::Message{.role = "assistant", .tool_calls = {nested}},
+                               call.id);
+            if (scope.turn_callbacks->on_tool_start) scope.turn_callbacks->on_tool_start(nested);
+        },
+        .on_finish = [this, &scope, &call](const core::llm::ToolCall& nested,
+                                           const core::llm::Message& message) {
+            journal_tool_event("tool_result", message, call.id);
+            if (scope.turn_callbacks->on_tool_finish) {
+                scope.turn_callbacks->on_tool_finish(nested, message);
+            }
+        },
+        .cancelled = scope.cancelled,
+    });
+    return core::tools::run_tool_script(*source, offered, host, tool_script_store_).output;
+}
+
+// ---------------------------------------------------------------------------
 // Permission helper
 // ---------------------------------------------------------------------------
+
 
 bool Agent::check_permission(const std::string& tool_name, const std::string& args) {
     PermissionProfile profile;
@@ -3375,7 +3611,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      tool_callback, done_callback, turn_callbacks, turn_state,
                      step_session_context,
                      provider_name_snapshot,
-                     step_effort = shared_request->effort]() {
+                     step_request = shared_request]() {
             // Counted because this thread is detached: a tool that never returns
             // must not be able to hang the turn that started it. A caller about to
             // destroy shared state can then wait for it within a bound.
@@ -3435,19 +3671,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 // registration, and denial precedence (allow-list, hook, user)
                 // is preserved by reporting argument failures further down.
                 std::optional<core::tools::schema::ArgumentIssue> argument_issue;
-                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
-                    resolved_definitions[i] = self->orchestrator_.task_tool_definition(
-                        self->session_context_snapshot().workspace_view().ordered_roots()).function;
-                } else if (tc.function.name == core::tools::names::kWriteTodos) {
-                    resolved_definitions[i] = self->todo_tool_.get_definition();
-                } else if (tc.function.name == core::tools::names::kReadToolResult) {
-                    resolved_definitions[i] = self->read_tool_result_tool_.get_definition();
-                } else if (tc.function.name == core::tools::names::kReview) {
-                    resolved_definitions[i] = core::tools::review_tool_definition();
-                } else {
-                    resolved_definitions[i] =
-                        self->skill_manager_.get_tool_definition(tc.function.name);
-                }
+                resolved_definitions[i] = self->resolve_tool_definition(tc.function.name);
                 if (resolved_definitions[i].has_value()) {
                     auto normalized = core::tools::schema::validate_arguments(
                         *resolved_definitions[i],
@@ -3470,12 +3694,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         !core::utils::json::is_object(tc.function.arguments);
                 }
 
-                {
-                    std::lock_guard lock(self->history_mutex_);
-                    if (self->execution_journal_)
-                        self->journal_unlocked("tool_start", core::session::SessionStore::message_json(
-                            core::llm::Message{.role = "assistant", .tool_calls = {tc}}));
-                }
+                self->journal_tool_event(
+                    "tool_start", core::llm::Message{.role = "assistant", .tool_calls = {tc}});
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
                 }
@@ -3486,7 +3706,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     tool_callback(tc.function.name, "[memory unavailable for this turn]");
                     continue;
                 }
-                if (!tool_is_allowed_for_turn(tc.function.name, turn_callbacks)) {
+                // `exec` is not a tool of its own: every call its script makes
+                // is gated against this step's offered tools.
+                if (!self->is_script_harness_call(tc.function.name)
+                    && !tool_is_allowed_for_turn(tc.function.name, turn_callbacks)) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::BlockedByTurnAllowList;
                     tool_callback(tc.function.name, "[blocked by turn tool allow-list]");
@@ -3498,30 +3721,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     tool_callback(tc.function.name, "[skipped after earlier denial]");
                     continue;
                 }
-                const auto hook_decision = core::hooks::run_pre_tool_use(
-                    build_tool_hook_payload(tc),
-                    step_session_context, {}, turn_state->change_tracker);
-                if (!hook_decision.allowed) {
+                const auto approval = self->approve_tool_call(
+                    tc, permission_mode, step_session_context, turn_state->change_tracker);
+                if (approval.hook_block) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::BlockedByHook;
-                    hook_denial_reasons[i] = hook_decision.reason;
+                    hook_denial_reasons[i] = *approval.hook_block;
                     denied_any = true;
                     tool_callback(
                         tc.function.name,
-                        hook_decision.reason.empty()
+                        approval.hook_block->empty()
                             ? "[blocked by PreToolUse hook]"
-                            : "[blocked by PreToolUse hook: " + hook_decision.reason + "]");
+                            : "[blocked by PreToolUse hook: " + *approval.hook_block + "]");
                     continue;
                 }
-                read_only_tasks[i] =
-                    tc.function.name == SubagentOrchestrator::kTaskToolName
-                    && self->orchestrator_.task_is_read_only(
-                        tc.function.arguments,
-                        permission_mode,
-                        self->session_context_snapshot().workspace_view().ordered_roots());
-                approved[i] = hook_decision.approved
-                    || read_only_tasks[i]
-                    || self->check_permission(tc.function.name, tc.function.arguments);
+                read_only_tasks[i] = approval.read_only_task;
+                approved[i] = approval.approved;
                 if (!approved[i]) {
                     denied_reasons[i] = DeniedReason::UserDenied;
                     denied_any = true;
@@ -3765,7 +3980,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                 scheduled_tasks.push_back({
                     .accesses = std::move(planned.accesses),
-                    .run = [self, tc, &tool_callback,
+                    .run = [self, tc, &tool_callback, &turn_callbacks,
                      dedup_index = dedup_decision.original_index,
                      deduplicator = &turn_state->deduplicator,
                      dedup_stop_requested,
@@ -3776,10 +3991,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      active_provider_name_for_task,
                      active_model_for_task,
                      parent_mode_for_task,
-                     step_effort,
+                     step_request,
                      parent_history_for_task,
-                     parent_summary_for_task,
-                     on_subagent_event = turn_callbacks.on_subagent_event]() -> core::llm::Message {
+                     parent_summary_for_task]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
                         // Registered for exactly as long as the call executes,
                         // so interrupt_running_tools() reaches it and nothing
@@ -3806,84 +4020,21 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             return self->is_stop_requested()
                                 || running_call->interrupted.load(std::memory_order_acquire);
                         };
-                        std::string result;
-                        if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
-                            // The conversation the worker is spawned from:
-                            // the endpoint is told which thread owns it.
-                            const std::string parent_conversation =
-                                self->conversation_scope().empty()
-                                    ? session_context.session_id
-                                    : self->conversation_scope();
-                            // The turn that spawns the worker, and the root of
-                            // the tree it belongs to: the endpoint is told
-                            // which turn owns the worker.
-                            const std::string parent_turn =
-                                recovery_turn_state->transport_turn_id;
-                            SubagentOrchestrator::RunContext run_context{
-                                .active_provider_name = active_provider_name_for_task,
-                                .active_model = active_model_for_task,
-                                .parent_mode = parent_mode_for_task,
-                                .parent_conversation_scope = parent_conversation,
-                                .parent_turn_id = parent_turn,
-                                .root_turn_id = self->root_turn_id(),
-                                .session_context = session_context,
-                                .permission_check = [self](const std::string& tool_name,
-                                                           const std::string& args) {
-                                    return self->check_permission(tool_name, args);
-                                },
-                                .parent_tool_call_id = tc.id,
-                                .on_subagent_event = on_subagent_event,
-                                // Propagate the parent's stop request (Esc,
-                                // /stop) and a tool interrupt (Ctrl+C) to the
-                                // delegated worker, so cancelling a turn or
-                                // this call also cancels the running subagent.
-                                .cancellation_requested = tool_cancelled,
-                                .memory_system = self->memory_system_,
-                                .execution_journal = self->execution_journal(),
-                                // The worker's edits belong to this turn's
-                                // summary, so it records into the same tracker
-                                // instead of one that is thrown away with it.
-                                .change_tracker = recovery_turn_state->change_tracker,
-                                .effort = step_effort,
-                                // The worker inherits the advisor and checks the
-                                // pairing against its own model.
-                                .advisor = recovery_turn_state->advisor_model,
-                                .parent_history = parent_history_for_task,
-                                .parent_context_summary = parent_summary_for_task,
-                            };
-
-                            result = self->orchestrator_.execute_task(
-                                tc.function.arguments,
-                                provider_for_task,
-                                run_context);
-                        } else if (tc.function.name == core::tools::names::kWriteTodos) {
-                            result = self->todo_tool_.execute(
-                                tc.function.arguments,
-                                session_context);
-                        } else if (tc.function.name == core::tools::names::kReadToolResult) {
-                            result = self->read_tool_result_tool_.execute(
-                                tc.function.arguments,
-                                session_context);
-                        } else if (tc.function.name == core::tools::names::kReview) {
-                            result = core::tools::execute_review_tool(
-                                *self,
-                                tc.function.arguments,
-                                tool_cancelled);
-                        } else {
-                            result = self->skill_manager_.execute_tool(
-                                tc.function.name,
-                                tc.function.arguments,
-                                core::tools::ToolInvocationContext{
-                                    .session_context = session_context,
-                                    .tool_call_id = tc.id,
-                                    .provider_name = active_provider_name_for_task,
-                                    .model_name = active_model_for_task,
-                                    .provider = provider_for_task,
-                                    .cancellation_requested = tool_cancelled,
-                                    .session_stats = self->session_stats_registry_,
-                                    .change_tracker = recovery_turn_state->change_tracker,
-                                });
-                        }
+                        std::string result = self->dispatch_tool(tc, ToolCallScope{
+                            .session_context = session_context,
+                            .provider = provider_for_task,
+                            .provider_name = active_provider_name_for_task,
+                            .model = active_model_for_task,
+                            .parent_mode = parent_mode_for_task,
+                            .effort = step_request->effort,
+                            .parent_history = parent_history_for_task,
+                            .parent_summary = parent_summary_for_task,
+                            .turn_state = recovery_turn_state,
+                            .turn_callbacks = &turn_callbacks,
+                            .request = step_request,
+                            .tool_trace = tool_callback,
+                            .cancelled = tool_cancelled,
+                        });
                         running_registration.release();
                         if (running_call->interrupted.load(std::memory_order_acquire)) {
                             result = annotate_user_interrupt(std::move(result));
@@ -3891,42 +4042,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         // Taken from the raw result: history compaction may
                         // rewrite the envelope that names the image.
                         auto image_input = read_image_input(tc.function.name, result);
-                        {
-                            std::lock_guard lock(self->history_mutex_);
-                            if (self->execution_journal_)
-                                self->journal_unlocked("tool_result", core::session::SessionStore::message_json(
-                                    core::llm::Message{.role = "tool", .content = result, .tool_call_id = tc.id}));
-                        }
-                        const bool raw_tool_ok =
-                            !recovery::result_indicates_error(result);
-                        if (recovery_turn_state->auto_turn) {
-                          self->auto_turn_coordinator_.observe_tool(
-                              *recovery_turn_state->auto_turn,
-                              AutoToolObservation{
-                                  .name = tc.function.name,
-                                  .arguments = tc.function.arguments,
-                                  .result = result,
-                                  .succeeded = raw_tool_ok,
-                                  .mutation_hint =
-                                      recovery_definition.has_value() &&
-                                      recovery_definition->annotations
-                                          .destructive_hint,
-                                  .trusted_verification_receipts =
-                                      recovery_definition.has_value() &&
-                                      recovery_definition
-                                          ->trusted_verification_receipts,
-                              });
-                        }
+                        self->journal_tool_event(
+                            "tool_result",
+                            core::llm::Message{.role = "tool", .content = result, .tool_call_id = tc.id});
+                        self->note_tool_result(
+                            tc, recovery_definition, result, *recovery_turn_state);
                         if (recovery_definition.has_value()) {
                           self->apply_tool_recovery_outcome(
                               tc, *recovery_definition, *recovery_turn_state,
-                              raw_tool_ok, result);
-                        }
-                        if (core::tools::MemoryTool::committed_mutation(
-                                tc.function.name,
-                                tc.function.arguments,
-                                result)) {
-                            self->refresh_system_prompt();
+                              !recovery::result_indicates_error(result), result);
                         }
                         const auto history_limits = tool_output_history::limits_for_tool(
                             tc.function.name,
@@ -3986,18 +4110,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             .tool_calls   = {}
                         };
                         if (image_input) message.content_parts.push_back(std::move(*image_input));
-                        // A hook is a shell command Filo did not scope, and it
-                        // runs detached: it can rewrite what the tool just
-                        // wrote, or create files no scope names. The turn says
-                        // so, and takes one more look before it reports.
-                        if (core::hooks::dispatch(
-                                core::hooks::HookEvent::PostToolUse,
-                                build_tool_hook_payload(tc, &message),
-                                session_context, {}, recovery_turn_state->change_tracker) > 0
-                            && recovery_turn_state->change_tracker) {
-                            recovery_turn_state->change_tracker->note_unscoped_mutation(
-                                "a post-tool hook");
-                        }
+                        self->run_post_tool_hooks(
+                            tc, message, session_context, recovery_turn_state->change_tracker);
                         return message;
                     },
                 });
@@ -4365,6 +4479,8 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
   {
     std::lock_guard lock(history_mutex_);
     ++conversation_generation_;
+    // A set-aside conversation comes back with the values its scripts stored.
+    if (kind == HistoryLoad::Resume) tool_script_store_.clear();
     current_mode_ = agent_mode_from_string(mode);
     context_summary_ = context_summary;
     project_facts_snapshot_.reset();

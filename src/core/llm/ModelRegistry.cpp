@@ -531,6 +531,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             .complete = true,
         },
         .tier = ModelTier::Reasoning,
+        .tool_mode = CatalogToolMode::CodeModeOnly,
         .pricing = pricing,
         .knowledge_cutoff = "2026-02-16",
         .constraints = kStandardConstraints,
@@ -583,6 +584,7 @@ constexpr int32_t kCodexGpt6MaxContextWindow = 872'000;
             .supported_efforts = std::move(supported_efforts),
         },
         .tier = ModelTier::Reasoning,
+        .tool_mode = CatalogToolMode::CodeModeOnly,
         .constraints = kStandardConstraints,
     };
 }

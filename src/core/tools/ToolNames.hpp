@@ -34,6 +34,10 @@ inline constexpr std::string_view kConversation = "conversation";
 inline constexpr std::string_view kTask = "task";
 inline constexpr std::string_view kDelegateTask = "delegate_task";
 inline constexpr std::string_view kReview = "review";
+inline constexpr std::string_view kExec = "exec";
+// Advertised beside exec by the wire that scripts its tools. It is not a
+// tool Filo runs: a script never yields, so a call is answered with that.
+inline constexpr std::string_view kWait = "wait";
 
 // Display titles of the tools the Agent serves itself. They are never
 // registered in ToolManager, so its title lookup falls back to

@@ -39,6 +39,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set_property(GLOBAL PROPERTY PREDEFINED_TARGETS_FOLDER "CMake")
 
 option(FILO_ENABLE_PYTHON "Enable embedded Python support via pybind11" ON)
+option(FILO_ENABLE_JAVASCRIPT "Enable the JavaScript tool script (exec) via QuickJS" ON)
 option(FILO_ENABLE_LLAMACPP "Enable embedded local GGUF inference via llama.cpp" OFF)
 option(FILO_ENABLE_IPO "Enable interprocedural optimization for Release-like builds" ON)
 option(FILO_ENABLE_NATIVE_TUNING "Enable host-specific CPU tuning (-march=native)" OFF)
@@ -138,6 +139,23 @@ CPMAddPackage("gh:yhirose/cpp-httplib@0.58.0")
 # segment accented, Cyrillic or CJK prompts. uni-algo is the standard
 # dependency-free alternative to ICU: std-library only, no exceptions/RTTI.
 CPMAddPackage("gh:uni-algo/uni-algo@1.2.0")
+
+# JavaScript for the tool script (exec). quickjs-ng is one C library with no
+# further dependencies. The CLI and examples are not part of Filo. Without it,
+# models trained to script their tools are offered direct tools instead.
+if(FILO_ENABLE_JAVASCRIPT)
+    CPMAddPackage(
+        NAME quickjs
+        GITHUB_REPOSITORY quickjs-ng/quickjs
+        GIT_TAG v0.18.0
+        VERSION 0.18.0
+        EXCLUDE_FROM_ALL YES
+        OPTIONS
+            "QJS_BUILD_CLI_STATIC OFF"
+            "QJS_BUILD_EXAMPLES OFF"
+            "QJS_ENABLE_INSTALL OFF"
+    )
+endif()
 
 if(FILO_ENABLE_PYTHON)
     set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
@@ -285,6 +303,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/transport/StreamResilience.cpp
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
+    src/core/llm/CatalogToolMode.cpp
     src/core/llm/ModelMetadata.cpp
     src/core/llm/ReasoningEffortResolution.cpp
     src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
@@ -400,6 +419,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/HistoryCompactionPlanner.cpp
     src/core/agent/SemanticHistoryEditor.cpp
     src/core/agent/ToolCallDeduplicator.cpp
+    src/core/agent/ScriptToolHost.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
     src/core/verification/Verification.cpp
@@ -527,6 +547,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/TodoTool.cpp
     src/core/tools/ReadToolResultTool.cpp
     src/core/tools/ReviewTool.cpp
+    src/core/tools/ExecTool.cpp
     src/core/tools/ConversationTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolManager.cpp
@@ -754,6 +775,11 @@ if(FILO_ENABLE_PYTHON)
     target_compile_definitions(filo_core PUBLIC FILO_ENABLE_PYTHON)
 endif()
 
+if(FILO_ENABLE_JAVASCRIPT)
+    target_link_libraries(filo_core PRIVATE qjs)
+    target_compile_definitions(filo_core PUBLIC FILO_ENABLE_JAVASCRIPT)
+endif()
+
 if(FILO_ENABLE_LLAMACPP)
     target_link_libraries(filo_core PUBLIC llama PRIVATE ${FILO_LLAMACPP_COMMON_TARGET})
     target_compile_definitions(filo_core PUBLIC FILO_ENABLE_LLAMACPP)
@@ -852,6 +878,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
+    tests/test_exec_tool.cpp
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp

@@ -13,6 +13,8 @@
 #include "../../tools/StrictToolSchema.hpp"
 #include "../../tools/ToolSchema.hpp"
 #include "../../tools/ToolNames.hpp"
+#include "../../tools/ExecTool.hpp"
+#include "../CatalogToolMode.hpp"
 #include "../StrictToolPolicy.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/JsonWriter.hpp"
@@ -29,6 +31,7 @@
 #include <format>
 #include <limits>
 #include <random>
+#include <unordered_set>
 #include <set>
 #include <tuple>
 
@@ -67,52 +70,192 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
     return url + "/responses";
 }
 
+/// Whether the model calls its tools from an `exec` script (catalog
+/// `tool_mode: code_mode_only`) instead of calling them directly. A request
+/// that offers no tools offers no script either, and neither does a build
+/// without the JavaScript runtime.
+[[nodiscard]] bool uses_tool_script(const ChatRequest& request) {
+    return core::tools::tool_script_available()
+        && !request.tools.empty()
+        && request_uses_code_mode(request);
+}
+
+// The harness code_mode_only models were trained on (codex-rs
+// core/src/tools/code_mode/execute_spec.rs, wait_spec.rs): `exec` is a
+// freeform tool whose input is the script, constrained by this grammar (an
+// optional `// @exec:` options line, then the source); `wait` resumes a
+// script that yielded. Filo's scripts never yield, but the model expects
+// both tools, so `wait` is declared and tells it so. A call to it finds no
+// such tool.
+constexpr std::string_view kExecGrammar = R"(
+start: pragma_source | plain_source
+pragma_source: PRAGMA_LINE NEWLINE SOURCE
+plain_source: SOURCE
+
+PRAGMA_LINE: /[ \t]*\/\/ @exec:[^\r\n]*/
+NEWLINE: /\r?\n/
+SOURCE: /[\s\S]+/
+)";
+
+void append_tool_script(std::string& payload, const std::vector<Tool>& tools) {
+    payload += R"({"type":"custom","name":")";
+    payload += core::tools::names::kExec;
+    payload += R"(","description":")";
+    payload += core::utils::escape_json_string(core::tools::tool_script_description(tools));
+    payload += R"(","format":{"type":"grammar","syntax":"lark","definition":")";
+    payload += core::utils::escape_json_string(kExecGrammar);
+    payload += R"("}},{"type":"function","name":")";
+    payload += core::tools::names::kWait;
+    payload += R"(","description":")";
+    payload += core::utils::escape_json_string(
+        "exec runs every script to completion, so there is never a running cell to wait on. "
+        "Do not call wait; read the result exec returned.");
+    payload += R"(","strict":false,"parameters":{"type":"object","properties":{)"
+               R"("cell_id":{"type":"string"},"yield_time_ms":{"type":"number"},)"
+               R"("max_tokens":{"type":"number"},"terminate":{"type":"boolean"}},)"
+               R"("additionalProperties":false}})";
+}
+
+void append_function_tool(
+    std::string& payload,
+    const core::tools::ToolDefinition& def,
+    std::optional<core::tools::schema::StrictDialect> strict_dialect) {
+    payload += R"({"type":"function","name":")";
+    payload += core::utils::escape_json_string(def.name);
+    payload += R"(","description":")";
+    payload += core::utils::escape_json_string(def.description);
+    // Strict mode compiles the schema into a decoding grammar, which is the
+    // only place an out-of-shape argument can be prevented rather than
+    // rejected. A contract that does not survive the projection stays on the
+    // permissive path instead of being silently narrowed.
+    const std::string canonical_schema =
+        core::tools::schema::canonical_input_schema(def);
+    const auto strict_schema = strict_dialect.has_value()
+        ? core::tools::schema::strict_input_schema(canonical_schema, *strict_dialect)
+        : std::nullopt;
+    payload += strict_schema.has_value() ? R"(","strict":true,"parameters":)"
+                                         : R"(","strict":false,"parameters":)";
+    payload += strict_schema.value_or(canonical_schema);
+    payload += "}";
+}
+
+/// The request's tools: hosted tools first, then either each tool as a
+/// function, or, for a script model, `exec` (which declares them) and `wait`.
 void append_tool_array(
     std::string& payload,
-    const std::vector<Tool>& tools,
+    const ChatRequest& request,
     std::span<const std::string_view> hosted_tool_types = {},
     std::optional<core::tools::schema::StrictDialect> strict_dialect = std::nullopt) {
     payload += '[';
     bool first = true;
-    for (const std::string_view type : hosted_tool_types) {
+    const auto separate = [&] {
         if (!first) payload += ',';
         first = false;
+    };
+    for (const std::string_view type : hosted_tool_types) {
+        separate();
         payload += R"({"type":")";
         payload += core::utils::escape_json_string(type);
         payload += R"("})";
     }
-    for (std::size_t i = 0; i < tools.size(); ++i) {
-        if (!first) payload += ',';
-        first = false;
-        const auto& def = tools[i].function;
-        payload += R"({"type":"function","name":")";
-        payload += core::utils::escape_json_string(def.name);
-        payload += R"(","description":")";
-        payload += core::utils::escape_json_string(def.description);
-        // Strict mode compiles the schema into a decoding grammar, which is the
-        // only place an out-of-shape argument can be prevented rather than
-        // rejected. A contract that does not survive the projection stays on the
-        // permissive path instead of being silently narrowed.
-        const std::string canonical_schema =
-            core::tools::schema::canonical_input_schema(def);
-        const auto strict_schema = strict_dialect.has_value()
-            ? core::tools::schema::strict_input_schema(canonical_schema, *strict_dialect)
-            : std::nullopt;
-        payload += strict_schema.has_value() ? R"(","strict":true,"parameters":)"
-                                             : R"(","strict":false,"parameters":)";
-        payload += strict_schema.value_or(canonical_schema);
-        payload += "}";
+    if (uses_tool_script(request)) {
+        separate();
+        append_tool_script(payload, request.tools);
+    } else {
+        for (const auto& tool : request.tools) {
+            separate();
+            append_function_tool(payload, tool.function, strict_dialect);
+        }
     }
     payload += "]";
 }
 
 void append_tool_schema(
     std::string& payload,
-    const std::vector<Tool>& tools,
+    const ChatRequest& request,
     std::span<const std::string_view> hosted_tool_types = {},
     std::optional<core::tools::schema::StrictDialect> strict_dialect = std::nullopt) {
     payload += R"(,"tools":)";
-    append_tool_array(payload, tools, hosted_tool_types, strict_dialect);
+    append_tool_array(payload, request, hosted_tool_types, strict_dialect);
+}
+
+/// The `input` of a replayed custom tool call: the script Filo carries as
+/// `{"source": ...}`.
+[[nodiscard]] std::string custom_tool_input(const ToolCall& call) {
+    return core::tools::source_from_arguments(call.function.arguments)
+        .value_or(call.function.arguments);
+}
+
+[[nodiscard]] std::string normalize_custom_tool_name(std::string_view name) {
+    constexpr std::string_view kPrefix = "functions.";
+    if (name.starts_with(kPrefix)) name.remove_prefix(kPrefix.size());
+    return std::string(name);
+}
+
+/// A `function_call` or `custom_tool_call` output item as Filo carries it.
+/// A custom call's freeform input travels as {"source": ...}; its name loses
+/// the `functions.` prefix a namespaced tool may be reported with. The name
+/// is empty when the item has none.
+[[nodiscard]] ToolCall decode_output_tool_call(simdjson::dom::object item,
+                                               std::string_view item_type) {
+    ToolCall call;
+    const bool custom = item_type == "custom_tool_call";
+    call.type = custom ? "custom" : "function";
+
+    int64_t index = -1;
+    if (item["index"].get(index) == simdjson::SUCCESS && index >= 0 && index <= INT32_MAX) {
+        call.index = static_cast<int>(index);
+    }
+
+    std::string_view id;
+    if (item["call_id"].get(id) == simdjson::SUCCESS || item["id"].get(id) == simdjson::SUCCESS) {
+        call.id = std::string(id);
+    }
+
+    std::string_view name;
+    if (item["name"].get(name) == simdjson::SUCCESS) {
+        call.function.name = custom ? normalize_custom_tool_name(name) : std::string(name);
+    }
+
+    std::string_view payload;
+    const bool has_payload = item[custom ? "input" : "arguments"].get(payload) == simdjson::SUCCESS;
+    if (custom) {
+        call.function.arguments = core::tools::arguments_for_source(has_payload ? payload : std::string_view{});
+    } else if (has_payload) {
+        call.function.arguments = std::string(payload);
+    }
+    return call;
+}
+
+void append_custom_tool_call_item(std::string& payload,
+                                  const ToolCall& call,
+                                  std::size_t fallback_idx,
+                                  bool namespaced) {
+    const std::string call_id = !call.id.empty()
+        ? call.id
+        : "call_" + std::to_string(fallback_idx);
+    payload += R"({"type":"custom_tool_call","call_id":")";
+    payload += core::utils::escape_json_string(call_id);
+    payload += R"(","name":")";
+    payload += core::utils::escape_json_string(call.function.name);
+    payload += '"';
+    if (namespaced) payload += R"(,"namespace":"functions")";
+    payload += R"(,"input":")";
+    payload += core::utils::escape_json_string(custom_tool_input(call));
+    payload += R"("})";
+}
+
+void append_custom_tool_call_output_item(std::string& payload,
+                                         const Message& msg,
+                                         std::size_t fallback_idx) {
+    const std::string call_id = !msg.tool_call_id.empty()
+        ? msg.tool_call_id
+        : "call_" + std::to_string(fallback_idx);
+    payload += R"({"type":"custom_tool_call_output","call_id":")";
+    payload += core::utils::escape_json_string(call_id);
+    payload += R"(","output":")";
+    payload += core::utils::escape_json_string(msg.content);
+    payload += R"("})";
 }
 
 [[nodiscard]] std::string collect_instructions(const ChatRequest& req) {
@@ -207,6 +350,17 @@ void append_function_call_item(std::string& payload,
     payload += R"("})";
 }
 
+void append_tool_call_item(std::string& payload,
+                           const ToolCall& call,
+                           std::size_t fallback_idx,
+                           bool namespaced) {
+    if (call.type == "custom") {
+        append_custom_tool_call_item(payload, call, fallback_idx, namespaced);
+        return;
+    }
+    append_function_call_item(payload, call, fallback_idx, namespaced);
+}
+
 void append_function_call_output_item(std::string& payload,
                                       const Message& msg,
                                       std::size_t fallback_idx) {
@@ -241,20 +395,19 @@ void append_function_call_output_item(std::string& payload,
         if (type == "message") {
             has_snapshot = true;
             text += extract_assistant_output_text(item);
-        } else if (type == "function_call") {
+        } else if (type == "function_call" || type == "custom_tool_call") {
             has_snapshot = true;
             if (tool_index >= message.tool_calls.size()) return std::nullopt;
             const auto& call = message.tool_calls[tool_index++];
-            std::string_view id, name, arguments;
-            if (item["call_id"].get(id) != simdjson::SUCCESS || id != call.id
-                || item["name"].get(name) != simdjson::SUCCESS || name != call.function.name
-                || item["arguments"].get(arguments) != simdjson::SUCCESS) {
+            const ToolCall generated = decode_output_tool_call(item, type);
+            if (generated.id != call.id || generated.function.name != call.function.name
+                || generated.type != call.type) {
                 return std::nullopt;
             }
             // Argument coercion may update a call after generation. Preserve
             // its surrounding message phases while replaying the current call.
             std::string serialized;
-            append_function_call_item(serialized, call, tool_index, namespaced);
+            append_tool_call_item(serialized, call, tool_index, namespaced);
             items.push_back(std::move(serialized));
             continue;
         } else if (type != "reasoning") {
@@ -285,10 +438,16 @@ void append_function_call_output_item(std::string& payload,
                 && continuation.kind == kReasoningEffortContinuationKind;
         };
 
+    // A custom call's result is replayed as custom_tool_call_output. Calls
+    // precede their results, so the ids are collected on the way.
+    std::unordered_set<std::string_view> custom_call_ids;
     for (const auto& msg : messages) {
         if (msg.role == "system" && !include_system_messages) continue;
 
         if (msg.role == "assistant") {
+            for (const auto& call : msg.tool_calls) {
+                if (call.type == "custom" && !call.id.empty()) custom_call_ids.insert(call.id);
+            }
             if (auto native = native_response_items(msg, namespaced)) {
                 items.insert(items.end(), native->begin(), native->end());
                 continue;
@@ -307,7 +466,11 @@ void append_function_call_output_item(std::string& payload,
         if (msg.role == "tool") {
             if (msg.content.empty() && msg.tool_call_id.empty()) continue;
             std::string item;
-            append_function_call_output_item(item, msg, ++fallback_idx);
+            if (custom_call_ids.contains(msg.tool_call_id)) {
+                append_custom_tool_call_output_item(item, msg, ++fallback_idx);
+            } else {
+                append_function_call_output_item(item, msg, ++fallback_idx);
+            }
             items.push_back(std::move(item));
             continue;
         }
@@ -335,7 +498,7 @@ void append_function_call_output_item(std::string& payload,
             for (const auto& tc : msg.tool_calls) {
                 if (tc.function.name.empty()) continue;
                 std::string item;
-                append_function_call_item(item, tc, ++fallback_idx, namespaced);
+                append_tool_call_item(item, tc, ++fallback_idx, namespaced);
                 items.push_back(std::move(item));
             }
         }
@@ -453,7 +616,7 @@ void append_function_call_output_item(std::string& payload,
 [[nodiscard]] std::string lite_tools_item(const ChatRequest& request) {
     if (request.tools.empty()) return {};
     std::string item = R"({"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","description":"","tools":)";
-    append_tool_array(item, request.tools, {},
+    append_tool_array(item, request, {},
         configured_strict_tool_dialect(ToolSchemaWire::OpenAI, request.model));
     item += "}]}";
     return item;
@@ -547,7 +710,11 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
     std::string_view right_type;
     if (left_doc["type"].get(left_type) != simdjson::SUCCESS) return false;
     if (right_doc["type"].get(right_type) != simdjson::SUCCESS) return false;
-    if (left_type != "function_call" || right_type != "function_call") return false;
+    if (left_type != right_type) return false;
+    const char* payload_field = nullptr;
+    if (left_type == "function_call") payload_field = "arguments";
+    else if (left_type == "custom_tool_call") payload_field = "input";
+    else return false;
 
     const auto same_field = [](const simdjson::dom::element& first,
                                 const simdjson::dom::element& second,
@@ -560,41 +727,19 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
     };
     return same_field(left_doc, right_doc, "call_id")
         && same_field(left_doc, right_doc, "name")
-        && same_field(left_doc, right_doc, "arguments");
+        && same_field(left_doc, right_doc, payload_field);
 }
 
 [[nodiscard]] std::string serialize_assistant_output_item(simdjson::dom::object item) {
     std::string_view item_type;
     if (item["type"].get(item_type) != simdjson::SUCCESS) return {};
 
-    if (item_type == "function_call") {
-        ToolCall call;
-        call.type = "function";
-
-        std::string_view call_id;
-        if (item["call_id"].get(call_id) == simdjson::SUCCESS) {
-            call.id = std::string(call_id);
-        } else {
-            std::string_view id;
-            if (item["id"].get(id) == simdjson::SUCCESS) {
-                call.id = std::string(id);
-            }
-        }
-
-        std::string_view name;
-        if (item["name"].get(name) == simdjson::SUCCESS) {
-            call.function.name = std::string(name);
-        }
+    if (item_type == "function_call" || item_type == "custom_tool_call") {
+        const ToolCall call = decode_output_tool_call(item, item_type);
         if (call.function.name.empty()) return {};
-
-        std::string_view arguments;
-        if (item["arguments"].get(arguments) == simdjson::SUCCESS) {
-            call.function.arguments = std::string(arguments);
-        }
-
         std::string serialized;
         std::string_view ns;
-        append_function_call_item(serialized, call, 0,
+        append_tool_call_item(serialized, call, 0,
             item["namespace"].get(ns) == simdjson::SUCCESS && ns == "functions");
         return serialized;
     }
@@ -1600,7 +1745,7 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     if (has_tools && !options.tools_in_input) {
         append_tool_schema(
             payload,
-            req.tools,
+            req,
             options.hosted_tool_types,
             configured_strict_tool_dialect(ToolSchemaWire::OpenAI, req.model));
     }
@@ -2596,7 +2741,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
             return result;
         }
 
-        if (item_type == "function_call") {
+        if (item_type == "function_call" || item_type == "custom_tool_call") {
             // output_item.added is a provisional item snapshot, not an
             // arguments delta. Qwen commonly reports arguments="{}" there and
             // supplies the completed JSON in output_item.done. Emitting both
@@ -2606,33 +2751,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
                 return result;
             }
 
-            ToolCall call;
-            call.type = "function";
-
-            int64_t index = -1;
-            if (item["index"].get(index) == simdjson::SUCCESS && index >= 0 && index <= INT32_MAX) {
-                call.index = static_cast<int>(index);
-            }
-
-            std::string_view call_id;
-            if (item["call_id"].get(call_id) == simdjson::SUCCESS) {
-                call.id = std::string(call_id);
-            } else {
-                std::string_view id;
-                if (item["id"].get(id) == simdjson::SUCCESS) {
-                    call.id = std::string(id);
-                }
-            }
-
-            std::string_view name;
-            if (item["name"].get(name) == simdjson::SUCCESS) {
-                call.function.name = std::string(name);
-            }
-
-            std::string_view arguments;
-            if (item["arguments"].get(arguments) == simdjson::SUCCESS) {
-                call.function.arguments = std::string(arguments);
-            }
+            ToolCall call = decode_output_tool_call(item, item_type);
             if (call.function.arguments.empty()) {
                 call.function.arguments = "{}";
             }
@@ -2662,7 +2781,8 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
             }
         }
 
-        if (preserves_output_messages() && (item_type == "message" || item_type == "function_call")) {
+        if (preserves_output_messages() && (item_type == "message" || item_type == "function_call"
+                                            || item_type == "custom_tool_call")) {
             if (const auto snapshot = serialize_assistant_output_item(item); !snapshot.empty()) {
                 if (result.chunks.empty()) result.chunks.emplace_back();
                 result.chunks.back().continuation_items.push_back({

@@ -527,6 +527,32 @@ TEST_CASE("Codex catalog keeps the ceiling apart from the served window",
     CHECK(result.models[1].resolved_context_window() == 272000);
 }
 
+TEST_CASE("Codex catalog publishes how each model calls its tools",
+          "[llm][model-catalog][openai][codex][exec]") {
+    CodexModelCatalogProvider catalog;
+
+    const auto result = catalog.parse_models_response(R"JSON({
+      "models": [
+        {"slug": "script-model", "visibility": "list", "tool_mode": "code_mode_only"},
+        {"slug": "mixed-model", "visibility": "list", "tool_mode": "code_mode"},
+        {"slug": "direct-model", "visibility": "list", "tool_mode": "direct"},
+        {"slug": "silent-model", "visibility": "list"}
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 4);
+    CHECK(result.models[0].tool_mode == CatalogToolMode::CodeModeOnly);
+    CHECK(result.models[1].tool_mode == CatalogToolMode::CodeMode);
+    CHECK(result.models[2].tool_mode == CatalogToolMode::Direct);
+    CHECK(result.models[3].tool_mode == CatalogToolMode::Unspecified);
+
+    // A row that names no mode keeps the curated card's; one that does wins.
+    ModelInfo curated{.canonical_id = "script-model", .tool_mode = CatalogToolMode::CodeModeOnly};
+    CHECK(merge_model_metadata(curated, result.models[3]).tool_mode == CatalogToolMode::CodeModeOnly);
+    CHECK(merge_model_metadata(curated, result.models[2]).tool_mode == CatalogToolMode::Direct);
+}
+
 TEST_CASE("xAI catalog loads callable language models, limits, aliases, and pricing",
           "[llm][model-catalog][xai]") {
     XaiModelCatalogProvider provider("grok");

@@ -2,17 +2,22 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/Agent.hpp"
+#include "core/session/ExecutionJournal.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/ExecTool.hpp"
 #include "core/tools/ReadTool.hpp"
+#include "core/tools/WriteFileTool.hpp"
 #include "TestSessionContext.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -156,6 +161,61 @@ public:
 private:
     std::string name_;
 };
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+/// Answers the first request with one `exec` call running @p source, the way
+/// a code_mode_only model does, and every later request with text.
+class ExecScriptProvider final : public core::llm::LLMProvider {
+public:
+    explicit ExecScriptProvider(std::string source) : source_(std::move(source)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        core::llm::StreamChunk chunk;
+        chunk.is_final = true;
+        if (++calls_ == 1) {
+            core::llm::ToolCall call;
+            call.index = 0;
+            call.id = "call-exec";
+            call.type = "custom";
+            call.function.name = "exec";
+            call.function.arguments = core::tools::arguments_for_source(source_);
+            chunk.tools = {call};
+        } else {
+            chunk.content = "script handled";
+        }
+        callback(chunk);
+    }
+
+private:
+    std::string source_;
+    std::atomic<int> calls_{0};
+};
+
+/// Runs one turn and returns the result the model read for its exec call.
+[[nodiscard]] std::string run_exec_turn(const std::shared_ptr<core::agent::Agent>& agent) {
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message("Run the script.", [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            std::lock_guard lock(done_mutex);
+            done = true;
+            done_cv.notify_one();
+        });
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(10), [&] { return done; }));
+    }
+    for (const auto& message : visible_history(agent)) {
+        if (message.role == "tool" && message.tool_call_id == "call-exec") return message.content;
+    }
+    FAIL("the exec call has no result");
+    return {};
+}
+#endif // FILO_ENABLE_JAVASCRIPT
 
 class ThrowingProvider final : public core::llm::LLMProvider {
 public:
@@ -413,3 +473,95 @@ TEST_CASE("Agent turns provider startup exceptions into terminal assistant error
     REQUIRE(history[1].role == "assistant");
     REQUIRE_THAT(history[1].content, Catch::Matchers::ContainsSubstring("invalid_scope"));
 }
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+
+TEST_CASE("An exec script's nested calls pass the permission gate one by one",
+          "[agent][permission][exec]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    const std::string probe = "filo-exec-permission-probe.txt";
+    auto provider = std::make_shared<ExecScriptProvider>(R"(
+const results = await Promise.allSettled([
+  tools.read({path: "README.md"}),
+  tools.write_file({file_path: ")" + probe + R"(", content: "x"}),
+]);
+text(results.map(r => r.status === "fulfilled" ? "ran" : r.reason.message).join("|"));
+)");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    std::vector<std::string> prompted;
+    std::mutex prompted_mutex;
+    agent->set_permission_fn([&](std::string_view name, std::string_view) {
+        std::lock_guard lock(prompted_mutex);
+        prompted.emplace_back(name);
+        return false;
+    });
+
+    const std::string result = run_exec_turn(agent);
+    CHECK_THAT(result, Catch::Matchers::StartsWith("Script completed\n"));
+    // The local read needs no approval; the write asks, is denied, and rejects
+    // inside the script instead of ending it.
+    CHECK_THAT(result, Catch::Matchers::EndsWith("ran|denied by the user"));
+    CHECK(prompted == std::vector<std::string>{"write_file"});
+    CHECK_FALSE(std::filesystem::exists(
+        core::workspace::Workspace::get_instance().get_primary() / probe));
+}
+
+TEST_CASE("A script's nested calls are journaled under the exec call",
+          "[agent][exec][journal]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
+    auto provider = std::make_shared<ExecScriptProvider>(R"(
+await tools.read({path: "README.md"});
+text("read");
+)");
+    const auto root = std::filesystem::temp_directory_path() / "filo-exec-journal-test";
+    std::filesystem::remove_all(root);
+    auto journal = std::make_shared<core::session::ExecutionJournal>(root);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager,
+        test_support::make_workspace_session_context(
+            core::context::SessionTransport::cli, "exec-journal"));
+    agent->set_execution_journal(journal);
+
+    CHECK_THAT(run_exec_turn(agent), Catch::Matchers::EndsWith("Output:\nread"));
+    std::ifstream file(journal->path_for("exec-journal"));
+    std::vector<std::string> nested;
+    for (std::string line; std::getline(file, line);) {
+        if (line.find(R"("parent_tool_call_id":"call-exec")") != std::string::npos) {
+            nested.push_back(line);
+        }
+    }
+    REQUIRE(nested.size() == 2);
+    CHECK_THAT(nested[0], Catch::Matchers::ContainsSubstring(R"("event":"tool_start")"));
+    CHECK_THAT(nested[0], Catch::Matchers::ContainsSubstring(R"("name":"read")"));
+    CHECK_THAT(nested[1], Catch::Matchers::ContainsSubstring(R"("event":"tool_result")"));
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("An exec script cannot reach a tool the step did not offer",
+          "[agent][permission][exec]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    auto provider = std::make_shared<ExecScriptProvider>(R"(
+text(typeof tools.write_file);
+)");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    // RESEARCH strips write tools from the request, so the script never sees one.
+    agent->set_mode("RESEARCH");
+    std::atomic<int> permission_checks{0};
+    agent->set_permission_fn([&](std::string_view, std::string_view) {
+        ++permission_checks;
+        return true;
+    });
+
+    const std::string result = run_exec_turn(agent);
+    CHECK_THAT(result, Catch::Matchers::StartsWith("Script completed\n"));
+    CHECK_THAT(result, Catch::Matchers::EndsWith("Output:\nundefined"));
+    CHECK(permission_checks.load() == 0);
+}
+
+#endif // FILO_ENABLE_JAVASCRIPT
