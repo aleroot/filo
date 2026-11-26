@@ -501,6 +501,7 @@ set(FILO_CORE_SOURCES
     src/core/net/EgressScope.cpp
     src/core/tools/SteeringEnforcement.cpp
     src/core/tools/ShellTool.cpp
+    src/core/tools/shell/CommandProcess.cpp
     src/core/tools/shell/ShellSessions.cpp
     src/core/tools/VerificationTool.cpp
     src/core/tools/ApplyPatchTool.cpp
@@ -880,6 +881,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
     tests/test_exec_tool.cpp
+    tests/test_command_sessions.cpp
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp

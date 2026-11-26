@@ -220,6 +220,15 @@ public:
     virtual ToolDefinition get_definition() const = 0;
 
     /**
+     * @brief The contract a call is normalized against when it runs.
+     *
+     * The advertised definition by default. A tool may accept fields only
+     * Filo itself sends (an exec script's translated calls) without offering
+     * them to a model; it declares them here.
+     */
+    virtual ToolDefinition execution_definition() const { return get_definition(); }
+
+    /**
      * @brief Executes the tool with the supplied arguments and session context.
      *
      * @param json_args  A JSON object string containing the arguments passed

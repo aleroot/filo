@@ -10,15 +10,47 @@
 #include "../utils/JsonUtils.hpp"
 #include "../changes/TurnChangeTracker.hpp"
 #include <simdjson.h>
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
+
+namespace core::tools {
+namespace {
+
+// The longest a command-session call may wait (codex-rs unified exec caps an
+// empty poll at DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS).
+constexpr int64_t kMaxYieldMs = 300'000;
+
+/// A command-session step as the script reads it before ExecTool shapes it:
+/// the output, then the exit code once the command ended or the id that
+/// continues it.
+[[nodiscard]] std::string session_result(const shell::ShellSessions::CommandStep& step) {
+    if (!step.error.empty()) {
+        return std::format(R"({{"error":"{}"}})", core::utils::escape_json_string(step.error));
+    }
+    std::string json;
+    json.reserve(step.output.size() + step.output.size() / 8 + 96);
+    json += R"({"output":")";
+    core::utils::append_escaped_utf8_safe(json, step.output);
+    json += '"';
+    if (step.exit_code) std::format_to(std::back_inserter(json), R"(,"exit_code":{})", *step.exit_code);
+    if (step.process_id) std::format_to(std::back_inserter(json), R"(,"process_id":{})", *step.process_id);
+    std::format_to(std::back_inserter(json), R"(,"wall_time_seconds":{:.3f}}})",
+                   step.wall_time.count());
+    return json;
+}
+
+} // namespace
+} // namespace core::tools
 
 namespace core::tools {
 
@@ -54,6 +86,20 @@ ToolDefinition ShellTool::get_definition() const {
     };
 }
 
+ToolDefinition ShellTool::execution_definition() const {
+    auto definition = get_definition();
+    for (auto& parameter : definition.parameters) {
+        if (parameter.name == "command") parameter.required = false;
+    }
+    definition.parameters.push_back(
+        {"yield_time_ms", "integer", "Return after this long, leaving the command running.", false});
+    definition.parameters.push_back(
+        {"process_id", "integer", "The command session to write to or read.", false});
+    definition.parameters.push_back(
+        {"input", "string", "Text written to the command session's stdin.", false});
+    return definition;
+}
+
 std::string ShellTool::execute(
     const std::string& json_args,
     const core::context::SessionContext& context)
@@ -86,6 +132,22 @@ std::string ShellTool::execute_impl(
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
         return R"({"error":"Invalid JSON arguments provided to shell skill."})";
+    }
+
+    // Command sessions are reached only through an exec script's
+    // exec_command and write_stdin, which ExecTool translates into these
+    // fields; the schema a model sees for this tool declares none of them.
+    if (int64_t process_id = 0; doc["process_id"].get(process_id) == simdjson::SUCCESS) {
+        std::string_view input;
+        std::ignore = doc["input"].get(input);
+        int64_t yield_ms = 0;
+        std::ignore = doc["yield_time_ms"].get(yield_ms);
+        return continue_session(static_cast<int>(process_id), input, yield_ms, context,
+                                tool_call_id);
+    }
+    std::optional<std::chrono::milliseconds> session_yield;
+    if (int64_t yield_ms = 0; doc["yield_time_ms"].get(yield_ms) == simdjson::SUCCESS) {
+        session_yield = std::chrono::milliseconds{std::clamp<int64_t>(yield_ms, 0, kMaxYieldMs)};
     }
 
     std::string_view command_view;
@@ -167,6 +229,14 @@ std::string ShellTool::execute_impl(
             core::landrun::LandrunSettings::instance().mode()));
     std::function<void(int)> before_dispatch;
     if (tracker) before_dispatch = [tracker](int group) { tracker->note_process_group(group); };
+    if (session_yield) {
+        return session_result(sessions_->start_command({
+            .session_id = std::string(context.shell_session()),
+            .command = std::string(command_view),
+            .working_dir = working_dir,
+            .tool_call_id = std::string(tool_call_id),
+        }, context.workspace_view().primary(), landrun_policy, *session_yield, before_dispatch));
+    }
     const auto result = sessions_->run({
         .session_id = std::string(context.shell_session()),
         .command = std::string(command_view),
@@ -183,6 +253,38 @@ std::string ShellTool::execute_impl(
     core::utils::append_escaped_utf8_safe(json, result.output);
     std::format_to(std::back_inserter(json), R"(","exit_code":{}}})", result.exit_code);
     return json;
+}
+
+std::string ShellTool::continue_session(int process_id,
+                                        std::string_view input,
+                                        std::int64_t yield_ms,
+                                        const core::context::SessionContext& context,
+                                        std::string_view tool_call_id) {
+    if (!input.empty()) {
+        // Text written to a session can be a command for the shell or REPL
+        // reading it, so it passes the gates a command's text passes.
+        if (context.read_only_shell) {
+            return R"({"error":"This worker is read-only: it cannot write to a running command."})";
+        }
+        if (const auto policy_error = core::tools::policy::enforce_command_policy(
+                names::kRunTerminalCommand, input)) {
+            return std::format(R"({{"error":"Tool policy blocked command: {}"}})",
+                               core::utils::escape_json_string(*policy_error));
+        }
+        if (const auto policy_error = core::tools::policy::enforce_url_policy(
+                names::kRunTerminalCommand, input)) {
+            return std::format(R"({{"error":"Tool policy blocked URL: {}"}})",
+                               core::utils::escape_json_string(*policy_error));
+        }
+        if (const auto steering_error = SteeringEnforcement::for_context(context).command_error(
+                input, context.workspace_view().primary())) {
+            return *steering_error;
+        }
+    }
+    return session_result(sessions_->continue_command(
+        context.shell_session(), process_id, input,
+        std::chrono::milliseconds{std::clamp<int64_t>(yield_ms, 0, kMaxYieldMs)},
+        std::string(tool_call_id)));
 }
 
 } // namespace core::tools

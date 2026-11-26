@@ -37,7 +37,7 @@ std::string ToolManager::execute_tool(
         if (!registered)
             return "{\"error\": \"Tool not found: " + name + "\"}";
         tool = registered->tool;
-        definition = tool->get_definition();
+        definition = tool->execution_definition();
     }
     // The policy the process runs under is the one every tool must obey.
     mandatory_policy = policy_snapshot();

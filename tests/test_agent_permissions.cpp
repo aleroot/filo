@@ -538,6 +538,28 @@ text(typeof tools.run_terminal_command + "|" + r.exit_code + "|" + r.output.trim
     for (const auto& name : prompted) CHECK(name == "run_terminal_command");
 }
 
+TEST_CASE("A script continues a running command with write_stdin without a second prompt",
+          "[agent][permission][exec]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+    auto provider = std::make_shared<ExecScriptProvider>(R"(
+const started = await tools.exec_command({cmd: "read line; echo got:$line", yield_time_ms: 250});
+const done = await tools.write_stdin({session_id: started.session_id, chars: "ping\n", yield_time_ms: 5000});
+text([typeof started.session_id, started.exit_code, done.exit_code, done.output.trim(), done.session_id].join("|"));
+)");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    std::atomic<int> prompts{0};
+    agent->set_permission_fn([&](std::string_view, std::string_view) {
+        ++prompts;
+        return true;
+    });
+
+    const std::string result = run_exec_turn(agent);
+    CHECK_THAT(result, Catch::Matchers::EndsWith("Output:\nnumber||0|got:ping|"));
+    CHECK(prompts.load() <= 1);
+}
+
 TEST_CASE("A script's nested calls are journaled under the exec call",
           "[agent][exec][journal]") {
     auto& tool_manager = core::tools::ToolManager::get_instance();

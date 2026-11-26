@@ -2,6 +2,7 @@
 
 #include "Tool.hpp"
 #include "shell/ShellSessions.hpp"
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -61,6 +62,11 @@ public:
     [[nodiscard]] shell::ShellSessions& sessions() const noexcept { return *sessions_; }
 
     ToolDefinition get_definition() const override;
+    /// The advertised definition plus the command-session fields an exec
+    /// script's exec_command and write_stdin are translated into
+    /// (ExecTool resolve_script_alias). `command` is then optional: a write
+    /// to a session names a process instead.
+    ToolDefinition execution_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
     std::string execute(const std::string& json_args, const ToolInvocationContext& invocation) override;
     void clear_session_state(std::string_view session_id) override;
@@ -71,6 +77,12 @@ private:
                              const core::context::SessionContext& context,
                              std::string_view tool_call_id,
                              std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
+    /// Writes to, or reads, a command session an earlier call started.
+    std::string continue_session(int process_id,
+                                 std::string_view input,
+                                 std::int64_t yield_ms,
+                                 const core::context::SessionContext& context,
+                                 std::string_view tool_call_id);
 
     std::shared_ptr<shell::ShellSessions> sessions_;
 };

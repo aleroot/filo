@@ -29,6 +29,10 @@ ToolDefinition PathVisibilityToolDecorator::get_definition() const {
     return wrapped_->get_definition();
 }
 
+ToolDefinition PathVisibilityToolDecorator::execution_definition() const {
+    return wrapped_->execution_definition();
+}
+
 std::string PathVisibilityToolDecorator::execute(
     const std::string& json_args,
     const core::context::SessionContext& context) {

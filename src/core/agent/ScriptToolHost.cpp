@@ -68,42 +68,62 @@ core::tools::ToolScriptReply ScriptToolHost::refuse(const core::llm::ToolCall& c
 std::optional<ScriptToolHost::Admitted>
 ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
                       core::tools::ToolScriptReply& refusal) {
-    // A script calls run_terminal_command as Codex's exec_command; from here
-    // on the call is the Filo tool's, so every gate and row treats it as one.
-    const auto alias = core::tools::resolve_script_alias(
-        requested.tool_name, requested.arguments,
-        services_.session_context.workspace_view().primary().string());
-    const std::string& name = alias ? alias->tool_name : requested.tool_name;
-    const std::string& requested_arguments = alias ? alias->arguments : requested.arguments;
     const auto refuse_unstarted = [&](std::string reason) {
         refusal = {.ran = false, .value = std::move(reason)};
         return std::nullopt;
     };
     if (cancelled()) return refuse_unstarted("the turn was stopped");
+
+    // A script reaches run_terminal_command as Codex's exec_command and
+    // write_stdin. The call is checked against the contract the script sees,
+    // then becomes the Filo tool's, so every gate and row treats it as one.
+    std::optional<core::tools::ScriptToolAlias> alias;
+    std::string requested_arguments = requested.arguments;
+    if (const auto alias_definition = core::tools::script_alias_definition(requested.tool_name)) {
+        auto validated = core::tools::schema::validate_arguments(
+            *alias_definition,
+            core::tools::nested_tool_arguments(*alias_definition, requested.arguments));
+        if (!validated) {
+            return refuse_unstarted(std::format("invalid arguments for {}: {}",
+                                                requested.tool_name, validated.error().message));
+        }
+        alias = core::tools::resolve_script_alias(
+            requested.tool_name, *validated,
+            services_.session_context.workspace_view().primary().string());
+        requested_arguments = alias->arguments;
+    }
+    const std::string& name = alias ? alias->tool_name : requested.tool_name;
     const bool offered = std::ranges::any_of(services_.offered, [&](const core::llm::Tool& tool) {
         return tool.function.name == name;
     });
-    if (!offered) return refuse_unstarted(name + " is not available in this step");
+    if (!offered) return refuse_unstarted(requested.tool_name + " is not available in this step");
     auto definition = services_.resolve(name);
-    if (!definition) return refuse_unstarted(name + " is not available");
-    auto arguments = core::tools::schema::validate_arguments(
-        *definition, core::tools::nested_tool_arguments(*definition, requested_arguments));
-    if (!arguments) {
-        return refuse_unstarted(
-            std::format("invalid arguments for {}: {}", name, arguments.error().message));
+    if (!definition) return refuse_unstarted(requested.tool_name + " is not available");
+    // A translated call carries fields only the alias declares.
+    std::string arguments = std::move(requested_arguments);
+    if (!alias) {
+        auto validated = core::tools::schema::validate_arguments(
+            *definition, core::tools::nested_tool_arguments(*definition, std::move(arguments)));
+        if (!validated) {
+            return refuse_unstarted(
+                std::format("invalid arguments for {}: {}", name, validated.error().message));
+        }
+        arguments = std::move(*validated);
     }
 
     core::llm::ToolCall call;
     call.id = "call_" + core::utils::random_uuid_v4();
     call.function.name = name;
-    call.function.arguments = std::move(*arguments);
+    call.function.arguments = std::move(arguments);
     if (services_.on_start) services_.on_start(call);
 
     if (denied_) {
         refusal = refuse(call, "skipped after an earlier denial in this script");
         return std::nullopt;
     }
-    const ToolApproval approval = services_.approve(call);
+    const ToolApproval approval = alias && alias->pre_approved
+        ? ToolApproval{.approved = true}
+        : services_.approve(call);
     if (approval.hook_block) {
         denied_ = true;
         refusal = refuse(call, approval.hook_block->empty()

@@ -18,6 +18,7 @@ public:
         std::shared_ptr<const core::workspace::IPathVisibilityFactory> visibility_factory);
 
     [[nodiscard]] ToolDefinition get_definition() const override;
+    [[nodiscard]] ToolDefinition execution_definition() const override;
 
     [[nodiscard]] std::string execute(
         const std::string& json_args,

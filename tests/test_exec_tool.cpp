@@ -350,54 +350,70 @@ TEST_CASE("A tool's output schema becomes the type its call resolves to", "[exec
     CHECK_THAT(description, ContainsSubstring("read(args: {\n}): Promise<unknown>; };"));
 }
 
-TEST_CASE("Scripts reach run_terminal_command as Codex's exec_command", "[exec]") {
+TEST_CASE("Scripts reach run_terminal_command as Codex's exec_command and write_stdin", "[exec]") {
     const std::vector<core::llm::Tool> offered{
         tool("run_terminal_command", "Run a command.", {{"command", "string", "Bash.", true}}),
         tool("read", "Read a file."),
+        tool("AskUserQuestion", "Ask."),
     };
     const auto surface = core::tools::script_tool_surface(offered);
-    REQUIRE(surface.size() == 2);
+    REQUIRE(surface.size() == 3);
     CHECK(surface[0].function.name == "exec_command");
-    CHECK(surface[1].function.name == "read");
+    CHECK(surface[1].function.name == "write_stdin");
+    CHECK(surface[2].function.name == "read");
 
     const std::string description = core::tools::tool_script_description(offered);
     CHECK_THAT(description, ContainsSubstring("### `exec_command`"));
     CHECK_THAT(description, ContainsSubstring("  cmd: string;\n"));
-    CHECK_THAT(description, ContainsSubstring("wall_time_seconds: number;"));
+    CHECK_THAT(description, ContainsSubstring("### `write_stdin`"));
+    CHECK_THAT(description, ContainsSubstring("session_id?: number;"));
     CHECK_FALSE(description.contains("run_terminal_command"));
+    CHECK_FALSE(description.contains("AskUserQuestion"));
 
-    SECTION("an object call keeps its directory, timeout, and budget") {
+    SECTION("exec_command keeps its directory and budget and clamps its yield") {
         const auto alias = core::tools::resolve_script_alias(
             "exec_command",
-            R"({"cmd":"rg -n \"x\"","workdir":"/repo/sub","timeout_ms":1500,"max_output_tokens":20})",
+            R"({"cmd":"rg -n \"x\"","workdir":"/repo/sub","yield_time_ms":90000,"max_output_tokens":20})",
             "/repo");
         REQUIRE(alias.has_value());
         CHECK(alias->tool_name == "run_terminal_command");
         CHECK(alias->arguments
-              == R"({"command":"rg -n \"x\"","working_dir":"/repo/sub","timeout_seconds":2})");
+              == R"({"command":"rg -n \"x\"","working_dir":"/repo/sub","yield_time_ms":30000})");
         CHECK(alias->max_output_tokens == 20);
+        CHECK_FALSE(alias->pre_approved);
     }
-    SECTION("a bare string runs in the turn cwd with the default timeout") {
-        const auto alias = core::tools::resolve_script_alias("exec_command", R"("ls")", "/repo");
+    SECTION("exec_command runs in the turn cwd and yields after 10 s by default") {
+        const auto alias = core::tools::resolve_script_alias("exec_command", R"({"cmd":"ls"})", "/repo");
         REQUIRE(alias.has_value());
-        CHECK(alias->arguments
-              == R"({"command":"ls","working_dir":"/repo","timeout_seconds":600})");
+        CHECK(alias->arguments == R"({"command":"ls","working_dir":"/repo","yield_time_ms":10000})");
         CHECK(alias->max_output_tokens == 10000);
     }
-    SECTION("a call without cmd is left for validation to reject") {
-        const auto alias = core::tools::resolve_script_alias("exec_command", R"({"workdir":"/x"})", "");
-        REQUIRE(alias.has_value());
-        CHECK(alias->arguments == "{}");
+    SECTION("write_stdin writes after 250 ms and polls for at least 5 s") {
+        const auto write = core::tools::resolve_script_alias(
+            "write_stdin", R"({"session_id":1234,"chars":"q\n"})", "/repo");
+        REQUIRE(write.has_value());
+        CHECK(write->arguments == R"({"process_id":1234,"input":"q\n","yield_time_ms":250})");
+        CHECK(write->pre_approved);
+        const auto poll = core::tools::resolve_script_alias(
+            "write_stdin", R"({"session_id":1234,"yield_time_ms":1000})", "/repo");
+        REQUIRE(poll.has_value());
+        CHECK(poll->arguments == R"({"process_id":1234,"input":"","yield_time_ms":5000})");
     }
     CHECK_FALSE(core::tools::resolve_script_alias("read", R"({"path":"a"})", "/repo").has_value());
+    CHECK(core::tools::script_alias_definition("write_stdin").has_value());
+    CHECK_FALSE(core::tools::script_alias_definition("read").has_value());
 }
 
 TEST_CASE("An exec_command result has Codex's shape and token truncation", "[exec]") {
     core::tools::ScriptToolAlias alias{.tool_name = "run_terminal_command", .max_output_tokens = 10000};
-    CHECK(core::tools::script_alias_result(alias, R"({"output":"ok\n","exit_code":0})", 0.25)
+    CHECK(core::tools::script_alias_result(
+              alias, R"({"output":"ok\n","exit_code":0,"wall_time_seconds":0.25})", 9.0)
           == R"({"wall_time_seconds":0.250,"exit_code":0,"output":"ok\n"})");
-    CHECK(core::tools::script_alias_result(alias, R"({"error":"bad working_dir"})", 0.1)
-          == R"({"error":"bad working_dir"})");
+    CHECK(core::tools::script_alias_result(
+              alias, R"({"output":"serving","process_id":4321,"wall_time_seconds":10})", 0.0)
+          == R"({"wall_time_seconds":10.000,"session_id":4321,"output":"serving"})");
+    CHECK(core::tools::script_alias_result(alias, R"({"error":"Unknown process id 7"})", 0.1)
+          == R"({"error":"Unknown process id 7"})");
 
     alias.max_output_tokens = 2;
     const auto truncated = core::tools::script_alias_result(

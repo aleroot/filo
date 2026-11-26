@@ -20,6 +20,7 @@
 #include <map>
 #include <ranges>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 namespace core::tools {
@@ -29,9 +30,6 @@ using Clock = std::chrono::steady_clock;
 
 // The default result budget, counted at four bytes a token.
 constexpr std::uint64_t kDefaultMaxOutputTokens = 10'000;
-// run_terminal_command's own default: Filo cannot leave a command running
-// past its call, so the timeout is long enough for builds and test suites.
-constexpr std::uint64_t kDefaultExecCommandTimeoutMs = 600'000;
 constexpr std::size_t kBytesPerToken = 4;
 constexpr int kMaxSchemaDepth = 4;
 
@@ -1047,96 +1045,147 @@ std::string nested_tool_arguments(const ToolDefinition& definition, std::string 
     return "{\"" + core::utils::escape_json_string(only->name) + "\":" + arguments + "}";
 }
 
+namespace {
+
+// codex-rs unified_exec/mod.rs: yield bounds, and the defaults
+// exec_command_handler and write_stdin use.
+constexpr std::int64_t kMinYieldMs = 250;
+constexpr std::int64_t kMaxYieldMs = 30'000;
+constexpr std::int64_t kMinEmptyPollYieldMs = 5'000;
+constexpr std::int64_t kMaxEmptyPollYieldMs = 300'000;
+constexpr std::int64_t kDefaultCommandYieldMs = 10'000;
+constexpr std::int64_t kDefaultWriteYieldMs = 250;
+
+// codex-rs shell_spec.rs unified_exec_output_schema.
+constexpr std::string_view kUnifiedExecOutputSchema =
+    R"({"type":"object","properties":{)"
+    R"("wall_time_seconds":{"type":"number","description":"Elapsed wall time spent waiting for output in seconds."},)"
+    R"("exit_code":{"type":"number","description":"Process exit code when the command finished during this call."},)"
+    R"("session_id":{"type":"number","description":"Session identifier to pass to write_stdin when the process is still running."},)"
+    R"("original_token_count":{"type":"number","description":"Approximate token count before output truncation."},)"
+    R"("output":{"type":"string","description":"Command output text, possibly truncated."}},)"
+    R"("required":["wall_time_seconds","output"],"additionalProperties":false})";
+
+constexpr std::string_view kMaxOutputTokensDescription =
+    "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.";
+
+[[nodiscard]] std::optional<std::int64_t> integer_field(simdjson::dom::object object,
+                                                        std::string_view key) {
+    double value = 0;
+    if (object[key].get(value) != simdjson::SUCCESS || !std::isfinite(value)) return std::nullopt;
+    return static_cast<std::int64_t>(value);
+}
+
+} // namespace
+
 ToolDefinition exec_command_definition() {
     return ToolDefinition{
         .name = std::string(names::kExecCommand),
         .title = "Run",
-        .description = "Runs a command to completion and returns its output. The process is "
-                       "terminated on timeout or cancellation and cannot be resumed.",
+        .description = "Runs a command, returning output or a session ID for ongoing interaction.",
         .parameters = {
             {"cmd", "string", "Shell command to execute.", true},
             {"workdir", "string", "Working directory for the command. Defaults to the turn cwd.",
              false},
-            {"timeout_ms", "number",
-             std::format("Maximum command runtime. Defaults to {} ms.",
-                         kDefaultExecCommandTimeoutMs),
+            {"yield_time_ms", "number",
+             "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
              false},
-            {"max_output_tokens", "number",
-             "Output token budget. Defaults to 10000 tokens; larger requests may be capped by "
-             "policy.",
-             false},
+            {"max_output_tokens", "number", std::string(kMaxOutputTokensDescription), false},
         },
-        .output_schema =
-            R"({"type":"object","properties":{)"
-            R"("wall_time_seconds":{"type":"number","description":"Elapsed wall time spent waiting for output in seconds."},)"
-            R"("exit_code":{"type":"number","description":"Process exit code when the command finished during this call."},)"
-            R"("original_token_count":{"type":"number","description":"Approximate token count before output truncation."},)"
-            R"("output":{"type":"string","description":"Command output text, possibly truncated."}},)"
-            R"("required":["wall_time_seconds","output"],"additionalProperties":false})",
+        .output_schema = std::string(kUnifiedExecOutputSchema),
+        .annotations = {.destructive_hint = true, .open_world_hint = true},
+    };
+}
+
+ToolDefinition write_stdin_definition() {
+    return ToolDefinition{
+        .name = std::string(names::kWriteStdin),
+        .title = "Run",
+        .description =
+            "Writes characters to an existing unified exec session and returns recent output.",
+        .parameters = {
+            {"session_id", "number", "Identifier of the running unified exec session.", true},
+            {"chars", "string",
+             "Bytes to write to stdin. Defaults to empty, which polls without writing.", false},
+            {"yield_time_ms", "number",
+             "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 "
+             "ms; empty polls wait 5000-300000 ms by default.",
+             false},
+            {"max_output_tokens", "number", std::string(kMaxOutputTokensDescription), false},
+        },
+        .output_schema = std::string(kUnifiedExecOutputSchema),
         .annotations = {.destructive_hint = true, .open_world_hint = true},
     };
 }
 
 std::vector<core::llm::Tool> script_tool_surface(const std::vector<core::llm::Tool>& offered) {
     std::vector<core::llm::Tool> surface;
-    surface.reserve(offered.size());
+    surface.reserve(offered.size() + 1);
     for (const auto& tool : offered) {
         // Asked beside exec, as Codex's request_user_input, never from a script.
         if (tool.function.name == names::kAskUserQuestion) continue;
-        surface.push_back(tool);
         if (tool.function.name == names::kRunTerminalCommand) {
-            surface.back().function = exec_command_definition();
+            surface.push_back(core::llm::Tool{.function = exec_command_definition()});
+            surface.push_back(core::llm::Tool{.function = write_stdin_definition()});
+            continue;
         }
+        surface.push_back(tool);
     }
     return surface;
+}
+
+std::optional<ToolDefinition> script_alias_definition(std::string_view tool_name) {
+    if (tool_name == names::kExecCommand) return exec_command_definition();
+    if (tool_name == names::kWriteStdin) return write_stdin_definition();
+    return std::nullopt;
 }
 
 std::optional<ScriptToolAlias> resolve_script_alias(std::string_view tool_name,
                                                     std::string_view arguments,
                                                     std::string_view default_workdir) {
-    if (tool_name != names::kExecCommand) return std::nullopt;
+    const bool command = tool_name == names::kExecCommand;
+    if (!command && tool_name != names::kWriteStdin) return std::nullopt;
     ScriptToolAlias alias{
         .tool_name = std::string(names::kRunTerminalCommand),
-        .arguments = std::string(arguments),
+        .arguments = "{}",
         .max_output_tokens = kDefaultMaxOutputTokens,
+        .pre_approved = !command,
     };
     simdjson::dom::parser parser;
     const simdjson::padded_string padded(arguments);
-    simdjson::dom::element document;
-    if (parser.parse(padded).get(document) != simdjson::SUCCESS) return alias;
+    simdjson::dom::object object;
+    if (parser.parse(padded).get(object) != simdjson::SUCCESS) return alias;
+    if (const auto tokens = integer_field(object, "max_output_tokens"); tokens && *tokens >= 1) {
+        alias.max_output_tokens = static_cast<std::uint64_t>(*tokens);
+    }
+    const auto yield = integer_field(object, "yield_time_ms");
 
-    std::string_view command;
-    std::string_view workdir = default_workdir;
-    std::optional<double> timeout_ms;
-    if (document.get(command) != simdjson::SUCCESS) {
-        // A bare string is the command, as for any one-string-argument tool.
-        simdjson::dom::object object;
-        if (document.get(object) != simdjson::SUCCESS) return alias;
-        if (object["cmd"].get(command) != simdjson::SUCCESS) {
-            // Missing cmd: run_terminal_command's validation names the problem.
-            alias.arguments = "{}";
-            return alias;
-        }
+    if (command) {
+        std::string_view cmd;
+        if (object["cmd"].get(cmd) != simdjson::SUCCESS) return alias;
+        std::string_view workdir = default_workdir;
         if (std::string_view dir; object["workdir"].get(dir) == simdjson::SUCCESS && !dir.empty()) {
             workdir = dir;
         }
-        if (double ms = 0; object["timeout_ms"].get(ms) == simdjson::SUCCESS && ms > 0) {
-            timeout_ms = ms;
+        alias.arguments = R"({"command":")" + core::utils::escape_json_string(cmd) + '"';
+        if (!workdir.empty()) {
+            alias.arguments += R"(,"working_dir":")" + core::utils::escape_json_string(workdir) + '"';
         }
-        if (double tokens = 0;
-            object["max_output_tokens"].get(tokens) == simdjson::SUCCESS && tokens >= 1) {
-            alias.max_output_tokens = static_cast<std::uint64_t>(tokens);
-        }
+        alias.arguments += std::format(
+            R"(,"yield_time_ms":{}}})",
+            std::clamp(yield.value_or(kDefaultCommandYieldMs), kMinYieldMs, kMaxYieldMs));
+        return alias;
     }
 
-    const auto timeout_seconds = std::max<std::int64_t>(
-        1, static_cast<std::int64_t>(std::ceil(
-               timeout_ms.value_or(static_cast<double>(kDefaultExecCommandTimeoutMs)) / 1000.0)));
-    alias.arguments = R"({"command":")" + core::utils::escape_json_string(command) + '"';
-    if (!workdir.empty()) {
-        alias.arguments += R"(,"working_dir":")" + core::utils::escape_json_string(workdir) + '"';
-    }
-    alias.arguments += std::format(R"(,"timeout_seconds":{}}})", timeout_seconds);
+    const auto session = integer_field(object, "session_id");
+    if (!session) return alias;
+    std::string_view chars;
+    std::ignore = object["chars"].get(chars);
+    const std::int64_t yield_ms = chars.empty()
+        ? std::clamp(yield.value_or(kMinEmptyPollYieldMs), kMinEmptyPollYieldMs, kMaxEmptyPollYieldMs)
+        : std::clamp(yield.value_or(kDefaultWriteYieldMs), kMinYieldMs, kMaxYieldMs);
+    alias.arguments = std::format(R"({{"process_id":{},"input":"{}","yield_time_ms":{}}})",
+                                  *session, core::utils::escape_json_string(chars), yield_ms);
     return alias;
 }
 
@@ -1145,13 +1194,19 @@ std::string script_alias_result(const ScriptToolAlias& alias,
                                 double wall_time_seconds) {
     simdjson::dom::parser parser;
     const simdjson::padded_string padded(result);
-    simdjson::dom::element document;
+    simdjson::dom::object document;
     std::string_view output;
-    std::int64_t exit_code = 0;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS
-        || document["output"].get(output) != simdjson::SUCCESS
-        || document["exit_code"].get(exit_code) != simdjson::SUCCESS) {
+        || document["output"].get(output) != simdjson::SUCCESS) {
         return std::string(result);
+    }
+    std::optional<std::int64_t> exit_code;
+    if (std::int64_t code = 0; document["exit_code"].get(code) == simdjson::SUCCESS) exit_code = code;
+    std::optional<std::int64_t> session;
+    if (std::int64_t id = 0; document["process_id"].get(id) == simdjson::SUCCESS) session = id;
+    if (!exit_code && !session) return std::string(result);
+    if (double reported = 0; document["wall_time_seconds"].get(reported) == simdjson::SUCCESS) {
+        wall_time_seconds = reported;
     }
 
     // codex-rs utils/string truncate.rs plan_token_truncation: keep the head
@@ -1170,8 +1225,9 @@ std::string script_alias_result(const ScriptToolAlias& alias,
         original_tokens = (output.size() + kBytesPerToken - 1) / kBytesPerToken;
     }
 
-    std::string json = std::format(R"({{"wall_time_seconds":{:.3f},"exit_code":{})",
-                                   wall_time_seconds, exit_code);
+    std::string json = std::format(R"({{"wall_time_seconds":{:.3f})", wall_time_seconds);
+    if (exit_code) json += std::format(R"(,"exit_code":{})", *exit_code);
+    if (session) json += std::format(R"(,"session_id":{})", *session);
     if (original_tokens) json += std::format(R"(,"original_token_count":{})", *original_tokens);
     json += R"(,"output":")" + core::utils::escape_json_string(text) + "\"}";
     return json;

@@ -61,20 +61,29 @@ inline constexpr std::uint64_t kDefaultExecYieldMs = 10'000;
 [[nodiscard]] std::string nested_tool_arguments(const ToolDefinition& definition,
                                                 std::string arguments);
 
-// Code-mode models were trained to run commands with Codex's
-// `tools.exec_command({cmd, workdir, ...})`. Scripts see that tool in place of
-// `run_terminal_command`, and each call is translated to Filo's tool, so the
-// permission, hook, and transcript paths stay those of a terminal command.
+// Code-mode models were trained to run commands with Codex's unified exec:
+// `tools.exec_command({cmd, workdir, yield_time_ms, ...})` returns after its
+// yield time, and a command still running keeps a session that
+// `tools.write_stdin({session_id, chars})` writes to or polls. Scripts see
+// those two tools in place of `run_terminal_command`, and each call is
+// translated to it, so the permission, hook, and transcript paths stay those
+// of a terminal command.
 
-/// Codex's one-shot `exec_command` (codex-rs unified_exec/exec_command.rs
-/// one_shot_exec_command_spec): runs to completion, no session to resume.
+/// Codex's `exec_command` (codex-rs core/src/tools/handlers/shell_spec.rs).
 [[nodiscard]] ToolDefinition exec_command_definition();
+/// Codex's `write_stdin` (same file).
+[[nodiscard]] ToolDefinition write_stdin_definition();
 
 /// The tools a script reaches: @p offered, with `run_terminal_command`
-/// presented as `exec_command`, and without AskUserQuestion, which a script
-/// model calls beside exec as Codex's `request_user_input`.
+/// presented as `exec_command` and `write_stdin`, and without
+/// AskUserQuestion, which a script model calls beside exec as Codex's
+/// `request_user_input`.
 [[nodiscard]] std::vector<core::llm::Tool> script_tool_surface(
     const std::vector<core::llm::Tool>& offered);
+
+/// The definition a script call to an alias is validated against, or
+/// nothing when @p tool_name is not an alias.
+[[nodiscard]] std::optional<ToolDefinition> script_alias_definition(std::string_view tool_name);
 
 /// A script call to a tool presented under another name, rewritten for the
 /// tool that runs it.
@@ -82,21 +91,26 @@ struct ScriptToolAlias {
     std::string tool_name;
     std::string arguments;
     std::uint64_t max_output_tokens = 0;
+    /// A write to a session needs no approval of its own: the command that
+    /// started it was approved.
+    bool pre_approved = false;
 };
 
-/// The Filo call behind a script's `exec_command` call, or nothing when
-/// @p tool_name is not an alias. Without `workdir` the command runs in
-/// @p default_workdir, as Codex runs it in the turn cwd. Arguments that are
-/// not an object pass through for validation to reject.
+/// The Filo call behind a script's `exec_command` or `write_stdin` call, or
+/// nothing when @p tool_name is not an alias. @p arguments are the validated
+/// arguments of the alias. Without `workdir` a command runs in
+/// @p default_workdir, as Codex runs it in the turn cwd. Yield times are
+/// clamped the way codex-rs unified_exec clamps them.
 [[nodiscard]] std::optional<ScriptToolAlias> resolve_script_alias(
     std::string_view tool_name,
     std::string_view arguments,
     std::string_view default_workdir);
 
-/// The result the script reads, in the shape of Codex's exec_command result:
-/// `{wall_time_seconds, exit_code, original_token_count?, output}`, with the
-/// output cut in the middle to the alias's token budget. A result that is not
-/// a command result (an error) passes through.
+/// The result the script reads, in the shape of Codex's unified exec result:
+/// `{wall_time_seconds, exit_code?, session_id?, original_token_count?,
+/// output}`, with the output cut in the middle to the alias's token budget.
+/// A result that is not a command result (an error) passes through.
+/// @p wall_time_seconds is used when the result carries none.
 [[nodiscard]] std::string script_alias_result(const ScriptToolAlias& alias,
                                               std::string_view result,
                                               double wall_time_seconds);

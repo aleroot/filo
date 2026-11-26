@@ -3766,6 +3766,15 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
     if (core::tools::names::is_terminal_tool(tool_name)) {
         const auto command = core::utils::json::first_string_field(object, {"command"});
         const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"});
+        // A script's write_stdin: input for a command session, or a poll.
+        if (!command) {
+            if (const auto process = core::utils::json::optional_int_field_clamped(object, "process_id")) {
+                const auto input = core::utils::json::first_string_field(object, {"input"});
+                return tool_description_line(input && !input->empty()
+                    ? std::format("session {} <- {}", *process, *input)
+                    : std::format("session {}: read output", *process));
+            }
+        }
         if (command && working_dir) {
             return tool_description_line(
                 std::format("cwd: {} | cmd: {}", *working_dir, *command));

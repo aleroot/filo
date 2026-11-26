@@ -38,9 +38,10 @@ inline constexpr std::string_view kExec = "exec";
 // Advertised beside exec by the wire that scripts its tools: resumes a script
 // that yielded.
 inline constexpr std::string_view kWait = "wait";
-// The name an exec script calls run_terminal_command by (Codex's shell tool).
-// Only scripts see it; the call runs as run_terminal_command.
+// The names an exec script calls run_terminal_command by (Codex's unified
+// exec tools). Only scripts see them; each call runs as run_terminal_command.
 inline constexpr std::string_view kExecCommand = "exec_command";
+inline constexpr std::string_view kWriteStdin = "write_stdin";
 
 // Display titles of the tools the Agent serves itself. They are never
 // registered in ToolManager, so its title lookup falls back to
