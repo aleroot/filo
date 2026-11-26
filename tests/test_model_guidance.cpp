@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -168,4 +169,47 @@ TEST_CASE("A code-mode model reads Codex's instructions instead of Filo's doctri
     CHECK(layers[0].content.find("[Working rules]") == std::string::npos);
     CHECK(layers[0].content.find("smallest correct change") == std::string::npos);
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Working rules]"));
+}
+
+TEST_CASE("A Codex-instructed prompt frames context the way Codex sends it",
+          "[context][model_guidance][codex]") {
+    TempWorkspace workspace;
+    {
+        std::ofstream(workspace.path() / "AGENTS.md") << "Run make test.\n";
+        const auto skill = workspace.path() / ".filo" / "skills" / "release";
+        std::filesystem::create_directories(skill);
+        std::ofstream(skill / "SKILL.md")
+            << "---\nname: release\ndescription: Cut a release.\n---\n\nTag it.\n";
+    }
+    const auto context = test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+        .primary = workspace.path(), .enforce = true, .version = 1});
+    const auto render = [&](bool codex) {
+        core::context::ContextBuilder builder(context);
+        builder.with_mode("BUILD");
+        if (codex) builder.with_codex_prompt("Codex instructions.", "<collaboration_mode>x</collaboration_mode>");
+        return builder.build();
+    };
+
+    const auto codex = render(true);
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring(
+        "Codex instructions.\n\n<permissions instructions>\nFilesystem sandboxing"));
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring(
+        "`approval_policy` is `unless-trusted`"));
+    CHECK(codex.find("</permissions instructions>") < codex.find("<collaboration_mode>"));
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring(
+        "# AGENTS.md instructions for " + std::filesystem::canonical(workspace.path()).string()
+        + "\n\n<INSTRUCTIONS>\nRun make test.\n</INSTRUCTIONS>"));
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring(
+        "<skills_instructions>\n## Skills\n"));
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring(
+        "### Available skills\n- release: Cut a release. (tool: activate_skill)\n"));
+    CHECK_THAT(codex, Catch::Matchers::ContainsSubstring("<environment_context>\n  <cwd>"));
+    CHECK(codex.find("[Project Steering]") == std::string::npos);
+    CHECK(codex.find("[Agent Skills]") == std::string::npos);
+
+    const auto filo = render(false);
+    CHECK_THAT(filo, Catch::Matchers::ContainsSubstring("[Project Steering]"));
+    CHECK_THAT(filo, Catch::Matchers::ContainsSubstring("[Agent Skills]"));
+    CHECK(filo.find("<permissions instructions>") == std::string::npos);
+    CHECK(filo.find("<environment_context>") == std::string::npos);
 }

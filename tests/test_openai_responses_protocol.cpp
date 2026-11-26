@@ -2494,3 +2494,44 @@ TEST_CASE("An exec call is parsed as a custom call and replayed with its output"
         R"({"type":"custom_tool_call_output","call_id":"call_9","output":"Script completed\nWall time 0.1 seconds\nOutput:\nhi"})"));
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"function_call_output","call_id":"call_9")"));
 }
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+TEST_CASE("A script model asks the user through Codex's request_user_input",
+          "[openai][responses][serializer][exec]") {
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req = code_mode_request();
+    req.tools.push_back(Tool{.function = {.name = "AskUserQuestion", .description = "Ask."}});
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(req))).get(doc) == simdjson::SUCCESS);
+    simdjson::dom::array tools;
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    // Beside exec, never inside a script.
+    CHECK(tool_names(tools)
+          == std::vector<std::string>{"custom/exec", "function/wait", "function/request_user_input"});
+    CHECK_THAT(std::string(std::string_view(tools.at(0)["description"])),
+               !Catch::Matchers::ContainsSubstring("AskUserQuestion"));
+
+    // The call runs as AskUserQuestion and replays under the wire name.
+    const auto parsed = protocol.parse_event(
+        R"json({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_q","name":"request_user_input","arguments":"{\"questions\":[]}"}})json");
+    REQUIRE(parsed.chunks.size() == 1);
+    REQUIRE(parsed.chunks[0].tools.size() == 1);
+    const ToolCall call = parsed.chunks[0].tools[0];
+    CHECK(call.function.name == "AskUserQuestion");
+    req.messages.push_back(Message{.role = "assistant", .tool_calls = {call}});
+    req.messages.push_back(Message{
+        .role = "tool", .content = R"({"answers":{}})", .name = "AskUserQuestion",
+        .tool_call_id = "call_q"});
+    const auto payload = protocol.serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("type":"function_call","call_id":"call_q","name":"request_user_input")"));
+
+    // A model with direct tools keeps Filo's name.
+    req.catalog_tool_mode = CatalogToolMode::Direct;
+    const auto direct = protocol.serialize(req);
+    CHECK_THAT(direct, Catch::Matchers::ContainsSubstring(
+        R"("type":"function_call","call_id":"call_q","name":"AskUserQuestion")"));
+    CHECK_THAT(direct, !Catch::Matchers::ContainsSubstring("request_user_input"));
+}
+#endif

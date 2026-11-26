@@ -71,7 +71,8 @@ inline constexpr std::uint64_t kDefaultExecYieldMs = 10'000;
 [[nodiscard]] ToolDefinition exec_command_definition();
 
 /// The tools a script reaches: @p offered, with `run_terminal_command`
-/// presented as `exec_command`.
+/// presented as `exec_command`, and without AskUserQuestion, which a script
+/// model calls beside exec as Codex's `request_user_input`.
 [[nodiscard]] std::vector<core::llm::Tool> script_tool_surface(
     const std::vector<core::llm::Tool>& offered);
 

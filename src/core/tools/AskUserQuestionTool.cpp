@@ -2,6 +2,7 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
+#include <algorithm>
 #include <format>
 #include <random>
 #include <sstream>
@@ -21,6 +22,10 @@ constexpr std::string_view kQuestionItemsSchema = R"({
     "question": {
       "type": "string",
       "description": "The specific, actionable question."
+    },
+    "id": {
+      "type": "string",
+      "description": "Optional stable identifier (snake_case); its answer is keyed by it instead of the question text."
     },
     "header": {
       "type": "string",
@@ -141,12 +146,20 @@ std::string AskUserQuestionTool::execute(
     request.session_id = context.session_id;
     request.promise = std::make_shared<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>();
 
+    // Answers are keyed by question text; the caller's id replaces it when given.
+    std::vector<std::pair<std::string, std::string>> answer_keys;
+
     for (auto question_elem : questions_array) {
         QuestionItem item;
         
         std::string_view question_text;
         if (question_elem["question"].get(question_text) == simdjson::SUCCESS) {
             item.question = std::string(question_text);
+        }
+        std::string_view question_id;
+        if (question_elem["id"].get(question_id) == simdjson::SUCCESS && !question_id.empty()
+            && !item.question.empty()) {
+            answer_keys.emplace_back(item.question, std::string(question_id));
         }
         
         std::string_view header;
@@ -222,7 +235,10 @@ std::string AskUserQuestionTool::execute(
     for (const auto& [question, answer] : *answers) {
         if (!first) json << ", ";
         first = false;
-        json << "\"" << core::utils::escape_json_string(question) << "\": \""
+        const auto keyed = std::ranges::find(answer_keys, question,
+                                             &std::pair<std::string, std::string>::first);
+        const std::string& key = keyed == answer_keys.end() ? question : keyed->second;
+        json << "\"" << core::utils::escape_json_string(key) << "\": \""
              << core::utils::escape_json_string(answer) << "\"";
     }
     json << "}}";

@@ -132,6 +132,23 @@ TEST_CASE("ask question emits one label-free Other input row",
     CHECK(options[1].accepts_free_text);
 }
 
+TEST_CASE("an answer is keyed by the question's id when the caller gives one",
+          "[tui][question-dialog][ask-user-question]") {
+    core::tools::AskUserQuestionTool tool;
+    tool.setQuestionCallback([](core::tools::QuestionRequest request) {
+        request.promise->set_value(std::vector<std::pair<std::string, std::string>>{
+            {"Which database?", "Postgres"}, {"Add tests?", "Yes"}});
+    });
+    const auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{});
+    const auto result = tool.execute(
+        R"({"questions":[)"
+        R"({"id":"database","header":"DB","question":"Which database?","options":[{"label":"Postgres","description":"a"},{"label":"SQLite","description":"b"}]},)"
+        R"({"question":"Add tests?","options":[{"label":"Yes"},{"label":"No"}]}]})",
+        context);
+    CHECK(result == R"({"answers": {"database": "Postgres", "Add tests?": "Yes"}})");
+}
+
 TEST_CASE("question dialog identifies when the embedded Other input is selected",
           "[tui][question-dialog][other]") {
     auto state = make_state();

@@ -327,9 +327,9 @@ TEST_CASE("The exec description documents every offered tool in TypeScript", "[e
         tool("mcp__docs-server.lookup", "Look up docs."),
     };
     const std::string description = core::tools::tool_script_description(tools);
-    CHECK_THAT(description, StartsWith("Run JavaScript code to orchestrate tool calls."));
+    CHECK_THAT(description, StartsWith("Run JavaScript code to orchestrate/compose tool calls\n"));
     CHECK_THAT(description, ContainsSubstring("yield_time_ms"));
-    CHECK_THAT(description, ContainsSubstring("Script running with cell ID"));
+    CHECK_THAT(description, ContainsSubstring("`yield_control()`"));
     CHECK_THAT(core::tools::wait_tool_description(),
                ContainsSubstring("Script running with cell ID"));
     CHECK_THAT(description, ContainsSubstring("### `read`\nRead a file."));

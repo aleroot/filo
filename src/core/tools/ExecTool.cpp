@@ -955,45 +955,48 @@ std::optional<std::string> source_from_arguments(std::string_view arguments) {
 }
 
 std::string tool_script_description(const std::vector<core::llm::Tool>& tools) {
+    // codex-rs code-mode-protocol/src/description.rs EXEC_DESCRIPTION_TEMPLATE
+    // and EXEC_HELPERS_TEMPLATE, naming Filo's runtime, listing only the
+    // helpers it implements, and adding how Filo answers a refused call.
     std::string description = std::format(
-        "Run JavaScript code to orchestrate tool calls.\n"
-        "- The input is raw JavaScript source text, not JSON, quoted strings, or markdown code fences. "
-        "It runs as an async script in a fresh realm, so top-level `await` works. There is no Node, "
-        "file system, network access, or console.\n"
-        "- Every tool declared below is a method of the global `tools` object, for example "
-        "`await tools.read({{path: \"README.md\"}})`. Tool names become JavaScript identifiers: any "
-        "character other than a letter, a digit, `_` or `$` becomes `_`. They are not top-level tools: "
-        "call them only from a script.\n"
-        "- A tool takes an object of its arguments, or a bare string when it has exactly one required "
-        "string parameter. It resolves to the tool's result: an object when the result is JSON, "
-        "otherwise a string.\n"
-        "- A call that cannot run (invalid arguments, blocked, or denied by the user) rejects with an "
-        "Error whose message says why. That is the call's outcome: handle it in the script or adjust, "
-        "and do not ask for the same permission again.\n"
-        "- Calls issued together, for example with `Promise.all` or `Promise.allSettled`, run in "
-        "parallel when they do not touch the same files. Batch independent reads and searches in one "
-        "script. Keep dependencies, edits, and adaptive follow-ups sequential, and inspect every "
-        "result before deciding the script is done.\n"
-        "- The result is the script's status and wall time, then only what the script reported with "
-        "`text(...)`; the script's own value is not returned. Report what the next decision needs.\n"
-        "- An optional first line `// @exec: {{\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}}` "
-        "sets how long to run before yielding and the result budget.\n"
-        "- `yield_time_ms` asks exec to yield early if the script is still running. Defaults to {} ms. "
-        "The result then starts with `Script running with cell ID ...` and the script keeps going. "
-        "Resume it with `wait`. A script that finishes first returns `Script completed`.\n"
-        "- `max_output_tokens` sets the token budget for this result. Defaults to 10000 tokens.\n"
-        "- When the script is fully evaluated, unawaited promises are discarded.\n"
+        "Run JavaScript code to orchestrate/compose tool calls\n"
+        "- Evaluates the provided JavaScript code in a fresh QuickJS realm as an async script.\n"
+        "- All nested tools are available on the global `tools` object, for example "
+        "`await tools.exec_command(...)`. Tool names are exposed as normalized JavaScript "
+        "identifiers, for example `await tools.mcp__ologs__get_profile(...)`.\n"
+        "- Nested tool methods take either a string or an object as their input argument.\n"
+        "- Nested tools return either an object or a string, based on the description.\n"
+        "- Runs raw JavaScript -- no Node, no file system, no network access, no console.\n"
+        "- Accepts raw JavaScript source text, not JSON, quoted strings, or markdown code fences.\n"
+        "- You may optionally start the tool input with a first-line pragma like "
+        "`// @exec: {{\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}}`.\n"
+        "- `yield_time_ms` asks `exec` to yield early if the script is still running. Defaults "
+        "to {} ms.\n"
+        "- `max_output_tokens` sets the token budget for direct `exec` results. Defaults to "
+        "10000 tokens.\n"
+        "- When the JS code is fully evaluated, the realm's lifetime ends and unawaited promises "
+        "are silently discarded.\n"
+        "- A nested call that cannot run (invalid arguments, blocked, or denied by the user) "
+        "rejects with an Error whose message says why. Handle it in the script, and do not ask "
+        "for the same permission again.\n"
+        "- Nested calls awaited together run in parallel when they do not touch the same files.\n"
         "- Global helpers:\n"
-        "- `text(value)`: Appends a text item. Non-string values are stringified with `JSON.stringify` "
-        "when possible.\n"
-        "- `exit()`: Ends the script successfully, like an early return from the top level.\n"
-        "- `yield_control()`: Yields the output so far while the script keeps running. Resume with "
-        "`wait`.\n"
-        "- `store(key, value)` / `load(key)`: Keep a serializable value for later scripts in this "
-        "conversation. `load` returns `undefined` when the key is missing.\n"
-        "- `setTimeout(callback, delayMs)` / `clearTimeout(id)`: Schedule a callback. A pending timeout "
-        "does not by itself keep the script alive; await a promise to wait for one.\n"
-        "- `ALL_TOOLS`: The callable tools as `{{ name, description }}` entries.\n\n"
+        "- `exit()`: Immediately ends the current script successfully (like an early return from "
+        "the top level).\n"
+        "- `text(value: string | number | boolean | undefined | null)`: Appends a text item. "
+        "Non-string values are stringified with `JSON.stringify(...)` when possible.\n"
+        "- `store(key: string, value: any)`: stores a serializable value under a string key for "
+        "later `exec` calls in the same session.\n"
+        "- `load(key: string)`: returns the stored value for a string key, or `undefined` if it "
+        "is missing.\n"
+        "- `setTimeout(callback: () => void, delayMs?: number)`: schedules a callback to run "
+        "later and returns a timeout id. Pending timeouts do not keep `exec` alive by themselves; "
+        "await an explicit promise if you need to wait for one.\n"
+        "- `clearTimeout(timeoutId?: number)`: cancels a timeout created by `setTimeout`.\n"
+        "- `ALL_TOOLS`: metadata for the enabled nested tools as `{{ name, description }}` "
+        "entries.\n"
+        "- `yield_control()`: yields the accumulated output to the model immediately while the "
+        "script keeps running.\n\n"
         "Shared MCP Types:\n```ts\n{}\n```",
         kDefaultExecYieldMs, kMcpTypescriptPreamble);
     for (const auto& tool : script_tool_surface(tools)) {
@@ -1004,18 +1007,20 @@ std::string tool_script_description(const std::vector<core::llm::Tool>& tools) {
 }
 
 std::string wait_tool_description() {
-    return "Waits on a yielded exec cell and returns new output or completion.\n"
-           "- Use wait only after exec returns `Script running with cell ID ...`.\n"
-           "- `cell_id` identifies the running exec cell to resume.\n"
+    // codex-rs core/src/tools/code_mode/wait_spec.rs + WAIT_DESCRIPTION_TEMPLATE.
+    return "Waits on a yielded `exec` cell and returns new output or completion.\n"
+           "- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n"
+           "- `cell_id` identifies the running `exec` cell to resume.\n"
            "- `yield_time_ms` controls how long to wait for more output before yielding again. "
            "Defaults to 10000 ms.\n"
            "- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 "
            "tokens.\n"
            "- `terminate: true` stops the running cell; false or omitted waits for output.\n"
-           "- wait returns only the new output since the last yield, or the final completion or "
+           "- `wait` returns only the new output since the last yield, or the final completion or "
            "termination result for that cell.\n"
-           "- If the cell is still running, wait may yield again with the same cell_id.\n"
-           "- If the cell has already finished, wait returns the completed result and closes the cell.";
+           "- If the cell is still running, `wait` may yield again with the same `cell_id`.\n"
+           "- If the cell has already finished, `wait` returns the completed result and closes "
+           "the cell.";
 }
 
 std::string script_identifier(std::string_view tool_name) {
@@ -1073,10 +1078,14 @@ ToolDefinition exec_command_definition() {
 }
 
 std::vector<core::llm::Tool> script_tool_surface(const std::vector<core::llm::Tool>& offered) {
-    std::vector<core::llm::Tool> surface = offered;
-    for (auto& tool : surface) {
+    std::vector<core::llm::Tool> surface;
+    surface.reserve(offered.size());
+    for (const auto& tool : offered) {
+        // Asked beside exec, as Codex's request_user_input, never from a script.
+        if (tool.function.name == names::kAskUserQuestion) continue;
+        surface.push_back(tool);
         if (tool.function.name == names::kRunTerminalCommand) {
-            tool.function = exec_command_definition();
+            surface.back().function = exec_command_definition();
         }
     }
     return surface;

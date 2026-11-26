@@ -80,6 +80,22 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
         && request_uses_code_mode(request);
 }
 
+// codex-rs core/src/tools/handlers/request_user_input_spec.rs: a script model
+// asks the user through Codex's top-level `request_user_input`, which its
+// instructions name. Filo runs that call as AskUserQuestion, so the name is
+// Codex's only on the wire.
+constexpr std::string_view kRequestUserInput = "request_user_input";
+
+[[nodiscard]] std::string_view wire_tool_name(std::string_view name, bool codex_tool_names) {
+    return codex_tool_names && name == core::tools::names::kAskUserQuestion ? kRequestUserInput
+                                                                            : name;
+}
+
+[[nodiscard]] std::string filo_tool_name(std::string_view wire_name) {
+    return std::string(wire_name == kRequestUserInput ? core::tools::names::kAskUserQuestion
+                                                      : wire_name);
+}
+
 // The harness code_mode_only models were trained on (codex-rs
 // core/src/tools/code_mode/execute_spec.rs, wait_spec.rs): `exec` is a
 // freeform tool whose input is the script, constrained by this grammar (an
@@ -107,9 +123,32 @@ void append_tool_script(std::string& payload, const std::vector<Tool>& tools) {
     payload += R"(","description":")";
     payload += core::utils::escape_json_string(core::tools::wait_tool_description());
     payload += R"(","strict":false,"parameters":{"type":"object","properties":{)"
-               R"("cell_id":{"type":"string"},"yield_time_ms":{"type":"number"},)"
-               R"("max_tokens":{"type":"number"},"terminate":{"type":"boolean"}},)"
-               R"("additionalProperties":false}})";
+               R"("cell_id":{"type":"string","description":"Identifier of the running exec cell."},)"
+               R"("yield_time_ms":{"type":"number","description":"Wait before yielding more output. Defaults to 10000 ms."},)"
+               R"("max_tokens":{"type":"number","description":"Output token budget for this wait call. Defaults to 10000 tokens."},)"
+               R"("terminate":{"type":"boolean","description":"True stops the running exec cell; false or omitted waits for output."}},)"
+               R"("required":["cell_id"],"additionalProperties":false}})";
+    const bool asks_user = std::ranges::any_of(tools, [](const Tool& tool) {
+        return tool.function.name == core::tools::names::kAskUserQuestion;
+    });
+    if (asks_user) {
+        // Codex keeps it beside exec rather than inside scripts
+        // (ToolExposure::DirectModelOnly), with this schema.
+        payload += R"(,{"type":"function","name":")";
+        payload += kRequestUserInput;
+        payload += R"(","description":"Request user input for one to three short questions and wait for the response.",)"
+                   R"("strict":false,"parameters":{"type":"object","properties":{"questions":{"type":"array",)"
+                   R"("description":"Questions to show the user. Prefer 1 and do not exceed 3","items":{"type":"object",)"
+                   R"("properties":{"id":{"type":"string","description":"Stable identifier for mapping answers (snake_case)."},)"
+                   R"("header":{"type":"string","description":"Short header label shown in the UI (12 or fewer chars)."},)"
+                   R"("question":{"type":"string","description":"Single-sentence prompt shown to the user."},)"
+                   R"("options":{"type":"array","description":"Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",)"
+                   R"("items":{"type":"object","properties":{"label":{"type":"string","description":"User-facing label (1-5 words)."},)"
+                   R"("description":{"type":"string","description":"One short sentence explaining impact/tradeoff if selected."}},)"
+                   R"("required":["label","description"],"additionalProperties":false}}},)"
+                   R"("required":["id","header","question","options"],"additionalProperties":false}}},)"
+                   R"("required":["questions"],"additionalProperties":false}})";
+    }
 }
 
 void append_function_tool(
@@ -210,7 +249,7 @@ void append_tool_schema(
 
     std::string_view name;
     if (item["name"].get(name) == simdjson::SUCCESS) {
-        call.function.name = custom ? normalize_custom_tool_name(name) : std::string(name);
+        call.function.name = custom ? normalize_custom_tool_name(name) : filo_tool_name(name);
     }
 
     std::string_view payload;
@@ -328,7 +367,8 @@ void append_message_item(std::string& payload,
 void append_function_call_item(std::string& payload,
                                const ToolCall& call,
                                std::size_t fallback_idx,
-                               bool namespaced = false) {
+                               bool namespaced,
+                               bool codex_tool_names) {
     const std::string call_id = !call.id.empty()
         ? call.id
         : "call_" + std::to_string(fallback_idx);
@@ -339,7 +379,7 @@ void append_function_call_item(std::string& payload,
     payload += R"({"type":"function_call","call_id":")";
     payload += core::utils::escape_json_string(call_id);
     payload += R"(","name":")";
-    payload += core::utils::escape_json_string(call.function.name);
+    payload += core::utils::escape_json_string(wire_tool_name(call.function.name, codex_tool_names));
     if (namespaced) payload += R"(","namespace":"functions)";
     payload += R"(","arguments":")";
     payload += core::utils::escape_json_string(arguments);
@@ -349,12 +389,13 @@ void append_function_call_item(std::string& payload,
 void append_tool_call_item(std::string& payload,
                            const ToolCall& call,
                            std::size_t fallback_idx,
-                           bool namespaced) {
+                           bool namespaced,
+                           bool codex_tool_names) {
     if (call.type == "custom") {
         append_custom_tool_call_item(payload, call, fallback_idx, namespaced);
         return;
     }
-    append_function_call_item(payload, call, fallback_idx, namespaced);
+    append_function_call_item(payload, call, fallback_idx, namespaced, codex_tool_names);
 }
 
 void append_function_call_output_item(std::string& payload,
@@ -374,7 +415,7 @@ void append_function_call_output_item(std::string& payload,
 // reasoning. Only replay them when they still describe the current history:
 // tool normalization or a history edit must not resurrect stale output.
 [[nodiscard]] std::optional<std::vector<std::string>> native_response_items(
-    const Message& message, bool namespaced) {
+    const Message& message, bool namespaced, bool codex_tool_names) {
     std::vector<std::string> items;
     std::string text;
     std::size_t tool_index = 0;
@@ -403,7 +444,7 @@ void append_function_call_output_item(std::string& payload,
             // Argument coercion may update a call after generation. Preserve
             // its surrounding message phases while replaying the current call.
             std::string serialized;
-            append_tool_call_item(serialized, call, tool_index, namespaced);
+            append_tool_call_item(serialized, call, tool_index, namespaced, codex_tool_names);
             items.push_back(std::move(serialized));
             continue;
         } else if (type != "reasoning") {
@@ -420,7 +461,8 @@ void append_function_call_output_item(std::string& payload,
     bool include_system_messages = false,
     bool namespaced = false,
     std::string_view image_detail = {},
-    bool include_reasoning_effort_updates = false) {
+    bool include_reasoning_effort_updates = false,
+    bool codex_tool_names = false) {
     std::vector<std::string> items;
     std::size_t fallback_idx = 0;
 
@@ -444,7 +486,7 @@ void append_function_call_output_item(std::string& payload,
             for (const auto& call : msg.tool_calls) {
                 if (call.type == "custom" && !call.id.empty()) custom_call_ids.insert(call.id);
             }
-            if (auto native = native_response_items(msg, namespaced)) {
+            if (auto native = native_response_items(msg, namespaced, codex_tool_names)) {
                 items.insert(items.end(), native->begin(), native->end());
                 continue;
             }
@@ -494,7 +536,7 @@ void append_function_call_output_item(std::string& payload,
             for (const auto& tc : msg.tool_calls) {
                 if (tc.function.name.empty()) continue;
                 std::string item;
-                append_tool_call_item(item, tc, ++fallback_idx, namespaced);
+                append_tool_call_item(item, tc, ++fallback_idx, namespaced, codex_tool_names);
                 items.push_back(std::move(item));
             }
         }
@@ -647,7 +689,8 @@ void collapse_adjacent_effort_updates(std::vector<std::string>& items) {
     // client_common.rs normalize_image_detail clears it for Responses Lite.
     auto items = build_input_items(request.messages, false, responses_lite(request),
                                    responses_lite(request) ? std::string_view{} : "high",
-                                   request.catalog_supports_reasoning_effort_updates);
+                                   request.catalog_supports_reasoning_effort_updates,
+                                   uses_tool_script(request));
     const std::string instructions = collect_instructions(request);
     if (!instructions.empty()) {
         Message developer;
@@ -735,8 +778,13 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         if (call.function.name.empty()) return {};
         std::string serialized;
         std::string_view ns;
+        std::string_view wire_name;
+        // The model's own output keeps the name it used.
+        const bool codex_tool_names = item["name"].get(wire_name) == simdjson::SUCCESS
+            && wire_name == kRequestUserInput;
         append_tool_call_item(serialized, call, 0,
-            item["namespace"].get(ns) == simdjson::SUCCESS && ns == "functions");
+            item["namespace"].get(ns) == simdjson::SUCCESS && ns == "functions",
+            codex_tool_names);
         return serialized;
     }
 
@@ -1802,7 +1850,11 @@ std::string OpenAIResponsesProtocol::serialize_with_options(
         build_input_items(
             req.messages,
             conversation_context_strategy() == ConversationContextStrategy::ReplayInput
-                && replay_system_messages_in_input()),
+                && replay_system_messages_in_input(),
+            /*namespaced=*/false,
+            /*image_detail=*/{},
+            /*include_reasoning_effort_updates=*/false,
+            uses_tool_script(req)),
         std::nullopt,
         options);
 }

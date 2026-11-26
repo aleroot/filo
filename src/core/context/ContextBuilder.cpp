@@ -30,6 +30,38 @@ namespace {
     return session_context.workspace_view().primary();
 }
 
+/// codex-rs prompts/templates/permissions: the `<permissions instructions>`
+/// a Codex-trained model reads its sandbox and approval policy from. The
+/// sandbox sentence is Codex's, adjusted to what Filo's OS sandbox allows. The
+/// approval sentence is Codex's `unless-trusted` text, which is how Filo's
+/// gate behaves: the client asks the user unless a rule allows the call.
+/// Codex's escalation texts are left out because they name tool parameters
+/// (`sandbox_permissions`, `justification`) Filo does not have.
+[[nodiscard]] std::string build_permissions_instructions() {
+    const auto sandbox_mode = core::landrun::LandrunSettings::instance().mode();
+    std::string sandbox;
+    if (!core::landrun::landrun_enabled(sandbox_mode)) {
+        sandbox = "Filesystem sandboxing defines which files can be read or written. "
+                  "`sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all "
+                  "commands are permitted. Network access is enabled.";
+    } else if (core::landrun::landrun_workspace_writable(sandbox_mode)) {
+        sandbox = "Filesystem sandboxing defines which files can be read or written. "
+                  "`sandbox_mode` is `workspace-write`: The sandbox permits reading files, and "
+                  "editing files in `cwd`, the other workspace directories, and temporary "
+                  "directories. Commands cannot edit files elsewhere. Network access is "
+                  "restricted.";
+    } else {
+        sandbox = "Filesystem sandboxing defines which files can be read or written. "
+                  "`sandbox_mode` is `read-only`: The sandbox only permits reading files, "
+                  "apart from a private temporary directory. Network access is restricted.";
+    }
+    return "<permissions instructions>\n" + sandbox
+        + "\n`approval_policy` is `unless-trusted`: The harness will require user approval "
+          "before running commands unless an explicit exec policy rule allows them. The "
+          "harness asks the user itself; a call the user denies fails with an error saying "
+          "so.\n</permissions instructions>";
+}
+
 [[nodiscard]] std::string build_runtime_prompt(std::string_view mode,
                                                const ModelGuidance* guidance,
                                                std::string_view codex_instructions,
@@ -39,6 +71,8 @@ namespace {
         // contradict it (smallest change, shortest reply, tools the model
         // cannot call directly), so they are not added beside it.
         std::string prompt(codex_instructions);
+        prompt += "\n\n";
+        prompt += build_permissions_instructions();
         if (!codex_collaboration.empty()) {
             prompt += "\n\n";
             prompt += codex_collaboration;
@@ -154,7 +188,8 @@ namespace {
     return block;
 }
 
-[[nodiscard]] std::string build_workspace_facts(const SessionContext& session_context) {
+[[nodiscard]] std::string build_workspace_facts(const SessionContext& session_context,
+                                                bool describe_sandbox) {
     const auto& workspace = session_context.workspace_view();
     if (workspace.primary().empty()) {
         return {};
@@ -176,7 +211,7 @@ namespace {
     context_section += "Relative paths resolve against the primary workspace.";
 
     const auto sandbox_mode = core::landrun::LandrunSettings::instance().mode();
-    if (core::landrun::landrun_enabled(sandbox_mode)) {
+    if (describe_sandbox && core::landrun::landrun_enabled(sandbox_mode)) {
         context_section += "\nOS sandbox: ";
         context_section += core::landrun::landrun_mode_name(sandbox_mode);
         context_section += core::landrun::landrun_workspace_writable(sandbox_mode)
@@ -216,8 +251,9 @@ void append_layer(std::vector<ContextLayer>& layers,
  */
 [[nodiscard]] std::string build_steering_layer(
     const std::vector<std::filesystem::path>& roots,
-    const SteeringPolicy& policy) {
-    auto content = load_workspace_steering_block(roots, policy);
+    const SteeringPolicy& policy,
+    SteeringFormat format) {
+    auto content = load_workspace_steering_block(roots, policy, format);
 
     const auto notice = SteeringGuard::for_roots(roots, policy).prompt_notice();
     if (notice.empty()) {
@@ -340,15 +376,18 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         "runtime",
         build_runtime_prompt(mode_, model_guidance_, codex_instructions_, codex_collaboration_));
 
+    // A Codex-instructed model reads its sandbox from <permissions
+    // instructions> and its cwd, shell, and date from <environment_context>.
+    const bool codex = !codex_instructions_.empty();
     append_layer(
         layers,
         ContextLayerKind::WorkspaceFacts,
         PromptStability::Workspace,
         "workspace",
-        codex_instructions_.empty()
-            ? build_workspace_facts(session_context_)
-            : build_workspace_facts(session_context_)
-                  + build_environment_context(session_context_));
+        codex
+            ? build_workspace_facts(session_context_, /*describe_sandbox=*/false)
+                  + build_environment_context(session_context_)
+            : build_workspace_facts(session_context_, /*describe_sandbox=*/true));
 
     if (!include_project_context_) {
         if (session_context_.memory_policy.use_memories
@@ -384,7 +423,8 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
                 ContextLayerKind::ProjectSteering,
                 PromptStability::Workspace,
                 "project_steering",
-                build_steering_layer(workspace_roots, session_context_.steering_policy));
+                build_steering_layer(workspace_roots, session_context_.steering_policy,
+                                     codex ? SteeringFormat::Codex : SteeringFormat::Filo));
         }
 
         if (include_skill_catalog_ && !workspace_roots.empty()) {
@@ -393,7 +433,9 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
                 ContextLayerKind::SkillCatalog,
                 PromptStability::Workspace,
                 "skill_catalog",
-                core::tools::SkillRegistry::build_catalog_prompt(workspace_roots));
+                codex
+                    ? core::tools::SkillRegistry::build_codex_catalog_prompt(workspace_roots)
+                    : core::tools::SkillRegistry::build_catalog_prompt(workspace_roots));
         }
 
     } catch (const std::exception&) {
