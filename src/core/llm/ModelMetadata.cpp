@@ -171,6 +171,9 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
     if (discovered.tool_mode != CatalogToolMode::Unspecified) {
         baseline.tool_mode = discovered.tool_mode;
     }
+    if (!discovered.experimental_supported_tools.empty()) {
+        baseline.experimental_supported_tools = discovered.experimental_supported_tools;
+    }
 
     for (auto& alias : discovered.aliases) {
         if (std::ranges::find(baseline.aliases, alias)

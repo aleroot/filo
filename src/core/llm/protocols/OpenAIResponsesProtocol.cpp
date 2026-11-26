@@ -111,6 +111,11 @@ NEWLINE: /\r?\n/
 SOURCE: /[\s\S]+/
 )";
 
+void append_function_tool(
+    std::string& payload,
+    const core::tools::ToolDefinition& def,
+    std::optional<core::tools::schema::StrictDialect> strict_dialect);
+
 void append_tool_script(std::string& payload, const std::vector<Tool>& tools) {
     payload += R"({"type":"custom","name":")";
     payload += core::tools::names::kExec;
@@ -128,13 +133,17 @@ void append_tool_script(std::string& payload, const std::vector<Tool>& tools) {
                R"("max_tokens":{"type":"number","description":"Output token budget for this wait call. Defaults to 10000 tokens."},)"
                R"("terminate":{"type":"boolean","description":"True stops the running exec cell; false or omitted waits for output."}},)"
                R"("required":["cell_id"],"additionalProperties":false}})";
-    const bool asks_user = std::ranges::any_of(tools, [](const Tool& tool) {
-        return tool.function.name == core::tools::names::kAskUserQuestion;
-    });
-    if (asks_user) {
-        // Codex keeps it beside exec rather than inside scripts
-        // (ToolExposure::DirectModelOnly), with this schema.
-        payload += R"(,{"type":"function","name":")";
+    // The tools that talk to the user stay beside exec, as Codex exposes them
+    // (ToolExposure::DirectModelOnly). AskUserQuestion goes out as Codex's
+    // request_user_input with Codex's schema.
+    for (const auto& tool : tools) {
+        if (!core::tools::is_direct_only_tool(tool.function.name)) continue;
+        payload += ',';
+        if (tool.function.name != core::tools::names::kAskUserQuestion) {
+            append_function_tool(payload, tool.function, std::nullopt);
+            continue;
+        }
+        payload += R"({"type":"function","name":")";
         payload += kRequestUserInput;
         payload += R"(","description":"Request user input for one to three short questions and wait for the response.",)"
                    R"("strict":false,"parameters":{"type":"object","properties":{"questions":{"type":"array",)"

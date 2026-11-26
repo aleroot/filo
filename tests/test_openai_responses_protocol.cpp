@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/tools/AsyncUserMessages.hpp"
 #include "core/llm/CodexUsageClient.hpp"
 #include "core/llm/Models.hpp"
 #include "core/utils/ClientPlatform.hpp"
@@ -2526,6 +2527,17 @@ TEST_CASE("A script model asks the user through Codex's request_user_input",
     const auto payload = protocol.serialize(req);
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("type":"function_call","call_id":"call_q","name":"request_user_input")"));
+
+    // The async user tools stay beside exec too.
+    req.tools.push_back(Tool{.function = core::tools::send_message_to_user_async_definition()});
+    REQUIRE(parser.parse(simdjson::padded_string(protocol.serialize(req))).get(doc) == simdjson::SUCCESS);
+    REQUIRE(doc["tools"].get(tools) == simdjson::SUCCESS);
+    CHECK(tool_names(tools) == std::vector<std::string>{
+        "custom/exec", "function/wait", "function/request_user_input",
+        "function/send_message_to_user_async"});
+    CHECK_THAT(std::string(std::string_view(tools.at(0)["description"])),
+               !Catch::Matchers::ContainsSubstring("send_message_to_user_async"));
+    req.tools.pop_back();
 
     // A model with direct tools keeps Filo's name.
     req.catalog_tool_mode = CatalogToolMode::Direct;

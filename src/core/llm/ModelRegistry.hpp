@@ -321,6 +321,10 @@ struct ModelInfo {
     /// published nothing; the bundled seed stands.
     std::string collaboration_default;
     std::string collaboration_plan;
+    /// Codex `experimental_supported_tools`: harness tools beyond the
+    /// standard set this model was trained to call (for example
+    /// `request_user_input_async`). A model fact like `tool_mode`.
+    std::vector<std::string> experimental_supported_tools;
     /// Provider-advertised automatic compaction threshold, when supplied.
     std::optional<int32_t> auto_compact_token_limit = {};
     

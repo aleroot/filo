@@ -109,6 +109,11 @@ std::string FiloPromptFraming::steering(const SteeringLoadResult& loaded,
     return content;
 }
 
+bool FiloPromptFraming::same_as(const PromptFraming& other) const noexcept {
+    const auto* filo = dynamic_cast<const FiloPromptFraming*>(&other);
+    return filo != nullptr && filo->guidance_ == guidance_;
+}
+
 std::string FiloPromptFraming::skills(
     const std::vector<std::filesystem::path>& workspace_roots) const {
     return core::tools::SkillRegistry::build_catalog_prompt(workspace_roots);

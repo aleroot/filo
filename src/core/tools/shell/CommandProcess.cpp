@@ -8,10 +8,14 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <expected>
 #include <format>
+#include <mutex>
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
@@ -50,40 +54,33 @@ void close_fd(int& fd) noexcept {
 
 } // namespace
 
-std::unique_ptr<CommandProcess> CommandProcess::spawn(std::string_view command,
-                                                      const std::filesystem::path& working_dir,
-                                                      const core::landrun::LandrunPolicy& policy,
-                                                      std::string& error) {
-    std::string script;
-    if (!working_dir.empty()) {
-        script = std::format("cd -- '{}' || exit 1\n",
-                             detail::shell_single_quote(working_dir.string()));
-    }
-    script += command;
+namespace {
 
-    const bool has_bash = ::access("/bin/bash", X_OK) == 0;
+/// argv and envp for execve, kept alive by their storage.
+struct Launch {
+    std::string executable;
     std::vector<std::string> arguments;
-    if (has_bash) arguments = {"bash", "--norc", "--noprofile", "-c", std::move(script)};
-    else arguments = {"sh", "-c", std::move(script)};
-
-    core::landrun::LandrunLaunch launch;
-    try {
-        launch = core::landrun::prepare_landrun_launch(
-            policy, has_bash ? "/bin/bash" : "/bin/sh", std::move(arguments));
-    } catch (const std::exception& ex) {
-        error = std::format("the sandbox could not prepare the command: {}", ex.what());
-        return nullptr;
-    }
+    std::vector<std::string> environment;
     std::vector<char*> argv;
-    argv.reserve(launch.arguments.size() + 1);
-    for (auto& argument : launch.arguments) argv.push_back(argument.data());
-    argv.push_back(nullptr);
-    auto environment = core::landrun::build_landrun_environment(policy, environ);
     std::vector<char*> envp;
-    envp.reserve(environment.size() + 1);
-    for (auto& entry : environment) envp.push_back(entry.data());
-    envp.push_back(nullptr);
 
+    void seal() {
+        for (auto& argument : arguments) argv.push_back(argument.data());
+        argv.push_back(nullptr);
+        for (auto& entry : environment) envp.push_back(entry.data());
+        envp.push_back(nullptr);
+    }
+};
+
+/// The two ends the parent keeps: what it writes to the command's stdin and
+/// what it reads the command's output from.
+struct Ends {
+    int pid = -1;
+    int input = -1;
+    int output = -1;
+};
+
+[[nodiscard]] std::expected<Ends, std::string> spawn_with_pipes(Launch& launch) {
     std::array<int, 2> in{-1, -1};
     std::array<int, 2> out{-1, -1};
     const auto close_all = [&] {
@@ -94,23 +91,21 @@ std::unique_ptr<CommandProcess> CommandProcess::spawn(std::string_view command,
     if (::pipe(in.data()) != 0 || ::pipe(out.data()) != 0
         || !set_cloexec(in[0]) || !set_cloexec(in[1])
         || !set_cloexec(out[0]) || !set_cloexec(out[1])) {
-        error = std::format("could not create pipes: {}", std::strerror(errno));
+        const int error = errno;
         close_all();
-        return nullptr;
+        return std::unexpected(std::format("could not create pipes: {}", std::strerror(error)));
     }
 
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
     if (::posix_spawn_file_actions_init(&actions) != 0) {
         close_all();
-        error = "could not prepare the process";
-        return nullptr;
+        return std::unexpected("could not prepare the process");
     }
     if (::posix_spawnattr_init(&attributes) != 0) {
         ::posix_spawn_file_actions_destroy(&actions);
         close_all();
-        error = "could not prepare the process";
-        return nullptr;
+        return std::unexpected("could not prepare the process");
     }
     sigset_t default_signals;
     short flags = POSIX_SPAWN_SETSIGDEF;
@@ -132,33 +127,146 @@ std::unique_ptr<CommandProcess> CommandProcess::spawn(std::string_view command,
 #ifndef POSIX_SPAWN_SETSID
         && ::posix_spawnattr_setpgroup(&attributes, 0) == 0
 #endif
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+        // Only the stdio set up above crosses into the command.
+        && ::posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_CLOEXEC_DEFAULT) == 0;
+#else
         && ::posix_spawnattr_setflags(&attributes, flags) == 0;
+#endif
     pid_t pid = -1;
     const int spawn_error = ready
         ? ::posix_spawn(&pid, launch.executable.c_str(), &actions, &attributes,
-                        argv.data(), envp.data())
+                        launch.argv.data(), launch.envp.data())
         : EINVAL;
     ::posix_spawn_file_actions_destroy(&actions);
     ::posix_spawnattr_destroy(&attributes);
     if (spawn_error != 0) {
         close_all();
-        error = std::format("could not start the command: {}", std::strerror(spawn_error));
-        return nullptr;
+        return std::unexpected(
+            std::format("could not start the command: {}", std::strerror(spawn_error)));
     }
 #ifndef POSIX_SPAWN_SETSID
     ::setpgid(pid, pid);
 #endif
-
     close_fd(in[0]);
     close_fd(out[1]);
-    if (const int flags = ::fcntl(in[1], F_GETFL); flags >= 0) {
-        ::fcntl(in[1], F_SETFL, flags | O_NONBLOCK);
+    return Ends{.pid = pid, .input = in[1], .output = out[0]};
+}
+
+/// codex-rs utils/pty: the command runs on a 24x80 pseudo-terminal that is
+/// its controlling terminal, so programs that check for a terminal behave as
+/// they would for a person.
+[[nodiscard]] std::expected<Ends, std::string> spawn_with_terminal(Launch& launch) {
+    int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0 || !set_cloexec(master)) {
+        const int error = errno;
+        close_fd(master);
+        return std::unexpected(
+            std::format("could not open a terminal: {}", std::strerror(error)));
+    }
+    int slave = -1;
+    {
+        // ptsname returns a static buffer.
+        static std::mutex ptsname_mutex;
+        std::lock_guard lock(ptsname_mutex);
+        if (const char* name = ::ptsname(master)) slave = ::open(name, O_RDWR | O_NOCTTY);
+    }
+    if (slave < 0 || !set_cloexec(slave)) {
+        const int error = errno;
+        close_fd(master);
+        close_fd(slave);
+        return std::unexpected(
+            std::format("could not open a terminal: {}", std::strerror(error)));
+    }
+    winsize size{.ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0};
+    ::ioctl(master, TIOCSWINSZ, &size);
+    // Descriptors other threads opened without close-on-exec must not reach
+    // the command: the child closes everything above stdio before exec.
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    const int last_fd = static_cast<int>(std::clamp(open_max, 256L, 65'536L));
+
+    // Only async-signal-safe calls between fork and exec: everything the
+    // child needs was prepared above.
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        const int error = errno;
+        close_fd(master);
+        close_fd(slave);
+        return std::unexpected(
+            std::format("could not start the command: {}", std::strerror(error)));
+    }
+    if (pid == 0) {
+        ::setsid();
+        ::ioctl(slave, TIOCSCTTY, 0);
+        ::dup2(slave, STDIN_FILENO);
+        ::dup2(slave, STDOUT_FILENO);
+        ::dup2(slave, STDERR_FILENO);
+        for (int fd = STDERR_FILENO + 1; fd < last_fd; ++fd) ::close(fd);
+        ::signal(SIGINT, SIG_DFL);
+        ::signal(SIGPIPE, SIG_DFL);
+        sigset_t none;
+        sigemptyset(&none);
+        ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        ::execve(launch.executable.c_str(), launch.argv.data(), launch.envp.data());
+        ::_exit(127);
+    }
+    close_fd(slave);
+    const int input = ::dup(master);
+    if (input < 0 || !set_cloexec(input)) {
+        close_fd(master);
+        ::kill(pid, SIGKILL);
+        int status = 0;
+        ::waitpid(pid, &status, 0);
+        return std::unexpected("could not open the terminal for writing");
+    }
+    return Ends{.pid = pid, .input = input, .output = master};
+}
+
+} // namespace
+
+std::unique_ptr<CommandProcess> CommandProcess::spawn(std::string_view command,
+                                                      const std::filesystem::path& working_dir,
+                                                      const core::landrun::LandrunPolicy& policy,
+                                                      bool tty,
+                                                      std::string& error) {
+    std::string script;
+    if (!working_dir.empty()) {
+        script = std::format("cd -- '{}' || exit 1\n",
+                             detail::shell_single_quote(working_dir.string()));
+    }
+    script += command;
+
+    const bool has_bash = ::access("/bin/bash", X_OK) == 0;
+    std::vector<std::string> arguments;
+    if (has_bash) arguments = {"bash", "--norc", "--noprofile", "-c", std::move(script)};
+    else arguments = {"sh", "-c", std::move(script)};
+
+    Launch launch;
+    try {
+        auto prepared = core::landrun::prepare_landrun_launch(
+            policy, has_bash ? "/bin/bash" : "/bin/sh", std::move(arguments));
+        launch.executable = std::move(prepared.executable);
+        launch.arguments = std::move(prepared.arguments);
+    } catch (const std::exception& ex) {
+        error = std::format("the sandbox could not prepare the command: {}", ex.what());
+        return nullptr;
+    }
+    launch.environment = core::landrun::build_landrun_environment(policy, environ);
+    launch.seal();
+
+    auto ends = tty ? spawn_with_terminal(launch) : spawn_with_pipes(launch);
+    if (!ends) {
+        error = std::move(ends.error());
+        return nullptr;
+    }
+    if (const int flags = ::fcntl(ends->input, F_GETFL); flags >= 0) {
+        ::fcntl(ends->input, F_SETFL, flags | O_NONBLOCK);
     }
     std::unique_ptr<CommandProcess> process(new CommandProcess());
-    process->pid_ = pid;
-    process->pgid_ = pid;
-    process->stdin_fd_ = in[1];
-    process->stdout_fd_ = out[0];
+    process->pid_ = ends->pid;
+    process->pgid_ = ends->pid;
+    process->stdin_fd_ = ends->input;
+    process->stdout_fd_ = ends->output;
     process->reader_ = std::jthread([raw = process.get()](std::stop_token stop) {
         raw->read_loop(std::move(stop));
     });

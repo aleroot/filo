@@ -3763,6 +3763,12 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         }
     }
 
+    if (tool_name == core::tools::names::kSendMessageToUserAsync) {
+        if (const auto message = core::utils::json::first_string_field(object, {"message"})) {
+            return tool_description_line(*message);
+        }
+    }
+
     if (core::tools::names::is_terminal_tool(tool_name)) {
         const auto command = core::utils::json::first_string_field(object, {"command"});
         const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"});

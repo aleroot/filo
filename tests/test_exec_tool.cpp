@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/Models.hpp"
+#include "core/tools/AsyncUserMessages.hpp"
 #include "core/tools/ExecTool.hpp"
 
 #include <atomic>
@@ -421,3 +422,61 @@ TEST_CASE("An exec_command result has Codex's shape and token truncation", "[exe
     CHECK(truncated
           == R"({"wall_time_seconds":1.000,"exit_code":3,"original_token_count":5,"output":"abcd…3 tokens truncated…qrst"})");
 }
+
+TEST_CASE("Async user messages render Codex's text and reject empty ones", "[exec][async_user]") {
+    using core::tools::async_user_message;
+    CHECK(async_user_message("send_message_to_user_async", R"({"message":"  **Blocked** on keys "})")
+              .value_or("") == "**Blocked** on keys");
+    CHECK(async_user_message(
+              "request_user_input_async",
+              R"({"questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"Name?"}]})")
+              .value_or("") == "Which DB?\n- Postgres\n- SQLite\n\nName?");
+    CHECK_FALSE(async_user_message("send_message_to_user_async", R"({"message":" "})").has_value());
+    CHECK_FALSE(async_user_message("request_user_input_async", R"({"questions":[]})").has_value());
+    CHECK(async_user_message("request_user_input_async",
+                             R"({"questions":[{"title":"x","options":[""]}]})").error()
+          == "options must contain at least one non-empty answer");
+    CHECK(core::tools::is_direct_only_tool("request_user_input_async"));
+    CHECK(core::tools::is_direct_only_tool("send_message_to_user_async"));
+    CHECK_FALSE(core::tools::is_direct_only_tool("read"));
+}
+
+TEST_CASE("exec_command passes tty through", "[exec]") {
+    const auto alias = core::tools::resolve_script_alias(
+        "exec_command", R"({"cmd":"python3","tty":true})", "/repo");
+    REQUIRE(alias.has_value());
+    CHECK(alias->arguments
+          == R"({"command":"python3","working_dir":"/repo","tty":true,"yield_time_ms":10000})");
+    CHECK_THAT(core::tools::tool_script_description(
+                   {tool("run_terminal_command", "Run.", {{"command", "string", "", true}})}),
+               ContainsSubstring("  tty?: boolean;\n"));
+}
+
+#ifdef FILO_ENABLE_JAVASCRIPT
+TEST_CASE("image() and generatedImage() attach images; notify() survives truncation",
+          "[exec]") {
+    Script script;
+    const auto outcome = script.run(R"(// @exec: {"max_output_tokens": 1}
+image("data:image/png;base64,iVBORw0KGgo=");
+image({type: "image", data: "R0lGODlh", mimeType: "image/gif"});
+generatedImage({image_url: "data:image/jpeg;base64,/9j/", output_hint: "a cat"});
+text("x".repeat(100));
+notify("still important");
+)");
+    CHECK_THAT(outcome.output, StartsWith("Script completed\n"));
+    REQUIRE(outcome.images.size() == 3);
+    CHECK(outcome.images[0].url == "data:image/png;base64,iVBORw0KGgo=");
+    CHECK(outcome.images[0].mime_type == "image/png");
+    CHECK(outcome.images[1].url == "data:image/gif;base64,R0lGODlh");
+    CHECK(outcome.images[2].mime_type == "image/jpeg");
+    CHECK_THAT(outcome.images[0].path, ContainsSubstring("exec script"));
+    CHECK_THAT(outcome.output, ContainsSubstring("truncated"));
+    CHECK_THAT(outcome.output, ContainsSubstring("\nNotify:\nstill important"));
+
+    const auto refused = script.run(R"(
+try { image("https://example.com/a.png"); } catch (e) { text(e.message); }
+)");
+    CHECK_THAT(refused.output, ContainsSubstring("HTTP(S) URLs are not supported"));
+    CHECK(refused.images.empty());
+}
+#endif

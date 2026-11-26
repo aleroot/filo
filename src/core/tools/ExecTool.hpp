@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "../llm/Models.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -12,9 +13,6 @@
 #include <unordered_map>
 #include <vector>
 
-namespace core::llm {
-struct Tool;
-}
 
 namespace core::tools {
 
@@ -74,10 +72,14 @@ inline constexpr std::uint64_t kDefaultExecYieldMs = 10'000;
 /// Codex's `write_stdin` (same file).
 [[nodiscard]] ToolDefinition write_stdin_definition();
 
+/// Whether a script model calls @p tool_name beside exec rather than from a
+/// script (codex-rs ToolExposure::DirectModelOnly): the tools that talk to
+/// the user.
+[[nodiscard]] bool is_direct_only_tool(std::string_view tool_name) noexcept;
+
 /// The tools a script reaches: @p offered, with `run_terminal_command`
-/// presented as `exec_command` and `write_stdin`, and without
-/// AskUserQuestion, which a script model calls beside exec as Codex's
-/// `request_user_input`.
+/// presented as `exec_command` and `write_stdin`, and without the direct-only
+/// tools.
 [[nodiscard]] std::vector<core::llm::Tool> script_tool_surface(
     const std::vector<core::llm::Tool>& offered);
 
@@ -165,6 +167,8 @@ struct ToolScriptOutcome {
     /// The `exec` or `wait` result the model reads: status, wall time, then
     /// the text the script reported, and the error when it failed.
     std::string output;
+    /// The images the script attached since the previous result.
+    std::vector<core::llm::ContentPart> images;
 };
 
 /// The exec cells of one conversation. A script that yields stays here until

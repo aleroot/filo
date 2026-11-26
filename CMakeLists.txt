@@ -468,6 +468,7 @@ set(FILO_CORE_SOURCES
     src/core/context/CodexInstructions.cpp
     src/core/context/CodexPromptFraming.cpp
     src/core/context/PromptFraming.cpp
+    src/core/context/PromptFramingFactory.cpp
     src/core/context/ModelGuidance.cpp
     src/core/context/PromptCode.cpp
     src/core/context/PromptPlan.cpp
@@ -552,6 +553,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ReadToolResultTool.cpp
     src/core/tools/ReviewTool.cpp
     src/core/tools/ExecTool.cpp
+    src/core/tools/AsyncUserMessages.cpp
     src/core/tools/ConversationTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolManager.cpp

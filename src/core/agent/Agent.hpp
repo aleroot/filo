@@ -2,6 +2,7 @@
 
 #include "../changes/TurnChangeTracker.hpp"
 #include "../context/ContextBuilder.hpp"
+#include "../context/PromptFraming.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../context/SessionContext.hpp"
 #include "../hooks/HookManager.hpp"
@@ -244,6 +245,14 @@ public:
         std::lock_guard lock(history_mutex_);
         permission_profile_ = profile;
     }
+
+    /// Hands @p message to the turn that is running; it joins the
+    /// conversation before the turn's next model request, and a turn about to
+    /// end takes another step to answer it. False, with nothing taken, when no
+    /// turn runs or the model's prompt does not describe messages that arrive
+    /// mid-turn (PromptFraming::describes_mid_turn_messages): the caller then
+    /// waits for the turn, as for any other model.
+    [[nodiscard]] bool steer(core::llm::Message message);
 
     void send_message(const std::string& user_message,
                       std::function<void(const std::string&)> text_callback,
@@ -680,6 +689,8 @@ private:
         std::shared_ptr<const core::llm::ChatRequest> request;
         std::function<void(const std::string&, const std::string&)> tool_trace;
         std::function<bool()> cancelled;
+        /// Shows the user text in the turn's transcript.
+        std::function<void(const std::string&)> show_user;
     };
 
     /// The argument contract of @p tool_name, wherever the tool is served.
@@ -717,6 +728,10 @@ private:
     /// Resumes a yielded exec cell. `wait`'s arguments name the cell.
     [[nodiscard]] std::string resume_tool_script(const core::llm::ToolCall& call,
                                                  const ToolCallScope& scope);
+    /// The result text of an exec or wait call; the images its script
+    /// attached wait for the call's result message (take_script_media).
+    [[nodiscard]] std::string keep_script_media(const core::llm::ToolCall& call,
+                                                core::tools::ToolScriptOutcome outcome);
     [[nodiscard]] ScriptToolHost script_host(const core::llm::ToolCall& call,
                                              const ToolCallScope& scope);
 
@@ -959,12 +974,31 @@ private:
     std::vector<std::string> stable_memory_entry_ids_;
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;
-    /// The model guidance the stable prompt is written for; nullptr = shared doctrine.
-    /// A Codex template replaces it: see codex_instructions_.
-    const core::context::ModelGuidance* prompt_guidance_ = nullptr;
-    std::string codex_instructions_;
-    std::string codex_collaboration_;
-    std::string codex_mode_;
+    /// How the stable prompt is written for the current model and mode
+    /// (context::prompt_framing_for).
+    std::shared_ptr<const core::context::PromptFraming> prompt_framing_;
+    /// Messages the user sent while a turn runs (steer()), and whether the
+    /// running turn takes them. Guarded by steering_mutex_.
+    std::mutex steering_mutex_;
+    std::vector<core::llm::Message> steering_;
+    bool accepting_steering_ = false;
+    /// Images an exec or wait call's script attached, until the call's
+    /// result message takes them. Guarded by script_media_mutex_.
+    std::mutex script_media_mutex_;
+    std::unordered_map<std::string, std::vector<core::llm::ContentPart>> script_media_;
+    [[nodiscard]] std::vector<core::llm::ContentPart> take_script_media(const std::string& call_id);
+    /// Drops images no result took: the conversation they belonged to is gone.
+    void clear_script_media();
+    /// Opens or closes the running turn to steering.
+    void begin_steering(bool accept);
+    /// The steering messages not read yet.
+    [[nodiscard]] std::vector<core::llm::Message> take_steering();
+    /// Whether a steering message waits to be read.
+    [[nodiscard]] bool steering_pending();
+    /// True, keeping the turn open, when a message waits to be read; false,
+    /// closing it, otherwise. Decided under one lock so a message is never
+    /// accepted by a turn that has already decided to end.
+    [[nodiscard]] bool steering_pending_or_close();
     core::context::ContextWindowSnapshot context_window_snapshot_;
     core::session::SessionEfficiencyController efficiency_controller_;
     HistoryCompactor history_compactor_;

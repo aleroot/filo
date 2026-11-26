@@ -36,12 +36,14 @@ public:
         std::optional<int> exit_code;
     };
 
-    /// Starts `bash -c` running @p command in @p working_dir under @p policy.
-    /// Nothing, with @p error set, when the process could not start.
+    /// Starts `bash -c` running @p command in @p working_dir under @p policy,
+    /// on a pseudo-terminal when @p tty, else on plain pipes. Nothing, with
+    /// @p error set, when the process could not start.
     [[nodiscard]] static std::unique_ptr<CommandProcess> spawn(
         std::string_view command,
         const std::filesystem::path& working_dir,
         const core::landrun::LandrunPolicy& policy,
+        bool tty,
         std::string& error);
 
     ~CommandProcess();

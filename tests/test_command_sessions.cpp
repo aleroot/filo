@@ -19,10 +19,11 @@ constexpr std::string_view kOwner = "conversation-a";
 
 [[nodiscard]] ShellSessions::CommandStep start(ShellSessions& sessions,
                                                std::string command,
-                                               std::chrono::milliseconds yield) {
+                                               std::chrono::milliseconds yield,
+                                               bool tty = false) {
     return sessions.start_command(
         {.session_id = std::string(kOwner), .command = std::move(command)},
-        std::filesystem::temp_directory_path(), {}, yield);
+        std::filesystem::temp_directory_path(), {}, yield, tty);
 }
 
 } // namespace
@@ -109,4 +110,22 @@ TEST_CASE("Quiescing a conversation stops its background sessions",
     CHECK(sessions.quiesce_session(kOwner));
     CHECK_THAT(sessions.continue_command(kOwner, *step.process_id, "", 10ms).error,
                ContainsSubstring("Unknown process id"));
+}
+
+TEST_CASE("A tty command runs on a terminal it can be driven through",
+          "[shell][command_session]") {
+    ShellSessions sessions;
+    const auto piped = start(sessions, "test -t 0 && echo terminal || echo pipe", 5s);
+    CHECK_THAT(piped.output, ContainsSubstring("pipe"));
+
+    const auto first = start(sessions,
+                             "test -t 0 && echo terminal; stty size; read line; echo got:$line",
+                             300ms, /*tty=*/true);
+    REQUIRE(first.error.empty());
+    REQUIRE(first.process_id.has_value());
+    CHECK_THAT(first.output, ContainsSubstring("terminal"));
+    CHECK_THAT(first.output, ContainsSubstring("24 80"));
+    const auto second = sessions.continue_command(kOwner, *first.process_id, "hi\n", 5s);
+    CHECK(second.exit_code == 0);
+    CHECK_THAT(second.output, ContainsSubstring("got:hi"));
 }

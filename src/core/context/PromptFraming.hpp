@@ -31,6 +31,16 @@ public:
     /// The skills available under @p workspace_roots.
     [[nodiscard]] virtual std::string skills(
         const std::vector<std::filesystem::path>& workspace_roots) const = 0;
+    /// Whether the prompt tells the model how to treat a message the user
+    /// sends while a turn runs. Only then may such a message join the turn
+    /// instead of waiting for it to end.
+    [[nodiscard]] virtual bool describes_mid_turn_messages() const noexcept { return false; }
+    /// Tools beyond the standard set that this prompt directs the model to
+    /// reach the user with (served by the Agent). Empty by default.
+    [[nodiscard]] virtual std::vector<std::string> user_messaging_tools() const { return {}; }
+    /// Whether @p other writes every layer the way this framing does, so a
+    /// prompt built with either is the same.
+    [[nodiscard]] virtual bool same_as(const PromptFraming& other) const noexcept = 0;
 };
 
 /// Filo's own prompt: its doctrine and working rules, tailored by @p guidance
@@ -46,6 +56,7 @@ public:
                                        std::string_view withheld_notice) const override;
     [[nodiscard]] std::string skills(
         const std::vector<std::filesystem::path>& workspace_roots) const override;
+    [[nodiscard]] bool same_as(const PromptFraming& other) const noexcept override;
 
 private:
     const ModelGuidance* guidance_;

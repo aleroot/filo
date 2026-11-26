@@ -108,6 +108,8 @@ ToolDefinition ShellTool::execution_definition() const {
     definition.parameters.push_back(
         {"yield_time_ms", "integer", "Return after this long, leaving the command running.", false});
     definition.parameters.push_back(
+        {"tty", "boolean", "Run the command session on a pseudo-terminal.", false});
+    definition.parameters.push_back(
         {"process_id", "integer", "The command session to write to or read.", false});
     definition.parameters.push_back(
         {"input", "string", "Text written to the command session's stdin.", false});
@@ -163,6 +165,8 @@ std::string ShellTool::execute_impl(
     if (int64_t yield_ms = 0; doc["yield_time_ms"].get(yield_ms) == simdjson::SUCCESS) {
         session_yield = std::chrono::milliseconds{std::clamp<int64_t>(yield_ms, 0, kMaxYieldMs)};
     }
+    bool tty = false;
+    std::ignore = doc["tty"].get(tty);
 
     std::string_view command_view;
     if (doc["command"].get(command_view) != simdjson::SUCCESS) {
@@ -236,7 +240,8 @@ std::string ShellTool::execute_impl(
             .command = std::string(command_view),
             .working_dir = working_dir,
             .tool_call_id = std::string(tool_call_id),
-        }, context.workspace_view().primary(), landrun_policy, *session_yield, before_dispatch));
+        }, context.workspace_view().primary(), landrun_policy, *session_yield, tty,
+           before_dispatch));
     }
     const auto result = sessions_->run({
         .session_id = std::string(context.shell_session()),

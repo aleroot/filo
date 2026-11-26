@@ -19,6 +19,7 @@
 #include <format>
 #include <map>
 #include <ranges>
+#include <span>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -167,14 +168,31 @@ struct ExecPragma {
                        head, text.size() - head.size() - tail.size(), tail);
 }
 
-/// The result the model reads: status, wall time, then the script's text items.
+/// The result the model reads: status, wall time, the script's text items
+/// within @p budget, then what it sent with notify(), which no budget cuts.
 [[nodiscard]] std::string render_output(std::string_view status,
                                         Clock::duration wall_time,
                                         std::string items,
-                                        std::size_t budget) {
+                                        std::size_t budget,
+                                        std::span<const std::string> notes = {}) {
     const double seconds = std::chrono::duration<double>(wall_time).count();
-    return std::format("{}\nWall time {:.1f} seconds\nOutput:\n{}",
-                       status, seconds, bounded(std::move(items), budget));
+    std::string output = std::format("{}\nWall time {:.1f} seconds\nOutput:\n{}",
+                                     status, seconds, bounded(std::move(items), budget));
+    for (const auto& note : notes) {
+        output += "\nNotify:\n";
+        output += note;
+    }
+    return output;
+}
+
+/// The MIME type of a base64 image data: URL, or nothing for anything else.
+[[nodiscard]] std::optional<std::string_view> image_data_url_mime(std::string_view url) {
+    constexpr std::string_view kPrefix = "data:image/";
+    constexpr std::string_view kBase64 = ";base64,";
+    if (!url.starts_with(kPrefix)) return std::nullopt;
+    const auto marker = url.find(kBase64);
+    if (marker == std::string_view::npos || marker + kBase64.size() >= url.size()) return std::nullopt;
+    return url.substr(5, marker - 5);
 }
 
 // ── TypeScript declarations ────────────────────────────────────────────────
@@ -338,6 +356,10 @@ constexpr std::size_t kMemoryLimitBytes = 64 * 1024 * 1024;
 // Scripts run on tool threads, whose native stacks can be as small as 512 KiB.
 constexpr std::size_t kMaxStackBytes = 256 * 1024;
 constexpr int kMaxToolCalls = 256;
+// What a script may attach with image(): enough for screenshots, bounded so
+// a loop cannot fill every later request with images.
+constexpr std::size_t kMaxImages = 16;
+constexpr std::size_t kMaxImageBytes = 20 * 1024 * 1024;
 // Uninterrupted JavaScript between two waits is a runaway loop, not work.
 constexpr auto kMaxSlice = std::chrono::seconds{30};
 // Total time a script may sleep on its own timers.
@@ -348,6 +370,7 @@ constexpr auto kCancelPoll = std::chrono::milliseconds{50};
 // The natives leave the global object once the helpers hold them.
 constexpr std::string_view kPrelude = R"((() => {
   const call = __filo_call, emit = __filo_text, put = __filo_store, get = __filo_load;
+  const attach = __filo_image, note = __filo_notify;
   const catalog = __filo_catalog;
   const show = (value) => {
     if (typeof value === "string") return value;
@@ -364,6 +387,26 @@ constexpr std::string_view kPrelude = R"((() => {
   globalThis.ALL_TOOLS = Object.freeze(catalog.map(([name, , description]) =>
     Object.freeze({ name, description })));
   globalThis.text = (value) => emit(show(value));
+  globalThis.notify = (value) => note(show(value));
+  // A data: URL, { image_url }, or an MCP ImageContent block.
+  const imageUrl = (input) => {
+    if (typeof input === "string") return input;
+    if (input && typeof input === "object") {
+      if (typeof input.image_url === "string") return input.image_url;
+      if (input.type === "image" && typeof input.data === "string") {
+        return `data:${input.mimeType || "image/png"};base64,${input.data}`;
+      }
+    }
+    throw new TypeError("image() takes a data: URL, { image_url }, or an MCP ImageContent block");
+  };
+  globalThis.image = (input) => attach(imageUrl(input));
+  globalThis.generatedImage = (result) => {
+    if (!result || typeof result.image_url !== "string") {
+      throw new TypeError("generatedImage() takes { image_url, output_hint? }");
+    }
+    attach(result.image_url);
+    if (result.output_hint !== undefined && result.output_hint !== null) emit(show(result.output_hint));
+  };
   globalThis.store = (key, value) => put(String(key), JSON.stringify(value));
   globalThis.load = (key) => {
     const json = get(String(key));
@@ -374,6 +417,7 @@ constexpr std::string_view kPrelude = R"((() => {
   globalThis.setTimeout = __filo_set_timeout;
   globalThis.clearTimeout = __filo_clear_timeout;
   for (const name of ["__filo_call", "__filo_text", "__filo_store", "__filo_load",
+                      "__filo_image", "__filo_notify",
                       "__filo_exit", "__filo_yield", "__filo_set_timeout", "__filo_clear_timeout",
                       "__filo_catalog"]) {
     delete globalThis[name];
@@ -594,6 +638,36 @@ private:
         return JS_UNDEFINED;
     }
 
+    static JSValue native_notify(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        auto& self = of(context);
+        std::string note = argc > 0 ? to_text(context, argv[0]) : std::string("undefined");
+        if (self.collected_ < kMaxCollectedBytes) {
+            self.collected_ += note.size();
+            self.notes_.push_back(std::move(note));
+        }
+        return JS_UNDEFINED;
+    }
+
+    static JSValue native_image(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+        auto& self = of(context);
+        std::string url = argc > 0 ? to_text(context, argv[0]) : std::string{};
+        const auto mime = image_data_url_mime(url);
+        if (!mime) {
+            return JS_ThrowTypeError(context,
+                                     "image() needs a base64 data: URL of an image; HTTP(S) URLs "
+                                     "are not supported");
+        }
+        if (self.images_.size() >= kMaxImages || self.image_bytes_ + url.size() > kMaxImageBytes) {
+            return JS_ThrowRangeError(context, "the script attached too many images");
+        }
+        self.image_bytes_ += url.size();
+        auto part = core::llm::ContentPart::make_image_url(std::move(url));
+        part.mime_type = std::string(*mime);
+        part.path = std::format("image {} attached by the exec script", self.images_.size() + 1);
+        self.images_.push_back(std::move(part));
+        return JS_UNDEFINED;
+    }
+
     static JSValue native_store(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
         if (argc < 1) return JS_ThrowTypeError(context, "store() needs a key");
         std::optional<std::string> json;
@@ -664,6 +738,8 @@ private:
                                      JS_NewCFunction(context_, function, name, length)) >= 0;
         };
         if (!define("__filo_call", &native_call, 2) || !define("__filo_text", &native_text, 1)
+            || !define("__filo_image", &native_image, 1)
+            || !define("__filo_notify", &native_notify, 1)
             || !define("__filo_store", &native_store, 2) || !define("__filo_load", &native_load, 1)
             || !define("__filo_exit", &native_exit, 0)
             || !define("__filo_yield", &native_yield, 0)
@@ -769,10 +845,18 @@ private:
             items += "Script error:\n" + error;
         }
         host_ = nullptr;
+        std::vector<std::string> notes(notes_.begin() + static_cast<std::ptrdiff_t>(notes_reported_),
+                                       notes_.end());
+        notes_reported_ = notes_.size();
+        std::vector<core::llm::ContentPart> images(
+            images_.begin() + static_cast<std::ptrdiff_t>(images_reported_), images_.end());
+        images_reported_ = images_.size();
         return ToolScriptOutcome{
             .completed = completed,
             .running = running,
-            .output = render_output(status, Clock::now() - started, std::move(items), budget_),
+            .output = render_output(status, Clock::now() - started, std::move(items), budget_,
+                                    notes),
+            .images = std::move(images),
         };
     }
 
@@ -908,8 +992,13 @@ private:
     Clock::time_point slice_started_ = Clock::now();
     Clock::time_point yield_at_ = Clock::time_point::max();
     std::vector<std::string> items_;
+    std::vector<std::string> notes_;
+    std::vector<core::llm::ContentPart> images_;
+    std::size_t image_bytes_ = 0;
     std::size_t collected_ = 0;
     std::size_t reported_ = 0;
+    std::size_t notes_reported_ = 0;
+    std::size_t images_reported_ = 0;
     std::size_t budget_ = 0;
     int calls_ = 0;
     bool exited_ = false;
@@ -983,10 +1072,19 @@ std::string tool_script_description(const std::vector<core::llm::Tool>& tools) {
         "the top level).\n"
         "- `text(value: string | number | boolean | undefined | null)`: Appends a text item. "
         "Non-string values are stringified with `JSON.stringify(...)` when possible.\n"
+        "- `image(imageUrlOrItem: string | {{ image_url: string }} | ImageContent)`: Appends an "
+        "image item. `image_url` should be a base64-encoded `data:` URL. To forward an MCP tool "
+        "image, pass an individual `ImageContent` block from `result.content`, for example "
+        "`image(result.content[0])`.\n"
+        "- `generatedImage(result: {{ image_url: string; output_hint?: string }})`: Appends an "
+        "image-generation result and its optional output hint. HTTP(S) URLs are not supported.\n"
         "- `store(key: string, value: any)`: stores a serializable value under a string key for "
         "later `exec` calls in the same session.\n"
         "- `load(key: string)`: returns the stored value for a string key, or `undefined` if it "
         "is missing.\n"
+        "- `notify(value: string | number | boolean | undefined | null)`: adds a message to this "
+        "`exec` result that the output token budget never truncates. Values are stringified "
+        "like `text(...)`.\n"
         "- `setTimeout(callback: () => void, delayMs?: number)`: schedules a callback to run "
         "later and returns a timeout id. Pending timeouts do not keep `exec` alive by themselves; "
         "await an explicit promise if you need to wait for one.\n"
@@ -1082,11 +1180,14 @@ ToolDefinition exec_command_definition() {
     return ToolDefinition{
         .name = std::string(names::kExecCommand),
         .title = "Run",
-        .description = "Runs a command, returning output or a session ID for ongoing interaction.",
+        .description =
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
         .parameters = {
             {"cmd", "string", "Shell command to execute.", true},
             {"workdir", "string", "Working directory for the command. Defaults to the turn cwd.",
              false},
+            {"tty", "boolean",
+             "True allocates a PTY for the command; false or omitted uses plain pipes.", false},
             {"yield_time_ms", "number",
              "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
              false},
@@ -1118,12 +1219,17 @@ ToolDefinition write_stdin_definition() {
     };
 }
 
+bool is_direct_only_tool(std::string_view tool_name) noexcept {
+    return tool_name == names::kAskUserQuestion
+        || tool_name == names::kRequestUserInputAsync
+        || tool_name == names::kSendMessageToUserAsync;
+}
+
 std::vector<core::llm::Tool> script_tool_surface(const std::vector<core::llm::Tool>& offered) {
     std::vector<core::llm::Tool> surface;
     surface.reserve(offered.size() + 1);
     for (const auto& tool : offered) {
-        // Asked beside exec, as Codex's request_user_input, never from a script.
-        if (tool.function.name == names::kAskUserQuestion) continue;
+        if (is_direct_only_tool(tool.function.name)) continue;
         if (tool.function.name == names::kRunTerminalCommand) {
             surface.push_back(core::llm::Tool{.function = exec_command_definition()});
             surface.push_back(core::llm::Tool{.function = write_stdin_definition()});
@@ -1170,6 +1276,9 @@ std::optional<ScriptToolAlias> resolve_script_alias(std::string_view tool_name,
         alias.arguments = R"({"command":")" + core::utils::escape_json_string(cmd) + '"';
         if (!workdir.empty()) {
             alias.arguments += R"(,"working_dir":")" + core::utils::escape_json_string(workdir) + '"';
+        }
+        if (bool tty = false; object["tty"].get(tty) == simdjson::SUCCESS && tty) {
+            alias.arguments += R"(,"tty":true)";
         }
         alias.arguments += std::format(
             R"(,"yield_time_ms":{}}})",

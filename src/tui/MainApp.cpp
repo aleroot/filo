@@ -7801,6 +7801,40 @@ RunResult run(RunOptions opts) {
                        std::string,
                        core::agent::Agent::TurnCallbacks)> submit_agent_turn;
 
+    // A typed prompt as the agent reads it: @ mentions expanded, attached
+    // media pinned, and absolute mentions granted to the workspace.
+    auto make_prompt_message = [&](const ThreadRuntime::Ptr& runtime,
+                                   const std::string& text,
+                                   const std::filesystem::path& base_dir) {
+        auto agent = runtime->agent();
+        std::optional<core::llm::MediaSnapshots> media_snapshots;
+        if (session_store) {
+            if (auto directory = core::session::SessionStore::media_dir(
+                    session_store->sessions_dir(), runtime->session_id());
+                !directory.empty()) {
+                media_snapshots.emplace(std::move(directory));
+            }
+        }
+        const auto expanded_prompt = core::context::expand_prompt(
+            text,
+            base_dir,
+            {.session_store = session_store.get(),
+             .current_session_id = runtime->session_id(),
+             .media_snapshots = media_snapshots ? &*media_snapshots : nullptr});
+        // An absolute @ mention is an explicit user selection. Finder
+        // drag-and-drop arrives through bracketed paste in this form.
+        agent->grant_workspace_paths(expanded_prompt.explicit_path_mentions);
+
+        core::llm::Message user_message;
+        user_message.role = "user";
+        user_message.content = expanded_prompt.display_text;
+        user_message.input_text = text;
+        if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
+            user_message.content_parts = expanded_prompt.content_parts;
+        }
+        return user_message;
+    };
+
     auto submit_or_queue_agent_turn =
         [&](std::string text, core::agent::Agent::TurnCallbacks turn_callbacks) {
             if (text.empty()) {
@@ -7808,6 +7842,25 @@ RunResult run(RunOptions opts) {
             }
 
             auto runtime = current_runtime;
+            // A plain prompt sent while a turn runs joins that turn when the
+            // model's prompt tells it how to treat such a message; a command
+            // that sets its own model, effort, or tools always waits.
+            const bool plain_prompt = !turn_callbacks.provider_override
+                && turn_callbacks.model_override.empty()
+                && turn_callbacks.effort_override.empty()
+                && turn_callbacks.effort_floor.empty()
+                && turn_callbacks.allowed_tools.empty();
+            if (plain_prompt && runtime->turn_active()
+                && runtime->agent()->steer(make_prompt_message(
+                    runtime, text, runtime->agent()->workspace_snapshot().primary()))) {
+                {
+                    std::lock_guard lock(ui_mutex);
+                    append_ui_message(*runtime->messages(),
+                                      make_user_message(text, current_time_str()));
+                }
+                wake_ui();
+                return;
+            }
             PendingAgentTurn pending{
                 .text = std::move(text),
                 .callbacks = std::move(turn_callbacks),
@@ -7967,6 +8020,7 @@ RunResult run(RunOptions opts) {
                      turn_changes,
                      user_message_id,
                      &update_live_assistant_message,
+                     &make_prompt_message,
                      &submit_agent_turn,
                      &settle_unstarted_turn,
                      &prompt_cache_watch,
@@ -8040,31 +8094,7 @@ RunResult run(RunOptions opts) {
                         std::format("\n\xe2\x84\xb9  {}\n", note));
                 }
             }
-            std::optional<core::llm::MediaSnapshots> media_snapshots;
-            if (session_store) {
-                if (auto directory = core::session::SessionStore::media_dir(
-                        session_store->sessions_dir(), runtime->session_id());
-                    !directory.empty()) {
-                    media_snapshots.emplace(std::move(directory));
-                }
-            }
-            const auto expanded_prompt = core::context::expand_prompt(
-                text,
-                base_dir,
-                {.session_store = session_store.get(),
-                 .current_session_id = runtime->session_id(),
-                 .media_snapshots = media_snapshots ? &*media_snapshots : nullptr});
-            // An absolute @ mention is an explicit user selection. Finder
-            // drag-and-drop arrives through bracketed paste in this form.
-            agent->grant_workspace_paths(expanded_prompt.explicit_path_mentions);
-
-            core::llm::Message user_message;
-            user_message.role = "user";
-            user_message.content = expanded_prompt.display_text;
-            user_message.input_text = text;
-            if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
-                user_message.content_parts = expanded_prompt.content_parts;
-            }
+            const auto user_message = make_prompt_message(runtime, text, base_dir);
 
             agent->send_message(user_message,
                 [runtime, live_timeline,

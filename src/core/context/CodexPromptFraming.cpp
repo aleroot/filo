@@ -3,8 +3,10 @@
 #include "SteeringLoader.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include "../tools/SkillRegistry.hpp"
+#include "../tools/ToolNames.hpp"
 #include "../utils/StringUtils.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -88,6 +90,30 @@ namespace {
 
 } // namespace
 
+CodexPromptFraming::CodexPromptFraming(CodexPrompt prompt,
+                                       std::vector<std::string> experimental_tools)
+    : prompt_(std::move(prompt)) {
+    const auto lists = [&](std::string_view name) {
+        return std::ranges::find(experimental_tools, name) != experimental_tools.end();
+    };
+    // `send_user_message_async` is the older catalog name of
+    // `request_user_input_async`.
+    if (lists(core::tools::names::kRequestUserInputAsync) || lists("send_user_message_async")) {
+        user_messaging_tools_.emplace_back(core::tools::names::kRequestUserInputAsync);
+    }
+    if (lists(core::tools::names::kSendMessageToUserAsync)) {
+        user_messaging_tools_.emplace_back(core::tools::names::kSendMessageToUserAsync);
+    }
+}
+
+bool CodexPromptFraming::same_as(const PromptFraming& other) const noexcept {
+    const auto* codex = dynamic_cast<const CodexPromptFraming*>(&other);
+    return codex != nullptr
+        && codex->prompt_.instructions == prompt_.instructions
+        && codex->prompt_.collaboration == prompt_.collaboration
+        && codex->user_messaging_tools_ == user_messaging_tools_;
+}
+
 std::string CodexPromptFraming::runtime(std::string_view mode) const {
     // The template is the whole doctrine: Filo's working rules contradict it
     // (smallest change, shortest reply), so they are not added beside it.
@@ -153,14 +179,6 @@ std::string CodexPromptFraming::skills(
     }
     out += "</skills_instructions>";
     return out;
-}
-
-std::shared_ptr<const PromptFraming> make_prompt_framing(CodexPrompt codex,
-                                                         const ModelGuidance* guidance) {
-    if (!codex.instructions.empty()) {
-        return std::make_shared<const CodexPromptFraming>(std::move(codex));
-    }
-    return std::make_shared<const FiloPromptFraming>(guidance);
 }
 
 } // namespace core::context

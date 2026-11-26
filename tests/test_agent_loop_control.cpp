@@ -2943,6 +2943,160 @@ TEST_CASE("Agent writes the prompt for the model each turn targets",
     CHECK(prompt(2).find("Autonomy and persistence") != std::string::npos);
 }
 
+namespace {
+
+/// Answers each request through @c respond, after recording it.
+class ScriptedProvider final : public core::llm::LLMProvider {
+public:
+    std::function<void(std::size_t, const core::llm::ChatRequest&,
+                       const std::function<void(const core::llm::StreamChunk&)>&)> respond;
+
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        std::size_t index = 0;
+        {
+            std::lock_guard lock(mutex_);
+            index = requests_.size();
+            requests_.push_back(request);
+        }
+        respond(index, request, callback);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+};
+
+[[nodiscard]] bool offers(const core::llm::ChatRequest& request, std::string_view name) {
+    return std::ranges::any_of(request.tools, [&](const core::llm::Tool& tool) {
+        return tool.function.name == name;
+    });
+}
+
+} // namespace
+
+TEST_CASE("A Codex-instructed turn reads a message the user sends while it runs",
+          "[agent][turn][steering]") {
+    auto provider = std::make_shared<ScriptedProvider>();
+    core::tools::ToolManager tool_manager;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    agent->set_active_model("gpt-6.2-sol");
+    CHECK_FALSE(agent->steer({.role = "user", .content = "no turn runs"}));
+
+    std::atomic<bool> steered{false};
+    provider->respond = [&](std::size_t index, const core::llm::ChatRequest&,
+                            const auto& callback) {
+        if (index == 0) {
+            // The user answers while the model is still producing its answer.
+            steered = agent->steer({.role = "user", .content = "use Postgres"});
+            callback(core::llm::StreamChunk::make_content("Done, assuming SQLite."));
+        } else {
+            callback(core::llm::StreamChunk::make_content("Switched to Postgres."));
+        }
+        callback(core::llm::StreamChunk::make_final());
+    };
+    send_and_wait(agent, "set up the database");
+
+    CHECK(steered.load());
+    const auto requests = provider->requests_snapshot();
+    // The turn took another step to answer instead of ending.
+    REQUIRE(requests.size() == 2);
+    const auto& messages = requests[1].messages;
+    REQUIRE(messages.size() >= 2);
+    CHECK(messages[messages.size() - 2].role == "assistant");
+    CHECK(messages.back().role == "user");
+    CHECK(messages.back().content == "use Postgres");
+}
+
+TEST_CASE("A turn whose prompt says nothing about mid-turn messages refuses them",
+          "[agent][turn][steering]") {
+    auto provider = std::make_shared<ScriptedProvider>();
+    core::tools::ToolManager tool_manager;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    agent->set_active_model("claude-opus-5-5");
+    std::atomic<bool> steered{true};
+    provider->respond = [&](std::size_t, const core::llm::ChatRequest& request, const auto& callback) {
+        steered = agent->steer({.role = "user", .content = "late"});
+        CHECK_FALSE(offers(request, "send_message_to_user_async"));
+        callback(core::llm::StreamChunk::make_content("ok"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+    send_and_wait(agent, "hello");
+    CHECK_FALSE(steered.load());
+    CHECK(provider->requests_snapshot().size() == 1);
+}
+
+TEST_CASE("send_message_to_user_async shows the user a message and the turn goes on",
+          "[agent][turn][steering]") {
+    auto provider = std::make_shared<ScriptedProvider>();
+    core::tools::ToolManager tool_manager;
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    agent->set_active_model("gpt-6.2-sol");
+    provider->respond = [&](std::size_t index, const core::llm::ChatRequest& request,
+                            const auto& callback) {
+        if (index == 0) {
+            CHECK(offers(request, "send_message_to_user_async"));
+            CHECK(offers(request, "request_user_input_async"));
+            core::llm::ToolCall call;
+            call.id = "call_async";
+            call.function.name = "send_message_to_user_async";
+            call.function.arguments = R"({"message":"**Which database?**"})";
+            core::llm::StreamChunk chunk;
+            chunk.tools = {call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+        if (index == 1) {
+            // The reply arrives while the model keeps working.
+            CHECK(agent->steer({.role = "user", .content = "Postgres"}));
+        }
+        callback(core::llm::StreamChunk::make_content(index == 1 ? "Working." : "Using Postgres."));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::mutex shown_mutex;
+    std::string shown;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message(
+        "set up the database",
+        [&](const std::string& text) {
+            std::lock_guard lock(shown_mutex);
+            shown += text;
+        },
+        [](const std::string&, const std::string&) {},
+        [&] {
+            std::lock_guard lock(done_mutex);
+            done = true;
+            done_cv.notify_one();
+        });
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&] { return done; }));
+    }
+
+    CHECK_THAT(shown, Catch::Matchers::ContainsSubstring("**Which database?**"));
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 3);
+    const auto result = std::ranges::find_if(requests[1].messages, [](const auto& message) {
+        return message.role == "tool" && message.tool_call_id == "call_async";
+    });
+    REQUIRE(result != requests[1].messages.end());
+    CHECK(result->content == R"({"accepted":true})");
+    CHECK(requests[2].messages.back().content == "Postgres");
+}
+
 TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {
     auto provider = std::make_shared<RotatingToolLoopProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

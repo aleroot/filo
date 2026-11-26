@@ -7,8 +7,7 @@
 #include "../changes/FileChangeJson.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
-#include "../context/CodexInstructions.hpp"
-#include "../context/CodexPromptFraming.hpp"
+#include "../context/PromptFramingFactory.hpp"
 #include "../context/ModelGuidance.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../llm/ModelCatalogDiscovery.hpp"
@@ -24,6 +23,7 @@
 #include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../tools/AsyncUserMessages.hpp"
 #include "../tools/ReviewTool.hpp"
 #include "../tools/ToolArgumentUtils.hpp"
 #include "../tools/ToolPolicy.hpp"
@@ -1283,8 +1283,37 @@ namespace {
 
 } // namespace
 
+bool Agent::steer(core::llm::Message message) {
+    std::lock_guard lock(steering_mutex_);
+    if (!accepting_steering_) return false;
+    message.role = "user";
+    steering_.push_back(std::move(message));
+    return true;
+}
+
+void Agent::begin_steering(bool accept) {
+    std::lock_guard lock(steering_mutex_);
+    accepting_steering_ = accept;
+}
+
+std::vector<core::llm::Message> Agent::take_steering() {
+    std::lock_guard lock(steering_mutex_);
+    return std::exchange(steering_, {});
+}
+
+bool Agent::steering_pending() {
+    std::lock_guard lock(steering_mutex_);
+    return !steering_.empty();
+}
+
+bool Agent::steering_pending_or_close() {
+    std::lock_guard lock(steering_mutex_);
+    if (!steering_.empty()) return true;
+    accepting_steering_ = false;
+    return false;
+}
+
 void Agent::retarget_prompt_unlocked(std::string_view model) {
-    core::context::CodexPromptText live;
     std::string catalog_key;
     if (provider_) {
         if (const auto metadata = provider_->metadata()) {
@@ -1292,36 +1321,11 @@ void Agent::retarget_prompt_unlocked(std::string_view model) {
                 metadata->service_id, metadata->provider_name));
         }
     }
-    if (const auto card = catalog_card(catalog_key, model)) {
-        live.instructions = card->instructions_template;
-        live.collaboration_default = card->collaboration_default;
-        live.collaboration_plan = card->collaboration_plan;
-    }
-    bool code_mode = false;
-    if (const auto info = core::llm::ModelRegistry::instance().lookup(model)) {
-        code_mode = core::llm::is_code_mode_only(info->tool_mode);
-    }
-    auto codex = core::context::codex_prompt_for(
-        model,
-        to_string(current_mode_),
-        live.instructions,
-        live.collaboration_default,
-        live.collaboration_plan,
-        code_mode);
-    const auto* guidance = codex.instructions.empty()
-        ? core::context::find_model_guidance(model)
-        : nullptr;
-    const auto mode = to_string(current_mode_);
-    if (guidance == prompt_guidance_
-        && codex.instructions == codex_instructions_
-        && codex.collaboration == codex_collaboration_
-        && mode == codex_mode_) {
-        return;
-    }
-    prompt_guidance_ = guidance;
-    codex_instructions_ = std::move(codex.instructions);
-    codex_collaboration_ = std::move(codex.collaboration);
-    codex_mode_ = std::string(mode);
+    const auto card = catalog_card(catalog_key, model);
+    auto framing = core::context::prompt_framing_for(
+        model, to_string(current_mode_), card ? &*card : nullptr);
+    if (prompt_framing_ && prompt_framing_->same_as(*framing)) return;
+    prompt_framing_ = std::move(framing);
     refresh_stable_prompt_state_unlocked();
 }
 
@@ -1421,9 +1425,7 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     stable_prompt_plan_ =
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
-            .with_framing(core::context::make_prompt_framing(
-                {.instructions = codex_instructions_, .collaboration = codex_collaboration_},
-                prompt_guidance_))
+            .with_framing(prompt_framing_)
             .with_memory_prompt(std::move(memory_projection.block))
             .include_project_context(session_context_.include_project_context)
             .include_project_facts(false)
@@ -1581,6 +1583,7 @@ void Agent::clear_history() {
         journal_unlocked("clear", "{}");
         history_.clear();
         tool_scripts_.clear();
+        clear_script_media();
         context_summary_.clear();
         project_facts_snapshot_.reset();
         consecutive_failure_rounds_ = 0;
@@ -2169,6 +2172,12 @@ std::optional<core::tools::ToolDefinition> Agent::resolve_tool_definition(
     if (tool_name == names::kWriteTodos) return todo_tool_.get_definition();
     if (tool_name == names::kReadToolResult) return read_tool_result_tool_.get_definition();
     if (tool_name == names::kReview) return core::tools::review_tool_definition();
+    if (tool_name == names::kRequestUserInputAsync) {
+        return core::tools::request_user_input_async_definition();
+    }
+    if (tool_name == names::kSendMessageToUserAsync) {
+        return core::tools::send_message_to_user_async_definition();
+    }
     return skill_manager_.get_tool_definition(tool_name);
 }
 
@@ -2234,6 +2243,14 @@ std::string Agent::dispatch_tool(const core::llm::ToolCall& call, const ToolCall
         return orchestrator_.execute_task(arguments, scope.provider, run_context);
     }
     if (name == names::kWriteTodos) return todo_tool_.execute(arguments, scope.session_context);
+    if (core::tools::is_async_user_message_tool(name)) {
+        auto message = core::tools::async_user_message(name, arguments);
+        if (!message) {
+            return std::format(R"({{"error":"{}"}})", core::utils::escape_json_string(message.error()));
+        }
+        if (scope.show_user) scope.show_user("\n\n" + *message + "\n\n");
+        return std::string(core::tools::kAsyncUserMessageAccepted);
+    }
     if (name == names::kReadToolResult) {
         return read_tool_result_tool_.execute(arguments, scope.session_context);
     }
@@ -2364,12 +2381,35 @@ std::string Agent::run_tool_script(const core::llm::ToolCall& call, const ToolCa
     const auto source = core::tools::source_from_arguments(call.function.arguments);
     if (!source) return R"({"error":"exec needs a script."})";
     auto host = script_host(call, scope);
-    return tool_scripts_.execute(*source, scope.request->tools, host).output;
+    return keep_script_media(call, tool_scripts_.execute(*source, scope.request->tools, host));
 }
 
 std::string Agent::resume_tool_script(const core::llm::ToolCall& call, const ToolCallScope& scope) {
     auto host = script_host(call, scope);
-    return tool_scripts_.resume(call.function.arguments, host).output;
+    return keep_script_media(call, tool_scripts_.resume(call.function.arguments, host));
+}
+
+std::string Agent::keep_script_media(const core::llm::ToolCall& call,
+                                     core::tools::ToolScriptOutcome outcome) {
+    if (!outcome.images.empty()) {
+        std::lock_guard lock(script_media_mutex_);
+        script_media_[call.id] = std::move(outcome.images);
+    }
+    return std::move(outcome.output);
+}
+
+void Agent::clear_script_media() {
+    std::lock_guard lock(script_media_mutex_);
+    script_media_.clear();
+}
+
+std::vector<core::llm::ContentPart> Agent::take_script_media(const std::string& call_id) {
+    std::lock_guard lock(script_media_mutex_);
+    const auto found = script_media_.find(call_id);
+    if (found == script_media_.end()) return {};
+    auto media = std::move(found->second);
+    script_media_.erase(found);
+    return media;
 }
 
 // ---------------------------------------------------------------------------
@@ -2513,8 +2553,16 @@ void Agent::send_message(core::llm::Message user_message,
         }
 
         const auto turn_changes = publish_turn_changes(turn_state);
+        // A message that reached a turn which then stopped or failed stays in
+        // the conversation, so the next turn reads it.
+        begin_steering(false);
+        auto unread_steering = take_steering();
         {
             std::lock_guard lock(history_mutex_);
+            for (auto& message : unread_steering) {
+                journal_message_unlocked(message);
+                history_.push_back(std::move(message));
+            }
             core::utils::JsonWriter event;
             {
                 auto object = event.object();
@@ -2565,6 +2613,7 @@ void Agent::send_message(core::llm::Message user_message,
             ? core::context::render_project_facts(*project_facts)
             : std::string{};
     std::optional<AutoModeContext> auto_context;
+    bool steerable = false;
     {
         std::lock_guard lock(history_mutex_);
         append_project_facts_update_unlocked(std::move(project_facts));
@@ -2610,6 +2659,7 @@ void Agent::send_message(core::llm::Message user_message,
         }
         journal_message_unlocked(user_message);
         history_.push_back(std::move(user_message));
+        steerable = prompt_framing_ && prompt_framing_->describes_mid_turn_messages();
         // After the prompt joins history: the memory block in the stable prefix
         // is ranked against the conversation, and this prompt is the one that
         // opens it. Everything above reads history as it stood before the turn.
@@ -2622,6 +2672,7 @@ void Agent::send_message(core::llm::Message user_message,
         turn_state->max_steps = sanitize_max_steps_per_turn(
             turn_callbacks.max_steps_override.value_or(loop_limits_.max_steps_per_turn));
     }
+    begin_steering(steerable);
     if (auto_context.has_value()) {
       turn_state->auto_turn = auto_turn_coordinator_.start(
           objective,
@@ -2777,6 +2828,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     if (!is_turn_current(turn_state) || is_stop_requested()) {
         done_callback();
         return;
+    }
+    // What the user sent since the last request joins the conversation now,
+    // after the previous step's tool results.
+    if (auto steering = take_steering(); !steering.empty()) {
+        std::lock_guard lock(history_mutex_);
+        for (auto& message : steering) {
+            journal_message_unlocked(message);
+            history_.push_back(std::move(message));
+        }
     }
 
     if (turn_state->transport_turn_id.empty()) {
@@ -3006,6 +3066,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.tools.push_back(core::llm::Tool{
                 .function = core::tools::review_tool_definition(),
             });
+        }
+        std::shared_ptr<const core::context::PromptFraming> framing;
+        {
+            std::lock_guard lock(history_mutex_);
+            framing = prompt_framing_;
+        }
+        // A reply to these arrives mid-turn, so only a prompt that describes
+        // mid-turn messages gets them.
+        const auto user_messaging_tools = framing && framing->describes_mid_turn_messages()
+            ? framing->user_messaging_tools()
+            : std::vector<std::string>{};
+        for (const auto& name : user_messaging_tools) {
+            if (!tool_is_allowed_for_turn(name, turn_callbacks)) continue;
+            if (auto definition = resolve_tool_definition(name)) {
+                request.tools.push_back(core::llm::Tool{.function = std::move(*definition)});
+            }
         }
     }
 
@@ -3607,6 +3683,20 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }));
           };
 
+          // A message the user sent during the turn is answered before the
+          // turn is judged complete.
+          const auto take_another_step = [&] {
+            pending_continuation->run_or_park([self, text_callback, tool_callback, done_callback,
+                                               turn_callbacks, turn_state] {
+                self->step(text_callback, tool_callback, done_callback,
+                           turn_callbacks, turn_state);
+            });
+          };
+          if (self->steering_pending()) {
+            take_another_step();
+            return;
+          }
+
           const bool mutation_observed = turn_state->auto_turn &&
               self->auto_turn_coordinator_.mutation_observed(
                   *turn_state->auto_turn);
@@ -3655,7 +3745,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             done_callback();
             return;
           }
-          // Pure text response — we're done
+          // Pure text response — we're done, unless a message arrived while
+          // completion was judged.
+          if (self->steering_pending_or_close()) {
+            take_another_step();
+            return;
+          }
           if (turn_callbacks.on_final_response) turn_callbacks.on_final_response(asst_msg.content);
           if (turn_callbacks.allow_efficiency_rotation) {
             self->run_efficiency_rotation_if_needed(
@@ -4048,7 +4143,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                 scheduled_tasks.push_back({
                     .accesses = std::move(planned.accesses),
-                    .run = [self, tc, &tool_callback, &turn_callbacks,
+                    .run = [self, tc, &tool_callback, &turn_callbacks, &text_callback,
                      dedup_index = dedup_decision.original_index,
                      deduplicator = &turn_state->deduplicator,
                      dedup_stop_requested,
@@ -4102,6 +4197,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             .request = step_request,
                             .tool_trace = tool_callback,
                             .cancelled = tool_cancelled,
+                            .show_user = text_callback,
                         });
                         running_registration.release();
                         if (running_call->interrupted.load(std::memory_order_acquire)) {
@@ -4178,6 +4274,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             .tool_calls   = {}
                         };
                         if (image_input) message.content_parts.push_back(std::move(*image_input));
+                        std::ranges::move(self->take_script_media(tc.id),
+                                          std::back_inserter(message.content_parts));
                         self->run_post_tool_hooks(
                             tc, message, session_context, recovery_turn_state->change_tracker);
                         return message;
@@ -4549,6 +4647,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     ++conversation_generation_;
     // A set-aside conversation comes back with the values its scripts stored.
     if (kind == HistoryLoad::Resume) tool_scripts_.clear();
+    clear_script_media();
     current_mode_ = agent_mode_from_string(mode);
     context_summary_ = context_summary;
     project_facts_snapshot_.reset();

@@ -200,6 +200,15 @@ namespace {
         copy_pointer("/model_messages/instructions_template", info.instructions_template);
         copy_pointer("/model_messages/collaboration_modes/default", info.collaboration_default);
         copy_pointer("/model_messages/collaboration_modes/plan", info.collaboration_plan);
+        simdjson::dom::array experimental;
+        if (model.raw()["experimental_supported_tools"].get(experimental) == simdjson::SUCCESS) {
+            for (simdjson::dom::element tool : experimental) {
+                std::string_view name;
+                if (tool.get(name) == simdjson::SUCCESS && !name.empty()) {
+                    info.experimental_supported_tools.emplace_back(name);
+                }
+            }
+        }
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

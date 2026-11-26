@@ -4,6 +4,7 @@
 #include "TestSessionContext.hpp"
 #include "core/context/CodexInstructions.hpp"
 #include "core/context/CodexPromptFraming.hpp"
+#include "core/context/PromptFramingFactory.hpp"
 #include "core/context/ContextBuilder.hpp"
 #include "core/context/ModelGuidance.hpp"
 #include "core/context/WorkingRules.hpp"
@@ -161,7 +162,7 @@ TEST_CASE("A code-mode model reads Codex's instructions instead of Filo's doctri
     const auto layers = core::context::ContextBuilder(context)
         .with_mode("BUILD")
         .with_model_guidance(core::context::find_model_guidance("gpt-6.2-sol"))
-        .with_framing(core::context::make_prompt_framing(bundled, nullptr))
+        .with_framing(std::make_shared<const core::context::CodexPromptFraming>(bundled))
         .include_project_context(false)
         .build_layers();
     REQUIRE_FALSE(layers.empty());
@@ -188,10 +189,10 @@ TEST_CASE("A Codex-instructed prompt frames context the way Codex sends it",
         core::context::ContextBuilder builder(context);
         builder.with_mode("BUILD");
         if (codex) {
-            builder.with_framing(core::context::make_prompt_framing(
-                {.instructions = "Codex instructions.",
-                 .collaboration = "<collaboration_mode>x</collaboration_mode>"},
-                nullptr));
+            builder.with_framing(std::make_shared<const core::context::CodexPromptFraming>(
+                core::context::CodexPrompt{
+                    .instructions = "Codex instructions.",
+                    .collaboration = "<collaboration_mode>x</collaboration_mode>"}));
         }
         return builder.build();
     };
@@ -218,4 +219,24 @@ TEST_CASE("A Codex-instructed prompt frames context the way Codex sends it",
     CHECK_THAT(filo, Catch::Matchers::ContainsSubstring("[Agent Skills]"));
     CHECK(filo.find("<permissions instructions>") == std::string::npos);
     CHECK(filo.find("<environment_context>") == std::string::npos);
+}
+
+TEST_CASE("Each model gets the framing it was trained on, and nothing else decides it",
+          "[context][model_guidance][codex]") {
+    using core::context::prompt_framing_for;
+    const auto codex = prompt_framing_for("gpt-6.2-astra", "BUILD", nullptr);
+    CHECK(codex->describes_mid_turn_messages());
+    CHECK(codex->user_messaging_tools()
+          == std::vector<std::string>{"request_user_input_async", "send_message_to_user_async"});
+    CHECK_THAT(codex->runtime("BUILD"), Catch::Matchers::StartsWith("You are Codex"));
+
+    const auto filo = prompt_framing_for("claude-opus-5-5", "BUILD", nullptr);
+    CHECK_FALSE(filo->describes_mid_turn_messages());
+    CHECK(filo->user_messaging_tools().empty());
+
+    // Equal framings are recognised, so the prompt is not rebuilt for nothing.
+    CHECK(codex->same_as(*prompt_framing_for("gpt-6.2-astra", "BUILD", nullptr)));
+    CHECK_FALSE(codex->same_as(*prompt_framing_for("gpt-6.2-astra", "PLAN", nullptr)));
+    CHECK_FALSE(codex->same_as(*filo));
+    CHECK(filo->same_as(*prompt_framing_for("claude-opus-5-5", "PLAN", nullptr)));
 }

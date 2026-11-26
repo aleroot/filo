@@ -58,11 +58,11 @@ public:
     /// recently used idle one is dropped (codex-rs MAX_UNIFIED_EXEC_PROCESSES).
     static constexpr std::size_t kMaxCommandSessions = 64;
 
-    /// Starts @p command (its working_dir, or @p workspace) and waits up to
-    /// @p yield for it to end.
+    /// Starts @p command (its working_dir, or @p workspace), on a
+    /// pseudo-terminal when @p tty, and waits up to @p yield for it to end.
     CommandStep start_command(ActiveCommand command, const std::filesystem::path& workspace,
         const core::landrun::LandrunPolicy& policy, std::chrono::milliseconds yield,
-        const std::function<void(int)>& before_dispatch = {});
+        bool tty = false, const std::function<void(int)>& before_dispatch = {});
     /// Writes @p input (nothing only reads) to the session @p process_id of
     /// @p session_id and waits up to @p yield for more output.
     CommandStep continue_command(std::string_view session_id, int process_id,

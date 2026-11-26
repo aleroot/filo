@@ -42,6 +42,9 @@ inline constexpr std::string_view kWait = "wait";
 // exec tools). Only scripts see them; each call runs as run_terminal_command.
 inline constexpr std::string_view kExecCommand = "exec_command";
 inline constexpr std::string_view kWriteStdin = "write_stdin";
+// Codex's asynchronous user messaging tools (AsyncUserMessages.hpp).
+inline constexpr std::string_view kRequestUserInputAsync = "request_user_input_async";
+inline constexpr std::string_view kSendMessageToUserAsync = "send_message_to_user_async";
 
 // Display titles of the tools the Agent serves itself. They are never
 // registered in ToolManager, so its title lookup falls back to

@@ -162,13 +162,13 @@ IShellExecutor::Result ShellSessions::run(ActiveCommand command, const fs::path&
 
 ShellSessions::CommandStep ShellSessions::start_command(ActiveCommand command,
     const fs::path& workspace, const core::landrun::LandrunPolicy& policy,
-    std::chrono::milliseconds yield, const std::function<void(int)>& before_dispatch) {
+    std::chrono::milliseconds yield, bool tty, const std::function<void(int)>& before_dispatch) {
     const auto started = std::chrono::steady_clock::now();
     std::string error;
     std::shared_ptr<CommandProcess> process = CommandProcess::spawn(
         command.command,
         command.working_dir.empty() ? workspace : fs::path(command.working_dir),
-        policy, error);
+        policy, tty, error);
     if (!process) return {.error = std::move(error)};
     if (before_dispatch) before_dispatch(process->process_group());
 

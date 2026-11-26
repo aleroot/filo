@@ -3,7 +3,8 @@
 #include "CodexInstructions.hpp"
 #include "PromptFraming.hpp"
 
-#include <memory>
+#include <string>
+#include <vector>
 
 namespace core::context {
 
@@ -13,7 +14,8 @@ namespace core::context {
 /// `# AGENTS.md instructions for <dir>`, and skills as `## Skills`.
 class CodexPromptFraming final : public PromptFraming {
 public:
-    explicit CodexPromptFraming(CodexPrompt prompt) : prompt_(std::move(prompt)) {}
+    /// @p experimental_tools: the catalog's `experimental_supported_tools`.
+    explicit CodexPromptFraming(CodexPrompt prompt, std::vector<std::string> experimental_tools = {});
 
     [[nodiscard]] std::string runtime(std::string_view mode) const override;
     [[nodiscard]] std::string workspace(const SessionContext& session_context) const override;
@@ -21,14 +23,19 @@ public:
                                        std::string_view withheld_notice) const override;
     [[nodiscard]] std::string skills(
         const std::vector<std::filesystem::path>& workspace_roots) const override;
+    /// The template's "Working with the user" section: a message sent during
+    /// active work steers the task.
+    [[nodiscard]] bool describes_mid_turn_messages() const noexcept override { return true; }
+    /// codex-rs spec_plan.rs add_core_utility_tools: the async user tools the
+    /// catalog lists for the model.
+    [[nodiscard]] std::vector<std::string> user_messaging_tools() const override {
+        return user_messaging_tools_;
+    }
+    [[nodiscard]] bool same_as(const PromptFraming& other) const noexcept override;
 
 private:
     CodexPrompt prompt_;
+    std::vector<std::string> user_messaging_tools_;
 };
-
-/// The framing for a model: Codex's when @p codex carries instructions,
-/// otherwise Filo's tailored by @p guidance.
-[[nodiscard]] std::shared_ptr<const PromptFraming> make_prompt_framing(
-    CodexPrompt codex, const ModelGuidance* guidance);
 
 } // namespace core::context

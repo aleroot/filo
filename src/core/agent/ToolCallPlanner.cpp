@@ -49,7 +49,8 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
     ToolAccessSet accesses;
 
     if (name == kGetCurrentTime || name == kWriteTodos || name == kReadToolResult
-        || name == kConversation) {
+        || name == kConversation || name == kRequestUserInputAsync
+        || name == kSendMessageToUserAsync) {
         accesses = no_tool_access();
     } else if (name == kAskUserQuestion) {
         accesses = all_tool_access();

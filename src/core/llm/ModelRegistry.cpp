@@ -655,6 +655,9 @@ constexpr int32_t kGpt62LongContextThreshold = 272'000;
         .proactive_delegation = true,
         .explicit_delegation = true,
     };
+    // codex-rs models.json gpt-6.2-sol / gpt-6.2-astra: the async user
+    // messaging tools their instructions name.
+    info.experimental_supported_tools = {"request_user_input_async", "send_message_to_user_async"};
     return info;
 }
 
