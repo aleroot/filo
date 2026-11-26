@@ -474,8 +474,7 @@ namespace {
 
 /// Renders a selection into a result. Shared by every mode so the byte budget,
 /// labeling, and disabled-source handling cannot drift apart.
-[[nodiscard]] SteeringLoadResult render_steering_result(const SteeringSelection& selection,
-                                                        SteeringFormat format) {
+[[nodiscard]] SteeringLoadResult render_steering_result(const SteeringSelection& selection) {
     SteeringLoadResult result;
     result.mode = selection.mode;
     result.root = selection.root;
@@ -485,15 +484,7 @@ namespace {
         return result;
     }
 
-    const bool codex = format == SteeringFormat::Codex;
-    std::string block;
-    if (codex) {
-        block = "\n\n# AGENTS.md instructions";
-        if (!selection.root.empty()) block += " for " + selection.root.string();
-        block += "\n\n<INSTRUCTIONS>\n";
-    } else {
-        block = "\n\n[Project Steering]\n";
-    }
+    std::string block = "\n\n[Project Steering]\n";
     std::size_t bytes_remaining = kMaxSteeringBytesTotal;
 
     for (const auto& file : selection.files) {
@@ -516,23 +507,21 @@ namespace {
         }
 
         result.source_labels.push_back(file.label);
-        if (codex) {
-            if (result.source_labels.size() > 1) block.push_back('\n');
-        } else {
-            block += "Source: " + file.label + "\n";
-        }
+        SteeringFile included = file;
+        included.content = content;
+        result.included.push_back(std::move(included));
+        block += "Source: " + file.label + "\n";
         block += content;
         if (!block.empty() && block.back() != '\n') {
             block.push_back('\n');
         }
-        if (!codex) block.push_back('\n');
+        block.push_back('\n');
 
         const std::size_t consumed = std::min(max_for_file, content.size());
         bytes_remaining = consumed >= bytes_remaining ? 0 : bytes_remaining - consumed;
     }
 
     if (!result.source_labels.empty()) {
-        if (codex) block += "</INSTRUCTIONS>";
         result.block = std::move(block);
     }
 
@@ -706,16 +695,14 @@ SteeringSelection select_steering_files(
 
 SteeringLoadResult load_workspace_steering_context(
     const std::vector<std::filesystem::path>& roots,
-    const SteeringPolicy& policy,
-    SteeringFormat format) {
-    return render_steering_result(select_steering_files(roots, policy), format);
+    const SteeringPolicy& policy) {
+    return render_steering_result(select_steering_files(roots, policy));
 }
 
 std::string load_workspace_steering_block(
     const std::vector<std::filesystem::path>& roots,
-    const SteeringPolicy& policy,
-    SteeringFormat format) {
-    return load_workspace_steering_context(roots, policy, format).block;
+    const SteeringPolicy& policy) {
+    return load_workspace_steering_context(roots, policy).block;
 }
 
 SteeringLoadResult load_project_steering_context(const std::filesystem::path& project_root,

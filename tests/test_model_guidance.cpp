@@ -3,6 +3,7 @@
 
 #include "TestSessionContext.hpp"
 #include "core/context/CodexInstructions.hpp"
+#include "core/context/CodexPromptFraming.hpp"
 #include "core/context/ContextBuilder.hpp"
 #include "core/context/ModelGuidance.hpp"
 #include "core/context/WorkingRules.hpp"
@@ -160,7 +161,7 @@ TEST_CASE("A code-mode model reads Codex's instructions instead of Filo's doctri
     const auto layers = core::context::ContextBuilder(context)
         .with_mode("BUILD")
         .with_model_guidance(core::context::find_model_guidance("gpt-6.2-sol"))
-        .with_codex_prompt(bundled.instructions, bundled.collaboration)
+        .with_framing(core::context::make_prompt_framing(bundled, nullptr))
         .include_project_context(false)
         .build_layers();
     REQUIRE_FALSE(layers.empty());
@@ -186,7 +187,12 @@ TEST_CASE("A Codex-instructed prompt frames context the way Codex sends it",
     const auto render = [&](bool codex) {
         core::context::ContextBuilder builder(context);
         builder.with_mode("BUILD");
-        if (codex) builder.with_codex_prompt("Codex instructions.", "<collaboration_mode>x</collaboration_mode>");
+        if (codex) {
+            builder.with_framing(core::context::make_prompt_framing(
+                {.instructions = "Codex instructions.",
+                 .collaboration = "<collaboration_mode>x</collaboration_mode>"},
+                nullptr));
+        }
         return builder.build();
     };
 

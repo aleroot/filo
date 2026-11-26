@@ -3,6 +3,7 @@
 #include "SessionContext.hpp"
 #include "PromptPlan.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 namespace core::context {
 
 struct ModelGuidance;
+class PromptFraming;
 
 // Mutable repository observations kept outside the cache-stable prompt plan.
 struct ProjectFactsSnapshot {
@@ -36,14 +38,12 @@ public:
     explicit ContextBuilder(const SessionContext& session_context);
 
     ContextBuilder& with_mode(std::string_view mode);
-    // The profile of the model the prompt is written for (find_model_guidance);
-    // nullptr keeps the shared doctrine as written.
-    ContextBuilder& with_model_guidance(const ModelGuidance* guidance) noexcept;
-    /// Codex base instructions and collaboration block for this turn. When
-    /// @p instructions is non-empty it replaces Filo's doctrine and any model
-    /// guidance: that text is the prompt the model was trained on.
-    ContextBuilder& with_codex_prompt(std::string instructions,
-                                      std::string collaboration);
+    // Filo's framing tailored to the profile of the model the prompt is
+    // written for (find_model_guidance); nullptr keeps the shared doctrine.
+    ContextBuilder& with_model_guidance(const ModelGuidance* guidance);
+    /// How each layer is written for the model (PromptFraming). Filo's own
+    /// framing by default; nullptr keeps the current one.
+    ContextBuilder& with_framing(std::shared_ptr<const PromptFraming> framing);
     // Pre-rendered semantic memory block from MemorySystem. ContextBuilder
     // does not open a store: the composition root projects the prompt so the
     // assembler stays independent of persistence.
@@ -61,9 +61,7 @@ private:
     const SessionContext& session_context_;
     std::string memory_prompt_;
     std::string mode_ = "BUILD";
-    const ModelGuidance* model_guidance_ = nullptr;
-    std::string codex_instructions_;
-    std::string codex_collaboration_;
+    std::shared_ptr<const PromptFraming> framing_;
     bool include_project_context_ = true;
     bool include_skill_catalog_ = true;
     bool include_project_facts_ = true;

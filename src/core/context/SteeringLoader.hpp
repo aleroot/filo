@@ -172,20 +172,14 @@ struct SteeringFile {
     std::filesystem::path root = {};
 };
 
-/// How loaded instructions are framed for the model.
-enum class SteeringFormat {
-    /// `[Project Steering]`, then each file after a `Source:` line.
-    Filo,
-    /// codex-rs context/user_instructions.rs: one `# AGENTS.md instructions
-    /// for <dir>` block holding every file in `<INSTRUCTIONS>`, the frame a
-    /// Codex-trained model reads project instructions from.
-    Codex,
-};
-
 struct SteeringLoadResult {
     std::string block;
     std::vector<std::string> source_labels;
     std::vector<SteeringFile> files;
+    /// The files @c block carries, in order, each with exactly the content it
+    /// carries (after the byte budget). A prompt that frames instructions
+    /// differently renders these instead of @c block.
+    std::vector<SteeringFile> included;
     SteeringMode mode = SteeringMode::Default;
     /// The root whose files were used; empty when no steering was found.
     std::filesystem::path root;
@@ -272,13 +266,11 @@ struct SteeringSelection {
  */
 [[nodiscard]] SteeringLoadResult load_workspace_steering_context(
     const std::vector<std::filesystem::path>& roots,
-    const SteeringPolicy& policy = {},
-    SteeringFormat format = SteeringFormat::Filo);
+    const SteeringPolicy& policy = {});
 
 [[nodiscard]] std::string load_workspace_steering_block(
     const std::vector<std::filesystem::path>& roots,
-    const SteeringPolicy& policy = {},
-    SteeringFormat format = SteeringFormat::Filo);
+    const SteeringPolicy& policy = {});
 
 [[nodiscard]] SteeringLoadResult load_project_steering_context(
     const std::filesystem::path& project_root,

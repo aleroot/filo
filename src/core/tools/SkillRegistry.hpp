@@ -171,13 +171,6 @@ public:
     [[nodiscard]] static std::string
     build_catalog_prompt(const std::vector<std::filesystem::path>& workspace_roots);
 
-    /// The same skills as Codex lists them (codex-rs ext/skills catalog_prompt.rs):
-    /// a `## Skills` section with `### Available skills`, which the Codex
-    /// instructions tell the model to look for. Each entry's locator names
-    /// `activate_skill`, the tool that reads a skill whatever its location.
-    [[nodiscard]] static std::string
-    build_codex_catalog_prompt(const std::vector<std::filesystem::path>& workspace_roots);
-
     [[nodiscard]] static std::vector<std::filesystem::path>
     list_relative_resources(const SkillManifest& skill, std::size_t max_entries = 200);
 };

@@ -466,6 +466,8 @@ set(FILO_CORE_SOURCES
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
     src/core/context/CodexInstructions.cpp
+    src/core/context/CodexPromptFraming.cpp
+    src/core/context/PromptFraming.cpp
     src/core/context/ModelGuidance.cpp
     src/core/context/PromptCode.cpp
     src/core/context/PromptPlan.cpp

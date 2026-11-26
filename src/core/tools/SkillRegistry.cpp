@@ -503,29 +503,6 @@ std::string SkillRegistry::build_catalog_prompt(const std::vector<fs::path>& wor
     return out.str();
 }
 
-std::string SkillRegistry::build_codex_catalog_prompt(const std::vector<fs::path>& workspace_roots) {
-    const auto skills = discover_instruction_skills(workspace_roots);
-    if (skills.empty()) return {};
-
-    std::string out = "\n\n<skills_instructions>\n## Skills\n";
-    out += "A skill is a set of instructions provided through a `SKILL.md` source. Below is the "
-           "list of skills that can be used. Each entry includes a name, description, and source "
-           "locator. Every locator here is the `activate_skill` tool: call it with the skill's "
-           "`name` to read its `SKILL.md`, and add `resource_path` to read a file the skill "
-           "references.\n";
-    out += "### Available skills\n";
-    for (const auto& skill : skills) {
-        out += "- " + skill.name + ": " + skill.description;
-        out += " (tool: activate_skill";
-        if (skill.from_additional_workspace && !skill.workspace_root.empty()) {
-            out += ", workspace: " + skill.workspace_root.string();
-        }
-        out += ")\n";
-    }
-    out += "</skills_instructions>";
-    return out;
-}
-
 std::vector<fs::path>
 SkillRegistry::list_relative_resources(const SkillManifest& skill, std::size_t max_entries) {
     std::vector<fs::path> resources;

@@ -8,6 +8,7 @@
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../context/CodexInstructions.hpp"
+#include "../context/CodexPromptFraming.hpp"
 #include "../context/ModelGuidance.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../llm/ModelCatalogDiscovery.hpp"
@@ -1420,8 +1421,9 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     stable_prompt_plan_ =
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
-            .with_model_guidance(prompt_guidance_)
-            .with_codex_prompt(codex_instructions_, codex_collaboration_)
+            .with_framing(core::context::make_prompt_framing(
+                {.instructions = codex_instructions_, .collaboration = codex_collaboration_},
+                prompt_guidance_))
             .with_memory_prompt(std::move(memory_projection.block))
             .include_project_context(session_context_.include_project_context)
             .include_project_facts(false)
