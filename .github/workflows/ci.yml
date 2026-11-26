@@ -22,7 +22,19 @@ jobs:
           set -eu
           packages="gcc-c++ cmake make pkg-config libopenssl-devel libicu-devel libcurl-devel zlib-devel python3 python3-devel git patch"
 
-          zypper --non-interactive --gpg-auto-import-keys refresh
+          # A mirror caught mid-sync serves a repomd.xml whose primary.xml is not
+          # there yet ("not found on medium", exit 4). That heals within minutes,
+          # so retry with a forced metadata download instead of failing the job.
+          attempt=1
+          until zypper --non-interactive --gpg-auto-import-keys refresh --force; do
+            if [ "$attempt" -ge 5 ]; then
+              echo "::error::Repository refresh failed $attempt times"
+              exit 1
+            fi
+            echo "::warning::Repository refresh failed (attempt $attempt), retrying in $((attempt * 30))s"
+            sleep $((attempt * 30))
+            attempt=$((attempt + 1))
+          done
 
           # The tumbleweed:latest image often lags behind the repositories by one
           # snapshot, which makes -devel packages unresolvable against the already
