@@ -191,6 +191,15 @@ namespace {
         if (model.string("tool_mode", tool_mode)) {
             info.tool_mode = catalog_tool_mode_from_string(tool_mode);
         }
+        const auto copy_pointer = [&](std::string_view pointer, std::string& out) {
+            std::string_view text;
+            if (model.raw().at_pointer(pointer).get(text) == simdjson::SUCCESS && !text.empty()) {
+                out.assign(text);
+            }
+        };
+        copy_pointer("/model_messages/instructions_template", info.instructions_template);
+        copy_pointer("/model_messages/collaboration_modes/default", info.collaboration_default);
+        copy_pointer("/model_messages/collaboration_modes/plan", info.collaboration_plan);
     }
     if (model.boolean("support_verbosity")) {
         (void)model.string("default_verbosity", info.default_verbosity);

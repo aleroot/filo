@@ -311,6 +311,16 @@ struct ModelInfo {
     /// ChatGPT backend train the same slug the same way. Unspecified keeps
     /// direct function tools.
     CatalogToolMode tool_mode = CatalogToolMode::Unspecified;
+    /// Codex `model_messages.instructions_template`, the base instructions the
+    /// model was trained against. Provider-scoped like `wire_protocol`: a
+    /// refresh must not publish one endpoint's prompt as a fact about every
+    /// later lookup of the id. Empty when this card did not publish one.
+    std::string instructions_template;
+    /// Codex `model_messages.collaboration_modes.default` and `.plan`.
+    /// Provider-scoped like `instructions_template`. Empty means the catalog
+    /// published nothing; the bundled seed stands.
+    std::string collaboration_default;
+    std::string collaboration_plan;
     /// Provider-advertised automatic compaction threshold, when supplied.
     std::optional<int32_t> auto_compact_token_limit = {};
     

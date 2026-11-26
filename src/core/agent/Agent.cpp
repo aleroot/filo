@@ -7,8 +7,10 @@
 #include "../changes/FileChangeJson.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
+#include "../context/CodexInstructions.hpp"
 #include "../context/ModelGuidance.hpp"
 #include "../hooks/HookManager.hpp"
+#include "../llm/ModelCatalogDiscovery.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/ToolCallAssembly.hpp"
 #include "../llm/ToolTranscript.hpp"
@@ -1078,7 +1080,7 @@ void Agent::set_mode(const std::string &mode) {
     if (!history_.empty() && history_[0].role == "system") {
       history_.erase(history_.begin());
     }
-    refresh_stable_prompt_state_unlocked();
+    retarget_prompt_unlocked(active_model_);
   }
 }
 
@@ -1260,10 +1262,65 @@ void Agent::refresh_stable_prompt_state_unlocked() {
     refresh_context_window_snapshot_unlocked();
 }
 
+namespace {
+
+/// The catalog card this provider published for @p model. The agent reads a
+/// model's own prompt text here; a provider snapshot is not a registry fact.
+[[nodiscard]] std::optional<core::llm::ModelInfo> catalog_card(
+    std::string_view catalog_key,
+    std::string_view model) {
+    const auto snapshot =
+        core::llm::ModelCatalogAvailability::instance().snapshot(catalog_key);
+    for (const auto& info : snapshot.models) {
+        if (info.canonical_id == model
+            || std::ranges::find(info.aliases, std::string(model)) != info.aliases.end()) {
+            return info;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 void Agent::retarget_prompt_unlocked(std::string_view model) {
-    const auto* guidance = core::context::find_model_guidance(model);
-    if (guidance == prompt_guidance_) return;
+    core::context::CodexPromptText live;
+    std::string catalog_key;
+    if (provider_) {
+        if (const auto metadata = provider_->metadata()) {
+            catalog_key = std::string(core::llm::model_catalog_key(
+                metadata->service_id, metadata->provider_name));
+        }
+    }
+    if (const auto card = catalog_card(catalog_key, model)) {
+        live.instructions = card->instructions_template;
+        live.collaboration_default = card->collaboration_default;
+        live.collaboration_plan = card->collaboration_plan;
+    }
+    bool code_mode = false;
+    if (const auto info = core::llm::ModelRegistry::instance().lookup(model)) {
+        code_mode = core::llm::is_code_mode_only(info->tool_mode);
+    }
+    auto codex = core::context::codex_prompt_for(
+        model,
+        to_string(current_mode_),
+        live.instructions,
+        live.collaboration_default,
+        live.collaboration_plan,
+        code_mode);
+    const auto* guidance = codex.instructions.empty()
+        ? core::context::find_model_guidance(model)
+        : nullptr;
+    const auto mode = to_string(current_mode_);
+    if (guidance == prompt_guidance_
+        && codex.instructions == codex_instructions_
+        && codex.collaboration == codex_collaboration_
+        && mode == codex_mode_) {
+        return;
+    }
     prompt_guidance_ = guidance;
+    codex_instructions_ = std::move(codex.instructions);
+    codex_collaboration_ = std::move(codex.collaboration);
+    codex_mode_ = std::string(mode);
     refresh_stable_prompt_state_unlocked();
 }
 
@@ -1364,6 +1421,7 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
             .with_model_guidance(prompt_guidance_)
+            .with_codex_prompt(codex_instructions_, codex_collaboration_)
             .with_memory_prompt(std::move(memory_projection.block))
             .include_project_context(session_context_.include_project_context)
             .include_project_facts(false)
@@ -1520,7 +1578,7 @@ void Agent::clear_history() {
         ++conversation_generation_;
         journal_unlocked("clear", "{}");
         history_.clear();
-        tool_script_store_.clear();
+        tool_scripts_.clear();
         context_summary_.clear();
         project_facts_snapshot_.reset();
         consecutive_failure_rounds_ = 0;
@@ -2099,7 +2157,7 @@ std::optional<core::tools::ToolDefinition> Agent::resolve_tool_definition(
     if (tool_name == names::kWait && !skill_manager_.get_tool_definition(tool_name)) {
         return core::tools::ToolDefinition{
             .name = std::string(names::kWait),
-            .description = "There is no running script to resume.",
+            .description = core::tools::wait_tool_description(),
         };
     }
     if (tool_name == SubagentOrchestrator::kTaskToolName) {
@@ -2124,7 +2182,7 @@ std::string Agent::dispatch_tool(const core::llm::ToolCall& call, const ToolCall
     const std::string& arguments = call.function.arguments;
     if (name == names::kExec) return run_tool_script(call, scope);
     if (name == names::kWait && is_script_harness_call(name)) {
-        return R"({"error":"exec runs every script to completion, so there is no running cell to wait on. Read the result exec returned."})";
+        return resume_tool_script(call, scope);
     }
     if (name == SubagentOrchestrator::kTaskToolName) {
         // A direct call snapshots the conversation before the batch. A script
@@ -2260,12 +2318,9 @@ ToolApproval Agent::approve_tool_call(
     };
 }
 
-std::string Agent::run_tool_script(const core::llm::ToolCall& call, const ToolCallScope& scope) {
-    const auto source = core::tools::source_from_arguments(call.function.arguments);
-    if (!source) return R"({"error":"exec needs a script."})";
-    const auto& offered = scope.request->tools;
-    ScriptToolHost host(NestedToolServices{
-        .offered = offered,
+ScriptToolHost Agent::script_host(const core::llm::ToolCall& call, const ToolCallScope& scope) {
+    return ScriptToolHost(NestedToolServices{
+        .offered = scope.request->tools,
         .session_context = scope.session_context,
         .resolve = [this](const std::string& name) { return resolve_tool_definition(name); },
         .approve = [this, &scope](const core::llm::ToolCall& nested) {
@@ -2301,7 +2356,18 @@ std::string Agent::run_tool_script(const core::llm::ToolCall& call, const ToolCa
         },
         .cancelled = scope.cancelled,
     });
-    return core::tools::run_tool_script(*source, offered, host, tool_script_store_).output;
+}
+
+std::string Agent::run_tool_script(const core::llm::ToolCall& call, const ToolCallScope& scope) {
+    const auto source = core::tools::source_from_arguments(call.function.arguments);
+    if (!source) return R"({"error":"exec needs a script."})";
+    auto host = script_host(call, scope);
+    return tool_scripts_.execute(*source, scope.request->tools, host).output;
+}
+
+std::string Agent::resume_tool_script(const core::llm::ToolCall& call, const ToolCallScope& scope) {
+    auto host = script_host(call, scope);
+    return tool_scripts_.resume(call.function.arguments, host).output;
 }
 
 // ---------------------------------------------------------------------------
@@ -4480,7 +4546,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     std::lock_guard lock(history_mutex_);
     ++conversation_generation_;
     // A set-aside conversation comes back with the values its scripts stored.
-    if (kind == HistoryLoad::Resume) tool_script_store_.clear();
+    if (kind == HistoryLoad::Resume) tool_scripts_.clear();
     current_mode_ = agent_mode_from_string(mode);
     context_summary_ = context_summary;
     project_facts_snapshot_.reset();

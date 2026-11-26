@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "TestSessionContext.hpp"
+#include "core/context/CodexInstructions.hpp"
 #include "core/context/ContextBuilder.hpp"
 #include "core/context/ModelGuidance.hpp"
 #include "core/context/WorkingRules.hpp"
@@ -130,4 +131,41 @@ TEST_CASE("Every profile renders in every mode in place of the shared rules",
                 core::context::working_rule_text(WorkingRule::RepositorySafety))));
         }
     }
+}
+
+TEST_CASE("A code-mode model reads Codex's instructions instead of Filo's doctrine",
+          "[context][model_guidance][codex]") {
+    TempWorkspace workspace;
+    const auto bundled = core::context::codex_prompt_for(
+        "gpt-6.2-sol", "BUILD", {}, {}, {}, true);
+    CHECK_THAT(bundled.instructions, Catch::Matchers::StartsWith(
+        "You are Codex, an agent based on GPT-6"));
+    CHECK_THAT(bundled.instructions, Catch::Matchers::ContainsSubstring(
+        "# Autonomy and persistence"));
+    CHECK_THAT(bundled.collaboration, Catch::Matchers::ContainsSubstring(
+        "strongly prefer making reasonable assumptions"));
+
+    const auto planned = core::context::codex_prompt_for(
+        "gpt-6.2-sol", "PLAN", "Catalog instructions.", "Catalog default.", {}, true);
+    CHECK(planned.instructions == "Catalog instructions.");
+    CHECK_THAT(planned.collaboration, Catch::Matchers::ContainsSubstring("# Plan Mode"));
+
+    CHECK(core::context::codex_prompt_for("gpt-4o", "BUILD", {}, {}, {}, false)
+              .instructions.empty());
+
+    const auto prompt = runtime_layer(workspace.path(), "BUILD", nullptr);
+    const auto context = test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+        .primary = workspace.path(), .enforce = true, .version = 1});
+    const auto layers = core::context::ContextBuilder(context)
+        .with_mode("BUILD")
+        .with_model_guidance(core::context::find_model_guidance("gpt-6.2-sol"))
+        .with_codex_prompt(bundled.instructions, bundled.collaboration)
+        .include_project_context(false)
+        .build_layers();
+    REQUIRE_FALSE(layers.empty());
+    CHECK_THAT(layers[0].content, Catch::Matchers::ContainsSubstring(
+        "Autonomy and persistence"));
+    CHECK(layers[0].content.find("[Working rules]") == std::string::npos);
+    CHECK(layers[0].content.find("smallest correct change") == std::string::npos);
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Working rules]"));
 }

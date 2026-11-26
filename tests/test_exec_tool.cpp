@@ -235,6 +235,52 @@ TEST_CASE("The pragma's max_output_tokens bounds the result", "[exec]") {
     CHECK_THAT(output, ContainsSubstring("END"));
 }
 
+TEST_CASE("A script that outlives its yield stays a cell wait can resume", "[exec]") {
+    core::tools::ToolScriptSession session;
+    RecordingHost host;
+    const std::vector<core::llm::Tool> tools{
+        tool("read", "Read a file.", {{"path", "string", "File path.", true}}),
+    };
+    const auto started = std::chrono::steady_clock::now();
+    const auto yielded = session.execute(
+        "// @exec: {\"yield_time_ms\": 40}\n"
+        "text('started');\n"
+        "await new Promise(resolve => setTimeout(resolve, 250));\n"
+        "text('finished');\n",
+        tools, host);
+    CHECK(yielded.running);
+    CHECK_FALSE(yielded.completed);
+    CHECK_THAT(yielded.output, StartsWith("Script running with cell ID c1\n"));
+    CHECK(output_of(yielded) == "started");
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(200));
+
+    const auto done = session.resume(R"({"cell_id":"c1","yield_time_ms":1000})", host);
+    CHECK(done.completed);
+    CHECK_FALSE(done.running);
+    CHECK_THAT(done.output, StartsWith("Script completed\n"));
+    CHECK(output_of(done) == "finished");
+
+    const auto missing = session.resume(R"({"cell_id":"c1"})", host);
+    CHECK_FALSE(missing.running);
+    CHECK_THAT(missing.output, ContainsSubstring("No running exec cell"));
+}
+
+TEST_CASE("wait can terminate a running cell", "[exec]") {
+    core::tools::ToolScriptSession session;
+    RecordingHost host;
+    const auto yielded = session.execute(
+        "// @exec: {\"yield_time_ms\": 30}\n"
+        "text('live');\n"
+        "await new Promise(resolve => setTimeout(resolve, 5000));\n",
+        {}, host);
+    REQUIRE(yielded.running);
+    const auto stopped = session.resume(R"({"cell_id":"c1","terminate":true})", host);
+    CHECK_FALSE(stopped.running);
+    CHECK_THAT(stopped.output, StartsWith("Script terminated\n"));
+    CHECK(output_of(stopped).empty());
+    CHECK(output_of(yielded) == "live");
+}
+
 #else
 
 TEST_CASE("A build without JavaScript fails a script instead of running it", "[exec]") {
@@ -281,7 +327,11 @@ TEST_CASE("The exec description documents every offered tool in TypeScript", "[e
         tool("mcp__docs-server.lookup", "Look up docs."),
     };
     const std::string description = core::tools::tool_script_description(tools);
-    CHECK_THAT(description, StartsWith("Run JavaScript that calls tools."));
+    CHECK_THAT(description, StartsWith("Run JavaScript code to orchestrate tool calls."));
+    CHECK_THAT(description, ContainsSubstring("yield_time_ms"));
+    CHECK_THAT(description, ContainsSubstring("Script running with cell ID"));
+    CHECK_THAT(core::tools::wait_tool_description(),
+               ContainsSubstring("Script running with cell ID"));
     CHECK_THAT(description, ContainsSubstring("### `read`\nRead a file."));
     CHECK_THAT(description, ContainsSubstring("declare const tools: { read(args: {\n"));
     CHECK_THAT(description, ContainsSubstring("  // File path.\n  path: string;\n"));

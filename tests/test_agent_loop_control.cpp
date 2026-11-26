@@ -2925,19 +2925,22 @@ TEST_CASE("Agent writes the prompt for the model each turn targets",
     const auto requests = provider->requests_snapshot();
     REQUIRE(requests.size() == 3);
     const auto prompt = [&](std::size_t i) { return requests[i].prompt_plan.render(); };
-    constexpr std::string_view kGuidance = "[Model guidance]";
     constexpr std::string_view kSharedRule = "do not edit unless asked";
 
-    CHECK(prompt(0).find(kGuidance) != std::string::npos);
+    CHECK(prompt(0).find("You are Codex, an agent based on GPT-6") != std::string::npos);
+    CHECK(prompt(0).find("Autonomy and persistence") != std::string::npos);
+    CHECK(prompt(0).find("<collaboration_mode>") != std::string::npos);
     CHECK(prompt(0).find(kSharedRule) == std::string::npos);
+    CHECK(prompt(0).find("smallest correct change") == std::string::npos);
     // The history's system message says the same as the plan.
-    CHECK(requests[0].messages[0].content.find(kGuidance) != std::string::npos);
+    CHECK(requests[0].messages[0].content.find("You are Codex, an agent based on GPT-6")
+          != std::string::npos);
 
     CHECK(requests[1].model == "claude-opus-5-5");
-    CHECK(prompt(1).find(kGuidance) == std::string::npos);
+    CHECK(prompt(1).find("You are Codex") == std::string::npos);
     CHECK(prompt(1).find(kSharedRule) != std::string::npos);
 
-    CHECK(prompt(2).find(kGuidance) != std::string::npos);
+    CHECK(prompt(2).find("Autonomy and persistence") != std::string::npos);
 }
 
 TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {

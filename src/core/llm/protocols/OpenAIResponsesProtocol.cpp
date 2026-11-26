@@ -84,9 +84,7 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
 // core/src/tools/code_mode/execute_spec.rs, wait_spec.rs): `exec` is a
 // freeform tool whose input is the script, constrained by this grammar (an
 // optional `// @exec:` options line, then the source); `wait` resumes a
-// script that yielded. Filo's scripts never yield, but the model expects
-// both tools, so `wait` is declared and tells it so. A call to it finds no
-// such tool.
+// script that yielded.
 constexpr std::string_view kExecGrammar = R"(
 start: pragma_source | plain_source
 pragma_source: PRAGMA_LINE NEWLINE SOURCE
@@ -107,9 +105,7 @@ void append_tool_script(std::string& payload, const std::vector<Tool>& tools) {
     payload += R"("}},{"type":"function","name":")";
     payload += core::tools::names::kWait;
     payload += R"(","description":")";
-    payload += core::utils::escape_json_string(
-        "exec runs every script to completion, so there is never a running cell to wait on. "
-        "Do not call wait; read the result exec returned.");
+    payload += core::utils::escape_json_string(core::tools::wait_tool_description());
     payload += R"(","strict":false,"parameters":{"type":"object","properties":{)"
                R"("cell_id":{"type":"string"},"yield_time_ms":{"type":"number"},)"
                R"("max_tokens":{"type":"number"},"terminate":{"type":"boolean"}},)"

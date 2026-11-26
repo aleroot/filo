@@ -465,6 +465,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/FileAccessScope.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/CodexInstructions.cpp
     src/core/context/ModelGuidance.cpp
     src/core/context/PromptCode.cpp
     src/core/context/PromptPlan.cpp

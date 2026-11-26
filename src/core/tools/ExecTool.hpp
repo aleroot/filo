@@ -2,6 +2,7 @@
 
 #include "Tool.hpp"
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -17,10 +18,10 @@ struct Tool;
 namespace core::tools {
 
 // `exec` runs a JavaScript script whose `tools.<name>(input)` calls reach the
-// tools a step offers, and whose `text(...)` calls make up the result. Each
-// script runs to completion in a fresh QuickJS realm. How the tool is put on
-// the wire is the provider protocol's business; this file only knows the
-// script, its runtime, and the host that runs the nested calls.
+// tools a step offers, and whose `text(...)` calls make up the result. A script
+// that is still running when its yield time elapses stays alive as a cell;
+// `wait` resumes that cell. How either tool is put on the wire is the provider
+// protocol's business.
 
 /// Whether this build has the JavaScript runtime (CMake FILO_ENABLE_JAVASCRIPT).
 /// Without it no model is offered `exec`.
@@ -32,6 +33,10 @@ namespace core::tools {
 #endif
 }
 
+/// How long `exec` runs before yielding a still-running script, unless the
+/// script's `// @exec:` line asks for another. Codex's default.
+inline constexpr std::uint64_t kDefaultExecYieldMs = 10'000;
+
 /// The argument contract of an `exec` call: the script, as `{"source": ...}`.
 [[nodiscard]] ToolDefinition exec_argument_definition();
 [[nodiscard]] std::string arguments_for_source(std::string_view source);
@@ -42,6 +47,9 @@ namespace core::tools {
 /// What the model reads about `exec`: how scripts run, the helpers, and a
 /// TypeScript declaration of every tool in @p tools.
 [[nodiscard]] std::string tool_script_description(const std::vector<core::llm::Tool>& tools);
+
+/// What the model reads about `wait`: resume a cell `exec` yielded.
+[[nodiscard]] std::string wait_tool_description();
 
 /// The JavaScript identifier a tool is reachable under: `tools.<identifier>`.
 [[nodiscard]] std::string script_identifier(std::string_view tool_name);
@@ -99,12 +107,37 @@ private:
 
 struct ToolScriptOutcome {
     bool completed = false;
-    /// The `exec` result the model reads: status, wall time, then the text
-    /// the script reported, and the error when it failed.
+    /// True when the script is still running and @c output names its cell.
+    bool running = false;
+    /// The `exec` or `wait` result the model reads: status, wall time, then
+    /// the text the script reported, and the error when it failed.
     std::string output;
 };
 
-/// Runs one script. @p tools are the tools the script may call.
+/// The exec cells of one conversation. A script that yields stays here until
+/// `wait` finishes it, terminates it, or @c clear drops the conversation.
+class ToolScriptSession {
+public:
+    ToolScriptSession();
+    ~ToolScriptSession();
+    ToolScriptSession(const ToolScriptSession&) = delete;
+    ToolScriptSession& operator=(const ToolScriptSession&) = delete;
+
+    void clear();
+    [[nodiscard]] ToolScriptOutcome execute(std::string_view source,
+                                            const std::vector<core::llm::Tool>& tools,
+                                            ToolScriptHost& host);
+    /// @p arguments is `wait`'s JSON object: cell_id, and optionally
+    /// yield_time_ms, max_tokens, and terminate.
+    [[nodiscard]] ToolScriptOutcome resume(std::string_view arguments, ToolScriptHost& host);
+
+private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
+
+/// Runs one script to completion. A script that would yield is not kept: this
+/// is the one-shot path tests use. A conversation uses ToolScriptSession.
 [[nodiscard]] ToolScriptOutcome run_tool_script(std::string_view source,
                                                 const std::vector<core::llm::Tool>& tools,
                                                 ToolScriptHost& host,

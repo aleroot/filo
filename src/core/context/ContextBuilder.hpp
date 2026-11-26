@@ -39,6 +39,11 @@ public:
     // The profile of the model the prompt is written for (find_model_guidance);
     // nullptr keeps the shared doctrine as written.
     ContextBuilder& with_model_guidance(const ModelGuidance* guidance) noexcept;
+    /// Codex base instructions and collaboration block for this turn. When
+    /// @p instructions is non-empty it replaces Filo's doctrine and any model
+    /// guidance: that text is the prompt the model was trained on.
+    ContextBuilder& with_codex_prompt(std::string instructions,
+                                      std::string collaboration);
     // Pre-rendered semantic memory block from MemorySystem. ContextBuilder
     // does not open a store: the composition root projects the prompt so the
     // assembler stays independent of persistence.
@@ -57,6 +62,8 @@ private:
     std::string memory_prompt_;
     std::string mode_ = "BUILD";
     const ModelGuidance* model_guidance_ = nullptr;
+    std::string codex_instructions_;
+    std::string codex_collaboration_;
     bool include_project_context_ = true;
     bool include_skill_catalog_ = true;
     bool include_project_facts_ = true;

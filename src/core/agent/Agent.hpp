@@ -15,6 +15,7 @@
 #include "../session/SessionEfficiencyController.hpp"
 #include "../session/TodoManager.hpp"
 #include "../tools/ExecTool.hpp"
+#include "ScriptToolHost.hpp"
 #include "../tools/ReadToolResultTool.hpp"
 #include "../tools/TodoTool.hpp"
 #include "../tools/ToolManager.hpp"
@@ -713,6 +714,11 @@ private:
     /// above, so its nested calls take the same path as direct ones.
     [[nodiscard]] std::string run_tool_script(const core::llm::ToolCall& call,
                                               const ToolCallScope& scope);
+    /// Resumes a yielded exec cell. `wait`'s arguments name the cell.
+    [[nodiscard]] std::string resume_tool_script(const core::llm::ToolCall& call,
+                                                 const ToolCallScope& scope);
+    [[nodiscard]] ScriptToolHost script_host(const core::llm::ToolCall& call,
+                                             const ToolCallScope& scope);
 
     // Freeze provider selection (and the conversation generation) into the turn
     // state so a live model switch applies to the next user turn, not halfway
@@ -874,8 +880,8 @@ private:
     core::tools::TodoTool todo_tool_;
     ToolResultStore tool_result_store_;
     core::tools::ReadToolResultTool read_tool_result_tool_;
-    // What `store()` keeps between this conversation's exec scripts.
-    core::tools::ToolScriptStore tool_script_store_;
+    // Running exec cells and what `store()` keeps between this conversation's scripts.
+    core::tools::ToolScriptSession tool_scripts_;
     std::shared_ptr<core::memory::MemorySystem> memory_system_;
     // Parent's tracker when this agent runs as a delegated worker; null for an
     // agent that owns its turns. Fixed at construction: it is read from the
@@ -954,7 +960,11 @@ private:
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;
     /// The model guidance the stable prompt is written for; nullptr = shared doctrine.
+    /// A Codex template replaces it: see codex_instructions_.
     const core::context::ModelGuidance* prompt_guidance_ = nullptr;
+    std::string codex_instructions_;
+    std::string codex_collaboration_;
+    std::string codex_mode_;
     core::context::ContextWindowSnapshot context_window_snapshot_;
     core::session::SessionEfficiencyController efficiency_controller_;
     HistoryCompactor history_compactor_;

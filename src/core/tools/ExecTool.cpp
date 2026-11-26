@@ -34,24 +34,111 @@ constexpr int kMaxSchemaDepth = 4;
 
 constexpr std::string_view kPragmaPrefix = "// @exec:";
 
-constexpr std::string_view kDescription =
-    R"(Run JavaScript that calls tools.
-- The input is raw JavaScript source text, not JSON, quoted strings, or markdown code fences. It runs as an async script in a fresh realm, so top-level `await` works. There is no Node, file system, network access, or console.
-- Every tool declared below is a method of the global `tools` object, for example `await tools.read({path: "README.md"})`. Tool names become JavaScript identifiers: any character other than a letter, a digit, `_` or `$` becomes `_`. They are not top-level tools: call them only from a script.
-- A tool takes an object of its arguments, or a bare string when it has exactly one required string parameter. It resolves to the tool's result: an object when the result is JSON, otherwise a string.
-- A call that cannot run (invalid arguments, blocked, or denied by the user) rejects with an Error whose message says why. That is the call's outcome: handle it in the script or adjust, and do not ask for the same permission again.
-- Calls issued together, for example with `Promise.all` or `Promise.allSettled`, run in parallel when they do not touch the same files. Batch independent reads and searches in one script.
-- The result is the script's status and wall time, then only what the script reported with `text(...)`; the script's own value is not returned. Report what the next decision needs.
-- An optional first line `// @exec: {"max_output_tokens": 1000}` sets the result budget, 10000 tokens by default.
-- The script runs to completion; promises it did not await are discarded when it ends.
-- Global helpers:
-- `text(value: string | number | boolean | undefined | null)`: Appends a text item to the result. Non-string values are stringified with `JSON.stringify(...)` when possible.
-- `exit()`: Immediately ends the script successfully, like an early return from the top level.
-- `store(key: string, value: any)`: Stores a serializable value under a string key for later scripts in the same session.
-- `load(key: string)`: Returns the stored value for a key, or `undefined` if it is missing.
-- `setTimeout(callback: () => void, delayMs?: number)`: Schedules a callback and returns a timeout id. A pending timeout does not keep the script alive; await a promise to wait for one.
-- `clearTimeout(timeoutId?: number)`: Cancels a timeout created by `setTimeout`.
-- `ALL_TOOLS`: The callable tools as `{ name, description }` entries.)";
+// codex-rs code-mode-protocol/src/description.rs MCP_TYPESCRIPT_PREAMBLE:
+// the shared result shape an MCP tool returns, so a script can read
+// result.content without guessing.
+constexpr std::string_view kMcpTypescriptPreamble = R"(type Role = "user" | "assistant";
+type MetaObject = Record<string, unknown>;
+type Annotations = {
+  audience?: Role[];
+  priority?: number;
+  lastModified?: string;
+};
+type Icon = {
+  src: string;
+  mimeType?: string;
+  sizes?: string[];
+  theme?: "light" | "dark";
+};
+type TextResourceContents = {
+  uri: string;
+  mimeType?: string;
+  _meta?: MetaObject;
+  text: string;
+};
+type BlobResourceContents = {
+  uri: string;
+  mimeType?: string;
+  _meta?: MetaObject;
+  blob: string;
+};
+type TextContent = {
+  type: "text";
+  text: string;
+  annotations?: Annotations;
+  _meta?: MetaObject;
+};
+type ImageContent = {
+  type: "image";
+  data: string;
+  mimeType: string;
+  annotations?: Annotations;
+  _meta?: MetaObject;
+};
+type AudioContent = {
+  type: "audio";
+  data: string;
+  mimeType: string;
+  annotations?: Annotations;
+  _meta?: MetaObject;
+};
+type ResourceLink = {
+  icons?: Icon[];
+  name: string;
+  title?: string;
+  uri: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: Annotations;
+  size?: number;
+  _meta?: MetaObject;
+  type: "resource_link";
+};
+type EmbeddedResource = {
+  type: "resource";
+  resource: TextResourceContents | BlobResourceContents;
+  annotations?: Annotations;
+  _meta?: MetaObject;
+};
+type ContentBlock =
+  | TextContent
+  | ImageContent
+  | AudioContent
+  | ResourceLink
+  | EmbeddedResource;
+type CallToolResult<TStructured = { [key: string]: unknown }> = {
+  _meta?: MetaObject;
+  content: ContentBlock[];
+  isError?: boolean;
+  structuredContent?: TStructured;
+  [key: string]: unknown;
+};)";
+
+struct ExecPragma {
+    std::uint64_t max_output_tokens = kDefaultMaxOutputTokens;
+    std::optional<std::uint64_t> yield_time_ms;
+};
+
+/// `max_output_tokens` and `yield_time_ms` from the optional first-line pragma.
+[[nodiscard]] ExecPragma parse_exec_pragma(std::string_view source) {
+    ExecPragma pragma;
+    const auto line = core::utils::str::trim_ascii_view(
+        source.substr(0, source.find_first_of("\r\n")));
+    if (!line.starts_with(kPragmaPrefix)) return pragma;
+    simdjson::dom::parser parser;
+    const simdjson::padded_string json(line.substr(kPragmaPrefix.size()));
+    simdjson::dom::element document;
+    if (parser.parse(json).get(document) != simdjson::SUCCESS) return pragma;
+    std::uint64_t tokens = 0;
+    if (document["max_output_tokens"].get(tokens) == simdjson::SUCCESS && tokens > 0) {
+        pragma.max_output_tokens = tokens;
+    }
+    std::uint64_t yield_ms = 0;
+    if (document["yield_time_ms"].get(yield_ms) == simdjson::SUCCESS) {
+        pragma.yield_time_ms = yield_ms;
+    }
+    return pragma;
+}
 
 // ── Output ─────────────────────────────────────────────────────────────────
 
@@ -77,23 +164,6 @@ constexpr std::string_view kDescription =
     const auto tail = utf8_suffix(text, budget - head.size());
     return std::format("{}\n…[{} bytes truncated]…\n{}",
                        head, text.size() - head.size() - tail.size(), tail);
-}
-
-/// `max_output_tokens` from the optional first-line pragma.
-[[nodiscard]] std::uint64_t max_output_tokens(std::string_view source) {
-    const auto line = core::utils::str::trim_ascii_view(
-        source.substr(0, source.find_first_of("\r\n")));
-    if (!line.starts_with(kPragmaPrefix)) return kDefaultMaxOutputTokens;
-    simdjson::dom::parser parser;
-    const simdjson::padded_string json(line.substr(kPragmaPrefix.size()));
-    simdjson::dom::element pragma;
-    std::uint64_t tokens = 0;
-    if (parser.parse(json).get(pragma) != simdjson::SUCCESS
-        || pragma["max_output_tokens"].get(tokens) != simdjson::SUCCESS
-        || tokens == 0) {
-        return kDefaultMaxOutputTokens;
-    }
-    return tokens;
 }
 
 /// The result the model reads: status, wall time, then the script's text items.
@@ -288,10 +358,11 @@ constexpr std::string_view kPrelude = R"((() => {
     return json === undefined ? undefined : JSON.parse(json);
   };
   globalThis.exit = __filo_exit;
+  globalThis.yield_control = __filo_yield;
   globalThis.setTimeout = __filo_set_timeout;
   globalThis.clearTimeout = __filo_clear_timeout;
   for (const name of ["__filo_call", "__filo_text", "__filo_store", "__filo_load",
-                      "__filo_exit", "__filo_set_timeout", "__filo_clear_timeout",
+                      "__filo_exit", "__filo_yield", "__filo_set_timeout", "__filo_clear_timeout",
                       "__filo_catalog"]) {
     delete globalThis[name];
   }
@@ -348,8 +419,8 @@ private:
 
 class ScriptRealm {
 public:
-    ScriptRealm(ToolScriptHost& host, ToolScriptStore& store)
-        : host_(host), store_(store), runtime_(JS_NewRuntime()) {
+    explicit ScriptRealm(ToolScriptStore& store)
+        : store_(store), runtime_(JS_NewRuntime()) {
         if (runtime_ == nullptr) return;
         JS_SetMemoryLimit(runtime_, kMemoryLimitBytes);
         JS_SetMaxStackSize(runtime_, kMaxStackBytes);
@@ -363,6 +434,7 @@ public:
 
     ~ScriptRealm() {
         if (context_ != nullptr) {
+            if (promise_held_) JS_FreeValue(context_, promise_);
             for (auto& call : pending_) release(call);
             for (auto& [id, timer] : timers_) JS_FreeValue(context_, timer.callback);
             JS_FreeContext(context_);
@@ -370,11 +442,20 @@ public:
         if (runtime_ != nullptr) JS_FreeRuntime(runtime_);
     }
 
+    void set_cell_id(std::string id) { cell_id_ = std::move(id); }
+    [[nodiscard]] const std::string& cell_id() const noexcept { return cell_id_; }
+
+    /// Starts the script. @p allow_yield keeps a still-running script parked
+    /// in this realm; otherwise a yield point is not a place to stop.
     [[nodiscard]] ToolScriptOutcome run(std::string_view source,
-                                        const std::vector<core::llm::Tool>& tools) {
+                                        const std::vector<core::llm::Tool>& tools,
+                                        ToolScriptHost& host,
+                                        bool allow_yield) {
         const auto started = Clock::now();
-        const std::size_t budget = static_cast<std::size_t>(std::min<std::uint64_t>(
-            max_output_tokens(source) * kBytesPerToken, kMaxCollectedBytes));
+        const auto pragma = parse_exec_pragma(source);
+        budget_ = static_cast<std::size_t>(std::min<std::uint64_t>(
+            pragma.max_output_tokens * kBytesPerToken, kMaxCollectedBytes));
+        arm(host, allow_yield, pragma.yield_time_ms.value_or(kDefaultExecYieldMs));
 
         std::optional<std::string> error;
         if (context_ == nullptr) {
@@ -387,31 +468,47 @@ public:
             // JS_Eval reads one byte past the source: it must be terminated.
             const std::string program(source);
             begin_slice();
-            OwnedValue promise(context_, JS_Eval(context_, program.c_str(), program.size(),
-                                                 "exec", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC));
-            error = promise.exception() ? failure_of_exception() : drive(promise.get());
+            OwnedValue evaluated(context_, JS_Eval(context_, program.c_str(), program.size(),
+                                                   "exec", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC));
+            if (evaluated.exception()) {
+                error = failure_of_exception();
+            } else {
+                promise_ = JS_DupValue(context_, evaluated.get());
+                promise_held_ = true;
+            }
         }
+        if (error) return finish(DriveKind::Failed, std::move(*error), started);
+        const auto status = drive();
+        return finish(status.kind, std::move(status.error), started);
+    }
 
-        std::string items;
-        for (const auto& item : items_) {
-            if (!items.empty()) items += '\n';
-            items += item;
+    [[nodiscard]] ToolScriptOutcome resume(ToolScriptHost& host,
+                                           std::uint64_t yield_ms,
+                                           std::optional<std::uint64_t> max_tokens) {
+        const auto started = Clock::now();
+        if (max_tokens && *max_tokens > 0) {
+            budget_ = static_cast<std::size_t>(std::min<std::uint64_t>(
+                *max_tokens * kBytesPerToken, kMaxCollectedBytes));
         }
-        if (error.has_value()) {
-            if (!items.empty()) items += '\n';
-            items += "Script error:\n" + *error;
-        }
-        const std::string_view status = !error.has_value() ? "Script completed"
-            : stop_ == Stop::None ? "Script failed"
-            : "Script terminated";
-        return ToolScriptOutcome{
-            .completed = !error.has_value(),
-            .output = render_output(status, Clock::now() - started, std::move(items), budget),
-        };
+        arm(host, true, yield_ms);
+        const auto status = drive();
+        return finish(status.kind, std::move(status.error), started);
+    }
+
+    [[nodiscard]] ToolScriptOutcome terminate() {
+        const auto started = Clock::now();
+        stop_ = Stop::Cancelled;
+        return finish(DriveKind::Terminated, {}, started);
     }
 
 private:
     enum class Stop { None, Cancelled, Runaway };
+    enum class DriveKind { Done, Failed, Yielded, Terminated };
+
+    struct DriveStatus {
+        DriveKind kind = DriveKind::Done;
+        std::string error;
+    };
 
     struct PendingCall {
         ToolScriptCall call;
@@ -430,7 +527,7 @@ private:
 
     static int interrupt(JSContext*, void* opaque) {
         auto& self = *static_cast<ScriptRealm*>(opaque);
-        if (self.host_.cancelled()) {
+        if (self.host_ != nullptr && self.host_->cancelled()) {
             self.stop_ = Stop::Cancelled;
             return 1;
         }
@@ -510,6 +607,11 @@ private:
         return JS_Throw(context, error);
     }
 
+    static JSValue native_yield(JSContext* context, JSValueConst, int, JSValueConst*) {
+        of(context).yield_requested_ = true;
+        return JS_UNDEFINED;
+    }
+
     static JSValue native_set_timeout(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
         auto& self = of(context);
         if (argc < 1 || !JS_IsFunction(context, argv[0])) {
@@ -552,6 +654,7 @@ private:
         if (!define("__filo_call", &native_call, 2) || !define("__filo_text", &native_text, 1)
             || !define("__filo_store", &native_store, 2) || !define("__filo_load", &native_load, 1)
             || !define("__filo_exit", &native_exit, 0)
+            || !define("__filo_yield", &native_yield, 0)
             || !define("__filo_set_timeout", &native_set_timeout, 2)
             || !define("__filo_clear_timeout", &native_clear_timeout, 1)) {
             return false;
@@ -607,31 +710,90 @@ private:
         return failure_of(exception.get());
     }
 
-    [[nodiscard]] std::optional<std::string> drive(JSValueConst promise) {
+    [[nodiscard]] bool should_yield() const noexcept {
+        return allow_yield_ && (yield_requested_ || Clock::now() >= yield_at_);
+    }
+
+    void arm(ToolScriptHost& host, bool allow_yield, std::uint64_t yield_ms) {
+        host_ = &host;
+        allow_yield_ = allow_yield;
+        yield_requested_ = false;
+        stop_ = Stop::None;
+        yield_at_ = allow_yield
+            ? Clock::now() + std::chrono::milliseconds(yield_ms)
+            : Clock::time_point::max();
+    }
+
+    [[nodiscard]] std::string take_new_items() {
+        std::string items;
+        for (std::size_t i = reported_; i < items_.size(); ++i) {
+            if (!items.empty()) items += '\n';
+            items += items_[i];
+        }
+        reported_ = items_.size();
+        return items;
+    }
+
+    [[nodiscard]] ToolScriptOutcome finish(DriveKind kind,
+                                           std::string error,
+                                           Clock::time_point started) {
+        std::string items = take_new_items();
+        std::string status;
+        bool completed = false;
+        bool running = false;
+        if (kind == DriveKind::Yielded) {
+            status = std::format("Script running with cell ID {}", cell_id_);
+            running = true;
+        } else if (kind == DriveKind::Done) {
+            status = "Script completed";
+            completed = true;
+        } else if (kind == DriveKind::Terminated || stop_ == Stop::Cancelled) {
+            status = "Script terminated";
+        } else {
+            status = "Script failed";
+        }
+        if (!error.empty() && kind != DriveKind::Yielded) {
+            if (!items.empty()) items += '\n';
+            items += "Script error:\n" + error;
+        }
+        host_ = nullptr;
+        return ToolScriptOutcome{
+            .completed = completed,
+            .running = running,
+            .output = render_output(status, Clock::now() - started, std::move(items), budget_),
+        };
+    }
+
+    [[nodiscard]] DriveStatus drive() {
         for (;;) {
-            if (auto failure = drain_jobs()) return failure;
-            if (exited_) return std::nullopt;
-            switch (JS_PromiseState(context_, promise)) {
+            if (auto failure = drain_jobs()) return {DriveKind::Failed, std::move(*failure)};
+            if (exited_) return {};
+            switch (JS_PromiseState(context_, promise_)) {
             case JS_PROMISE_PENDING:
                 break;
             case JS_PROMISE_REJECTED: {
-                OwnedValue reason(context_, JS_PromiseResult(context_, promise));
-                return failure_of(reason.get());
+                OwnedValue reason(context_, JS_PromiseResult(context_, promise_));
+                return {DriveKind::Failed, failure_of(reason.get()).value_or(std::string{})};
             }
             case JS_PROMISE_FULFILLED:
             case JS_PROMISE_NOT_A_PROMISE:
-                return std::nullopt;
+                return {};
             }
-            if (host_.cancelled()) {
+            if (host_ != nullptr && host_->cancelled()) {
                 stop_ = Stop::Cancelled;
-                return failure_of(JS_UNDEFINED);
+                return {DriveKind::Failed, failure_of(JS_UNDEFINED).value_or(std::string{})};
             }
+            if (should_yield() && pending_.empty()) return {DriveKind::Yielded, {}};
             if (!pending_.empty()) {
-                if (auto failure = settle_pending_calls()) return failure;
+                if (auto failure = settle_pending_calls()) {
+                    return {DriveKind::Failed, std::move(*failure)};
+                }
             } else if (!timers_.empty()) {
-                if (auto failure = fire_next_timer()) return failure;
+                const auto step = fire_next_timer();
+                if (step.kind == DriveKind::Yielded) return step;
+                if (step.kind == DriveKind::Failed) return step;
             } else {
-                return "the script awaited a promise that nothing settles";
+                return {DriveKind::Failed, "the script awaited a promise that nothing settles"};
             }
         }
     }
@@ -664,7 +826,7 @@ private:
         std::vector<ToolScriptCall> calls;
         calls.reserve(batch.size());
         for (const auto& pending : batch) calls.push_back(pending.call);
-        auto replies = host_.run(calls);
+        auto replies = host_->run(calls);
 
         std::optional<std::string> failure;
         for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -683,48 +845,64 @@ private:
         return failure;
     }
 
-    [[nodiscard]] std::optional<std::string> fire_next_timer() {
+    [[nodiscard]] DriveStatus fire_next_timer() {
         const auto next = std::ranges::min_element(timers_, {}, [](const auto& entry) {
             return entry.second.due;
         });
         auto now = Clock::now();
         if (next->second.due > now) {
-            if (timer_wait_ + (next->second.due - now) > kMaxTimerWait) {
-                return std::format("the script waited on timers for more than {} seconds",
-                                   kMaxTimerWait.count());
+            const auto due_in = next->second.due - now;
+            if (!allow_yield_ && timer_wait_ + due_in > kMaxTimerWait) {
+                return {DriveKind::Failed,
+                        std::format("the script waited on timers for more than {} seconds",
+                                    kMaxTimerWait.count())};
             }
-            while (now < next->second.due) {
-                if (host_.cancelled()) {
+            const auto wake = allow_yield_ ? std::min(next->second.due, yield_at_) : next->second.due;
+            while (now < wake) {
+                if (host_ != nullptr && host_->cancelled()) {
                     stop_ = Stop::Cancelled;
-                    return failure_of(JS_UNDEFINED);
+                    return {DriveKind::Failed, failure_of(JS_UNDEFINED).value_or(std::string{})};
                 }
-                const auto pause = std::min<Clock::duration>(next->second.due - now, kCancelPoll);
+                if (should_yield()) return {DriveKind::Yielded, {}};
+                const auto pause = std::min<Clock::duration>(wake - now, kCancelPoll);
                 std::this_thread::sleep_for(pause);
-                timer_wait_ += pause;
+                if (!allow_yield_) timer_wait_ += pause;
                 now = Clock::now();
             }
+            if (now < next->second.due) return {DriveKind::Yielded, {}};
         }
         const JSValue callback = next->second.callback;
         timers_.erase(next);
         begin_slice();
         OwnedValue called(context_, JS_Call(context_, callback, JS_UNDEFINED, 0, nullptr));
         JS_FreeValue(context_, callback);
-        return called.exception() ? failure_of_exception() : std::nullopt;
+        if (called.exception()) {
+            return {DriveKind::Failed, failure_of_exception().value_or(std::string{})};
+        }
+        return {};
     }
 
-    ToolScriptHost& host_;
+    ToolScriptHost* host_ = nullptr;
     ToolScriptStore& store_;
     JSRuntime* runtime_ = nullptr;
     JSContext* context_ = nullptr;
+    JSValue promise_ = JS_UNDEFINED;
+    bool promise_held_ = false;
+    std::string cell_id_;
     std::vector<PendingCall> pending_;
     std::map<std::int64_t, Timer> timers_;
     std::int64_t next_timer_id_ = 0;
     Clock::duration timer_wait_{};
     Clock::time_point slice_started_ = Clock::now();
+    Clock::time_point yield_at_ = Clock::time_point::max();
     std::vector<std::string> items_;
     std::size_t collected_ = 0;
+    std::size_t reported_ = 0;
+    std::size_t budget_ = 0;
     int calls_ = 0;
     bool exited_ = false;
+    bool allow_yield_ = false;
+    bool yield_requested_ = false;
     Stop stop_ = Stop::None;
 };
 
@@ -763,12 +941,67 @@ std::optional<std::string> source_from_arguments(std::string_view arguments) {
 }
 
 std::string tool_script_description(const std::vector<core::llm::Tool>& tools) {
-    std::string description(kDescription);
+    std::string description = std::format(
+        "Run JavaScript code to orchestrate tool calls.\n"
+        "- The input is raw JavaScript source text, not JSON, quoted strings, or markdown code fences. "
+        "It runs as an async script in a fresh realm, so top-level `await` works. There is no Node, "
+        "file system, network access, or console.\n"
+        "- Every tool declared below is a method of the global `tools` object, for example "
+        "`await tools.read({{path: \"README.md\"}})`. Tool names become JavaScript identifiers: any "
+        "character other than a letter, a digit, `_` or `$` becomes `_`. They are not top-level tools: "
+        "call them only from a script.\n"
+        "- A tool takes an object of its arguments, or a bare string when it has exactly one required "
+        "string parameter. It resolves to the tool's result: an object when the result is JSON, "
+        "otherwise a string.\n"
+        "- A call that cannot run (invalid arguments, blocked, or denied by the user) rejects with an "
+        "Error whose message says why. That is the call's outcome: handle it in the script or adjust, "
+        "and do not ask for the same permission again.\n"
+        "- Calls issued together, for example with `Promise.all` or `Promise.allSettled`, run in "
+        "parallel when they do not touch the same files. Batch independent reads and searches in one "
+        "script. Keep dependencies, edits, and adaptive follow-ups sequential, and inspect every "
+        "result before deciding the script is done.\n"
+        "- The result is the script's status and wall time, then only what the script reported with "
+        "`text(...)`; the script's own value is not returned. Report what the next decision needs.\n"
+        "- An optional first line `// @exec: {{\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}}` "
+        "sets how long to run before yielding and the result budget.\n"
+        "- `yield_time_ms` asks exec to yield early if the script is still running. Defaults to {} ms. "
+        "The result then starts with `Script running with cell ID ...` and the script keeps going. "
+        "Resume it with `wait`. A script that finishes first returns `Script completed`.\n"
+        "- `max_output_tokens` sets the token budget for this result. Defaults to 10000 tokens.\n"
+        "- When the script is fully evaluated, unawaited promises are discarded.\n"
+        "- Global helpers:\n"
+        "- `text(value)`: Appends a text item. Non-string values are stringified with `JSON.stringify` "
+        "when possible.\n"
+        "- `exit()`: Ends the script successfully, like an early return from the top level.\n"
+        "- `yield_control()`: Yields the output so far while the script keeps running. Resume with "
+        "`wait`.\n"
+        "- `store(key, value)` / `load(key)`: Keep a serializable value for later scripts in this "
+        "conversation. `load` returns `undefined` when the key is missing.\n"
+        "- `setTimeout(callback, delayMs)` / `clearTimeout(id)`: Schedule a callback. A pending timeout "
+        "does not by itself keep the script alive; await a promise to wait for one.\n"
+        "- `ALL_TOOLS`: The callable tools as `{{ name, description }}` entries.\n\n"
+        "Shared MCP Types:\n```ts\n{}\n```",
+        kDefaultExecYieldMs, kMcpTypescriptPreamble);
     for (const auto& tool : tools) {
         description += "\n\n";
         description += render_tool_section(tool.function);
     }
     return description;
+}
+
+std::string wait_tool_description() {
+    return "Waits on a yielded exec cell and returns new output or completion.\n"
+           "- Use wait only after exec returns `Script running with cell ID ...`.\n"
+           "- `cell_id` identifies the running exec cell to resume.\n"
+           "- `yield_time_ms` controls how long to wait for more output before yielding again. "
+           "Defaults to 10000 ms.\n"
+           "- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 "
+           "tokens.\n"
+           "- `terminate: true` stops the running cell; false or omitted waits for output.\n"
+           "- wait returns only the new output since the last yield, or the final completion or "
+           "termination result for that cell.\n"
+           "- If the cell is still running, wait may yield again with the same cell_id.\n"
+           "- If the cell has already finished, wait returns the completed result and closes the cell.";
 }
 
 std::string script_identifier(std::string_view tool_name) {
@@ -831,18 +1064,130 @@ ToolScriptOutcome run_tool_script(std::string_view source,
                                   ToolScriptHost& host,
                                   ToolScriptStore& store) {
 #ifdef FILO_ENABLE_JAVASCRIPT
-    ScriptRealm realm(host, store);
-    return realm.run(source, tools);
+    ScriptRealm realm(store);
+    return realm.run(source, tools, host, /*allow_yield=*/false);
 #else
     (void)tools;
     (void)host;
     (void)store;
+    (void)source;
     return ToolScriptOutcome{
         .completed = false,
         .output = render_output("Script failed", {},
                                 "Script error:\nthis build of Filo has no JavaScript runtime",
-                                static_cast<std::size_t>(max_output_tokens(source) * kBytesPerToken)),
+                                static_cast<std::size_t>(kDefaultMaxOutputTokens * kBytesPerToken)),
     };
+#endif
+}
+
+namespace {
+
+constexpr std::size_t kMaxExecCells = 8;
+
+[[nodiscard]] ToolScriptOutcome wait_refusal(std::string text) {
+    return ToolScriptOutcome{.output = std::move(text)};
+}
+
+struct WaitArguments {
+    std::string cell_id;
+    std::uint64_t yield_ms = kDefaultExecYieldMs;
+    std::optional<std::uint64_t> max_tokens;
+    bool terminate = false;
+    std::string error;
+};
+
+[[nodiscard]] WaitArguments parse_wait_arguments(std::string_view arguments) {
+    WaitArguments parsed;
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded(arguments);
+    simdjson::dom::element document;
+    std::string_view cell_id;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS
+        || document["cell_id"].get(cell_id) != simdjson::SUCCESS
+        || cell_id.empty()) {
+        parsed.error = "wait needs a cell_id. exec returns \"Script running with cell ID ...\" "
+                       "while a script is still going.";
+        return parsed;
+    }
+    parsed.cell_id.assign(cell_id);
+    std::uint64_t yield_ms = 0;
+    if (document["yield_time_ms"].get(yield_ms) == simdjson::SUCCESS) parsed.yield_ms = yield_ms;
+    std::uint64_t max_tokens = 0;
+    if (document["max_tokens"].get(max_tokens) == simdjson::SUCCESS && max_tokens > 0) {
+        parsed.max_tokens = max_tokens;
+    }
+    bool terminate = false;
+    if (document["terminate"].get(terminate) == simdjson::SUCCESS) parsed.terminate = terminate;
+    return parsed;
+}
+
+} // namespace
+
+struct ToolScriptSession::State {
+#ifdef FILO_ENABLE_JAVASCRIPT
+    ToolScriptStore store;
+    std::vector<std::unique_ptr<ScriptRealm>> cells;
+    int next_id = 0;
+#endif
+};
+
+ToolScriptSession::ToolScriptSession() : state_(std::make_unique<State>()) {}
+
+ToolScriptSession::~ToolScriptSession() = default;
+
+void ToolScriptSession::clear() {
+#ifdef FILO_ENABLE_JAVASCRIPT
+    state_->cells.clear();
+    state_->store.clear();
+#else
+    (void)state_;
+#endif
+}
+
+ToolScriptOutcome ToolScriptSession::execute(std::string_view source,
+                                             const std::vector<core::llm::Tool>& tools,
+                                             ToolScriptHost& host) {
+#ifdef FILO_ENABLE_JAVASCRIPT
+    if (state_->cells.size() >= kMaxExecCells) {
+        return wait_refusal(
+            "Too many exec scripts are still running. wait for one to finish, or terminate it, "
+            "before starting another.");
+    }
+    const std::string id = "c" + std::to_string(++state_->next_id);
+    auto realm = std::make_unique<ScriptRealm>(state_->store);
+    realm->set_cell_id(id);
+    auto outcome = realm->run(source, tools, host, /*allow_yield=*/true);
+    if (outcome.running) state_->cells.push_back(std::move(realm));
+    return outcome;
+#else
+    (void)source;
+    (void)tools;
+    (void)host;
+    return wait_refusal("Script error:\nthis build of Filo has no JavaScript runtime");
+#endif
+}
+
+ToolScriptOutcome ToolScriptSession::resume(std::string_view arguments, ToolScriptHost& host) {
+    const auto parsed = parse_wait_arguments(arguments);
+    if (!parsed.error.empty()) return wait_refusal(parsed.error);
+#ifdef FILO_ENABLE_JAVASCRIPT
+    const auto found = std::ranges::find_if(state_->cells, [&](const auto& cell) {
+        return cell && cell->cell_id() == parsed.cell_id;
+    });
+    if (found == state_->cells.end()) {
+        return wait_refusal(std::format(
+            "No running exec cell \"{}\". exec returns \"Script running with cell ID {}\" only "
+            "while that script is still going.",
+            parsed.cell_id, parsed.cell_id));
+    }
+    auto outcome = parsed.terminate
+        ? (*found)->terminate()
+        : (*found)->resume(host, parsed.yield_ms, parsed.max_tokens);
+    if (!outcome.running) state_->cells.erase(found);
+    return outcome;
+#else
+    (void)host;
+    return wait_refusal("Script error:\nthis build of Filo has no JavaScript runtime");
 #endif
 }
 

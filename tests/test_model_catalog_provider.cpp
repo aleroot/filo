@@ -547,6 +547,23 @@ TEST_CASE("Codex catalog publishes how each model calls its tools",
     CHECK(result.models[2].tool_mode == CatalogToolMode::Direct);
     CHECK(result.models[3].tool_mode == CatalogToolMode::Unspecified);
 
+    const auto prompted = catalog.parse_models_response(R"JSON({
+      "models": [{
+        "slug": "gpt-6.2-sol",
+        "visibility": "list",
+        "tool_mode": "code_mode_only",
+        "model_messages": {
+          "instructions_template": "You are Codex, from the catalog.",
+          "collaboration_modes": {"default": "Default from the catalog.", "plan": null}
+        }
+      }]
+    })JSON");
+    REQUIRE(prompted.ok());
+    REQUIRE(prompted.models.size() == 1);
+    CHECK(prompted.models[0].instructions_template == "You are Codex, from the catalog.");
+    CHECK(prompted.models[0].collaboration_default == "Default from the catalog.");
+    CHECK(prompted.models[0].collaboration_plan.empty());
+
     // A row that names no mode keeps the curated card's; one that does wins.
     ModelInfo curated{.canonical_id = "script-model", .tool_mode = CatalogToolMode::CodeModeOnly};
     CHECK(merge_model_metadata(curated, result.models[3]).tool_mode == CatalogToolMode::CodeModeOnly);

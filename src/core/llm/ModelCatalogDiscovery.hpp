@@ -88,6 +88,11 @@ struct ProviderModelCatalogSnapshot {
         std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const noexcept;
 };
 
+/// The id a provider's catalog snapshot is stored under. HttpLLMProvider and
+/// consumers that look its card up must key the snapshot the same way.
+[[nodiscard]] std::string_view model_catalog_key(std::string_view service_id,
+                                                 std::string_view provider_name) noexcept;
+
 class ModelCatalogAvailability {
 public:
     static ModelCatalogAvailability& instance();

@@ -110,6 +110,11 @@ bool ProviderModelCatalogSnapshot::refresh_due(
         && now >= next_retry_at;
 }
 
+std::string_view model_catalog_key(std::string_view service_id,
+                                   std::string_view provider_name) noexcept {
+    return service_id.empty() ? provider_name : service_id;
+}
+
 ModelCatalogAvailability& ModelCatalogAvailability::instance() {
     static ModelCatalogAvailability availability;
     return availability;

@@ -27,7 +27,28 @@ namespace {
 }
 
 [[nodiscard]] std::string build_runtime_prompt(std::string_view mode,
-                                               const ModelGuidance* guidance) {
+                                               const ModelGuidance* guidance,
+                                               std::string_view codex_instructions,
+                                               std::string_view codex_collaboration) {
+    if (!codex_instructions.empty()) {
+        // The catalog template is the whole doctrine. Filo's working rules
+        // contradict it (smallest change, shortest reply, tools the model
+        // cannot call directly), so they are not added beside it.
+        std::string prompt(codex_instructions);
+        if (!codex_collaboration.empty()) {
+            prompt += "\n\n";
+            prompt += codex_collaboration;
+        }
+        if (mode == "AUTO") {
+            prompt += "\n\nLet Filo's AUTO controller choose a proportional execution contract for each "
+                      "turn. Follow the generated AUTO contract exactly: keep simple work direct, "
+                      "decompose complex work, fan out independent read-only investigations, "
+                      "preserve repository state, and finish mutations with fresh verification "
+                      "evidence.";
+        }
+        return prompt;
+    }
+
     std::string prompt =
         "You are Filo, an advanced AI coding assistant running in " + std::string(mode) + " mode.\n\n";
     if (mode == "AUTO") {
@@ -231,6 +252,13 @@ ContextBuilder& ContextBuilder::with_model_guidance(const ModelGuidance* guidanc
     return *this;
 }
 
+ContextBuilder& ContextBuilder::with_codex_prompt(std::string instructions,
+                                                  std::string collaboration) {
+    codex_instructions_ = std::move(instructions);
+    codex_collaboration_ = std::move(collaboration);
+    return *this;
+}
+
 ContextBuilder& ContextBuilder::with_memory_prompt(std::string prompt) {
     memory_prompt_ = std::move(prompt);
     return *this;
@@ -259,7 +287,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         ContextLayerKind::RuntimeInstructions,
         PromptStability::Stable,
         "runtime",
-        build_runtime_prompt(mode_, model_guidance_));
+        build_runtime_prompt(mode_, model_guidance_, codex_instructions_, codex_collaboration_));
 
     append_layer(
         layers,
