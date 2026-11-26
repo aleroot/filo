@@ -22,6 +22,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -512,6 +513,26 @@ text(results.map(r => r.status === "fulfilled" ? "ran" : r.reason.message).join(
 
 TEST_CASE("A script's exec_command runs as run_terminal_command and answers in Codex's shape",
           "[agent][permission][exec]") {
+    // A workspace of its own: under ctest each test is a fresh process whose
+    // workspace is unset, and canonical("") throws with libstdc++.
+    auto& workspace = core::workspace::Workspace::get_instance();
+    struct RestoreWorkspace {
+        std::filesystem::path primary;
+        std::vector<std::filesystem::path> additional;
+        bool enforced;
+        ~RestoreWorkspace() {
+            core::workspace::Workspace::get_instance().initialize(primary, additional, enforced);
+        }
+    } const restore{workspace.get_primary(), workspace.get_additional(), workspace.is_enforced()};
+    std::string pattern = (std::filesystem::temp_directory_path() / "filo-exec-cwd-XXXXXX").string();
+    REQUIRE(::mkdtemp(pattern.data()) != nullptr);
+    const auto cwd = std::filesystem::canonical(pattern);
+    struct RemoveDirectory {
+        std::filesystem::path path;
+        ~RemoveDirectory() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } const cleanup{cwd};
+    workspace.initialize(cwd, {}, true);
+
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
     auto provider = std::make_shared<ExecScriptProvider>(R"(
@@ -529,12 +550,10 @@ text(typeof tools.run_terminal_command + "|" + r.exit_code + "|" + r.output.trim
     });
 
     const std::string result = run_exec_turn(agent);
-    const auto cwd = core::workspace::Workspace::get_instance().get_primary();
     CHECK_THAT(result, Catch::Matchers::StartsWith("Script completed\n"));
     // Without workdir the command runs in the turn cwd, as Codex runs it.
     CHECK_THAT(result, Catch::Matchers::EndsWith(
-        "Output:\nundefined|0|hi" + std::filesystem::canonical(cwd).string() + "|number")
-        || Catch::Matchers::EndsWith("Output:\nundefined|0|hi" + cwd.string() + "|number"));
+        "Output:\nundefined|0|hi" + cwd.string() + "|number"));
     for (const auto& name : prompted) CHECK(name == "run_terminal_command");
 }
 
