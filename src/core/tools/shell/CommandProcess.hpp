@@ -2,7 +2,6 @@
 
 #include "../../landrun/LandrunPolicy.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -10,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -67,7 +67,7 @@ public:
 
 private:
     CommandProcess() = default;
-    void read_loop();
+    void read_loop(std::stop_token stop);
     void append(std::string_view bytes);
     [[nodiscard]] std::string take_unread();
 
@@ -75,8 +75,7 @@ private:
     int pgid_ = -1;
     int stdin_fd_ = -1;
     int stdout_fd_ = -1;
-    std::thread reader_;
-    std::atomic<bool> stop_reader_{false};
+    std::jthread reader_;
 
     mutable std::mutex mutex_;
     std::condition_variable changed_;

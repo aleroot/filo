@@ -407,17 +407,17 @@ TEST_CASE("Scripts reach run_terminal_command as Codex's exec_command and write_
 TEST_CASE("An exec_command result has Codex's shape and token truncation", "[exec]") {
     core::tools::ScriptToolAlias alias{.tool_name = "run_terminal_command", .max_output_tokens = 10000};
     CHECK(core::tools::script_alias_result(
-              alias, R"({"output":"ok\n","exit_code":0,"wall_time_seconds":0.25})", 9.0)
+              alias, R"({"output":"ok\n","exit_code":0,"wall_time_seconds":0.25})")
           == R"({"wall_time_seconds":0.250,"exit_code":0,"output":"ok\n"})");
     CHECK(core::tools::script_alias_result(
-              alias, R"({"output":"serving","process_id":4321,"wall_time_seconds":10})", 0.0)
+              alias, R"({"output":"serving","process_id":4321,"wall_time_seconds":10})")
           == R"({"wall_time_seconds":10.000,"session_id":4321,"output":"serving"})");
-    CHECK(core::tools::script_alias_result(alias, R"({"error":"Unknown process id 7"})", 0.1)
+    CHECK(core::tools::script_alias_result(alias, R"({"error":"Unknown process id 7"})")
           == R"({"error":"Unknown process id 7"})");
 
     alias.max_output_tokens = 2;
     const auto truncated = core::tools::script_alias_result(
-        alias, R"({"output":"abcdefghijklmnopqrst","exit_code":3})", 1.0);
+        alias, R"({"output":"abcdefghijklmnopqrst","exit_code":3,"wall_time_seconds":1})");
     CHECK(truncated
           == R"({"wall_time_seconds":1.000,"exit_code":3,"original_token_count":5,"output":"abcd…3 tokens truncated…qrst"})");
 }

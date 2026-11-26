@@ -1189,9 +1189,7 @@ std::optional<ScriptToolAlias> resolve_script_alias(std::string_view tool_name,
     return alias;
 }
 
-std::string script_alias_result(const ScriptToolAlias& alias,
-                                std::string_view result,
-                                double wall_time_seconds) {
+std::string script_alias_result(const ScriptToolAlias& alias, std::string_view result) {
     simdjson::dom::parser parser;
     const simdjson::padded_string padded(result);
     simdjson::dom::object document;
@@ -1205,9 +1203,8 @@ std::string script_alias_result(const ScriptToolAlias& alias,
     std::optional<std::int64_t> session;
     if (std::int64_t id = 0; document["process_id"].get(id) == simdjson::SUCCESS) session = id;
     if (!exit_code && !session) return std::string(result);
-    if (double reported = 0; document["wall_time_seconds"].get(reported) == simdjson::SUCCESS) {
-        wall_time_seconds = reported;
-    }
+    double wall_time_seconds = 0;
+    std::ignore = document["wall_time_seconds"].get(wall_time_seconds);
 
     // codex-rs utils/string truncate.rs plan_token_truncation: keep the head
     // and the tail of the budget, and say how many tokens were cut.

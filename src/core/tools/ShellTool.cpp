@@ -49,6 +49,20 @@ constexpr int64_t kMaxYieldMs = 300'000;
     return json;
 }
 
+/// The command and URL policies' verdict on text a shell will run: the
+/// error result when either blocks it.
+[[nodiscard]] std::optional<std::string> policy_error(std::string_view text) {
+    if (const auto blocked = policy::enforce_command_policy(names::kRunTerminalCommand, text)) {
+        return std::format(R"({{"error":"Tool policy blocked command: {}"}})",
+                           core::utils::escape_json_string(*blocked));
+    }
+    if (const auto blocked = policy::enforce_url_policy(names::kRunTerminalCommand, text)) {
+        return std::format(R"({{"error":"Tool policy blocked URL: {}"}})",
+                           core::utils::escape_json_string(*blocked));
+    }
+    return std::nullopt;
+}
+
 } // namespace
 } // namespace core::tools
 
@@ -186,20 +200,7 @@ std::string ShellTool::execute_impl(
         timeout = std::chrono::milliseconds{timeout_secs * 1000};
     }
 
-    if (const auto policy_error = core::tools::policy::enforce_command_policy(
-            names::kRunTerminalCommand,
-            command_view)) {
-        return std::format(
-            R"({{"error":"Tool policy blocked command: {}"}})",
-            core::utils::escape_json_string(*policy_error));
-    }
-    if (const auto policy_error = core::tools::policy::enforce_url_policy(
-            names::kRunTerminalCommand,
-            command_view)) {
-        return std::format(
-            R"({{"error":"Tool policy blocked URL: {}"}})",
-            core::utils::escape_json_string(*policy_error));
-    }
+    if (auto blocked = policy_error(command_view)) return *std::move(blocked);
 
     // Enforced here: an autonomous permission profile never prompts.
     if (context.read_only_shell && !core::permissions::shell_call_is_allowed(json_args)) {
@@ -266,16 +267,7 @@ std::string ShellTool::continue_session(int process_id,
         if (context.read_only_shell) {
             return R"({"error":"This worker is read-only: it cannot write to a running command."})";
         }
-        if (const auto policy_error = core::tools::policy::enforce_command_policy(
-                names::kRunTerminalCommand, input)) {
-            return std::format(R"({{"error":"Tool policy blocked command: {}"}})",
-                               core::utils::escape_json_string(*policy_error));
-        }
-        if (const auto policy_error = core::tools::policy::enforce_url_policy(
-                names::kRunTerminalCommand, input)) {
-            return std::format(R"({{"error":"Tool policy blocked URL: {}"}})",
-                               core::utils::escape_json_string(*policy_error));
-        }
+        if (auto blocked = policy_error(input)) return *std::move(blocked);
         if (const auto steering_error = SteeringEnforcement::for_context(context).command_error(
                 input, context.workspace_view().primary())) {
             return *steering_error;

@@ -2,10 +2,10 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
-#include <algorithm>
 #include <format>
 #include <random>
 #include <sstream>
+#include <unordered_map>
 
 namespace core::tools {
 
@@ -147,7 +147,7 @@ std::string AskUserQuestionTool::execute(
     request.promise = std::make_shared<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>();
 
     // Answers are keyed by question text; the caller's id replaces it when given.
-    std::vector<std::pair<std::string, std::string>> answer_keys;
+    std::unordered_map<std::string, std::string> answer_keys;
 
     for (auto question_elem : questions_array) {
         QuestionItem item;
@@ -159,7 +159,7 @@ std::string AskUserQuestionTool::execute(
         std::string_view question_id;
         if (question_elem["id"].get(question_id) == simdjson::SUCCESS && !question_id.empty()
             && !item.question.empty()) {
-            answer_keys.emplace_back(item.question, std::string(question_id));
+            answer_keys.try_emplace(item.question, question_id);
         }
         
         std::string_view header;
@@ -235,8 +235,7 @@ std::string AskUserQuestionTool::execute(
     for (const auto& [question, answer] : *answers) {
         if (!first) json << ", ";
         first = false;
-        const auto keyed = std::ranges::find(answer_keys, question,
-                                             &std::pair<std::string, std::string>::first);
+        const auto keyed = answer_keys.find(question);
         const std::string& key = keyed == answer_keys.end() ? question : keyed->second;
         json << "\"" << core::utils::escape_json_string(key) << "\": \""
              << core::utils::escape_json_string(answer) << "\"";

@@ -7,7 +7,7 @@
 #include "../utils/Uuid.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <expected>
 #include <format>
 #include <utility>
 
@@ -74,23 +74,27 @@ ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
     };
     if (cancelled()) return refuse_unstarted("the turn was stopped");
 
+    // Validates the script's arguments against a contract, as the tool will.
+    const auto validate = [&](const core::tools::ToolDefinition& contract)
+        -> std::expected<std::string, std::string> {
+        return core::tools::schema::validate_arguments(
+                   contract, core::tools::nested_tool_arguments(contract, requested.arguments))
+            .transform_error([&](const auto& issue) {
+                return std::format("invalid arguments for {}: {}", requested.tool_name,
+                                   issue.message);
+            });
+    };
+
     // A script reaches run_terminal_command as Codex's exec_command and
     // write_stdin. The call is checked against the contract the script sees,
     // then becomes the Filo tool's, so every gate and row treats it as one.
     std::optional<core::tools::ScriptToolAlias> alias;
-    std::string requested_arguments = requested.arguments;
-    if (const auto alias_definition = core::tools::script_alias_definition(requested.tool_name)) {
-        auto validated = core::tools::schema::validate_arguments(
-            *alias_definition,
-            core::tools::nested_tool_arguments(*alias_definition, requested.arguments));
-        if (!validated) {
-            return refuse_unstarted(std::format("invalid arguments for {}: {}",
-                                                requested.tool_name, validated.error().message));
-        }
+    if (const auto contract = core::tools::script_alias_definition(requested.tool_name)) {
+        auto validated = validate(*contract);
+        if (!validated) return refuse_unstarted(std::move(validated.error()));
         alias = core::tools::resolve_script_alias(
             requested.tool_name, *validated,
             services_.session_context.workspace_view().primary().string());
-        requested_arguments = alias->arguments;
     }
     const std::string& name = alias ? alias->tool_name : requested.tool_name;
     const bool offered = std::ranges::any_of(services_.offered, [&](const core::llm::Tool& tool) {
@@ -99,22 +103,16 @@ ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
     if (!offered) return refuse_unstarted(requested.tool_name + " is not available in this step");
     auto definition = services_.resolve(name);
     if (!definition) return refuse_unstarted(requested.tool_name + " is not available");
-    // A translated call carries fields only the alias declares.
-    std::string arguments = std::move(requested_arguments);
-    if (!alias) {
-        auto validated = core::tools::schema::validate_arguments(
-            *definition, core::tools::nested_tool_arguments(*definition, std::move(arguments)));
-        if (!validated) {
-            return refuse_unstarted(
-                std::format("invalid arguments for {}: {}", name, validated.error().message));
-        }
-        arguments = std::move(*validated);
-    }
+    // A translated call carries fields only the alias declares, so it was
+    // validated against the alias instead.
+    auto arguments = alias ? std::expected<std::string, std::string>(alias->arguments)
+                           : validate(*definition);
+    if (!arguments) return refuse_unstarted(std::move(arguments.error()));
 
     core::llm::ToolCall call;
     call.id = "call_" + core::utils::random_uuid_v4();
     call.function.name = name;
-    call.function.arguments = std::move(arguments);
+    call.function.arguments = std::move(*arguments);
     if (services_.on_start) services_.on_start(call);
 
     if (denied_) {
@@ -144,14 +142,8 @@ ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
         .task = {
             .accesses = std::move(planned.accesses),
             .run = [this, call, definition = std::move(definition), alias] {
-                const auto started = std::chrono::steady_clock::now();
                 auto message = services_.execute(call, definition);
-                if (alias) {
-                    const std::chrono::duration<double> wall =
-                        std::chrono::steady_clock::now() - started;
-                    message.content = core::tools::script_alias_result(
-                        *alias, message.content, wall.count());
-                }
+                if (alias) message.content = core::tools::script_alias_result(*alias, message.content);
                 return message;
             },
         },

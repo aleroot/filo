@@ -110,10 +110,8 @@ struct ScriptToolAlias {
 /// `{wall_time_seconds, exit_code?, session_id?, original_token_count?,
 /// output}`, with the output cut in the middle to the alias's token budget.
 /// A result that is not a command result (an error) passes through.
-/// @p wall_time_seconds is used when the result carries none.
 [[nodiscard]] std::string script_alias_result(const ScriptToolAlias& alias,
-                                              std::string_view result,
-                                              double wall_time_seconds);
+                                              std::string_view result);
 
 /// One `tools.<name>(input)` call. `arguments` is JSON: an object, or a
 /// string when the script passed one.

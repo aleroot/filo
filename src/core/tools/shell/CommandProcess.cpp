@@ -159,13 +159,15 @@ std::unique_ptr<CommandProcess> CommandProcess::spawn(std::string_view command,
     process->pgid_ = pid;
     process->stdin_fd_ = in[1];
     process->stdout_fd_ = out[0];
-    process->reader_ = std::thread([raw = process.get()] { raw->read_loop(); });
+    process->reader_ = std::jthread([raw = process.get()](std::stop_token stop) {
+        raw->read_loop(std::move(stop));
+    });
     return process;
 }
 
 CommandProcess::~CommandProcess() {
     kill();
-    stop_reader_.store(true, std::memory_order_release);
+    reader_.request_stop();
     if (reader_.joinable()) reader_.join();
     // The reader stops without reaping when it is told to: the process was
     // just killed, so this wait is short.
@@ -177,12 +179,12 @@ CommandProcess::~CommandProcess() {
     close_fd(stdout_fd_);
 }
 
-void CommandProcess::read_loop() {
+void CommandProcess::read_loop(std::stop_token stop) {
     std::array<char, kReadChunkBytes> buffer{};
     bool eof = false;
     bool exited = false;
     std::optional<std::chrono::steady_clock::time_point> exited_at;
-    while (!stop_reader_.load(std::memory_order_acquire)) {
+    while (!stop.stop_requested()) {
         if (!eof) {
             pollfd fd{.fd = stdout_fd_, .events = POLLIN, .revents = 0};
             const int ready = ::poll(&fd, 1, kPollIntervalMs);
