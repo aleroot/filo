@@ -9,6 +9,7 @@
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ExecTool.hpp"
 #include "core/tools/ReadTool.hpp"
+#include "core/tools/ShellTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "TestSessionContext.hpp"
 
@@ -507,6 +508,34 @@ text(results.map(r => r.status === "fulfilled" ? "ran" : r.reason.message).join(
     CHECK(prompted == std::vector<std::string>{"write_file"});
     CHECK_FALSE(std::filesystem::exists(
         core::workspace::Workspace::get_instance().get_primary() / probe));
+}
+
+TEST_CASE("A script's exec_command runs as run_terminal_command and answers in Codex's shape",
+          "[agent][permission][exec]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+    auto provider = std::make_shared<ExecScriptProvider>(R"(
+const r = await tools.exec_command({cmd: "printf 'hi'; pwd"});
+text(typeof tools.run_terminal_command + "|" + r.exit_code + "|" + r.output.trim().split("\n").join(",") + "|" + typeof r.wall_time_seconds);
+)");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager, test_support::make_workspace_session_context());
+    std::vector<std::string> prompted;
+    std::mutex prompted_mutex;
+    agent->set_permission_fn([&](std::string_view name, std::string_view) {
+        std::lock_guard lock(prompted_mutex);
+        prompted.emplace_back(name);
+        return true;
+    });
+
+    const std::string result = run_exec_turn(agent);
+    const auto cwd = core::workspace::Workspace::get_instance().get_primary();
+    CHECK_THAT(result, Catch::Matchers::StartsWith("Script completed\n"));
+    // Without workdir the command runs in the turn cwd, as Codex runs it.
+    CHECK_THAT(result, Catch::Matchers::EndsWith(
+        "Output:\nundefined|0|hi" + std::filesystem::canonical(cwd).string() + "|number")
+        || Catch::Matchers::EndsWith("Output:\nundefined|0|hi" + cwd.string() + "|number"));
+    for (const auto& name : prompted) CHECK(name == "run_terminal_command");
 }
 
 TEST_CASE("A script's nested calls are journaled under the exec call",

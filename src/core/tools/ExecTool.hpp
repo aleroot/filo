@@ -2,6 +2,7 @@
 
 #include "Tool.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -59,6 +60,45 @@ inline constexpr std::uint64_t kDefaultExecYieldMs = 10'000;
 /// parameter (`tools.apply_patch(patch)`); it becomes that parameter.
 [[nodiscard]] std::string nested_tool_arguments(const ToolDefinition& definition,
                                                 std::string arguments);
+
+// Code-mode models were trained to run commands with Codex's
+// `tools.exec_command({cmd, workdir, ...})`. Scripts see that tool in place of
+// `run_terminal_command`, and each call is translated to Filo's tool, so the
+// permission, hook, and transcript paths stay those of a terminal command.
+
+/// Codex's one-shot `exec_command` (codex-rs unified_exec/exec_command.rs
+/// one_shot_exec_command_spec): runs to completion, no session to resume.
+[[nodiscard]] ToolDefinition exec_command_definition();
+
+/// The tools a script reaches: @p offered, with `run_terminal_command`
+/// presented as `exec_command`.
+[[nodiscard]] std::vector<core::llm::Tool> script_tool_surface(
+    const std::vector<core::llm::Tool>& offered);
+
+/// A script call to a tool presented under another name, rewritten for the
+/// tool that runs it.
+struct ScriptToolAlias {
+    std::string tool_name;
+    std::string arguments;
+    std::uint64_t max_output_tokens = 0;
+};
+
+/// The Filo call behind a script's `exec_command` call, or nothing when
+/// @p tool_name is not an alias. Without `workdir` the command runs in
+/// @p default_workdir, as Codex runs it in the turn cwd. Arguments that are
+/// not an object pass through for validation to reject.
+[[nodiscard]] std::optional<ScriptToolAlias> resolve_script_alias(
+    std::string_view tool_name,
+    std::string_view arguments,
+    std::string_view default_workdir);
+
+/// The result the script reads, in the shape of Codex's exec_command result:
+/// `{wall_time_seconds, exit_code, original_token_count?, output}`, with the
+/// output cut in the middle to the alias's token budget. A result that is not
+/// a command result (an error) passes through.
+[[nodiscard]] std::string script_alias_result(const ScriptToolAlias& alias,
+                                              std::string_view result,
+                                              double wall_time_seconds);
 
 /// One `tools.<name>(input)` call. `arguments` is JSON: an object, or a
 /// string when the script passed one.

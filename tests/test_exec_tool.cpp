@@ -339,3 +339,69 @@ TEST_CASE("The exec description documents every offered tool in TypeScript", "[e
     CHECK_THAT(description, ContainsSubstring("### `mcp__docs_server_lookup` (`mcp__docs-server.lookup`)"));
     CHECK_THAT(description, ContainsSubstring("`text(value"));
 }
+
+TEST_CASE("A tool's output schema becomes the type its call resolves to", "[exec]") {
+    auto described = tool("grep_search", "Search files.", {{"pattern", "string", "Pattern.", true}});
+    described.function.output_schema =
+        R"({"type":"object","properties":{"matches":{"type":"array","items":{"type":"string"}}},"required":["matches"]})";
+    const std::string description =
+        core::tools::tool_script_description({described, tool("read", "Read a file.")});
+    CHECK_THAT(description, ContainsSubstring("): Promise<{ matches: Array<string>; }>; };"));
+    CHECK_THAT(description, ContainsSubstring("read(args: {\n}): Promise<unknown>; };"));
+}
+
+TEST_CASE("Scripts reach run_terminal_command as Codex's exec_command", "[exec]") {
+    const std::vector<core::llm::Tool> offered{
+        tool("run_terminal_command", "Run a command.", {{"command", "string", "Bash.", true}}),
+        tool("read", "Read a file."),
+    };
+    const auto surface = core::tools::script_tool_surface(offered);
+    REQUIRE(surface.size() == 2);
+    CHECK(surface[0].function.name == "exec_command");
+    CHECK(surface[1].function.name == "read");
+
+    const std::string description = core::tools::tool_script_description(offered);
+    CHECK_THAT(description, ContainsSubstring("### `exec_command`"));
+    CHECK_THAT(description, ContainsSubstring("  cmd: string;\n"));
+    CHECK_THAT(description, ContainsSubstring("wall_time_seconds: number;"));
+    CHECK_FALSE(description.contains("run_terminal_command"));
+
+    SECTION("an object call keeps its directory, timeout, and budget") {
+        const auto alias = core::tools::resolve_script_alias(
+            "exec_command",
+            R"({"cmd":"rg -n \"x\"","workdir":"/repo/sub","timeout_ms":1500,"max_output_tokens":20})",
+            "/repo");
+        REQUIRE(alias.has_value());
+        CHECK(alias->tool_name == "run_terminal_command");
+        CHECK(alias->arguments
+              == R"({"command":"rg -n \"x\"","working_dir":"/repo/sub","timeout_seconds":2})");
+        CHECK(alias->max_output_tokens == 20);
+    }
+    SECTION("a bare string runs in the turn cwd with the default timeout") {
+        const auto alias = core::tools::resolve_script_alias("exec_command", R"("ls")", "/repo");
+        REQUIRE(alias.has_value());
+        CHECK(alias->arguments
+              == R"({"command":"ls","working_dir":"/repo","timeout_seconds":600})");
+        CHECK(alias->max_output_tokens == 10000);
+    }
+    SECTION("a call without cmd is left for validation to reject") {
+        const auto alias = core::tools::resolve_script_alias("exec_command", R"({"workdir":"/x"})", "");
+        REQUIRE(alias.has_value());
+        CHECK(alias->arguments == "{}");
+    }
+    CHECK_FALSE(core::tools::resolve_script_alias("read", R"({"path":"a"})", "/repo").has_value());
+}
+
+TEST_CASE("An exec_command result has Codex's shape and token truncation", "[exec]") {
+    core::tools::ScriptToolAlias alias{.tool_name = "run_terminal_command", .max_output_tokens = 10000};
+    CHECK(core::tools::script_alias_result(alias, R"({"output":"ok\n","exit_code":0})", 0.25)
+          == R"({"wall_time_seconds":0.250,"exit_code":0,"output":"ok\n"})");
+    CHECK(core::tools::script_alias_result(alias, R"({"error":"bad working_dir"})", 0.1)
+          == R"({"error":"bad working_dir"})");
+
+    alias.max_output_tokens = 2;
+    const auto truncated = core::tools::script_alias_result(
+        alias, R"({"output":"abcdefghijklmnopqrst","exit_code":3})", 1.0);
+    CHECK(truncated
+          == R"({"wall_time_seconds":1.000,"exit_code":3,"original_token_count":5,"output":"abcd…3 tokens truncated…qrst"})");
+}

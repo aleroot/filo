@@ -7,6 +7,7 @@
 #include "../utils/Uuid.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <utility>
 
@@ -67,7 +68,13 @@ core::tools::ToolScriptReply ScriptToolHost::refuse(const core::llm::ToolCall& c
 std::optional<ScriptToolHost::Admitted>
 ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
                       core::tools::ToolScriptReply& refusal) {
-    const std::string& name = requested.tool_name;
+    // A script calls run_terminal_command as Codex's exec_command; from here
+    // on the call is the Filo tool's, so every gate and row treats it as one.
+    const auto alias = core::tools::resolve_script_alias(
+        requested.tool_name, requested.arguments,
+        services_.session_context.workspace_view().primary().string());
+    const std::string& name = alias ? alias->tool_name : requested.tool_name;
+    const std::string& requested_arguments = alias ? alias->arguments : requested.arguments;
     const auto refuse_unstarted = [&](std::string reason) {
         refusal = {.ran = false, .value = std::move(reason)};
         return std::nullopt;
@@ -80,7 +87,7 @@ ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
     auto definition = services_.resolve(name);
     if (!definition) return refuse_unstarted(name + " is not available");
     auto arguments = core::tools::schema::validate_arguments(
-        *definition, core::tools::nested_tool_arguments(*definition, requested.arguments));
+        *definition, core::tools::nested_tool_arguments(*definition, requested_arguments));
     if (!arguments) {
         return refuse_unstarted(
             std::format("invalid arguments for {}: {}", name, arguments.error().message));
@@ -116,8 +123,16 @@ ScriptToolHost::admit(const core::tools::ToolScriptCall& requested,
         .call = call,
         .task = {
             .accesses = std::move(planned.accesses),
-            .run = [this, call, definition = std::move(definition)] {
-                return services_.execute(call, definition);
+            .run = [this, call, definition = std::move(definition), alias] {
+                const auto started = std::chrono::steady_clock::now();
+                auto message = services_.execute(call, definition);
+                if (alias) {
+                    const std::chrono::duration<double> wall =
+                        std::chrono::steady_clock::now() - started;
+                    message.content = core::tools::script_alias_result(
+                        *alias, message.content, wall.count());
+                }
+                return message;
             },
         },
     };

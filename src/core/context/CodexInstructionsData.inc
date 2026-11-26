@@ -1,5 +1,7 @@
-// Generated from codex-rs main (models.json gpt-6.2-sol instructions_template
-// and collaboration-mode-templates). The live catalog replaces these.
+// Generated from codex-rs main: models.json gpt-6.2-sol instructions_template
+// and collaboration_modes.default (the catalog text Codex sends, which differs
+// from templates/default.md), and collaboration-mode-templates/plan.md.
+// The live catalog replaces these.
 constexpr std::string_view kBundledCodexInstructions = R"FILO_CODEX_TEXT(You are Codex, an agent based on GPT-6. You and the user share a workspace, and your job is to collaborate with them until their intended goal is completely handled.
 
 # Personality
@@ -211,8 +213,6 @@ Use the `request_user_input` tool only for optional questions where the answer w
 If `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.
 
 Never use the `request_user_input` tool for permission requests or permission-related escalations.
-
-If explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.
 )FILO_CODEX_TEXT";
 constexpr std::string_view kBundledCollaborationPlan = R"FILO_CODEX_TEXT(# Plan Mode (Conversational)
 

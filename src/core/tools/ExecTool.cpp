@@ -29,6 +29,9 @@ using Clock = std::chrono::steady_clock;
 
 // The default result budget, counted at four bytes a token.
 constexpr std::uint64_t kDefaultMaxOutputTokens = 10'000;
+// run_terminal_command's own default: Filo cannot leave a command running
+// past its call, so the timeout is long enough for builds and test suites.
+constexpr std::uint64_t kDefaultExecCommandTimeoutMs = 600'000;
 constexpr std::size_t kBytesPerToken = 4;
 constexpr int kMaxSchemaDepth = 4;
 
@@ -297,6 +300,17 @@ struct ExecPragma {
     return render_type(root, 0);
 }
 
+/// What the call resolves to, from the tool's output schema (codex-rs
+/// render_code_mode_sample_for_definition), or `unknown` without one.
+[[nodiscard]] std::string render_result(const ToolDefinition& definition) {
+    if (definition.output_schema.empty()) return "unknown";
+    simdjson::dom::parser parser;
+    const simdjson::padded_string schema(definition.output_schema);
+    simdjson::dom::element root;
+    if (parser.parse(schema).get(root) != simdjson::SUCCESS) return "unknown";
+    return render_type(root, 1);
+}
+
 /// A heading, the tool's own description, then its TypeScript declaration.
 [[nodiscard]] std::string render_tool_section(const ToolDefinition& definition) {
     const std::string identifier = script_identifier(definition.name);
@@ -312,8 +326,8 @@ struct ExecPragma {
         section += '\n';
     }
     section += std::format(
-        "exec tool declaration:\n```ts\ndeclare const tools: {{ {}(args: {}): Promise<unknown>; }};\n```",
-        identifier, render_arguments(definition));
+        "exec tool declaration:\n```ts\ndeclare const tools: {{ {}(args: {}): Promise<{}>; }};\n```",
+        identifier, render_arguments(definition), render_result(definition));
     return section;
 }
 
@@ -460,7 +474,7 @@ public:
         std::optional<std::string> error;
         if (context_ == nullptr) {
             error = "the JavaScript runtime did not start";
-        } else if (!install(tools)) {
+        } else if (!install(script_tool_surface(tools))) {
             error = stop_ == Stop::None
                 ? "the script helpers did not start: " + take_exception()
                 : failure_of_exception();
@@ -982,7 +996,7 @@ std::string tool_script_description(const std::vector<core::llm::Tool>& tools) {
         "- `ALL_TOOLS`: The callable tools as `{{ name, description }}` entries.\n\n"
         "Shared MCP Types:\n```ts\n{}\n```",
         kDefaultExecYieldMs, kMcpTypescriptPreamble);
-    for (const auto& tool : tools) {
+    for (const auto& tool : script_tool_surface(tools)) {
         description += "\n\n";
         description += render_tool_section(tool.function);
     }
@@ -1026,6 +1040,132 @@ std::string nested_tool_arguments(const ToolDefinition& definition, std::string 
     }
     if (only == nullptr) return arguments;
     return "{\"" + core::utils::escape_json_string(only->name) + "\":" + arguments + "}";
+}
+
+ToolDefinition exec_command_definition() {
+    return ToolDefinition{
+        .name = std::string(names::kExecCommand),
+        .title = "Run",
+        .description = "Runs a command to completion and returns its output. The process is "
+                       "terminated on timeout or cancellation and cannot be resumed.",
+        .parameters = {
+            {"cmd", "string", "Shell command to execute.", true},
+            {"workdir", "string", "Working directory for the command. Defaults to the turn cwd.",
+             false},
+            {"timeout_ms", "number",
+             std::format("Maximum command runtime. Defaults to {} ms.",
+                         kDefaultExecCommandTimeoutMs),
+             false},
+            {"max_output_tokens", "number",
+             "Output token budget. Defaults to 10000 tokens; larger requests may be capped by "
+             "policy.",
+             false},
+        },
+        .output_schema =
+            R"({"type":"object","properties":{)"
+            R"("wall_time_seconds":{"type":"number","description":"Elapsed wall time spent waiting for output in seconds."},)"
+            R"("exit_code":{"type":"number","description":"Process exit code when the command finished during this call."},)"
+            R"("original_token_count":{"type":"number","description":"Approximate token count before output truncation."},)"
+            R"("output":{"type":"string","description":"Command output text, possibly truncated."}},)"
+            R"("required":["wall_time_seconds","output"],"additionalProperties":false})",
+        .annotations = {.destructive_hint = true, .open_world_hint = true},
+    };
+}
+
+std::vector<core::llm::Tool> script_tool_surface(const std::vector<core::llm::Tool>& offered) {
+    std::vector<core::llm::Tool> surface = offered;
+    for (auto& tool : surface) {
+        if (tool.function.name == names::kRunTerminalCommand) {
+            tool.function = exec_command_definition();
+        }
+    }
+    return surface;
+}
+
+std::optional<ScriptToolAlias> resolve_script_alias(std::string_view tool_name,
+                                                    std::string_view arguments,
+                                                    std::string_view default_workdir) {
+    if (tool_name != names::kExecCommand) return std::nullopt;
+    ScriptToolAlias alias{
+        .tool_name = std::string(names::kRunTerminalCommand),
+        .arguments = std::string(arguments),
+        .max_output_tokens = kDefaultMaxOutputTokens,
+    };
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded(arguments);
+    simdjson::dom::element document;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS) return alias;
+
+    std::string_view command;
+    std::string_view workdir = default_workdir;
+    std::optional<double> timeout_ms;
+    if (document.get(command) != simdjson::SUCCESS) {
+        // A bare string is the command, as for any one-string-argument tool.
+        simdjson::dom::object object;
+        if (document.get(object) != simdjson::SUCCESS) return alias;
+        if (object["cmd"].get(command) != simdjson::SUCCESS) {
+            // Missing cmd: run_terminal_command's validation names the problem.
+            alias.arguments = "{}";
+            return alias;
+        }
+        if (std::string_view dir; object["workdir"].get(dir) == simdjson::SUCCESS && !dir.empty()) {
+            workdir = dir;
+        }
+        if (double ms = 0; object["timeout_ms"].get(ms) == simdjson::SUCCESS && ms > 0) {
+            timeout_ms = ms;
+        }
+        if (double tokens = 0;
+            object["max_output_tokens"].get(tokens) == simdjson::SUCCESS && tokens >= 1) {
+            alias.max_output_tokens = static_cast<std::uint64_t>(tokens);
+        }
+    }
+
+    const auto timeout_seconds = std::max<std::int64_t>(
+        1, static_cast<std::int64_t>(std::ceil(
+               timeout_ms.value_or(static_cast<double>(kDefaultExecCommandTimeoutMs)) / 1000.0)));
+    alias.arguments = R"({"command":")" + core::utils::escape_json_string(command) + '"';
+    if (!workdir.empty()) {
+        alias.arguments += R"(,"working_dir":")" + core::utils::escape_json_string(workdir) + '"';
+    }
+    alias.arguments += std::format(R"(,"timeout_seconds":{}}})", timeout_seconds);
+    return alias;
+}
+
+std::string script_alias_result(const ScriptToolAlias& alias,
+                                std::string_view result,
+                                double wall_time_seconds) {
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded(result);
+    simdjson::dom::element document;
+    std::string_view output;
+    std::int64_t exit_code = 0;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS
+        || document["output"].get(output) != simdjson::SUCCESS
+        || document["exit_code"].get(exit_code) != simdjson::SUCCESS) {
+        return std::string(result);
+    }
+
+    // codex-rs utils/string truncate.rs plan_token_truncation: keep the head
+    // and the tail of the budget, and say how many tokens were cut.
+    const std::size_t budget = alias.max_output_tokens * kBytesPerToken;
+    std::string text;
+    std::optional<std::uint64_t> original_tokens;
+    if (output.size() <= budget) {
+        text = std::string(output);
+    } else {
+        const auto head = utf8_prefix(output, budget / 2);
+        const auto tail = utf8_suffix(output, budget - budget / 2);
+        const auto removed = output.size() - budget;
+        text = std::format("{}…{} tokens truncated…{}", head,
+                           (removed + kBytesPerToken - 1) / kBytesPerToken, tail);
+        original_tokens = (output.size() + kBytesPerToken - 1) / kBytesPerToken;
+    }
+
+    std::string json = std::format(R"({{"wall_time_seconds":{:.3f},"exit_code":{})",
+                                   wall_time_seconds, exit_code);
+    if (original_tokens) json += std::format(R"(,"original_token_count":{})", *original_tokens);
+    json += R"(,"output":")" + core::utils::escape_json_string(text) + "\"}";
+    return json;
 }
 
 bool ToolScriptStore::store(std::string key, std::optional<std::string> json) {

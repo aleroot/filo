@@ -8,8 +8,12 @@
 #include "../scm/ScmFactory.hpp"
 #include "../tools/SkillRegistry.hpp"
 #include "../utils/FileSystemUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <utility>
@@ -101,6 +105,53 @@ namespace {
     }
 
     return prompt;
+}
+
+/// The IANA name of the local time zone (TZ, else the /etc/localtime link),
+/// or empty when neither names one.
+[[nodiscard]] std::string local_timezone_name() {
+    if (const char* tz = std::getenv("TZ"); tz != nullptr && *tz != '\0') {
+        std::string_view name(tz);
+        if (name.starts_with(':')) name.remove_prefix(1);
+        if (!name.empty() && !name.starts_with('/')) return std::string(name);
+    }
+    std::error_code error;
+    const auto target = std::filesystem::read_symlink("/etc/localtime", error);
+    if (error) return {};
+    const std::string path = target.generic_string();
+    constexpr std::string_view kZoneInfo = "zoneinfo/";
+    const auto at = path.rfind(kZoneInfo);
+    return at == std::string::npos ? std::string{} : path.substr(at + kZoneInfo.size());
+}
+
+/// codex-rs context/world_state/environment.rs: the `<environment_context>`
+/// a Codex-trained model reads its cwd, shell, date, and time zone from. The
+/// shell is bash because Filo's terminal tool runs every command in bash.
+[[nodiscard]] std::string build_environment_context(const SessionContext& session_context) {
+    const auto& primary = session_context.workspace_view().primary();
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+#ifdef _WIN32
+    const bool have_date = localtime_s(&local, &now) == 0;
+#else
+    const bool have_date = localtime_r(&now, &local) != nullptr;
+#endif
+    std::string block = "\n\n<environment_context>\n";
+    if (!primary.empty()) {
+        block += "  <cwd>" + core::utils::str::escape_xml(primary.string()) + "</cwd>\n";
+    }
+    block += "  <shell>bash</shell>\n";
+    if (have_date) {
+        char date[16] = {};
+        if (std::strftime(date, sizeof(date), "%Y-%m-%d", &local) > 0) {
+            block += std::string("  <current_date>") + date + "</current_date>\n";
+        }
+    }
+    if (const auto timezone = local_timezone_name(); !timezone.empty()) {
+        block += "  <timezone>" + core::utils::str::escape_xml(timezone) + "</timezone>\n";
+    }
+    block += "</environment_context>";
+    return block;
 }
 
 [[nodiscard]] std::string build_workspace_facts(const SessionContext& session_context) {
@@ -294,7 +345,10 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         ContextLayerKind::WorkspaceFacts,
         PromptStability::Workspace,
         "workspace",
-        build_workspace_facts(session_context_));
+        codex_instructions_.empty()
+            ? build_workspace_facts(session_context_)
+            : build_workspace_facts(session_context_)
+                  + build_environment_context(session_context_));
 
     if (!include_project_context_) {
         if (session_context_.memory_policy.use_memories
