@@ -151,7 +151,7 @@ std::expected<SessionTranscriptPage, std::string> SessionTranscriptReader::read(
     if (id == current_session_id) {
         return std::unexpected("A conversation cannot reference itself.");
     }
-    const auto session = store_.load_by_id(id);
+    const auto session = store_.read_by_id(id);
     if (!session) {
         return std::unexpected("Saved conversation unavailable; it may have been deleted.");
     }

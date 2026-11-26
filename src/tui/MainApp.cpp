@@ -2004,6 +2004,9 @@ RunResult run(RunOptions opts) {
         agent,
         selected_messages,
         session_leases.retain(session_id));
+    // The resumed conversation now lives in the agent and the transcript;
+    // this copy would otherwise stay for as long as Filo runs.
+    startup_data.reset();
     if (!thread_runtimes.insert(current_runtime)
         || !thread_runtimes.select(session_id)) {
         core::logging::error("Could not initialize the thread runtime registry.");
@@ -6298,7 +6301,7 @@ RunResult run(RunOptions opts) {
                      snap_todos = std::move(snap_todos),
                      total, cost, stats,
                      generation,
-                     completion_promise]() {
+                     completion_promise]() mutable {
             struct SaveCompletion {
                 ThreadRuntime::Ptr runtime;
                 ~SaveCompletion() { runtime->finish_save(); }
@@ -6326,10 +6329,11 @@ RunResult run(RunOptions opts) {
                 data.model             = metadata.model;
                 data.mode              = snap_mode;
                 data.context_summary   = snap_context;
-                data.messages          = snap_messages;
+                // Moved, not copied: the conversation may hold megabytes.
+                data.messages          = std::move(snap_messages);
                 data.goal              = metadata.goal;
                 data.goal_graph        = metadata.goal_graph;
-                data.todos             = snap_todos;
+                data.todos             = std::move(snap_todos);
                 data.stats.prompt_tokens     = total.prompt_tokens;
                 data.stats.completion_tokens = total.completion_tokens;
                 data.stats.cost_usd          = cost;

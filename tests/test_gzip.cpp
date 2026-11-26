@@ -90,6 +90,22 @@ TEST_CASE("gzip reads every member of a concatenated stream", "[gzip]") {
     CHECK_FALSE(gzip::decompress(two, 1'999));
 }
 
+TEST_CASE("gzip output keeps no more memory than it holds", "[gzip]") {
+    // A session is decompressed whole and parsed while this string lives:
+    // an output buffer sized by guess held up to four times the session.
+    const auto check_tight = [](const std::string& original, const std::string& packed) {
+        const auto result = gzip::decompress(packed);
+        REQUIRE(result.has_value());
+        CHECK(*result == original);
+        CHECK(result->capacity() <= original.size() + original.size() / 8 + 64);
+    };
+    const auto noise = random_bytes(1u << 20);
+    check_tight(noise, gzip::compress(noise));  // Sized from the trailer.
+    const auto text = repetitive_text(3u << 20);
+    check_tight(text, gzip::compress(text));  // Grown past it, then trimmed.
+    check_tight(noise + noise, gzip::compress(noise) + gzip::compress(noise));
+}
+
 TEST_CASE("gzip rejects an out-of-range compression level", "[gzip]") {
     CHECK_THROWS_AS(gzip::compress("x", {.level = gzip::kMaxLevel + 1}), std::invalid_argument);
     CHECK_THROWS_AS(gzip::compress("x", {.level = -1}), std::invalid_argument);

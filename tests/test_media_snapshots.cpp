@@ -120,6 +120,34 @@ TEST_CASE("An @-mentioned video is pinned when the prompt has a snapshot store",
     CHECK(unpinned.content_parts[1].snapshot.empty());
 }
 
+TEST_CASE("An @-mentioned image is pinned as a snapshot, not held inline",
+          "[media][image][context]") {
+    Fixture fixture;
+    const auto image = fixture.root / "shots" / "error.png";
+    fixture.write(image, "png-bytes");
+    const auto prompt = R"(Look at @"shots/error.png")";
+
+    const MediaSnapshots snapshots(fixture.root / "media" / "session");
+    const auto pinned = core::context::expand_prompt(prompt, fixture.root, {.media_snapshots = &snapshots});
+    REQUIRE(pinned.content_parts.size() == 2);
+    const auto& part = pinned.content_parts[1];
+    CHECK(part.type == core::llm::ContentPartType::Image);
+    CHECK(part.path == image.string());
+    CHECK(part.url.empty());  // The history keeps a path, not the image.
+    CHECK(fs::path(part.snapshot).parent_path() == snapshots.directory());
+
+    // What is sent is what was attached, however the file changes later.
+    fixture.write(image, "overwritten");
+    const auto encoded = core::llm::encode_image_part(part);
+    REQUIRE(encoded);
+    CHECK(encoded->data_url() == "data:image/png;base64,cG5nLWJ5dGVz");
+
+    // Without a snapshot store the bytes are kept inline, as before.
+    const auto inline_part = core::context::expand_prompt(prompt, fixture.root).content_parts[1];
+    CHECK(inline_part.snapshot.empty());
+    CHECK(inline_part.url == "data:image/png;base64,b3ZlcndyaXR0ZW4=");
+}
+
 TEST_CASE("A session keeps where its media snapshots are, and removes them with it",
           "[media][session]") {
     Fixture fixture;

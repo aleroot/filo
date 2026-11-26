@@ -609,6 +609,120 @@ TEST_CASE("Sending a prompt records it instead of rewriting the history", "[hist
     CHECK(after.entries() == std::vector<std::string>{"third", "fourth"});
 }
 
+TEST_CASE("Prompt history reads the file again whenever another writer changed it",
+          "[history][concurrency]") {
+    TempHistoryFile file("filo_test_history_refresh");
+    PromptHistoryStore first(file.path);
+    PromptHistoryStore second(file.path);
+
+    // A recorded prompt grows the log.
+    REQUIRE(first.append_and_save("first-1"));
+    REQUIRE(second.append_and_save("second-1"));
+    REQUIRE(first.append_and_save("first-2"));
+    CHECK(first.entries() == std::vector<std::string>{"first-1", "second-1", "first-2"});
+
+    // A rewrite replaces the snapshot and drops the log.
+    REQUIRE(second.load());
+    REQUIRE(second.remove_at_and_save(0));
+    REQUIRE(first.append_and_save("first-3"));
+    CHECK(first.entries() == std::vector<std::string>{"second-1", "first-2", "first-3"});
+
+    // A whole save by the const path, and a clear.
+    REQUIRE(second.load());
+    second.add("unsaved");
+    REQUIRE(second.save());
+    REQUIRE(first.load());
+    CHECK(first.entries().back() == "unsaved");
+    REQUIRE(second.clear_and_save());
+    REQUIRE(first.load());
+    CHECK(first.empty());
+
+    // A file rewritten in place by another program (a different size: an
+    // in-place rewrite of the same size within one clock tick is invisible).
+    std::ofstream(file.path, std::ios::trunc) << R"({"version":2,"entries":["edited"]})";
+    REQUIRE(first.load());
+    CHECK(first.entries() == std::vector<std::string>{"edited"});
+}
+
+TEST_CASE("Prompt history never keeps what memory holds and the file does not",
+          "[history]") {
+    TempHistoryFile file("filo_test_history_memory_only");
+    {
+        PromptHistoryStore store(file.path);
+        REQUIRE(store.append_and_save("saved"));
+        store.add("only in memory");
+        REQUIRE(store.append_and_save("sent"));
+        CHECK(store.entries() == std::vector<std::string>{"saved", "sent"});
+    }
+
+    // Entries trimmed by a lower limit come back when the limit is raised:
+    // the file still holds them.
+    {
+        PromptHistoryStore store(file.path);
+        store.set_max_entries(1);
+        REQUIRE(store.append_and_save("third"));
+        CHECK(store.entries() == std::vector<std::string>{"third"});
+        store.set_max_entries(10);
+        REQUIRE(store.load());
+        CHECK(store.entries() == std::vector<std::string>{"saved", "sent", "third"});
+    }
+}
+
+TEST_CASE("Prompt history keeps in memory what reading the file gives back",
+          "[history]") {
+    TempHistoryFile file("filo_test_history_utf8");
+    PromptHistoryStore store(file.path);
+    REQUIRE(store.append_and_save(PromptHistoryEntry{
+        .text = "bad \xff byte", .session_id = "s", .workspace = "/w\xfe"}));
+    PromptHistoryStore reader(file.path);
+    REQUIRE(reader.load());
+    CHECK(store.records() == reader.records());
+    CHECK(store.records().back().text != "bad \xff byte");
+}
+
+TEST_CASE("PromptHistoryStore reads every format the history was ever written in",
+          "[history]") {
+    TempHistoryFile file("filo_test_history_formats");
+    const auto load = [&](std::string_view json) -> std::optional<std::vector<PromptHistoryEntry>> {
+        file.cleanup();
+        std::ofstream(file.path) << json;
+        PromptHistoryStore store(file.path);
+        if (!store.load()) return std::nullopt;
+        return store.records();
+    };
+    using Entries = std::vector<PromptHistoryEntry>;
+
+    // Keys in any order; non-string entries are skipped but keep `meta` aligned.
+    CHECK(load(R"({"meta":[{"session":"a"},{},{"workspace":"/w","session":"c"}],)"
+               R"("entries":["one",7,"three"],"version":2})")
+          == Entries{{.text = "one", .session_id = "a"},
+                     {.text = "three", .session_id = "c", .workspace = "/w"}});
+    // Only the first of repeated keys counts, as a lookup would.
+    CHECK(load(R"({"entries":["first"],"entries":["second"],)"
+               R"("meta":[{"session":"x","session":"y"}],"meta":[{"session":"z"}]})")
+          == Entries{{.text = "first", .session_id = "x"}});
+    // Escaped keys and texts.
+    CHECK(load(R"({"\u0065ntries":["a\n\"b\u00e9"],"meta":[{"s\u0065ssion":"\u0041"}]})")
+          == Entries{{.text = "a\n\"b\xc3\xa9", .session_id = "A"}});
+    // The legacy plain array; a document without entries.
+    CHECK(load(R"(["old", {"x":1}, "older"])") == Entries{{.text = "old"}, {.text = "older"}});
+    CHECK(load(R"({"version":2})") == Entries{});
+    CHECK(load(R"({"entries":5,"meta":[]})") == Entries{});
+    CHECK(load("5") == Entries{});
+    CHECK(load(" null ") == Entries{});
+
+    // A file that is not JSON is refused whole, even where nothing is read
+    // from it, so it is never salvaged and saved over.
+    CHECK_FALSE(load(R"({"version":tru,"entries":["a"]})"));
+    CHECK_FALSE(load(R"({"entries":["a",nul]})"));
+    CHECK_FALSE(load(R"({"entries":["a"],"meta":[{"x":[1 2]}]})"));
+    CHECK_FALSE(load(R"({"other":["a" "b"],"entries":["a"]})"));
+    CHECK_FALSE(load(R"({"entries":["a"]} trailing)"));
+    CHECK_FALSE(load(R"({"entries":["a\x"]})"));
+    CHECK_FALSE(load("falsy"));
+    CHECK_FALSE(load(std::string(1100, '[') + std::string(1100, ']')));
+}
+
 TEST_CASE("PromptHistoryStore handles corrupted JSON gracefully", "[history]") {
     auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_bad.json";
     

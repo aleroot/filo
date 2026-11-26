@@ -100,6 +100,14 @@ constexpr std::size_t kMaxSessionBytes = std::size_t{1} << 30;
 // Construction
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// The log of a session may grow to the size of its snapshot, and at least
+/// this much, before a save writes a whole snapshot again.
+constexpr std::uint64_t kMinSessionLogBytes = 256 * 1024;
+
+} // namespace
+
 /// What a store last committed to each session file it saved, so the next
 /// save can append only the change (see save()).
 struct SessionStore::Log {
@@ -111,6 +119,20 @@ struct SessionStore::Log {
     };
     std::mutex mutex;
     std::unordered_map<std::string, Saved> files;
+
+    /// The file at @p path holding @p messages, as `read` left it at
+    /// @p position; nullopt when it cannot be amended from there.
+    [[nodiscard]] static std::optional<Saved> baseline(
+        const std::filesystem::path& path, const std::vector<core::llm::Message>& messages,
+        core::persistence::AmendedFile::Position position) {
+        if (!position.log_bytes) return std::nullopt;
+        Saved saved{.file = core::persistence::AmendedFile(path, kMinSessionLogBytes)};
+        saved.file.adopt(std::move(position));
+        saved.messages.reserve(messages.size());
+        for (const auto& message : messages)
+            saved.messages.push_back(core::utils::crypto::sha256(message_json(message)));
+        return saved;
+    }
 };
 
 SessionStore::SessionStore(std::filesystem::path sessions_dir)
@@ -875,28 +897,18 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json, std::s
 // save
 // ---------------------------------------------------------------------------
 
-namespace {
-
-/// The log of a session may grow to the size of its snapshot, and at least
-/// this much, before a save writes a whole snapshot again.
-constexpr std::uint64_t kMinSessionLogBytes = 256 * 1024;
-
-} // namespace
-
 bool SessionStore::append(const std::filesystem::path& path, const SessionData& data,
                           const std::vector<std::string>& messages) const {
     std::lock_guard guard(log_->mutex);
     auto known = log_->files.find(path.string());
     if (known == log_->files.end()) {
+        // Not opened through this store (see remember()): read it now.
         core::persistence::AmendedFile::Position position;
         const auto previous = load_by_path(path, &position);
-        if (!previous || !position.log_bytes) return false;
-        Log::Saved baseline{.file = core::persistence::AmendedFile(path, kMinSessionLogBytes)};
-        baseline.file.adopt(std::move(position));
-        baseline.messages.reserve(previous->messages.size());
-        for (const auto& message : previous->messages)
-            baseline.messages.push_back(core::utils::crypto::sha256(message_json(message)));
-        known = log_->files.emplace(path.string(), std::move(baseline)).first;
+        if (!previous) return false;
+        auto baseline = Log::baseline(path, previous->messages, std::move(position));
+        if (!baseline) return false;
+        known = log_->files.emplace(path.string(), std::move(*baseline)).first;
     }
     auto& saved = known->second;
     // A record keeps the messages that did not change and carries the rest.
@@ -1004,27 +1016,33 @@ constexpr std::size_t kLegacyStatsTailBytes = 4096;
 /// Buffered prefix of a stream that grows on demand.
 class FilePrefix {
 public:
-    explicit FilePrefix(std::istream& input) : input_(input) {}
+    explicit FilePrefix(std::istream& input) : input_(&input) {}
+    /// Bytes already in memory are read where they are, never copied.
+    explicit FilePrefix(std::string_view bytes) : input_(nullptr), in_memory_(bytes) {}
 
     /// Makes bytes [0, size) available; false when the stream is shorter.
     [[nodiscard]] bool ensure(std::size_t size) {
+        if (input_ == nullptr) return in_memory_.size() >= size;
         while (data_.size() < size && !eof_) {
             const std::size_t old_size = data_.size();
             const std::size_t chunk = std::max(kInitialReadChunk, old_size);
             data_.resize(old_size + chunk);
-            input_.read(data_.data() + old_size, static_cast<std::streamsize>(chunk));
+            input_->read(data_.data() + old_size, static_cast<std::streamsize>(chunk));
             const auto got = static_cast<std::size_t>(
-                std::max<std::streamsize>(input_.gcount(), 0));
+                std::max<std::streamsize>(input_->gcount(), 0));
             data_.resize(old_size + got);
             if (got < chunk) eof_ = true;
         }
         return data_.size() >= size;
     }
 
-    [[nodiscard]] const std::string& data() const noexcept { return data_; }
+    [[nodiscard]] std::string_view data() const noexcept {
+        return input_ == nullptr ? in_memory_ : std::string_view(data_);
+    }
 
 private:
-    std::istream& input_;
+    std::istream* input_;
+    std::string_view in_memory_;
     std::string data_;
     bool eof_ = false;
 };
@@ -1037,7 +1055,7 @@ public:
 
     [[nodiscard]] std::size_t position() const noexcept { return pos_; }
     [[nodiscard]] std::string_view slice(std::size_t begin, std::size_t end) const {
-        return std::string_view(prefix_.data()).substr(begin, end - begin);
+        return prefix_.data().substr(begin, end - begin);
     }
 
     /// Next non-whitespace byte without consuming it; '\0' at end of input.
@@ -1093,7 +1111,7 @@ private:
     [[nodiscard]] bool skip_string() {
         ++pos_;  // opening quote
         while (prefix_.ensure(pos_ + 1)) {
-            const std::string& data = prefix_.data();
+            const std::string_view data = prefix_.data();
             const char* begin = data.data() + pos_;
             const std::size_t available = data.size() - pos_;
             const auto* quote = static_cast<const char*>(std::memchr(begin, '"', available));
@@ -1179,10 +1197,20 @@ private:
     return stats;
 }
 
-/// Builds a catalogue row from a bounded read of @p input. nullopt means the
+/// What a full scan of a session's messages found, without decoding them.
+struct CatalogueScan {
+    std::size_t message_count = 0;
+    /// The message the preview came from; npos when none gave one.
+    std::size_t preview_index = std::string::npos;
+};
+
+/// Builds a catalogue row from a bounded read of @p prefix. nullopt means the
 /// layout was not recognised and the caller should use the full decoder.
-[[nodiscard]] std::optional<SessionInfo> scan_catalogue_row(std::istream& input) {
-    FilePrefix prefix(input);
+/// With @p scan, every message is stepped over (not decoded) to count them;
+/// without it, @p input is the stream @p prefix reads, for legacy stats.
+[[nodiscard]] std::optional<SessionInfo> scan_catalogue_row(FilePrefix& prefix,
+                                                            std::istream* input,
+                                                            CatalogueScan* scan) {
     PrefixCursor cursor(prefix);
     if (!cursor.consume('{')) return std::nullopt;
 
@@ -1212,18 +1240,28 @@ private:
 
         if (*key == "messages") {
             if (!cursor.consume('[')) return std::nullopt;
-            while (!preview_seen) {
+            std::size_t count = 0;
+            for (;;) {
                 const char ch = cursor.peek();
                 if (ch == ']') {
                     static_cast<void>(cursor.consume(']'));
+                    if (scan) scan->message_count = count;
                     break;
                 }
                 if (ch == ',') {
                     static_cast<void>(cursor.consume(','));
                     continue;
                 }
+                if (preview_seen) {
+                    // Counted, never decoded.
+                    if (!scan) break;
+                    if (!cursor.skip_value()) return std::nullopt;
+                    ++count;
+                    continue;
+                }
                 const std::size_t begin = cursor.position();
                 if (!cursor.skip_value()) return std::nullopt;
+                ++count;
                 simdjson::dom::element element;
                 if (parse_repairing(parser, cursor.slice(begin, cursor.position()),
                                     repaired, element) != simdjson::SUCCESS) {
@@ -1233,11 +1271,13 @@ private:
                 if (message.role != "user" || message.synthetic) continue;
                 preview = collapse_preview(core::llm::message_text_for_display(message));
                 preview_seen = !preview.empty();
+                if (preview_seen && scan) scan->preview_index = count - 1;
             }
-            if (preview_seen && !stats_seen) {
+            // A full scan reads on to the stats; only a stopped one jumps.
+            if (preview_seen && !stats_seen && input != nullptr) {
                 // Legacy layout: stats trail the conversation. The tail read
                 // moves the stream, so any failure must use the full decoder.
-                auto stats = read_legacy_trailing_stats(input);
+                auto stats = read_legacy_trailing_stats(*input);
                 if (!stats.has_value()) return std::nullopt;
                 append_member("stats", *stats);
                 stats_seen = true;
@@ -1284,6 +1324,18 @@ private:
     }
     info.preview = std::move(preview);
     return info;
+}
+
+[[nodiscard]] std::optional<SessionInfo> scan_catalogue_row(std::istream& input) {
+    FilePrefix prefix(input);
+    return scan_catalogue_row(prefix, &input, nullptr);
+}
+
+/// A full scan of a session document already in memory.
+[[nodiscard]] std::optional<SessionInfo> scan_catalogue_row(std::string_view json,
+                                                            CatalogueScan& scan) {
+    FilePrefix prefix(json);
+    return scan_catalogue_row(prefix, nullptr, &scan);
 }
 
 // ── Persistent catalogue cache ──────────────────────────────────────────────
@@ -1414,10 +1466,63 @@ private:
 
 } // namespace
 
+std::optional<SessionInfo> SessionStore::read_amended_header(
+    const std::filesystem::path& path) const {
+    auto contents = core::persistence::AmendedFile::read(path, kMaxSessionBytes);
+    if (!contents || !*contents || (*contents)->records.empty()) return std::nullopt;
+
+    // The snapshot is scanned, never decoded: decoding a long conversation
+    // takes over ten times its size, and only its message count and the
+    // message its preview comes from are needed.
+    CatalogueScan scan;
+    std::string snapshot_preview;
+    {
+        std::string json = std::move((*contents)->snapshot);
+        if (core::utils::gzip::is_compressed(json)) {
+            auto inflated = core::utils::gzip::decompress(json, kMaxSessionBytes);
+            if (!inflated) return std::nullopt;
+            json = std::move(*inflated);
+        }
+        auto row = scan_catalogue_row(json, scan);
+        if (!row) return std::nullopt;
+        snapshot_preview = std::move(row->preview);
+    }
+
+    // Replayed as load_by_path replays them: each record keeps the first
+    // `keep` messages and carries the rest, and its header is the session's.
+    std::size_t from_snapshot = scan.message_count;
+    std::vector<core::llm::Message> carried;
+    std::optional<SessionData> latest;
+    for (const auto& record : (*contents)->records) {
+        const auto json = core::utils::gzip::decompress(record, kMaxSessionBytes);
+        std::size_t keep = std::numeric_limits<std::size_t>::max();
+        auto amended = json ? from_json(*json, &keep) : std::nullopt;
+        if (!amended || keep > from_snapshot + carried.size()) return std::nullopt;
+        if (keep <= from_snapshot) {
+            from_snapshot = keep;
+            carried.clear();
+        } else {
+            carried.resize(keep - from_snapshot);
+        }
+        std::ranges::move(amended->messages, std::back_inserter(carried));
+        amended->messages.clear();
+        latest = std::move(amended);
+    }
+
+    // The first user message of the conversation the records leave: the
+    // snapshot's, when they kept it, else the first among those they carry.
+    auto info = session_info_from_data(*latest, path);
+    info.preview = scan.preview_index < from_snapshot
+        ? std::move(snapshot_preview)
+        : first_user_message_preview(carried);
+    return info;
+}
+
 std::optional<SessionInfo> SessionStore::read_session_header(
     const std::filesystem::path& path) const {
     if (core::utils::FileStamp::of(core::persistence::AmendedFile::log_path(path)).exists()) {
         // The snapshot's header may be older than the log's last record.
+        if (auto info = read_amended_header(path)) return info;
         auto data = load_by_path(path);
         return data ? std::optional(session_info_from_data(*data, path)) : std::nullopt;
     }
@@ -1477,6 +1582,21 @@ std::optional<SessionData> SessionStore::load_by_path(
         data->messages = std::move(messages);
     }
     if (data && position) *position = std::move((*contents)->position);
+    return data;
+}
+
+void SessionStore::remember(const std::filesystem::path& path, const SessionData& data,
+                            core::persistence::AmendedFile::Position position) const {
+    auto baseline = Log::baseline(path, data.messages, std::move(position));
+    if (!baseline) return;
+    std::lock_guard guard(log_->mutex);
+    log_->files.insert_or_assign(path.string(), std::move(*baseline));
+}
+
+std::optional<SessionData> SessionStore::load_and_remember(const std::filesystem::path& path) const {
+    core::persistence::AmendedFile::Position position;
+    auto data = load_by_path(path, &position);
+    if (data) remember(path, *data, std::move(position));
     return data;
 }
 
@@ -1597,6 +1717,15 @@ std::vector<SessionInfo> SessionStore::list() const {
 // ---------------------------------------------------------------------------
 
 std::optional<SessionData> SessionStore::load_by_id(std::string_view session_id) const {
+    return find_by_id(session_id, true);
+}
+
+std::optional<SessionData> SessionStore::read_by_id(std::string_view session_id) const {
+    return find_by_id(session_id, false);
+}
+
+std::optional<SessionData> SessionStore::find_by_id(std::string_view session_id,
+                                                    bool remember_for_save) const {
     std::error_code ec;
     if (!std::filesystem::exists(sessions_dir_, ec)) return std::nullopt;
 
@@ -1607,7 +1736,7 @@ std::optional<SessionData> SessionStore::load_by_id(std::string_view session_id)
         const std::string fname = p.filename().string();
         if (session_id_from_filename(fname) != session_id) continue;
 
-        return load_by_path(p);
+        return remember_for_save ? load_and_remember(p) : load_by_path(p);
     }
     return std::nullopt;
 }
@@ -1617,9 +1746,13 @@ std::optional<SessionData> SessionStore::load_by_index(int index) const {
 
     int valid_session_index = 0;
     for (const auto& info : list()) {
-        auto data = load_by_path(info.path);
+        core::persistence::AmendedFile::Position position;
+        auto data = load_by_path(info.path, &position);
         if (!data.has_value()) continue;
-        if (++valid_session_index == index) return data;
+        if (++valid_session_index == index) {
+            remember(info.path, *data, std::move(position));
+            return data;
+        }
     }
     return std::nullopt;
 }
@@ -1638,7 +1771,7 @@ std::optional<SessionData> SessionStore::load_most_recent_for_project(
 
     for (const auto& info : list()) {
         if (canonicalize_working_dir(info.working_dir) != target) continue;
-        if (auto data = load_by_path(info.path); data.has_value()) {
+        if (auto data = load_and_remember(info.path); data.has_value()) {
             return data;
         }
     }
@@ -1661,11 +1794,21 @@ std::optional<SessionData> SessionStore::load(std::string_view id_or_index) cons
 }
 
 std::optional<SessionData> SessionStore::load_by_name(std::string_view name) const {
+    return find_by_name(name, true);
+}
+
+std::optional<SessionData> SessionStore::read_by_name(std::string_view name) const {
+    return find_by_name(name, false);
+}
+
+std::optional<SessionData> SessionStore::find_by_name(std::string_view name,
+                                                      bool remember_for_save) const {
     if (name.empty()) return std::nullopt;
     // list() is sorted most-recent first, so the first match wins.
     for (const auto& info : list()) {
         if (info.name != name) continue;
-        if (auto data = load_by_path(info.path); data.has_value()) {
+        if (auto data = remember_for_save ? load_and_remember(info.path) : load_by_path(info.path);
+            data.has_value()) {
             return data;
         }
     }

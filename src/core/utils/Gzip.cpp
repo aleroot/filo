@@ -3,8 +3,10 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -63,6 +65,8 @@ public:
 
     [[nodiscard]] std::string take() && {
         output_.resize(produced_);
+        // A buffer grown by doubling may be twice what it holds.
+        if (output_.capacity() - produced_ > produced_ / 8) output_.shrink_to_fit();
         return std::move(output_);
     }
 
@@ -76,6 +80,18 @@ private:
 [[nodiscard]] std::string zlib_error(int status, const z_stream& stream) {
     if (stream.msg != nullptr) return stream.msg;
     return std::format("zlib error {}", status);
+}
+
+/// The uncompressed size the last gzip member of @p bytes records (ISIZE),
+/// when @p bytes is long enough to hold one.
+[[nodiscard]] std::optional<std::size_t> trailing_size(std::string_view bytes) noexcept {
+    constexpr std::size_t kSmallestMember = 18;  // 10-byte header, 8-byte trailer.
+    if (bytes.size() < kSmallestMember) return std::nullopt;
+    std::uint32_t size = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        size |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[bytes.size() - 4 + i])) << (8 * i);
+    }
+    return size;
 }
 
 } // namespace
@@ -134,7 +150,13 @@ std::expected<std::string, std::string> decompress(std::string_view bytes,
     const auto too_large = [&] {
         return std::unexpected(std::format("decompressed data exceeds {} bytes", max_output_bytes));
     };
-    const std::size_t estimate = bytes.size() > capacity / 4 ? capacity : bytes.size() * 4;
+    std::size_t estimate = bytes.size() > capacity / 4 ? capacity : bytes.size() * 4;
+    // RFC 1952 ends a member with its size modulo 2^32. Trusted only below the
+    // estimate, which bounds what a corrupt trailer can make this allocate;
+    // one byte more lets zlib read the trailer without asking for room.
+    if (const auto claimed = trailing_size(bytes); claimed && *claimed < estimate) {
+        estimate = *claimed + 1;
+    }
     Buffers buffers(bytes, std::min(capacity, std::max(kInitialInflateBytes, estimate)));
     for (;;) {
         if (buffers.output_full()) {

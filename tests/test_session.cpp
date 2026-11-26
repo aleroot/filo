@@ -8,6 +8,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/TodoManager.hpp"
+#include "core/session/ThreadCatalog.hpp"
 #include "core/session/TodoUtils.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/tools/ReadToolResultTool.hpp"
@@ -25,6 +26,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -1606,6 +1608,75 @@ TEST_CASE("Saving a growing conversation appends the turn instead of rewriting t
         REQUIRE(store.remove("1c0e0001"));
         CHECK_FALSE(std::filesystem::exists(path));
         CHECK_FALSE(std::filesystem::exists(session_log(path)));
+    }
+}
+
+TEST_CASE("A session with a log is listed as decoding it whole would list it",
+          "[session][incremental][catalogue]") {
+    using core::llm::Message;
+    // Each case saves a snapshot, then changes the conversation and saves
+    // again (a record appended to the log) before it is listed.
+    const auto check_listed = [](core::session::SessionData data,
+                                 const std::function<void(core::session::SessionData&)>& change,
+                                 std::string_view expected_preview) {
+        TempDir tmp{std::filesystem::temp_directory_path()
+                    / std::format("filo_test_session_amended_row_{}", data.session_id)};
+        const core::session::SessionStore store{tmp.path};
+        REQUIRE(store.save(data));
+        change(data);
+        REQUIRE(store.save(data));
+        change(data);
+        REQUIRE(store.save(data));
+        const auto path = store.compute_path(data);
+        REQUIRE(std::filesystem::exists(session_log(path)));
+
+        const core::session::SessionStore fresh{tmp.path};
+        const auto loaded = fresh.load_by_id(data.session_id);
+        REQUIRE(loaded);
+        const auto listed = fresh.list();
+        REQUIRE(listed.size() == 1);
+        const auto& row = listed.front();
+        CHECK(row.preview == expected_preview);
+        CHECK(row.preview == core::session::first_user_message_preview(loaded->messages));
+        CHECK(row.name == loaded->name);
+        CHECK(row.last_active_at == loaded->last_active_at);
+        CHECK(row.turn_count == loaded->stats.turn_count);
+        CHECK(row.model == loaded->model);
+    };
+
+    int turn = 1;
+    SECTION("turns added: the snapshot's first prompt stays the preview") {
+        check_listed(make_test_session("a0000001"), [&](auto& data) {
+            add_turn(data, ++turn);
+            data.name = std::format("renamed {}", turn);
+            data.model = "grok-5";
+        }, "Hello, Filo!");
+    }
+    SECTION("the first prompt edited: the preview comes from the log") {
+        check_listed(make_test_session("a0000002"), [&](auto& data) {
+            data.messages[0].content = std::format("Edited prompt {}", ++turn);
+            add_turn(data, turn);
+        }, "Edited prompt 3");
+    }
+    SECTION("compacted to a summary: earlier messages are gone") {
+        check_listed(make_test_session("a0000003"), [&](auto& data) {
+            data.messages = {Message{.role = "user", .content = std::format("Summary {}", ++turn)},
+                             Message{.role = "assistant", .content = "Continuing"}};
+        }, "Summary 3");
+    }
+    SECTION("a snapshot with no prompt yet: the first one comes from the log") {
+        auto data = make_test_session("a0000004");
+        data.messages = {Message{.role = "user", .content = "note", .synthetic = true},
+                         Message{.role = "assistant", .content = "Ready"}};
+        check_listed(std::move(data), [&](auto& data) { add_turn(data, ++turn); }, "Question 2");
+    }
+    SECTION("shortened, then grown again") {
+        auto data = make_test_session("a0000005");
+        add_turn(data, 2);
+        check_listed(std::move(data), [&](auto& data) {
+            if (++turn == 2) data.messages.resize(1);
+            else add_turn(data, turn + 10);
+        }, "Hello, Filo!");
     }
 }
 

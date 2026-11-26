@@ -230,9 +230,9 @@ std::optional<SessionData> resolve_session_reference(const SessionStore& store,
                                                      std::string_view current_session_id) {
     std::optional<SessionData> session;
     if (is_session_id(token.target)) {
-        session = store.load_by_id(core::utils::str::to_lower_ascii_copy(token.target));
+        session = store.read_by_id(core::utils::str::to_lower_ascii_copy(token.target));
     }
-    if (!session.has_value() && token.quoted) session = store.load_by_name(token.target);
+    if (!session.has_value() && token.quoted) session = store.read_by_name(token.target);
     if (!session.has_value() || session->session_id == current_session_id) return std::nullopt;
     return session;
 }

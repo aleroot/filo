@@ -89,6 +89,10 @@ public:
 
     [[nodiscard]] const std::filesystem::path& snapshot_path() const noexcept { return snapshot_; }
 
+    /// Where the last successful `replace` or `amend` left the file, as
+    /// `read` would report it. Only meaningful right after one succeeded.
+    [[nodiscard]] const std::optional<Position>& position() const noexcept { return position_; }
+
 private:
     std::filesystem::path snapshot_;
     std::filesystem::path log_;

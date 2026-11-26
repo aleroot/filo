@@ -269,12 +269,19 @@ void append_text_part(std::vector<core::llm::ContentPart>& parts, std::string_vi
     parts.push_back(core::llm::ContentPart::make_text(std::string(text)));
 }
 
-// Pins the image bytes as a data URL at mention time so replaying the
-// conversation (resume, later turns) never depends on the file still existing.
+// Pins the image bytes at mention time so replaying the conversation (resume,
+// later turns) never depends on the file still existing: into the session's
+// media snapshots when it has them, else inline as a data URL. A snapshot is
+// a path in the history; a data URL is the whole image, in memory and in
+// every save of the session.
 [[nodiscard]] core::llm::ContentPart make_pinned_image_attachment(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path, const core::llm::MediaSnapshots* snapshots) {
     auto attachment = core::llm::ContentPart::make_image(
         path.string(), core::utils::mime::guess_type(path, false));
+    if (snapshots != nullptr) {
+        snapshots->pin(attachment);
+        if (!attachment.snapshot.empty()) return attachment;
+    }
     if (const auto encoded = core::llm::encode_image_part(attachment);
         encoded.has_value()) {
         attachment.url = encoded->data_url();
@@ -587,7 +594,8 @@ ExpandedPrompt expand_prompt(std::string_view input,
         if (target == MentionTarget::Image) {
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;
-            output.content_parts.push_back(make_pinned_image_attachment(resolved));
+            output.content_parts.push_back(
+                make_pinned_image_attachment(resolved, options.media_snapshots));
             append_text_part(output.content_parts, trailing_suffix);
             i = cursor;
             continue;

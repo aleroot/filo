@@ -9,14 +9,178 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <optional>
+#include <string_view>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 
 namespace core::history {
 
 namespace {
 /// Far above any history, below what would exhaust memory.
 constexpr std::size_t kMaxHistoryBytes = std::size_t{64} << 20;
+
+using simdjson::ondemand::array;
+using simdjson::ondemand::json_type;
+using simdjson::ondemand::object;
+using simdjson::ondemand::value;
+
+/// How deeply values may nest, the root being at depth 1. The on-demand
+/// parser does not check it (a debug build asserts), so a container is not
+/// entered at this depth: its values would be deeper. The dom parser accepts
+/// an empty one there; nothing else differs.
+constexpr std::size_t kMaxDepth = simdjson::DEFAULT_MAX_DEPTH;
+
+/// Reads @p item whole; @p depth is how many containers it would make, it
+/// included, if it is one. The on-demand parser validates only what it
+/// reads, and a history that does not parse must be refused as a whole, not
+/// salvaged and then saved over.
+simdjson::error_code consume(value item, std::size_t depth) {
+    json_type type{};
+    if (const auto error = item.type().get(type)) return error;
+    switch (type) {
+        case json_type::array: {
+            if (depth >= kMaxDepth) return simdjson::DEPTH_ERROR;
+            array items;
+            if (const auto error = item.get_array().get(items)) return error;
+            for (auto element : items) {
+                value child;
+                if (const auto error = element.get(child)) return error;
+                if (const auto error = consume(child, depth + 1)) return error;
+            }
+            return simdjson::SUCCESS;
+        }
+        case json_type::object: {
+            if (depth >= kMaxDepth) return simdjson::DEPTH_ERROR;
+            object fields;
+            if (const auto error = item.get_object().get(fields)) return error;
+            for (auto field : fields) {
+                std::string_view key;
+                value child;
+                if (const auto error = field.unescaped_key().get(key)) return error;
+                if (const auto error = field.value().get(child)) return error;
+                if (const auto error = consume(child, depth + 1)) return error;
+            }
+            return simdjson::SUCCESS;
+        }
+        case json_type::string: {
+            std::string_view text;
+            return item.get_string().get(text);
+        }
+        case json_type::boolean: {
+            bool flag = false;
+            return item.get_bool().get(flag);
+        }
+        case json_type::null: {
+            bool null = false;
+            if (const auto error = item.is_null().get(null)) return error;
+            return null ? simdjson::SUCCESS : simdjson::N_ATOM_ERROR;
+        }
+        default: {
+            simdjson::ondemand::number number;
+            return item.get_number().get(number);
+        }
+    }
+}
+
+/// The string @p item holds, or nullopt (after reading it whole) when it
+/// holds something else.
+simdjson::error_code optional_string(value item, std::size_t depth,
+                                     std::optional<std::string_view>& out) {
+    json_type type{};
+    if (const auto error = item.type().get(type)) return error;
+    if (type != json_type::string) return consume(item, depth);
+    std::string_view text;
+    if (const auto error = item.get_string().get(text)) return error;
+    out = text;
+    return simdjson::SUCCESS;
+}
+
+/// The texts of @p entries (at @p depth) with their positions; non-strings
+/// are counted.
+simdjson::error_code read_entries(array entries, std::size_t depth,
+                                  std::vector<PromptHistoryEntry>& result,
+                                  std::vector<std::size_t>& source_index, std::size_t& count) {
+    for (auto element : entries) {
+        value item;
+        if (const auto error = element.get(item)) return error;
+        std::optional<std::string_view> text;
+        if (const auto error = optional_string(item, depth + 1, text)) return error;
+        if (text) {
+            result.push_back(PromptHistoryEntry{.text = std::string(*text)});
+            source_index.push_back(count);
+        }
+        ++count;
+    }
+    return simdjson::SUCCESS;
+}
+
+struct EntryScope {
+    std::string session_id;
+    std::string workspace;
+};
+
+/// One `meta` item (at @p depth): the first `session` and `workspace` keys
+/// of an object.
+simdjson::error_code read_scope(value item, std::size_t depth, EntryScope& scope) {
+    json_type type{};
+    if (const auto error = item.type().get(type)) return error;
+    if (type != json_type::object) return consume(item, depth);
+    if (depth >= kMaxDepth) return simdjson::DEPTH_ERROR;
+    object fields;
+    if (const auto error = item.get_object().get(fields)) return error;
+    bool seen_session = false;
+    bool seen_workspace = false;
+    for (auto field : fields) {
+        std::string_view key;
+        value child;
+        if (const auto error = field.unescaped_key().get(key)) return error;
+        // Decided before the value is read: that may reuse the key's buffer.
+        std::string* target = nullptr;
+        if (key == "session" && !std::exchange(seen_session, true)) target = &scope.session_id;
+        else if (key == "workspace" && !std::exchange(seen_workspace, true)) target = &scope.workspace;
+        if (const auto error = field.value().get(child)) return error;
+        std::optional<std::string_view> text;
+        if (const auto error = optional_string(child, depth + 1, text)) return error;
+        if (target != nullptr && text) *target = std::string(*text);
+    }
+    return simdjson::SUCCESS;
+}
+
+simdjson::error_code read_meta(array meta, std::size_t depth, std::vector<EntryScope>& scopes) {
+    for (auto element : meta) {
+        value item;
+        if (const auto error = element.get(item)) return error;
+        if (const auto error = read_scope(item, depth + 1, scopes.emplace_back())) return error;
+    }
+    return simdjson::SUCCESS;
+}
+
+/// A scalar root holds no entries, but must still be JSON. (A scalar
+/// document cannot be read as a value, so it is read where it stands.)
+simdjson::error_code validate_scalar(simdjson::ondemand::document& doc, json_type type,
+                                     std::string_view json) {
+    switch (type) {
+        case json_type::string: {
+            std::string_view text;
+            return doc.get_string().get(text);
+        }
+        case json_type::boolean:
+        case json_type::null: {
+            // Compared whole: simdjson 5 reads a root `falsX` as false.
+            constexpr std::string_view kWhitespace = " \t\n\r";
+            const auto first = json.find_first_not_of(kWhitespace);
+            const auto atom = json.substr(first, json.find_last_not_of(kWhitespace) + 1 - first);
+            return atom == "true" || atom == "false" || atom == "null"
+                ? simdjson::SUCCESS : simdjson::INCORRECT_TYPE;
+        }
+        default: {
+            simdjson::ondemand::number number;
+            return doc.get_number().get(number);
+        }
+    }
+}
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -54,11 +218,29 @@ bool PromptHistoryStore::load(std::string* error) {
         if (error) *error = lock_error;
         return false;
     }
+    return refresh_unlocked(error);
+}
+
+PromptHistoryStore::DiskState PromptHistoryStore::disk_state() const {
+    return DiskState{
+        .snapshot = core::utils::FileStamp::of(history_file_),
+        .log = core::utils::FileStamp::of(core::persistence::AmendedFile::log_path(history_file_)),
+    };
+}
+
+bool PromptHistoryStore::refresh_unlocked(std::string* error) {
+    // Every writer holds the lock and changes what a stamp sees: a record
+    // grows the log, and a new snapshot is renamed over the old one, so it
+    // has another inode (and the log it starts has another size or inode).
+    if (synced_ && *synced_ == disk_state()) return true;
     return load_unlocked(error);
 }
 
 bool PromptHistoryStore::load_unlocked(std::string* error) {
+    synced_.reset();
     position_.reset();
+    // Taken before reading, so a change made meanwhile is read next time.
+    auto state = disk_state();
     auto contents = core::persistence::AmendedFile::read(history_file_, kMaxHistoryBytes);
     if (!contents) {
         if (error) {
@@ -85,6 +267,7 @@ bool PromptHistoryStore::load_unlocked(std::string* error) {
         if (auto parsed = from_json(record); parsed && parsed->size() == 1) add(std::move(parsed->front()));
     }
     position_ = std::move((*contents)->position);
+    synced_ = std::move(state);
     return true;
 }
 
@@ -105,6 +288,19 @@ bool PromptHistoryStore::save_unlocked(std::string* error) const {
     return written.has_value();
 }
 
+bool PromptHistoryStore::commit_unlocked(std::string* error) {
+    synced_.reset();
+    position_.reset();
+    core::persistence::AmendedFile file(history_file_);
+    if (auto written = file.replace(to_json(entries_)); !written) {
+        if (error) *error = std::move(written.error());
+        return false;
+    }
+    position_ = file.position();
+    synced_ = disk_state();
+    return true;
+}
+
 bool PromptHistoryStore::append_and_save(std::string_view text, std::string* error) {
     return append_and_save(PromptHistoryEntry{.text = std::string(text)}, error);
 }
@@ -118,19 +314,30 @@ bool PromptHistoryStore::append_and_save(PromptHistoryEntry entry, std::string* 
         if (error) *error = lock_error;
         return false;
     }
-    if (!load_unlocked(error)) return false;
+    if (!refresh_unlocked(error)) return false;
     // A repeat of the newest prompt of the same session is not added.
     if (!entries_.empty() && entries_.back().text == entry.text
         && entries_.back().session_id == entry.session_id) {
         return true;
     }
     const std::string record = to_json({entry});
-    add(std::move(entry));
+    // Kept as reading the record back gives it (text that is not UTF-8 is
+    // stored repaired), so memory still matches the file after the write.
+    auto stored = from_json(record);
+    const bool exact = stored && stored->size() == 1;
+    add(exact ? std::move(stored->front()) : std::move(entry));
     // A prompt is recorded as a change to the history, not a rewrite of all
     // of it (up to max_entries prompts); the next save folds it in.
     core::persistence::AmendedFile file(history_file_);
     if (position_) file.adopt(*position_);
-    return file.amend(record, core::persistence::AmendedFile::Durability::Deferred) || save_unlocked(error);
+    if (file.amend(record, core::persistence::AmendedFile::Durability::Deferred)) {
+        position_ = file.position();
+        synced_ = disk_state();
+    } else if (!commit_unlocked(error)) {
+        return false;
+    }
+    if (!exact) synced_.reset();
+    return true;
 }
 
 bool PromptHistoryStore::rename_session_and_save(std::string_view from,
@@ -144,7 +351,7 @@ bool PromptHistoryStore::rename_session_and_save(std::string_view from,
         if (error) *error = lock_error;
         return false;
     }
-    if (!load_unlocked(error)) return false;
+    if (!refresh_unlocked(error)) return false;
     bool changed = false;
     for (auto& entry : entries_) {
         if (entry.session_id == from) {
@@ -152,7 +359,7 @@ bool PromptHistoryStore::rename_session_and_save(std::string_view from,
             changed = true;
         }
     }
-    return !changed || save_unlocked(error);
+    return !changed || commit_unlocked(error);
 }
 
 bool PromptHistoryStore::clear_and_save(std::string* error) {
@@ -164,7 +371,7 @@ bool PromptHistoryStore::clear_and_save(std::string* error) {
         return false;
     }
     clear();
-    return save_unlocked(error);
+    return commit_unlocked(error);
 }
 
 bool PromptHistoryStore::remove_at_and_save(std::size_t index, std::string* error) {
@@ -175,7 +382,7 @@ bool PromptHistoryStore::remove_at_and_save(std::size_t index, std::string* erro
         if (error) *error = lock_error;
         return false;
     }
-    if (!load_unlocked(error)) return false;
+    if (!refresh_unlocked(error)) return false;
     if (index >= entries_.size()) {
         if (error) {
             *error = std::format("history index {} out of range (have {})",
@@ -184,7 +391,7 @@ bool PromptHistoryStore::remove_at_and_save(std::size_t index, std::string* erro
         return false;
     }
     entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
-    return save_unlocked(error);
+    return commit_unlocked(error);
 }
 
 void PromptHistoryStore::add(std::string_view text) {
@@ -195,6 +402,7 @@ void PromptHistoryStore::add(PromptHistoryEntry entry) {
     if (entry.text.empty()) {
         return;
     }
+    synced_.reset();  // The file no longer says what memory holds.
 
     // Collapse a repeat of the newest entry from the same session. A repeat
     // from another thread is kept: that thread's own history needs it.
@@ -228,6 +436,7 @@ std::vector<std::string> PromptHistoryStore::entries_newest_first() const {
 
 void PromptHistoryStore::clear() {
     entries_.clear();
+    synced_.reset();
 }
 
 void PromptHistoryStore::enforce_size_limit() {
@@ -281,59 +490,73 @@ std::string PromptHistoryStore::to_json(const std::vector<PromptHistoryEntry>& e
 std::optional<std::vector<PromptHistoryEntry>> PromptHistoryStore::from_json(
     std::string_view json) {
     try {
-        simdjson::dom::parser parser;
-        simdjson::dom::element doc;
-        if (parser.parse_unpadded(json).get(doc) != simdjson::SUCCESS) {
-            return std::nullopt;
-        }
+        // On demand rather than dom: a dom parser needs about 13 times the
+        // input (40 MB for a 3 MB history), this about half of that. Every
+        // value is still read, so what dom refuses is refused here too.
+        const simdjson::padded_string padded(json);
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        json_type type{};
+        if (parser.iterate(padded).get(doc) || doc.type().get(type)) return std::nullopt;
 
-        // `entries` under an object, or a plain array (legacy format).
-        simdjson::dom::array entries_arr;
-        if (doc["entries"].get(entries_arr) != simdjson::SUCCESS
-            && doc.get(entries_arr) != simdjson::SUCCESS) {
-            return std::vector<PromptHistoryEntry>{};
-        }
-
-        // Keep `meta` aligned with `entries`: skipped non-string entries drop
-        // their meta slot too.
         std::vector<PromptHistoryEntry> result;
         std::vector<std::size_t> source_index;
-        std::size_t position = 0;
-        for (simdjson::dom::element entry_el : entries_arr) {
-            std::string_view sv;
-            if (entry_el.get(sv) == simdjson::SUCCESS) {
-                result.push_back(PromptHistoryEntry{.text = std::string(sv)});
-                source_index.push_back(position);
+        std::size_t count = 0;
+        std::vector<EntryScope> scopes;
+        bool meta_found = false;
+        if (type == json_type::array) {
+            // Legacy format: a plain array of texts.
+            array entries;
+            if (doc.get_array().get(entries) || read_entries(entries, 1, result, source_index, count)) {
+                return std::nullopt;
             }
-            ++position;
+        } else if (type == json_type::object) {
+            object root;
+            if (doc.get_object().get(root)) return std::nullopt;
+            bool entries_seen = false;
+            bool meta_seen = false;
+            for (auto field : root) {
+                std::string_view key;
+                value item;
+                if (field.unescaped_key().get(key)) return std::nullopt;
+                // Like a lookup, only the first of repeated keys counts.
+                const bool entries_key = key == "entries" && !std::exchange(entries_seen, true);
+                const bool meta_key = key == "meta" && !std::exchange(meta_seen, true);
+                json_type item_type{};
+                if (field.value().get(item) || item.type().get(item_type)) return std::nullopt;
+                if ((!entries_key && !meta_key) || item_type != json_type::array) {
+                    if (consume(item, 2)) return std::nullopt;
+                    continue;
+                }
+                array items;
+                if (item.get_array().get(items)) return std::nullopt;
+                meta_found |= meta_key;
+                const auto error = entries_key ? read_entries(items, 2, result, source_index, count)
+                                               : read_meta(items, 2, scopes);
+                if (error) return std::nullopt;
+            }
+        } else {
+            // Read in full, trailing content included.
+            if (validate_scalar(doc, type, json)) return std::nullopt;
+            return result;
         }
+        if (!doc.at_end()) return std::nullopt;
 
-        simdjson::dom::array meta_arr;
-        if (doc.is_object()
-            && doc["meta"].get(meta_arr) == simdjson::SUCCESS
-            && meta_arr.size() == position) {
-            std::vector<simdjson::dom::element> meta;
-            meta.reserve(position);
-            for (simdjson::dom::element item : meta_arr) {
-                meta.push_back(item);
-            }
+        // `meta` parallels `entries`, non-strings included; one that does
+        // not line up was rewritten by an older build and is ignored.
+        if (meta_found && scopes.size() == count) {
             for (std::size_t i = 0; i < result.size(); ++i) {
-                const auto& item = meta[source_index[i]];
-                std::string_view value;
-                if (item["session"].get(value) == simdjson::SUCCESS) {
-                    result[i].session_id = std::string(value);
-                }
-                if (item["workspace"].get(value) == simdjson::SUCCESS) {
-                    result[i].workspace = std::string(value);
-                }
+                auto& scope = scopes[source_index[i]];
+                result[i].session_id = std::move(scope.session_id);
+                result[i].workspace = std::move(scope.workspace);
             }
         }
-
         return result;
     } catch (...) {
         return std::nullopt;
     }
 }
+
 
 // -----------------------------------------------------------------------------
 // PersistentPromptHistory Implementation

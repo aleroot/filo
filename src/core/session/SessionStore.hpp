@@ -62,6 +62,12 @@ public:
     // Load by user-assigned name (most recently active match wins).
     [[nodiscard]] std::optional<SessionData> load_by_name(std::string_view name) const;
 
+    // The load_* functions prepare this store to save what they return as an
+    // append to the file. A caller that only reads a session (another
+    // conversation it refers to) reads it with these instead.
+    [[nodiscard]] std::optional<SessionData> read_by_id(std::string_view session_id) const;
+    [[nodiscard]] std::optional<SessionData> read_by_name(std::string_view name) const;
+
     // Load by 1-based index from the sorted list (1 = most recent).
     [[nodiscard]] std::optional<SessionData> load_by_index(int index) const;
 
@@ -170,9 +176,26 @@ private:
     // user message, legacy trailing stats) without decoding the conversation.
     [[nodiscard]] std::optional<SessionInfo> read_session_header(
         const std::filesystem::path& path) const;
+    // The catalogue row of a file amended by a log, from a scan of its
+    // snapshot and a replay of its (small) records; nullopt when that cannot
+    // tell, and the caller decodes the whole session instead.
+    [[nodiscard]] std::optional<SessionInfo> read_amended_header(
+        const std::filesystem::path& path) const;
     [[nodiscard]] std::optional<SessionData> load_by_path(
         const std::filesystem::path& path,
         core::persistence::AmendedFile::Position* position = nullptr) const;
+    /// Remembers that the file at @p path holds @p data as `read` left it at
+    /// @p position, so the first save of a session opened through this store
+    /// appends to it without reading the whole file again.
+    void remember(const std::filesystem::path& path, const SessionData& data,
+                  core::persistence::AmendedFile::Position position) const;
+    /// load_by_path, then remember() what it read.
+    [[nodiscard]] std::optional<SessionData> load_and_remember(
+        const std::filesystem::path& path) const;
+    [[nodiscard]] std::optional<SessionData> find_by_id(std::string_view session_id,
+                                                        bool remember_for_save) const;
+    [[nodiscard]] std::optional<SessionData> find_by_name(std::string_view name,
+                                                          bool remember_for_save) const;
 
     [[nodiscard]] static std::string    to_json(const SessionData& data);
     /// @p keep, when given, receives how many saved messages a log record

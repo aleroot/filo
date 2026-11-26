@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/persistence/AmendedFile.hpp"
+#include "core/utils/FileStamp.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -55,6 +56,8 @@ public:
     explicit PromptHistoryStore(std::filesystem::path history_file);
 
     // Load history from disk. Returns true on success (empty file is success).
+    // The file is read again only when it changed since this store last read
+    // or wrote it, or the entries were changed in memory since.
     [[nodiscard]] bool load(std::string* error = nullptr);
 
     // Save history to disk atomically.
@@ -104,6 +107,7 @@ public:
     // Set maximum number of entries to keep (0 = unlimited).
     void set_max_entries(std::size_t max_entries) noexcept {
         max_entries_ = max_entries;
+        synced_.reset();  // Reading the file again now trims differently.
     }
 
     [[nodiscard]] std::size_t max_entries() const noexcept {
@@ -134,14 +138,32 @@ private:
     [[nodiscard]] static std::optional<std::vector<PromptHistoryEntry>> from_json(
         std::string_view json);
 
+    /// The history file and its log as one `lstat` each sees them.
+    struct DiskState {
+        core::utils::FileStamp snapshot;
+        core::utils::FileStamp log;
+        bool operator==(const DiskState&) const = default;
+    };
+
     void enforce_size_limit();
+    [[nodiscard]] DiskState disk_state() const;
     [[nodiscard]] bool load_unlocked(std::string* error = nullptr);
+    /// load_unlocked, unless the files are as this store left them.
+    [[nodiscard]] bool refresh_unlocked(std::string* error = nullptr);
     [[nodiscard]] bool save_unlocked(std::string* error = nullptr) const;
+    /// save_unlocked, remembering where the write left the file.
+    [[nodiscard]] bool commit_unlocked(std::string* error = nullptr);
 
     std::filesystem::path history_file_;
     std::vector<PromptHistoryEntry> entries_;
-    /// Where the last load left the file, so a prompt can be recorded after it.
+    /// Where the last load or write left the file, so a prompt can be
+    /// recorded after it.
     std::optional<core::persistence::AmendedFile::Position> position_;
+    /// The files as this store last read or wrote them, while `entries_`
+    /// still holds exactly what reading them would give; nullopt when it may
+    /// not. A history of thousands of prompts costs tens of MB to parse, so
+    /// a prompt sent from an unchanged file must not read it again.
+    std::optional<DiskState> synced_;
     std::size_t max_entries_ = 10000;  // Default: keep last 10k entries
 };
 
