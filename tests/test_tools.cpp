@@ -3593,13 +3593,16 @@ TEST_CASE("SearchReplaceTool returns error for missing old_string key", "[tools]
 #ifdef FILO_ENABLE_PYTHON
 namespace {
 
-// Peek at the installed streams from outside an execute() call: inside one,
-// sys.stdout is legitimately the capture buffer for that call.
+// Peek at the installed streams from outside an execute() call: the stream
+// routers, and where a write from a thread with no call of its own goes.
 std::string installed_stream_types() {
     py::gil_scoped_acquire gil;
     py::module_ sys = py::module_::import("sys");
-    return py::str(py::type::of(sys.attr("stdout"))).cast<std::string>() + " "
-        + py::str(py::type::of(sys.attr("stderr"))).cast<std::string>();
+    const auto describe = [](py::handle stream) {
+        return py::str(py::type::of(stream)).cast<std::string>() + "->"
+            + py::str(py::type::of(stream.attr("_filo_stream")())).cast<std::string>();
+    };
+    return describe(sys.attr("stdout")) + " " + describe(sys.attr("stderr"));
 }
 
 } // namespace
@@ -3643,8 +3646,19 @@ TEST_CASE("PythonManager keeps sys.stdout/sys.stderr when calls interleave",
     CHECK(first_result.output == "first start\nfirst end\n");
     CHECK(second_result.output == "second start\nsecond end\n");
     const auto streams = installed_stream_types();
-    REQUIRE_THAT(streams, Catch::Matchers::ContainsSubstring("TextIOWrapper"));
+    REQUIRE_THAT(streams, Catch::Matchers::ContainsSubstring("_Router'>-><class '_io.TextIOWrapper"));
     REQUIRE_THAT(streams, !Catch::Matchers::ContainsSubstring("StringIO"));
+}
+
+TEST_CASE("PythonManager puts the stream routers back when code replaces them",
+          "[tools][python]") {
+    auto& pm = core::tools::PythonManager::get_instance();
+    const auto result = pm.execute(
+        "import sys, io\nsys.stdout = io.StringIO()\nsys.stderr = io.StringIO()\n",
+        "stream-replaced");
+    REQUIRE(result.success);
+    REQUIRE_THAT(installed_stream_types(), !Catch::Matchers::ContainsSubstring("StringIO"));
+    CHECK(pm.execute("print('still captured')", "stream-replaced").output == "still captured\n");
 }
 
 TEST_CASE("PythonManager clear_scope clears the default namespace",

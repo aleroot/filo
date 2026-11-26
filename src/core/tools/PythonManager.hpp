@@ -61,8 +61,10 @@ public:
      * Stdout and stderr are captured; the namespace (variables, imports,
      * function definitions) survives across calls with the same scope.
      *
-     * Thread-safe: can be called from any thread. The GIL is acquired
-     * automatically for the duration of the execution.
+     * Thread-safe: can be called from any thread. Calls in one scope run one
+     * at a time; calls in different scopes run side by side, taking turns on
+     * the GIL, so one conversation's slow or stuck code never holds up
+     * another's.
      */
     PythonExecResult execute(const std::string& code, std::string_view scope = {});
 
@@ -75,22 +77,15 @@ public:
      * Python's main one can cut such a call short. So the code runs on its own
      * thread, and if it has not unwound within @p grace after the interrupt,
      * this returns an interrupted result and leaves it to finish there.
-     * While that abandoned code still holds the interpreter, later calls
-     * fail at once instead of queueing behind it for as long as it stays
-     * blocked, and code whose call was cancelled before it started never runs.
+     * While that abandoned code still holds its scope, later calls in the
+     * same scope fail at once instead of queueing behind it for as long as it
+     * stays blocked; other scopes are unaffected. A call cancelled while it
+     * waits for its scope, or before it started, never runs.
      */
     PythonExecResult execute(const std::string& code,
                              std::string_view scope,
                              const std::function<bool()>& cancellation_requested,
                              std::chrono::milliseconds grace = std::chrono::milliseconds(1000));
-
-    /** Take the process-wide Python execution lock.
-     *
-     * Foreign Python entry points (e.g. Python skill calls) hold this while
-     * they run, so their code cannot run in the window where execute() has
-     * sys.stdout/sys.stderr redirected to its capture buffers.
-     */
-    std::unique_lock<std::mutex> lock_execution();
 
     /** Drop the namespace of @p scope and free what it kept alive.
      *
@@ -112,6 +107,10 @@ private:
         py::dict globals;
         int      running = 0;      // execute() calls in progress
         bool     retired = false;  // removed from scopes_; release when idle
+        // Held while a call runs in this scope, so calls in one namespace run
+        // one at a time. Waited for with the GIL released; never taken while
+        // holding it.
+        std::timed_mutex busy;
     };
 
     PythonManager()  = default;
@@ -123,9 +122,10 @@ private:
     static void release(Scope& scope);
 
     struct Run;
-    // Runs @p code in @p scope; execution_mutex_ must be held. With @p run,
-    // the executing thread is published to it for interruption.
-    PythonExecResult execute_locked(const std::string& code, std::string_view scope, Run* run);
+    // Runs @p code in @p scope once no other call runs there. With @p run,
+    // the executing thread is published to it for interruption, and the wait
+    // for the scope ends when the run is cancelled.
+    PythonExecResult execute_in_scope(const std::string& code, std::string_view scope, Run* run);
     // Raises KeyboardInterrupt in @p run's code until it has finished, from a
     // helper thread, so the caller never waits for the GIL.
     void interrupt(std::shared_ptr<Run> run);
@@ -141,17 +141,11 @@ private:
     // Set once initialization finished, so clear/move can skip a cold start.
     std::atomic<bool>                       initialized_{false};
 
-    // Serialises the sys.stdout/sys.stderr swap + run + restore in execute()
-    // against every other Python entry point. Python code may release the GIL
-    // mid-call (sleep, join, IO, subprocess), so without this an overlapping
-    // call can restore out of order and leave a dead capture buffer installed
-    // as sys.stdout/sys.stderr forever. Always taken before the GIL.
-    std::mutex                              execution_mutex_;
-
-    // The run last left behind by an interrupt that it outlived; while it is
-    // unfinished, cancellable calls are refused rather than queued.
-    std::mutex                              abandoned_mutex_;
-    std::shared_ptr<Run>                    abandoned_;
+    // Per scope, the run last left behind by an interrupt that it outlived;
+    // while it is unfinished, cancellable calls in that scope are refused
+    // rather than queued. Never held while waiting for the GIL or a scope.
+    std::mutex                                                     abandoned_mutex_;
+    std::map<std::string, std::shared_ptr<Run>, std::less<>>       abandoned_;
 
     // Guard for lazy initialization thread-safety
     std::mutex init_mutex_;

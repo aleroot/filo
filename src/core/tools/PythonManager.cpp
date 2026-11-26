@@ -14,52 +14,133 @@ namespace core::tools {
 
 namespace {
 
-/**
- * @brief Restores sys.stdout/sys.stderr on every exit path, including
- *        exceptions thrown while the redirected code runs.
- *
- * Pairing this with PythonManager's execution_mutex_ is what makes the
- * redirection safe: user code can release the GIL mid-run (sleep, join, IO,
- * subprocess), so without the lock two overlapping execute() calls would
- * restore each other's capture buffers and leave a dead io.StringIO installed
- * as sys.stdout/sys.stderr forever.
- */
-class StreamRedirect {
-public:
-    StreamRedirect(py::object out, py::object err)
-        : sys_(py::module_::import("sys")) {
-        old_out_ = sys_.attr("stdout");
-        old_err_ = sys_.attr("stderr");
-        sys_.attr("stdout") = std::move(out);
-        sys_.attr("stderr") = std::move(err);
-    }
+/// Installed once as sys.stdout/sys.stderr. A write goes to the capture of
+/// the execute() call running on the writing thread, or of the call that
+/// started that thread while it runs; anything else reaches the real stream.
+/// Swapping sys.stdout per call instead would make every call in the process
+/// wait for the one before it: the streams are global, and two overlapping
+/// swaps restore each other's buffers.
+constexpr const char* kStreamRouterSource = R"PY(
+import sys, threading
 
-    ~StreamRedirect() {
+class _Capture:
+    __slots__ = ('streams', 'active')
+    def __init__(self, out, err):
+        self.streams = (out, err)
+        self.active = True
+
+_by_thread = {}
+_threads = getattr(threading, '_active', {})
+
+def _current():
+    ident = threading.get_ident()
+    capture = _by_thread.get(ident)
+    if capture is None:
+        # Looked up without current_thread(): for a thread Python did not
+        # start, that registers a dummy Thread object that is never removed.
+        capture = getattr(_threads.get(ident), '_filo_capture', None)
+        if capture is not None and not capture.active:
+            capture = None
+    return capture
+
+class _Router:
+    def __init__(self, index, target):
+        self._filo_index = index
+        self._filo_target = target
+    def _filo_stream(self):
+        capture = _current()
+        return self._filo_target if capture is None else capture.streams[self._filo_index]
+    def write(self, text):
+        return self._filo_stream().write(text)
+    def writelines(self, lines):
+        return self._filo_stream().writelines(lines)
+    def flush(self):
+        return self._filo_stream().flush()
+    def __getattr__(self, name):
+        return getattr(self._filo_stream(), name)
+
+_original_start = threading.Thread.start
+def _start(self, *args, **kwargs):
+    capture = _current()
+    if capture is not None:
+        self._filo_capture = capture
+    return _original_start(self, *args, **kwargs)
+threading.Thread.start = _start
+
+_routers = (_Router(0, sys.stdout), _Router(1, sys.stderr))
+
+def install():
+    # Also undoes code that replaced the streams, as restoring them did.
+    sys.stdout, sys.stderr = _routers
+
+def begin(out, err):
+    install()
+    capture = _Capture(out, err)
+    _by_thread[threading.get_ident()] = capture
+    return capture
+
+def end(capture):
+    capture.active = False
+    _by_thread.pop(threading.get_ident(), None)
+    install()
+
+install()
+)PY";
+
+constexpr const char* kStreamRouterModule = "_filo_streams";
+
+/**
+ * @brief Captures what one execute() call prints, until finish() or the end
+ *        of the scope, whichever comes first. Requires the GIL.
+ */
+class OutputCapture {
+public:
+    OutputCapture()
+        : router_(py::module_::import(kStreamRouterModule)),
+          out_(py::module_::import("io").attr("StringIO")()),
+          err_(py::module_::import("io").attr("StringIO")()),
+          capture_(router_.attr("begin")(out_, err_)) {}
+
+    ~OutputCapture() {
         try {
-            restore();
+            finish();
         } catch (...) {
-            // Never throw from a destructor; the process keeps whatever
-            // streams are installed and the next call re-establishes them.
+            // Never throw from a destructor; the router stays installed and
+            // a capture left active only receives this thread's writes.
         }
     }
 
-    /** Put the real streams back. Idempotent, so the caller can restore as
-     *  soon as the code is done and the destructor becomes a no-op. */
-    void restore() {
-        if (!sys_) return;
-        sys_.attr("stdout") = old_out_;
-        sys_.attr("stderr") = old_err_;
-        sys_ = py::module_();
+    /** Stop capturing. Idempotent, so the caller can stop as soon as the
+     *  code is done and the destructor becomes a no-op. */
+    void finish() {
+        if (!capture_) return;
+        router_.attr("end")(capture_);
+        capture_ = py::object();
     }
 
-    StreamRedirect(const StreamRedirect&) = delete;
-    StreamRedirect& operator=(const StreamRedirect&) = delete;
+    /** Stdout, then stderr on its own line when there is any. */
+    [[nodiscard]] std::string text() const {
+        auto text = py::str(out_.attr("getvalue")()).cast<std::string>();
+        const auto err = py::str(err_.attr("getvalue")()).cast<std::string>();
+        if (!err.empty()) {
+            if (!text.empty()) text += '\n';
+            text += err;
+        }
+        return text;
+    }
+
+    OutputCapture(const OutputCapture&) = delete;
+    OutputCapture& operator=(const OutputCapture&) = delete;
 
 private:
-    py::module_ sys_;
-    py::object  old_out_;
-    py::object  old_err_;
+    py::module_ router_;
+    py::object  out_;
+    py::object  err_;
+    py::object  capture_;
 };
+
+/// How often a call waiting for its scope checks whether it was cancelled.
+constexpr auto kScopePollInterval = std::chrono::milliseconds(50);
 
 } // namespace
 
@@ -123,6 +204,15 @@ if _venv and _os.path.isdir(_venv):
         }
     }
 
+    try {
+        py::object router = py::module_::import("types").attr("ModuleType")(kStreamRouterModule);
+        py::exec(kStreamRouterSource, router.attr("__dict__"));
+        py::module_::import("sys").attr("modules")[kStreamRouterModule] = router;
+    } catch (const py::error_already_set& e) {
+        // Calls then fail with the import error instead of mixing output.
+        core::logging::error("PythonManager: stream routing setup failed: {}", e.what());
+    }
+
     // Release the GIL to enable multi-threading and keep the returned main
     // thread state so we can restore it during shutdown before finalization.
     main_thread_state_ = PyEval_SaveThread();
@@ -163,6 +253,12 @@ void PythonManager::retire(std::shared_ptr<Scope> scope) {
 
 void PythonManager::clear_scope(std::string_view scope) {
     if (!initialized_.load(std::memory_order_acquire)) return;
+    {
+        // A call still stuck in the old namespace no longer stands in the
+        // way: the next call starts a new one.
+        std::lock_guard lock(abandoned_mutex_);
+        if (const auto it = abandoned_.find(scope); it != abandoned_.end()) abandoned_.erase(it);
+    }
     py::gil_scoped_acquire acquire;
     const auto it = scopes_.find(scope);
     if (it == scopes_.end()) return;
@@ -184,6 +280,21 @@ void PythonManager::move_scope(std::string_view from, std::string_view to) {
     } else {
         scopes_.emplace(std::string(to), std::move(moved));
     }
+    {
+        // A stuck call moves with its namespace, and leaves with the one it
+        // displaces. (Brief, and never held while waiting for the GIL.)
+        std::lock_guard lock(abandoned_mutex_);
+        std::shared_ptr<Run> stuck;
+        if (const auto source = abandoned_.find(from); source != abandoned_.end()) {
+            stuck = std::move(source->second);
+            abandoned_.erase(source);
+        }
+        if (stuck) {
+            abandoned_.insert_or_assign(std::string(to), std::move(stuck));
+        } else if (const auto target = abandoned_.find(to); target != abandoned_.end()) {
+            abandoned_.erase(target);
+        }
+    }
     retire(std::move(displaced));
 }
 
@@ -191,10 +302,6 @@ std::size_t PythonManager::scope_count() {
     if (!initialized_.load(std::memory_order_acquire)) return 0;
     py::gil_scoped_acquire acquire;
     return scopes_.size();
-}
-
-std::unique_lock<std::mutex> PythonManager::lock_execution() {
-    return std::unique_lock<std::mutex>(execution_mutex_);
 }
 
 /**
@@ -207,6 +314,9 @@ struct PythonManager::Run {
     bool                    done = false;     // guarded by mutex
     PythonExecResult        result;           // guarded by mutex
     std::atomic<bool>       cancelled{false};
+    // True while the run holds its scope: cleared before the scope is let go,
+    // so a call that finds it false never waits behind this run.
+    std::atomic<bool>       holds_scope{false};
     // Guarded by the GIL: true exactly while py::exec runs for this call, so
     // an interrupt can never land in code that is not this call's.
     bool                    in_exec = false;
@@ -228,10 +338,7 @@ PythonExecResult interrupted_result(std::string error, std::string output = {}) 
 } // namespace
 
 PythonExecResult PythonManager::execute(const std::string& code, std::string_view scope_key) {
-    // Held across the stream swap, the code, and the restore: the three only
-    // form one atomic step for other Python entry points when serialised.
-    std::lock_guard<std::mutex> exec_lock(execution_mutex_);
-    return execute_locked(code, scope_key, nullptr);
+    return execute_in_scope(code, scope_key, nullptr);
 }
 
 PythonExecResult PythonManager::execute(const std::string& code,
@@ -244,14 +351,18 @@ PythonExecResult PythonManager::execute(const std::string& code,
     }
     {
         std::lock_guard lock(abandoned_mutex_);
-        if (abandoned_ && !abandoned_->finished()) {
-            return {.success = false,
-                    .error = "Not run: an earlier interrupted python call is still blocked in a "
-                             "call that cannot be cut short (a subprocess wait, a socket or pipe "
-                             "read) and holds the interpreter. It is released when that call "
-                             "returns; end whatever it waits for, or use another tool meanwhile."};
+        if (const auto it = abandoned_.find(scope_key); it != abandoned_.end()) {
+            if (it->second->holds_scope.load(std::memory_order_acquire)) {
+                return {.success = false,
+                        .error = "Not run: an earlier interrupted python call in this conversation "
+                                 "is still blocked in a call that cannot be cut short (a "
+                                 "subprocess wait, a socket or pipe read) and holds its namespace. "
+                                 "It is released when that call returns; end whatever it waits "
+                                 "for, start a new namespace with reset, or use another tool "
+                                 "meanwhile."};
+            }
+            abandoned_.erase(it);
         }
-        abandoned_.reset();
     }
 
     // The code runs on its own thread so that this one can always answer the
@@ -262,14 +373,8 @@ PythonExecResult PythonManager::execute(const std::string& code,
         const core::utils::DetachedWorkTracker::Guard detached_guard{
             core::utils::DetachedWorkTracker::instance()};
         PythonExecResult result;
-        // Held until the run is published as done, so whoever gets the
-        // interpreter next never sees this run as still blocked.
-        std::unique_lock exec_lock(execution_mutex_, std::defer_lock);
         try {
-            exec_lock.lock();
-            result = run->cancelled.load(std::memory_order_acquire)
-                ? interrupted_result("Interrupted by the user before the code started.")
-                : execute_locked(code, scope, run.get());
+            result = execute_in_scope(code, scope, run.get());
         } catch (const std::exception& e) {
             result = {.success = false, .error = std::string("Python execution failed: ") + e.what()};
         } catch (...) {
@@ -294,11 +399,12 @@ PythonExecResult PythonManager::execute(const std::string& code,
         if (!run->settled.wait_for(lock, grace, [&] { return run->done; })) {
             lock.unlock();
             std::lock_guard abandoned_lock(abandoned_mutex_);
-            abandoned_ = run;
+            abandoned_.insert_or_assign(std::string(scope_key), run);
             return interrupted_result(
                 "Interrupted by the user. The code is blocked in a call that cannot be cut "
                 "short, so it keeps running in the background until that call returns; "
-                "later python calls are refused until then.");
+                "later python calls in this conversation are refused until then, unless "
+                "reset starts a new namespace.");
         }
         break;
     }
@@ -328,9 +434,9 @@ void PythonManager::interrupt(std::shared_ptr<Run> run) {
     }).detach();
 }
 
-PythonExecResult PythonManager::execute_locked(const std::string& code,
-                                               std::string_view scope_key,
-                                               Run* run) {
+PythonExecResult PythonManager::execute_in_scope(const std::string& code,
+                                                 std::string_view scope_key,
+                                                 Run* run) {
     ensure_initialized();
 
     // Acquire the GIL before any Python C API calls.
@@ -341,7 +447,36 @@ PythonExecResult PythonManager::execute_locked(const std::string& code,
 
     // Declared after the GIL guard, so the last reference to a retired
     // namespace is dropped while the GIL is still held.
-    const auto scope = acquire_scope(scope_key);
+    std::shared_ptr<Scope> scope;
+    std::unique_lock<std::timed_mutex> busy;
+    while (!busy) {
+        scope = acquire_scope(scope_key);
+        std::unique_lock candidate(scope->busy, std::defer_lock);
+        {
+            // The call running in this scope needs the GIL to finish.
+            const py::gil_scoped_release released;
+            while (!candidate.try_lock_for(kScopePollInterval)) {
+                if (run && run->cancelled.load(std::memory_order_acquire)) {
+                    return interrupted_result("Interrupted by the user before the code started.");
+                }
+            }
+        }
+        // A namespace cleared while this call waited is not run in: the
+        // next lookup creates its successor.
+        if (!scope->retired) busy = std::move(candidate);
+    }
+    if (run) run->holds_scope.store(true, std::memory_order_release);
+    // Declared after `busy`, so the scope reads as free before it is.
+    struct ScopeHold {
+        Run* run;
+        ~ScopeHold() {
+            if (run) run->holds_scope.store(false, std::memory_order_release);
+        }
+    } const scope_hold{run};
+    if (run && run->cancelled.load(std::memory_order_acquire)) {
+        return interrupted_result("Interrupted by the user before the code started.");
+    }
+
     ++scope->running;
     struct RunningGuard {
         PythonManager& manager;
@@ -353,12 +488,8 @@ PythonExecResult PythonManager::execute_locked(const std::string& code,
 
     PythonExecResult result;
 
-    py::module_ io     = py::module_::import("io");
-    py::object buf_out = io.attr("StringIO")();
-    py::object buf_err = io.attr("StringIO")();
-
-    // The guard restores the streams on every exit path of the block below.
-    StreamRedirect redirect(buf_out, buf_err);
+    // Stops capturing on every exit path of the block below.
+    OutputCapture capture;
     // Published and withdrawn under the GIL, which the interrupting thread
     // holds while it raises: the exception reaches this exec or nothing.
     struct ExecWindow {
@@ -398,21 +529,15 @@ PythonExecResult PythonManager::execute_locked(const std::string& code,
         result.success = false;
         result.error   = "Python execution failed with an unknown error.";
     }
-    // Restore before reading the buffers: the real streams are back as soon
-    // as the code is done, and getvalue() works on the detached buffers.
-    redirect.restore();
+    // Stop before reading the buffers, so nothing written afterwards (by a
+    // thread the code started) lands in them.
+    capture.finish();
     if (run && !result.success && run->cancelled.load(std::memory_order_acquire)) {
         result.interrupted = true;
         result.error = "Interrupted by the user (KeyboardInterrupt).";
     }
 
-    result.output = py::str(buf_out.attr("getvalue")()).cast<std::string>();
-    std::string err_str = py::str(buf_err.attr("getvalue")()).cast<std::string>();
-    if (!err_str.empty()) {
-        if (!result.output.empty()) result.output += '\n';
-        result.output += err_str;
-    }
-
+    result.output = capture.text();
     return result;
 }
 

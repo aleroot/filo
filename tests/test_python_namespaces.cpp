@@ -176,9 +176,9 @@ TEST_CASE("Clearing a session with a running Python call waits for it to finish"
             flag));
     });
 
-    // execute() serialises stream redirection even across separate scopes.
-    // Observe and signal the running call under the GIL directly, so a second
-    // execute() cannot block the test behind the call it needs to release.
+    // Calls in separate scopes run side by side now; observe and signal the
+    // running call under the GIL directly all the same, so the test does not
+    // depend on that to release it.
     const auto has_started = [&] {
         py::gil_scoped_acquire gil;
         return py::module_::import("__main__").attr("__dict__")
@@ -282,6 +282,131 @@ TEST_CASE("A python call cancelled before it starts never runs", "[python][inter
     CHECK_THAT(tool.execute(R"({"code":"ran = True"})", invocation),
                ContainsSubstring("before the code started"));
     CHECK_THAT(run(tool, context, "print('ran' in globals())"), ContainsSubstring("False"));
+}
+
+TEST_CASE("A python call blocked in one conversation does not hold up another",
+          "[python][interrupt][regression]") {
+    // Two tabs of one Filo share the interpreter. A call blocked in a C call
+    // (here a sleep; in the field a waitpid on a child that never exited)
+    // used to hold a process-wide lock, so every other conversation's call
+    // queued behind it, and once one was interrupted none could run again.
+    auto& manager = core::tools::PythonManager::get_instance();
+    const auto blocked_scope = unique_session("blocked-tab");
+    const auto other_scope = unique_session("other-tab");
+
+    core::tools::PythonExecResult blocked;
+    std::jthread blocked_tab([&] {
+        blocked = manager.execute(
+            "import time\nprint('blocked start')\ntime.sleep(1.5)\nprint('blocked end')\n",
+            blocked_scope, [] { return false; });
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto other = manager.execute("print('other ran')", other_scope, [] { return false; });
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(700));
+    CHECK(other.success);
+    CHECK(other.output == "other ran\n");
+
+    blocked_tab.join();
+    CHECK(blocked.success);
+    // Each call kept exactly its own output while they overlapped.
+    CHECK(blocked.output == "blocked start\nblocked end\n");
+}
+
+TEST_CASE("A python call cancelled while it waits for its namespace never runs",
+          "[python][interrupt]") {
+    auto& manager = core::tools::PythonManager::get_instance();
+    const auto scope = unique_session("queued");
+
+    std::jthread running([&] {
+        CHECK(manager.execute("import time\ntime.sleep(0.8)\n", scope).success);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::atomic<bool> cancel{false};
+    std::jthread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel = true;
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const auto queued = manager.execute("queued_ran = True", scope, [&] { return cancel.load(); });
+    // It gives up as soon as it is cancelled, not when the running call ends,
+    // and says truthfully that its code never started.
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+    CHECK(queued.interrupted);
+    CHECK_THAT(queued.error, ContainsSubstring("before the code started"));
+
+    running.join();
+    CHECK_THAT(manager.execute("print('queued_ran' in globals())", scope).output,
+               ContainsSubstring("False"));
+}
+
+TEST_CASE("A python call left blocked stops only its own conversation",
+          "[python][interrupt][regression]") {
+    auto& manager = core::tools::PythonManager::get_instance();
+    const auto stuck_scope = unique_session("stuck");
+    const auto other_scope = unique_session("stuck-other");
+
+    std::atomic<bool> cancel{false};
+    std::jthread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel = true;
+    });
+    const auto abandoned = manager.execute(
+        "import time\ntime.sleep(1.2)\n", stuck_scope, [&] { return cancel.load(); },
+        std::chrono::milliseconds(200));
+    REQUIRE(abandoned.interrupted);
+    CHECK_THAT(abandoned.error, ContainsSubstring("keeps running in the background"));
+
+    // Another conversation runs at once.
+    const auto other = manager.execute("print('unaffected')", other_scope, [] { return false; });
+    CHECK(other.success);
+    CHECK(other.output == "unaffected\n");
+
+    // The stuck conversation is refused at once, until it resets.
+    const auto refused = manager.execute("print('x')", stuck_scope, [] { return false; });
+    CHECK_FALSE(refused.success);
+    CHECK_THAT(refused.error, ContainsSubstring("in this conversation"));
+    manager.clear_scope(stuck_scope);
+    const auto fresh_started = std::chrono::steady_clock::now();
+    const auto fresh = manager.execute("print('fresh')", stuck_scope, [] { return false; });
+    CHECK(std::chrono::steady_clock::now() - fresh_started < std::chrono::milliseconds(500));
+    CHECK(fresh.success);
+    CHECK(fresh.output == "fresh\n");
+
+    // Let the abandoned code finish its sleep, so it does not overlap
+    // whatever runs next in this process.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+}
+
+TEST_CASE("A python call captures what the threads it starts print while it runs",
+          "[python]") {
+    auto& manager = core::tools::PythonManager::get_instance();
+    const auto scope = unique_session("threads");
+
+    const auto joined = manager.execute(
+        "import threading\n"
+        "t = threading.Thread(target=lambda: print('from worker'))\n"
+        "t.start(); t.join()\n"
+        "print('from call')\n",
+        scope);
+    CHECK(joined.output == "from worker\nfrom call\n");
+
+    // A thread that outlives its call writes nowhere near a later call.
+    const auto started = manager.execute(
+        "import threading, time\n"
+        "late = threading.Event()\n"
+        "done = threading.Event()\n"
+        "def later():\n"
+        "    late.wait()\n"
+        "    print('late write')\n"
+        "    done.set()\n"
+        "threading.Thread(target=later, daemon=True).start()\n",
+        scope);
+    CHECK(started.output.empty());
+    const auto next = manager.execute("late.set(); done.wait(2)\nprint('next')\n", scope);
+    CHECK(next.output == "next\n");
 }
 
 #endif // FILO_ENABLE_PYTHON
