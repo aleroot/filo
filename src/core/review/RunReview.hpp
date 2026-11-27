@@ -25,6 +25,8 @@ struct WorkspaceReview {
     ClassifiedFindings findings;
     std::vector<FailedGroup> failed_groups;
     std::string repository;
+    /// The reviewing model when it is not the conversation's own; empty otherwise.
+    std::string reviewer;
     std::string error;
 };
 

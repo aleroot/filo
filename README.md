@@ -178,6 +178,16 @@ Subagent profiles can deliberately use a different configured provider and model
 
 Profiles inherit the parent provider/model when their respective fields are omitted.
 
+The built-in `code-review` profile also decides who reviews: `/review` and the `review` tool use its `provider` and `model`. When that is not the conversation's own model, the review names it ("Reviewed by …" in `/review`, and in the review card header).
+
+```json
+{
+  "subagents": {
+    "code-review": { "provider": "openai", "model": "gpt-6.1-terra" }
+  }
+}
+```
+
 </details>
 
 <details>

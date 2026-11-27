@@ -1170,6 +1170,13 @@ TEST_CASE("tool presentation renders a review as findings rather than JSON",
         CHECK(expanded.find("\"ok\"") == std::string::npos);
     }
 
+    SECTION("a review by another model names it in the header") {
+        const auto [compact, expanded] = render_review(
+            R"({"ok":true,"reviewer":"gpt-6.1-terra","empty":false,"incomplete":false,)"
+            R"("blocking_count":0,"follow_up_count":0,"blocking":[],"follow_ups":[]})");
+        CHECK_THAT(compact, ContainsSubstring("gpt-6.1-terra · no issues"));
+    }
+
     SECTION("an empty checkout has nothing to review") {
         const auto [compact, expanded] = render_review(
             R"({"ok":true,"empty":true,"incomplete":false,"blocking_count":0,)"

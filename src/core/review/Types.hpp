@@ -170,6 +170,8 @@ struct Report {
     std::vector<FailedGroup> failed_groups;
     int groups_reviewed = 0;
     int plan_passes = 0;
+    /// The reviewing model when it is not the conversation's own; empty otherwise.
+    std::string reviewer;
 };
 
 struct ReviewSteeringSource {

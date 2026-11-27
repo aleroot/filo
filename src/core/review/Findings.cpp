@@ -367,6 +367,10 @@ struct FindingsByVisibility {
         summary += "\n\n**Overall correctness:** ";
         summary += verdict;
     }
+    if (!report.reviewer.empty()) {
+        summary += "\n\n**Reviewed by:** ";
+        summary += report.reviewer;
+    }
     if (const auto explanation = trim_ascii_copy(report.overall_explanation);
         !explanation.empty()) {
         summary += "\n\n";

@@ -862,13 +862,16 @@ std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& v
             const auto& review = view.review;
             if (review.empty) return "nothing to review";
             std::vector<std::string> parts;
+            if (!review.reviewer.empty()) parts.push_back(review.reviewer);
             if (!review.blocking.empty()) {
                 parts.push_back(std::format("{} blocking", review.blocking.size()));
             }
             if (!review.follow_ups.empty()) {
                 parts.push_back(count_label(review.follow_ups.size(), "follow-up", "follow-ups"));
             }
-            if (parts.empty()) parts.emplace_back("no issues");
+            if (review.blocking.empty() && review.follow_ups.empty()) {
+                parts.emplace_back("no issues");
+            }
             if (review.incomplete) parts.emplace_back("incomplete");
             return join_with(parts, " · ");
         }

@@ -79,6 +79,8 @@ struct ReviewResult {
     std::vector<ReviewFindingRow> blocking;
     std::vector<ReviewFindingRow> follow_ups;
     std::vector<UnreviewedUnit>   unreviewed;
+    /// The reviewing model, set only when it was not the conversation's own.
+    std::string                   reviewer;
     std::string                   error;
     bool                          empty = false;
     bool                          incomplete = false;

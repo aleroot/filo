@@ -153,6 +153,8 @@ bool parse_review_result(std::string_view payload, ReviewResult& out) {
         found = true;
         core::utils::json::ignore_error(object["empty"].get(out.empty));
         core::utils::json::ignore_error(object["incomplete"].get(out.incomplete));
+        out.reviewer = core::utils::json::first_string_field(object, {"reviewer"})
+                           .value_or(std::string{});
         const std::string repository =
             core::utils::json::first_string_field(object, {"repository"})
                 .value_or(std::string{});

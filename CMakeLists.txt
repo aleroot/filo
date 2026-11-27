@@ -604,6 +604,7 @@ set(FILO_CORE_SOURCES
     src/core/review/TurnRunners.cpp
     src/core/review/Engine.cpp
     src/core/review/RunReview.cpp
+    src/core/review/Reviewer.cpp
     src/core/review/ReviewSteering.cpp
     src/core/review/SummaryPrompt.cpp
     src/core/commands/SkillCommandLoader.cpp

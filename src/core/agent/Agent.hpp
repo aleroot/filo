@@ -513,6 +513,11 @@ public:
         active_provider_name_ = std::move(provider_name);
     }
 
+    [[nodiscard]] std::string get_active_provider_name() const {
+        std::lock_guard lock(history_mutex_);
+        return active_provider_name_;
+    }
+
     /// Name the delegated worker this agent runs as, so the provider can
     /// attribute the requests it sends (codex-rs `x-openai-subagent`). A
     /// conversation's own agent leaves it empty.

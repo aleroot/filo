@@ -11,6 +11,7 @@
 #include "core/review/Prompt.hpp"
 #include "core/review/ReviewSteering.hpp"
 #include "core/review/ReviewTargets.hpp"
+#include "core/review/Reviewer.hpp"
 #include "core/review/SummaryPrompt.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -567,6 +568,61 @@ TEST_CASE("render_report_sections of a clean review is a single section", "[revi
     const auto sections = render_report_sections(report);
     REQUIRE(sections.size() == 1);
     CHECK_THAT(sections[0].markdown, ContainsSubstring("No actionable comments found."));
+    CHECK(sections[0].markdown.find("Reviewed by") == std::string::npos);
+}
+
+TEST_CASE("a review run by another model names it in the summary", "[review][findings]") {
+    Report report;
+    report.overall_correctness = "patch is correct";
+    report.reviewer = "gpt-6.1-terra";
+    const auto sections = render_report_sections(report);
+    REQUIRE_FALSE(sections.empty());
+    CHECK_THAT(sections[0].markdown, ContainsSubstring("**Reviewed by:** gpt-6.1-terra"));
+    CHECK_THAT(render_report(report), ContainsSubstring("**Reviewed by:** gpt-6.1-terra"));
+}
+
+TEST_CASE("select_reviewer follows subagents.code-review and falls back to the conversation",
+          "[review][reviewer]") {
+    core::config::AppConfig config;
+    config.providers["openai"].model = "gpt-6.2";
+    config.providers["grok"].model = "grok-5";
+    config.providers["bare"].model = "";
+
+    SECTION("nothing configured reviews with the conversation's model, unlabelled") {
+        const auto selected = select_reviewer(config, "openai", "gpt-6.2");
+        REQUIRE(selected.has_value());
+        CHECK(selected->provider == "openai");
+        CHECK(selected->model == "gpt-6.2");
+        CHECK(reviewer_label(*selected, "openai", "gpt-6.2").empty());
+    }
+    SECTION("a model alone stays on the conversation's provider") {
+        config.subagents["code-review"].model = "gpt-6.1-terra";
+        const auto selected = select_reviewer(config, "openai", "gpt-6.2");
+        REQUIRE(selected.has_value());
+        CHECK(selected->provider == "openai");
+        CHECK(selected->model == "gpt-6.1-terra");
+        CHECK(reviewer_label(*selected, "openai", "gpt-6.2") == "gpt-6.1-terra");
+    }
+    SECTION("a configured model equal to the conversation's is not labelled") {
+        config.subagents["code-review"].model = "gpt-6.2";
+        const auto selected = select_reviewer(config, "openai", "gpt-6.2");
+        REQUIRE(selected.has_value());
+        CHECK(reviewer_label(*selected, "openai", "gpt-6.2").empty());
+    }
+    SECTION("another provider without a model uses that provider's model") {
+        config.subagents["code-review"].provider = "grok";
+        const auto selected = select_reviewer(config, "openai", "gpt-6.2");
+        REQUIRE(selected.has_value());
+        CHECK(selected->provider == "grok");
+        CHECK(selected->model == "grok-5");
+        CHECK(reviewer_label(*selected, "openai", "gpt-6.2") == "grok · grok-5");
+    }
+    SECTION("another provider with no model anywhere is an error") {
+        config.subagents["code-review"].provider = "bare";
+        const auto selected = select_reviewer(config, "openai", "gpt-6.2");
+        REQUIRE_FALSE(selected.has_value());
+        CHECK_THAT(selected.error(), ContainsSubstring("subagents.code-review.model"));
+    }
 }
 
 TEST_CASE("finding_id is short, stable, and tells findings apart", "[review][findings]") {

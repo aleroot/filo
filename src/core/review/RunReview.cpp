@@ -3,6 +3,7 @@
 #include "Engine.hpp"
 #include "Git.hpp"
 #include "Prompt.hpp"
+#include "Reviewer.hpp"
 #include "TurnRunner.hpp"
 
 #include "../agent/Agent.hpp"
@@ -72,6 +73,9 @@ void write_finding_array(core::utils::JsonWriter& writer,
 void write_review_body(core::utils::JsonWriter& writer, const WorkspaceReview& review) {
     if (!review.repository.empty()) {
         writer.kv_str("repository", review.repository).comma();
+    }
+    if (!review.reviewer.empty()) {
+        writer.kv_str("reviewer", review.reviewer).comma();
     }
     writer.kv_bool("empty", review.empty).comma();
     writer.kv_bool("incomplete", review.findings.incomplete).comma();
@@ -154,12 +158,18 @@ WorkspaceReview review_workspace(
         return review;
     }
 
-    auto review_agent = session_agent->make_isolated_agent(session_agent->get_provider());
+    auto reviewer = resolve_reviewer(*session_agent);
+    if (!reviewer) {
+        review.error = reviewer.error();
+        return review;
+    }
+    auto review_agent = make_review_agent(*session_agent, *reviewer);
     if (!review_agent) {
         review.error = "review requires an active provider";
         return review;
     }
     review.repository = repository.string();
+    review.reviewer = reviewer->label;
     const std::filesystem::path reviewed = repository;
     review_agent->update_session_context([&](core::context::SessionContext& context) {
         (void)context.set_workspace_primary(reviewed);

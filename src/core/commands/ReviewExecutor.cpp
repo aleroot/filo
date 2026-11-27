@@ -4,6 +4,7 @@
 #include "../review/Findings.hpp"
 #include "../review/Git.hpp"
 #include "../review/Prompt.hpp"
+#include "../review/Reviewer.hpp"
 #include "../review/ReviewSteering.hpp"
 #include "../context/SteeringLoader.hpp"
 #include "../utils/StringUtils.hpp"
@@ -402,11 +403,24 @@ void run_agent_review_turn(const CommandContext& ctx,
     auto collected_output = std::make_shared<std::string>();
     auto interrupted = std::make_shared<bool>(false);
     auto tools_run = std::make_shared<std::atomic<int>>(0);
+    auto reviewer = core::review::resolve_reviewer(*ctx.agent);
+    if (!reviewer) {
+        append_fn(std::format("\n✗  {}\n", reviewer.error()));
+        if (set_review_activity_fn) {
+            set_review_activity_fn(false, "");
+        }
+        return;
+    }
 
     core::agent::Agent::TurnCallbacks review_callbacks{
         .min_context_utilization_for_rotation =
             core::review::kReviewRotationMinContextUtilization,
     };
+    if (!reviewer->label.empty()) {
+        review_callbacks.provider_override = reviewer->provider;
+        review_callbacks.provider_name_override = reviewer->selection.provider;
+        review_callbacks.model_override = reviewer->selection.model;
+    }
     review_callbacks.effort_override = "off";
     review_callbacks.max_tokens_override = core::review::kReviewMaxOutputTokens;
     review_callbacks.response_format_override = core::llm::ResponseFormat{
@@ -434,6 +448,7 @@ void run_agent_review_turn(const CommandContext& ctx,
          interrupted,
          tools_run,
          set_review_activity_fn,
+         reviewer_label = reviewer->label,
          output = ReviewOutput(ctx)]() {
             const std::string raw = trim_ascii_copy(*collected_output);
             if (*interrupted || raw.find(core::review::kStopMarker) != std::string::npos) {
@@ -446,6 +461,7 @@ void run_agent_review_turn(const CommandContext& ctx,
             }
 
             auto report = core::review::parse_review_output(raw);
+            report.reviewer = reviewer_label;
             core::review::drop_unchecked_evidence(
                 report, tools_run->load(std::memory_order_relaxed));
             output.publish(render_review(report));
@@ -571,7 +587,15 @@ void run_grouped_review(const CommandContext& ctx,
     const auto set_review_activity_fn = ctx.set_review_activity_fn;
     const std::string hint = input.user_facing_hint;
     auto agent = ctx.agent;
-    auto review_agent = agent->make_isolated_agent(agent->get_provider());
+    auto reviewer = core::review::resolve_reviewer(*agent);
+    if (!reviewer) {
+        ctx.append_history_fn(std::format("\n✗  {}\n", reviewer.error()));
+        if (set_review_activity_fn) {
+            set_review_activity_fn(false, "");
+        }
+        return;
+    }
+    auto review_agent = core::review::make_review_agent(*agent, *reviewer);
     if (!review_agent) {
         ctx.append_history_fn("\n✗  Review requires an active provider.\n");
         if (set_review_activity_fn) {
@@ -593,6 +617,7 @@ void run_grouped_review(const CommandContext& ctx,
     });
 
     auto result = engine.run(input);
+    result.report.reviewer = reviewer->label;
 
     const auto publish_report = [&](std::string_view trailer) {
         auto rendered = render_review(result.report, trailer);
