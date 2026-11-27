@@ -6,6 +6,8 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -49,9 +51,13 @@ public:
     /// click would. Unknown keys are harmless: they simply never render.
     void ExpandDisclosures(const std::vector<std::string>& keys);
 
-    /// Receives the key of a file-change affordance the user clicked, to open
-    /// that one change in the configured external comparer.
-    void SetDiffComparerOpener(std::function<void(std::string_view key)> opener);
+    /// Receives the key of a file-change affordance the user clicked
+    /// (parse_turn_file_change_open_key names the file and the action).
+    void SetFileChangeActionOpener(std::function<void(std::string_view key)> opener);
+
+    /// Receives the target of a link the user clicked in a message. A click
+    /// that becomes a drag is a selection, not a click.
+    void SetLinkOpener(std::function<void(std::string_view href)> opener);
 
     // Read-only introspection (used by unit tests and diagnostics).
     [[nodiscard]] bool  IsAutoScrollFollowing()  const noexcept;
@@ -93,7 +99,16 @@ private:
     // Explicit user toggles only; absent entries fall back to the pure default.
     std::unordered_map<std::string, bool>        disclosure_expanded_;
     std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
-    std::function<void(std::string_view key)>    diff_comparer_opener_;
+    std::function<void(std::string_view key)>    file_change_action_opener_;
+    std::function<void(std::string_view href)>   link_opener_;
+    /// The link under the last left press and where the press was. The link
+    /// opens if the button is released where it was pressed.
+    std::optional<std::string>                   pressed_link_;
+    int                                          pressed_x_ = -1;
+    int                                          pressed_y_ = -1;
+
+    /// The target of the link drawn at (@p x, @p y), if any.
+    [[nodiscard]] std::optional<std::string> LinkAt(int x, int y) const;
 };
 
 } // namespace tui

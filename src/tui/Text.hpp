@@ -17,6 +17,9 @@ bool starts_with_line_break(std::string_view text);
 bool ends_with_line_break(std::string_view text);
 
 std::string normalize_newlines(std::string input);
+/// @p input made safe to draw: CR and CRLF become LF, other control bytes
+/// but tab are dropped, and so is every byte of malformed UTF-8.
+std::string sanitize_terminal_text(std::string_view input);
 bool erase_last_utf8_codepoint(std::string& text);
 
 std::string flatten_whitespace(std::string_view input);

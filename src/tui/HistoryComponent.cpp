@@ -1,9 +1,11 @@
 #include "HistoryComponent.hpp"
 
+#include "MarkdownRenderer.hpp"
 #include "TuiTheme.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace tui {
 namespace {
@@ -265,21 +267,57 @@ void HistoryComponent::ExpandDisclosures(const std::vector<std::string>& keys) {
     }
 }
 
-void HistoryComponent::SetDiffComparerOpener(std::function<void(std::string_view key)> opener) {
-    diff_comparer_opener_ = std::move(opener);
+void HistoryComponent::SetFileChangeActionOpener(std::function<void(std::string_view key)> opener) {
+    file_change_action_opener_ = std::move(opener);
+}
+
+void HistoryComponent::SetLinkOpener(std::function<void(std::string_view href)> opener) {
+    link_opener_ = std::move(opener);
+}
+
+std::optional<std::string> HistoryComponent::LinkAt(int x, int y) const {
+    for (const auto& [key, box] : disclosure_hitboxes_) {
+        if (!box.Contain(x, y)) continue;
+        if (auto link = parse_markdown_link_key(key)) return std::move(link->href);
+    }
+    return std::nullopt;
 }
 
 bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
+    // A link opens when the button is released where it was pressed. The
+    // press is left to FTXUI, so a drag that starts on a link, even one that
+    // ends on it, still selects text.
+    if (link_opener_ && event.mouse().button == ftxui::Mouse::Left) {
+        const int x = event.mouse().x;
+        const int y = event.mouse().y;
+        if (event.mouse().motion == ftxui::Mouse::Pressed) {
+            pressed_link_ = LinkAt(x, y);
+            pressed_x_ = x;
+            pressed_y_ = y;
+            if (pressed_link_) return false;
+        } else if (event.mouse().motion == ftxui::Mouse::Moved
+                   && (x != pressed_x_ || y != pressed_y_)) {
+            pressed_link_.reset();
+        } else if (event.mouse().motion == ftxui::Mouse::Released && pressed_link_) {
+            const auto pressed = std::exchange(pressed_link_, std::nullopt);
+            if (x == pressed_x_ && y == pressed_y_ && LinkAt(x, y) == pressed) {
+                link_opener_(*pressed);
+                return true;
+            }
+            return false;
+        }
+    }
+
     if (event.mouse().button == ftxui::Mouse::Left
         && event.mouse().motion == ftxui::Mouse::Pressed) {
-        // A file row's comparer affordance is tested first: the row's own
-        // disclosure box covers the whole line, this cell included, so the
-        // narrower target has to win.
-        if (diff_comparer_opener_) {
+        // A file row's affordances are tested first: the row's own
+        // disclosure box covers the whole line, these cells included, so the
+        // narrower targets have to win.
+        if (file_change_action_opener_) {
             for (const auto& [key, box] : disclosure_hitboxes_) {
                 if (is_turn_file_change_open_key(key)
                     && box.Contain(event.mouse().x, event.mouse().y)) {
-                    diff_comparer_opener_(key);
+                    file_change_action_opener_(key);
                     return true;
                 }
             }
@@ -288,6 +326,7 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
         // Clicking a system-message disclosure chevron toggles its details.
         for (const auto& [disclosure_id, box] : disclosure_hitboxes_) {
             if (is_turn_file_change_open_key(disclosure_id)
+                || parse_markdown_link_key(disclosure_id)
                 || !box.Contain(event.mouse().x, event.mouse().y)) {
                 continue;
             }
@@ -334,6 +373,7 @@ std::size_t HistoryComponent::compute_render_cache_key(
     seed = combine_hash(seed, options.expand_system_details ? 1 : 0);
     seed = combine_hash(seed, options.expand_tool_results ? 1 : 0);
     seed = combine_hash(seed, options.show_diff_comparer_affordance ? 1 : 0);
+    seed = combine_hash(seed, options.show_document_affordance ? 1 : 0);
     seed = combine_hash(seed, options.tool_result_preview_max_lines);
     // Colours resolve when cards are built, so a theme switch must rebuild.
     seed = combine_hash(seed, static_cast<std::size_t>(tui::active_theme()));

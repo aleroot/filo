@@ -96,6 +96,9 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
         }
     } else if (name == kFileSearch || name == kGrepSearch || name == kListDirectory) {
         accesses = single_file_access(ToolFileOperation::Search, context, args, "path", true);
+    } else if (name == kOpenDocument) {
+        // Shown after any write to it in the same batch, beside other reads.
+        accesses = single_file_access(ToolFileOperation::Read, context, args, "path");
     } else if (name == kWriteFile) {
         accesses = single_file_access(ToolFileOperation::Write, context, args, "file_path");
     } else if (name == kReplace || name == kReplaceInFile || name == kSearchReplace) {

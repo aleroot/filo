@@ -2,8 +2,105 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 
 namespace tui {
+namespace {
+
+bool is_utf8_continuation(unsigned char c) {
+    return (c & 0b1100'0000u) == 0b1000'0000u;
+}
+
+std::size_t utf8_sequence_length(unsigned char lead) {
+    if ((lead & 0b1110'0000u) == 0b1100'0000u) return 2;
+    if ((lead & 0b1111'0000u) == 0b1110'0000u) return 3;
+    if ((lead & 0b1111'1000u) == 0b1111'0000u) return 4;
+    return 0;
+}
+
+bool is_valid_utf8_sequence(std::string_view input,
+                                   std::size_t pos,
+                                   std::size_t len) {
+    if (pos + len > input.size()) return false;
+
+    const unsigned char b0 = static_cast<unsigned char>(input[pos]);
+    std::uint32_t cp = 0;
+
+    if (len == 2) {
+        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
+        if (!is_utf8_continuation(b1)) return false;
+        cp = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+        // U+0080-U+009F are C1 controls: some terminals read U+009B as CSI
+        // and U+009D as OSC, so they are dropped like ASCII controls.
+        return cp > 0x9Fu;
+    }
+
+    if (len == 3) {
+        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(input[pos + 2]);
+        if (!is_utf8_continuation(b1) || !is_utf8_continuation(b2)) return false;
+        cp = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+        if (cp < 0x800u) return false;                       // overlong
+        if (cp >= 0xD800u && cp <= 0xDFFFu) return false;    // surrogate half
+        return true;
+    }
+
+    if (len == 4) {
+        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(input[pos + 2]);
+        const unsigned char b3 = static_cast<unsigned char>(input[pos + 3]);
+        if (!is_utf8_continuation(b1)
+            || !is_utf8_continuation(b2)
+            || !is_utf8_continuation(b3)) return false;
+        cp = ((b0 & 0x07u) << 18)
+           | ((b1 & 0x3Fu) << 12)
+           | ((b2 & 0x3Fu) << 6)
+           | (b3 & 0x3Fu);
+        if (cp < 0x10000u) return false;                     // overlong
+        return cp <= 0x10FFFFu;
+    }
+
+    return false;
+}
+
+} // namespace
+
+std::string sanitize_terminal_text(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size();) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+
+        // Keep visible ASCII + '\n' + '\t'. Drop other ASCII control bytes.
+        if (c < 0x80u) {
+            if (c == '\r') {
+                // Normalize CRLF/CR to '\n' to avoid cursor-jump artifacts.
+                if (i + 1 < input.size() && input[i + 1] == '\n') ++i;
+                out.push_back('\n');
+                ++i;
+                continue;
+            }
+            if (c == '\n' || c == '\t' || (c >= 0x20u && c != 0x7Fu)) {
+                out.push_back(static_cast<char>(c));
+            }
+            ++i;
+            continue;
+        }
+
+        const std::size_t len = utf8_sequence_length(c);
+        if (len == 0 || !is_valid_utf8_sequence(input, i, len)) {
+            ++i;   // drop malformed byte
+            continue;
+        }
+
+        out.append(input.substr(i, len));
+        i += len;
+    }
+
+    return out;
+}
+
 
 std::string to_lower_ascii(std::string_view input) {
     std::string out;

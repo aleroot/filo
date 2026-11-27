@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AskUserQuestionTool.hpp"
+#include "OpenDocumentTool.hpp"
 #include "../memory/MemoryStore.hpp"
 
 #include <filesystem>
@@ -29,6 +30,10 @@ struct BuiltinToolRegistrationOptions {
 
     std::function<void(QuestionRequest)> ask_user_question_callback = {};
     std::shared_ptr<AskUserQuestionTool>* ask_user_question_tool_out = nullptr;
+    /// Registers open_document and hands it back here, so the host can
+    /// install its pane. Only an interactive host with a document pane sets
+    /// it; the tool is agent_only, so it never reaches MCP clients either way.
+    std::shared_ptr<OpenDocumentTool>* open_document_tool_out = nullptr;
     /// Semantic store from the execution-root MemorySystem. When unset the
     /// tool uses the default on-disk path handle (same file, separate owner).
     std::optional<core::memory::MemoryStore> memory_store = {};

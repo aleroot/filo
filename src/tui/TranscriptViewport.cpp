@@ -1,5 +1,7 @@
 #include "TranscriptViewport.hpp"
 
+#include "ElementLayout.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <functional>
@@ -18,7 +20,6 @@ namespace tui {
 namespace {
 
 constexpr int kScrollbarColumns = 1;
-constexpr int kMaxLayoutIterations = 20;
 
 std::size_t combine_hash(std::size_t seed, std::size_t value) {
     constexpr std::size_t kMix = static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
@@ -171,27 +172,6 @@ std::size_t message_fingerprint(const UiMessage& msg) {
     return seed;
 }
 
-/// Lay out an element at an exact content width without allocating a full
-/// transcript Screen. This mirrors ftxui::Render's convergence loop, but fixes
-/// the x-axis and lets the element discover its wrapped natural height.
-int layout_at(ftxui::Element& element, int width, int x, int y) {
-    width = std::max(width, 1);
-    ftxui::Node::Status status;
-    element->Check(&status);
-
-    int height = 1;
-    while (status.need_iteration && status.iteration < kMaxLayoutIterations) {
-        element->ComputeRequirement();
-        height = std::max(element->requirement().min_y, 1);
-        element->SetBox(ftxui::Box{x, x + width - 1, y, y + height - 1});
-        status.need_iteration = false;
-        ++status.iteration;
-        element->Check(&status);
-    }
-
-    return height;
-}
-
 /// Cheap height guess for a card that has not been laid out at this width.
 /// It only positions off-screen cards (scrollbar, page jumps); every visible
 /// card is measured exactly before it is drawn.
@@ -293,7 +273,7 @@ struct TranscriptViewport::State {
         auto& entry = entries[index];
         const int previous = entry.height;
         auto element = render_history_message((*snapshot)[index], tick, options);
-        entry.height = layout_at(element, width, 0, 0);
+        entry.height = layout_element(element, width, 0, 0);
         entry.measured = true;
         ++message_measure_count;
         measurements_dirty = true;
@@ -459,7 +439,7 @@ struct TranscriptViewport::State {
             auto element = render_history_message((*snapshot)[index], tick, options);
             const auto& entry = entries[index];
             const int local_y = entry.offset - scroll_top;
-            layout_at(element, width, 0, local_y);
+            layout_element(element, width, 0, local_y);
             element->Render(*frame.raster);
         }
         ++viewport_build_count;
@@ -527,7 +507,7 @@ public:
                 (*state_->snapshot)[index], tick_, selection_options);
             const auto& entry = state_->entries[index];
             const int y = box_.y_min + entry.offset - state_->frame.scroll_top;
-            layout_at(element, content_width_, box_.x_min, y);
+            layout_element(element, content_width_, box_.x_min, y);
             element->Select(selection);
             selection_elements_.push_back(std::move(element));
         }

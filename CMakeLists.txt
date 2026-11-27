@@ -247,7 +247,12 @@ set(FILO_CORE_SOURCES
     src/tui/viewer/TerminalDiffViewer.cpp
     src/tui/HistoryComponent.cpp
     src/tui/TranscriptViewport.cpp
+    src/tui/ElementLayout.cpp
     src/tui/MarkdownRenderer.cpp
+    src/tui/DocumentLink.cpp
+    src/tui/DocumentView.cpp
+    src/tui/DocumentReader.cpp
+    src/tui/DocumentPane.cpp
     src/tui/MainApp.cpp
     src/tui/MemoryMenu.cpp
     src/tui/KeyInput.cpp
@@ -547,6 +552,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/DeleteFileTool.cpp
     src/core/tools/MoveFileTool.cpp
     src/core/tools/CreateDirectoryTool.cpp
+    src/core/tools/OpenDocumentTool.cpp
     src/core/tools/SearchReplaceTool.cpp
     src/core/tools/AskUserQuestionTool.cpp
     src/core/tools/ActivateSkillTool.cpp
@@ -955,6 +961,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_workspace_details_panel.cpp
     tests/test_mcp_servers_panel.cpp
     tests/test_agents_visualizer_panel.cpp
+    tests/test_document_reader.cpp
+    tests/test_open_document_tool.cpp
     tests/test_agent_permissions.cpp
     tests/test_command_policy.cpp
     tests/test_subagent_orchestrator.cpp

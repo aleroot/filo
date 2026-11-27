@@ -592,6 +592,51 @@ TEST_CASE("An affordance key names the turn and file it came from",
 
     CHECK_FALSE(parse_turn_file_change_open_key("file-change:0123456789abcdef:src/app.cpp").has_value());
     CHECK_FALSE(parse_turn_file_change_open_key("file-change-open:0123456789abcdef").has_value());
+    CHECK(ref->action == FileChangeAction::compare);
+
+    const auto view = parse_turn_file_change_open_key(
+        turn_file_change_open_key("0123456789abcdef", "src/a:b.cpp", FileChangeAction::view));
+    REQUIRE(view.has_value());
+    CHECK(view->action == FileChangeAction::view);
+    CHECK(view->message_id == "0123456789abcdef");
+    CHECK(view->path == "src/a:b.cpp");
+}
+
+TEST_CASE("The document affordance marks every file still there, beside the comparer",
+          "[tui][turn_file_changes][document]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    std::unordered_map<std::string, ftxui::Box> hitboxes;
+    ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    options.show_document_affordance = true;
+    options.system_disclosure_hitboxes = &hitboxes;
+
+    const auto text = render_text({answer}, options);
+    // The deleted file is gone, so only two rows offer to show theirs.
+    CHECK(count_of(text, "\u2261") == 2);
+    CHECK_THAT(text, ContainsSubstring("\u2261  \u2197"));
+    const auto view = [&](std::string_view path) {
+        return turn_file_change_open_key(answer.id, path, FileChangeAction::view);
+    };
+    CHECK(hitboxes.contains(view("src/app.cpp")));
+    CHECK(hitboxes.contains(view("docs/guide.md")));
+    CHECK_FALSE(hitboxes.contains(view("assets/logo.png")));
+
+    // Each glyph is its own one-cell target on the row, apart from the other.
+    const auto& document = hitboxes.at(view("src/app.cpp"));
+    const auto& compare = hitboxes.at(turn_file_change_open_key(answer.id, "src/app.cpp"));
+    const auto& row = hitboxes.at(turn_file_change_key(answer.id, "src/app.cpp"));
+    CHECK(document.x_min == document.x_max);
+    CHECK(document.y_min == row.y_min);
+    CHECK(document.x_max < compare.x_min);
+
+    // Without a pane there is nothing to show it in.
+    hitboxes.clear();
+    options.show_document_affordance = false;
+    CHECK(count_of(render_text({answer}, options), "\u2261") == 0);
+    CHECK_FALSE(hitboxes.contains(view("src/app.cpp")));
 }
 
 TEST_CASE("A turn exports one patch for the comparer", "[tui][turn_file_changes][diff_comparer]") {

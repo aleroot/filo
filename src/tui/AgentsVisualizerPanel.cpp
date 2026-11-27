@@ -28,16 +28,12 @@ using namespace ftxui;
     return std::format("{:.2f} MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
 }
 
-[[nodiscard]] int line_count(const core::context::SteeringFile& file) {
-    return static_cast<int>(split_lines_view(file.content).size());
-}
-
 } // namespace
 
 int agents_visualizer_page_lines(std::size_t file_count, int available_rows) {
-    // Window frame (2), source/status/stats + gap (4), the ▲/▼ scroll markers
-    // (2), gap + hint (2), and the file tabs + gap (2) when there are several.
-    const int chrome = 10 + (file_count > 1 ? 2 : 0);
+    // Window frame (2), source/status/stats + gap (4), gap + position and
+    // hints (2), and the file tabs + gap (2) when there are several.
+    const int chrome = 8 + (file_count > 1 ? 2 : 0);
     return std::max(3, available_rows - chrome);
 }
 
@@ -45,7 +41,6 @@ AgentsVisualizerEventResult handle_agents_visualizer_panel_event(
     AgentsVisualizerPanelState& state,
     ftxui::Event event,
     const std::vector<core::context::SteeringFile>& files,
-    int page_lines,
     const Box& popover_box,
     const std::vector<Box>& tab_hitboxes) {
     using Result = AgentsVisualizerEventResult;
@@ -53,15 +48,16 @@ AgentsVisualizerEventResult handle_agents_visualizer_panel_event(
 
     const std::size_t count = files.size();
     state.selected_file = count == 0 ? 0 : std::min(state.selected_file, count - 1);
-    const int page = std::max(1, page_lines);
-    const int max_scroll = count == 0
-        ? 0
-        : std::max(0, line_count(files[state.selected_file]) - page);
-    const auto scroll_to = [&](int offset) { state.scroll_offset = std::clamp(offset, 0, max_scroll); };
-    const auto scroll_by = [&](int delta) { scroll_to(state.scroll_offset + delta); };
+    // Scroll from where the last frame settled, within what it drew.
+    std::ignore = take_frame_offset(state.metrics, state.scroll_offset);
+    const auto scroll = [&](const Event& scroll_event) {
+        return handle_scroll_event(state.scroll_offset, scroll_event,
+                                   state.metrics.viewport_rows, state.metrics.content_rows);
+    };
     const auto select_file = [&](std::size_t index) {
         state.selected_file = index;
         state.scroll_offset = 0;
+        state.metrics = {};
     };
     const auto is_any = [&event](const auto&... keys) { return ((event == keys) || ...); };
 
@@ -81,31 +77,20 @@ AgentsVisualizerEventResult handle_agents_visualizer_panel_event(
                 tabs, [&](const Box& tab) { return tab.Contain(mouse.x, mouse.y); });
             if (hit != tabs.end()) select_file(static_cast<std::size_t>(hit - tabs.begin()));
         }
-        if (mouse.button == Mouse::WheelUp) scroll_by(-3);
-        if (mouse.button == Mouse::WheelDown) scroll_by(3);
+        std::ignore = scroll(event);
         return Result::handled;
     }
 
     if (is_panel_dismiss_event(event)) {
         state.active = false;
-    } else if (is_any(Event::ArrowUp, Event::Character('k'), Event::Character('K'))) {
-        scroll_by(-1);
-    } else if (is_any(Event::ArrowDown, Event::Character('j'), Event::Character('J'))) {
-        scroll_by(1);
-    } else if (event == Event::PageUp) {
-        scroll_by(-page);
-    } else if (event == Event::PageDown) {
-        scroll_by(page);
-    } else if (event == Event::Home) {
-        scroll_to(0);
-    } else if (event == Event::End) {
-        scroll_to(max_scroll);
     } else if (is_any(Event::ArrowLeft, Event::TabReverse)) {
         if (count > 0) select_file((state.selected_file + count - 1) % count);
     } else if (is_any(Event::ArrowRight, Event::Tab)) {
         if (count > 0) select_file((state.selected_file + 1) % count);
     } else if (is_any(Event::Character('u'), Event::Character('U'), Event::Character(' '))) {
         return count > 0 ? Result::toggle_selected_file : Result::handled;
+    } else if (scroll(event)) {
+        // Scrolled.
     } else if (event == Event::Custom || is_ctrl_c_event(event)) {
         // Preserve Ctrl+C and app events, but keep keystrokes out of the
         // prompt while the popover holds the keyboard.
@@ -119,7 +104,8 @@ Element render_agents_visualizer_panel(
     std::size_t selected_file_index,
     int scroll_offset,
     std::vector<Box>* tab_hitboxes,
-    int max_visible_lines) {
+    int max_visible_lines,
+    ScrollMetrics* metrics) {
     Elements rows;
 
     if (files.empty()) {
@@ -179,28 +165,17 @@ Element render_agents_visualizer_panel(
 
     // ── Active File Metadata & Stats ─────────────────────────────────────────
     const auto& cur_file = files[active_index];
-    const auto lines = split_lines_view(cur_file.content);
-    const int total_lines = static_cast<int>(lines.size());
-
-    int section_count = 0;
-    for (const auto& line : lines) {
-        if (!line.empty() && line[0] == '#') {
-            section_count++;
-        }
-    }
+    const int total_lines = document_line_count(cur_file.content);
+    const int section_count = static_cast<int>(std::ranges::count_if(
+        split_lines_view(cur_file.content),
+        [](std::string_view line) { return line.starts_with('#'); }));
 
     if (max_visible_lines <= 0) {
         const auto term_size = Terminal::Size();
         // Dynamically use all remaining height between banner and status bar
-        const int reserved_lines = (files.size() > 1 ? 21 : 19);
+        const int reserved_lines = (files.size() > 1 ? 19 : 17);
         max_visible_lines = std::max(12, term_size.dimy - reserved_lines);
     }
-
-    const int max_scroll = std::max(0, total_lines - max_visible_lines);
-    const int clamped_scroll = std::clamp(scroll_offset, 0, max_scroll);
-    const int view_end = std::min(total_lines, clamped_scroll + max_visible_lines);
-    const float view_pct = total_lines == 0 ? 100.0f
-        : std::min(100.0f, (static_cast<float>(view_end) / static_cast<float>(total_lines)) * 100.0f);
 
     rows.push_back(hbox({
         text("  Source: ") | color(ColorTextSecondary),
@@ -224,52 +199,26 @@ Element render_agents_visualizer_panel(
         stats_elements.push_back(text(" · ") | color(ColorTextMuted));
         stats_elements.push_back(text(std::format("{} sections", section_count)) | color(ColorTextSecondary));
     }
-    stats_elements.push_back(text(" · ") | color(ColorTextMuted));
-    stats_elements.push_back(
-        text(std::format("showing lines {}-{} of {} ({:.0f}%)",
-                         total_lines == 0 ? 0 : clamped_scroll + 1,
-                         view_end,
-                         total_lines,
-                         view_pct))
-        | color(ColorTextSecondary));
-
     rows.push_back(hbox(std::move(stats_elements)));
     rows.push_back(text(""));
 
-    // ── Viewport Slicing & Markdown Rendering ────────────────────────────────
-    if (clamped_scroll > 0) {
-        rows.push_back(hbox({
-            text("  ▲ ") | color(ColorYellowDark),
-            text(std::format("{} more lines above", clamped_scroll))
-                | color(ColorTextMuted) | dim,
-        }));
-    }
-
-    std::string visible_content;
-    for (int i = clamped_scroll; i < view_end; ++i) {
-        visible_content.append(lines[static_cast<std::size_t>(i)]);
-        visible_content.push_back('\n');
-    }
-
-    // Markdown can wrap past the line budget; the viewport then gives way so
-    // the footer hints stay visible when the popover is cut to the screen.
-    if (!visible_content.empty()) {
-        rows.push_back(hbox({text("  "), render_markdown(visible_content) | xflex})
-                       | yframe | flex_shrink);
-    } else {
+    // ── The file, scrolled by drawn rows ─────────────────────────────────────
+    // A table or code block is laid out whole and then scrolled, so it is
+    // never cut in the source and drawn as something else.
+    if (cur_file.content.empty()) {
         rows.push_back(text("  (empty file)") | color(ColorTextMuted) | dim);
-    }
-
-    if (view_end < total_lines) {
+    } else {
         rows.push_back(hbox({
-            text("  ▼ ") | color(ColorYellowDark),
-            text(std::format("{} more lines below", total_lines - view_end))
-                | color(ColorTextMuted) | dim,
-        }));
+            text("  "),
+            render_document_content(cur_file.content, document_format(cur_file.path), {},
+                                    scroll_offset, metrics) | xflex,
+        }) | size(HEIGHT, EQUAL, max_visible_lines));
     }
 
-    // ── Footer Navigation Hints ──────────────────────────────────────────────
-    rows.push_back(text(""));
+    // ── Footer: position and navigation hints ────────────────────────────────
+    rows.push_back(metrics != nullptr
+        ? hbox({text("  "), scroll_status(*metrics) | size(WIDTH, EQUAL, kScrollStatusColumns)})
+        : text(""));
     std::string help_str = "  ↑/↓ scroll · PgUp/PgDn page";
     if (files.size() > 1) {
         help_str += " · ←/→ file";

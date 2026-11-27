@@ -35,6 +35,8 @@ inline constexpr std::string_view kTask = "task";
 inline constexpr std::string_view kDelegateTask = "delegate_task";
 inline constexpr std::string_view kReview = "review";
 inline constexpr std::string_view kExec = "exec";
+// Shows a file in the interactive host's document pane (OpenDocumentTool).
+inline constexpr std::string_view kOpenDocument = "open_document";
 // Advertised beside exec by the wire that scripts its tools: resumes a script
 // that yielded.
 inline constexpr std::string_view kWait = "wait";
@@ -145,7 +147,8 @@ is_verification_tool(std::string_view tool_name) noexcept {
 [[nodiscard]] constexpr bool is_path_visibility_constrained_tool(
     std::string_view tool_name) noexcept {
     return is_read_search_list_tool(tool_name)
-        || is_file_modification_tool(tool_name);
+        || is_file_modification_tool(tool_name)
+        || tool_name == kOpenDocument;
 }
 
 } // namespace core::tools::names

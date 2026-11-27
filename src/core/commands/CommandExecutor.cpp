@@ -4017,6 +4017,28 @@ public:
     }
 };
 
+/// Shows a file in the document pane beside the transcript.
+class OpenCommand : public Command {
+public:
+    std::string get_name() const override { return "/open"; }
+    std::string get_description() const override {
+        return "Read a file in the pane beside the transcript (path, or path:line)";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.open_document_fn) {
+            ctx.append_history_fn("\n✗  No document pane is available in this context.\n");
+            return;
+        }
+        const auto result = ctx.open_document_fn(trailing_arguments(ctx.text));
+        if (!result.ok && !result.message.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", result.message));
+        }
+    }
+};
+
 /// Puts back the files the latest turn changed. Strict, and all or nothing: a
 /// file that has moved on since refuses the whole revert rather than leaving a
 /// tree that matches no state anyone asked for.
@@ -4142,6 +4164,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ExportCommand>());
     register_command(std::make_unique<ForkCommand>());
     register_command(std::make_unique<RewindCommand>());
+    register_command(std::make_unique<OpenCommand>());
     register_command(std::make_unique<InitCommand>());
     register_command(std::make_unique<GoalCommand>());
     register_command(std::make_unique<TodoCommand>());

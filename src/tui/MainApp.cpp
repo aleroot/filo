@@ -38,6 +38,7 @@
 #include "AnchoredPopover.hpp"
 #include "McpServersPanel.hpp"
 #include "AgentsVisualizerPanel.hpp"
+#include "DocumentPane.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/ThreadCatalog.hpp"
@@ -96,6 +97,7 @@
 #include "core/tools/DeleteFileTool.hpp"
 #include "core/tools/MoveFileTool.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
+#include "core/tools/OpenDocumentTool.hpp"
 #include "core/tools/ActivateSkillTool.hpp"
 #include "core/tools/SkillRegistry.hpp"
 #ifdef FILO_ENABLE_PYTHON
@@ -856,8 +858,10 @@ RunResult run(RunOptions opts) {
     // ── Tool registration ───────────────────────────────────────────────────
     auto& tool_manager = core::tools::ToolManager::get_instance();
     std::shared_ptr<core::tools::AskUserQuestionTool> ask_user_tool;
+    std::shared_ptr<core::tools::OpenDocumentTool> open_document_tool;
     auto tool_options = core::tools::agent_builtin_tool_options();
     tool_options.ask_user_question_tool_out = &ask_user_tool;
+    tool_options.open_document_tool_out = &open_document_tool;
     tool_options.memory_store = memory_system->semantic();
     // Skills are workspace-scoped, not cwd-scoped: pass every granted root so
     // the activate_skill schema and Python skill discovery see the whole
@@ -1054,6 +1058,11 @@ RunResult run(RunOptions opts) {
     std::vector<Box> agents_tab_hitboxes;
     // Lines of the selected file the popover showed in the last frame.
     int agents_visualizer_page = 1;
+    // Files opened from a link, a command, or the turn's changes, beside the
+    // transcript. Touched only on the UI thread; the flag tells the animation
+    // thread to keep a slow redraw going so a file edited on disk refreshes.
+    DocumentPaneState document_pane;
+    std::atomic<bool> document_pane_open{false};
     std::vector<Box> thread_tab_hitboxes;
     std::vector<std::string> thread_tab_session_ids;
     SelectionClipboardCopier selection_clipboard_copier;
@@ -1090,6 +1099,18 @@ RunResult run(RunOptions opts) {
             ui_state_revision.fetch_add(1, std::memory_order_release);
             screen.PostEvent(Event::Custom);
         }
+    };
+    // Runs @p task on the UI thread; false once the UI stopped taking work.
+    auto post_ui_task = [&](std::function<void()> task) {
+        if (!ui_accepting_events.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::lock_guard lock(ui_event_post_mutex);
+        if (!ui_accepting_events.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        screen.Post(std::move(task));
+        return true;
     };
     // MCP handshakes finish on background threads; repaint when one does.
     // Detached again before this frame's locals go away, on every exit path.
@@ -2335,7 +2356,8 @@ RunResult run(RunOptions opts) {
             assistant_active,
             review_active,
             fallback_animation_active);
-        if (!cadence.has_value() && remote_completion_fresh) {
+        if (!cadence.has_value()
+            && (remote_completion_fresh || document_pane_open.load(std::memory_order_relaxed))) {
             return AnimationCadence{
                 .period = std::chrono::seconds(1),
                 .advance_frame = false,
@@ -6832,6 +6854,83 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = {}};
     };
 
+    // A link to a local file opens it in the document pane; relative paths
+    // are the workspace's. Any other link goes to the browser.
+    const auto open_document = [&](const DocumentTarget& target) {
+        const auto base = agent ? agent->session_context_snapshot().workspace_view().primary()
+                                : agent_session_context.workspace_view().primary();
+        document_pane.show(resolve_document_target(target, base));
+        document_pane_open.store(true, std::memory_order_relaxed);
+        wake_ui();
+    };
+    // open_document, the agent's way to show a file: only the conversation on
+    // screen may, and it takes nothing from the user (show_for_agent). The
+    // call waits for the UI thread, so the model learns what the user sees.
+    open_document_tool->set_opener([&](const core::tools::DocumentRequest& request) {
+        using core::tools::DocumentDisplay;
+        auto answer = std::make_shared<std::promise<DocumentDisplay>>();
+        auto display = answer->get_future();
+        // The task and a timed-out caller race to claim the request: a task
+        // that loses must not show a pane the model was told is unavailable.
+        auto claimed = std::make_shared<std::atomic<bool>>(false);
+        const bool posted = post_ui_task([&, answer, claimed, request] {
+            if (claimed->exchange(true)) {
+                return;
+            }
+            const auto visible = thread_runtimes.current();
+            if (!visible || visible->session_id() != request.session_id) {
+                answer->set_value(DocumentDisplay::elsewhere);
+                return;
+            }
+            const bool can_split = document_pane_split_width(Terminal::Size().dimx).has_value();
+            const auto placement = document_pane.show_for_agent(
+                DocumentTarget{.path = request.path, .line = request.line}, can_split);
+            document_pane_open.store(document_pane.open, std::memory_order_relaxed);
+            wake_ui();
+            using Placement = DocumentPaneState::Placement;
+            answer->set_value(placement == Placement::front    ? DocumentDisplay::shown
+                              : placement == Placement::behind ? DocumentDisplay::behind
+                                                               : DocumentDisplay::hidden);
+        });
+        if (!posted) {
+            return DocumentDisplay::unavailable;
+        }
+        if (display.wait_for(std::chrono::seconds(5)) != std::future_status::ready
+            && !claimed->exchange(true)) {
+            return DocumentDisplay::unavailable;
+        }
+        try {
+            return display.get();
+        } catch (const std::future_error&) {
+            return DocumentDisplay::unavailable;  // The UI dropped the task on exit.
+        }
+    });
+    const auto open_link = [&](std::string_view href) {
+        if (const auto target = parse_document_link(href)) {
+            open_document(*target);
+        } else {
+            core::auth::open_browser(href);
+        }
+    };
+    // /open [path[:line]]: a file in the pane, or the pane as it was left.
+    const auto open_document_command = [&](std::string_view argument)
+        -> core::commands::CommandOperationResult {
+        if (argument.empty()) {
+            if (document_pane.reader.empty()) {
+                return {.message = "Usage: /open <path>[:line]. Clicking a file link opens one too."};
+            }
+            document_pane.open = true;
+            document_pane.focused = true;
+            document_pane_open.store(true, std::memory_order_relaxed);
+            wake_ui();
+            return {.ok = true};
+        }
+        const auto target = parse_document_link(argument);
+        if (!target) return {.message = std::format("'{}' is not a file path.", argument)};
+        open_document(*target);
+        return {.ok = true};
+    };
+
     auto open_changes = [&](core::commands::ChangesScope scope) {
         return scope == core::commands::ChangesScope::Conversation
             ? open_conversation_changes()
@@ -6903,6 +7002,12 @@ RunResult run(RunOptions opts) {
     auto open_file_change = [&](std::string_view key) {
         const auto ref = parse_turn_file_change_open_key(key);
         if (!ref.has_value()) {
+            return;
+        }
+        if (ref->action == FileChangeAction::view) {
+            // The file as it is now; a path the row shows relative is the
+            // workspace's.
+            open_document(DocumentTarget{.path = ref->path});
             return;
         }
 
@@ -8695,6 +8800,7 @@ RunResult run(RunOptions opts) {
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
             .open_diff_comparer_fn = open_changes,
+            .open_document_fn = open_document_command,
             .revert_turn_files_fn = revert_latest_turn_files,
             .change_workspace_root_fn = change_workspace_root,
             .steering_policy_fn = [&]() {
@@ -8881,6 +8987,7 @@ RunResult run(RunOptions opts) {
                 .expand_tool_results = tool_output_expanded,
                 .show_reasoning = ui_show_reasoning,
                 .show_diff_comparer_affordance = diff_comparer_is_external,
+                .show_document_affordance = true,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
                 .scroll_anchor = nullptr,
@@ -8910,9 +9017,13 @@ RunResult run(RunOptions opts) {
             }
             history_component->JumpToMessage(*message_index, message_count);
         };
+    history_component->SetLinkOpener([&open_link, &modal_owns_screen](std::string_view href) {
+        if (!modal_owns_screen()) open_link(href);
+    });
+
     // A file row's affordance opens just that change in the configured
     // comparer, unless a dialog or picker owns the screen.
-    history_component->SetDiffComparerOpener(
+    history_component->SetFileChangeActionOpener(
         [&open_file_change, &modal_owns_screen](std::string_view key) {
             if (!modal_owns_screen()) {
                 open_file_change(key);
@@ -9155,8 +9266,7 @@ RunResult run(RunOptions opts) {
             if (agents_visualizer_panel_state.active) {
                 agents_event = handle_agents_visualizer_panel_event(
                     agents_visualizer_panel_state, event, steering_context.files,
-                    agents_visualizer_page, agents_visualizer_popover_box,
-                    agents_tab_hitboxes);
+                    agents_visualizer_popover_box, agents_tab_hitboxes);
                 agents_popover_dismissed = !agents_visualizer_panel_state.active;
                 if (agents_event == AgentsVisualizerEventResult::toggle_selected_file && agent) {
                     const auto& cur = steering_context.files[agents_visualizer_panel_state.selected_file];
@@ -9175,6 +9285,20 @@ RunResult run(RunOptions opts) {
         }
         if (agents_event != AgentsVisualizerEventResult::ignored) {
             return true;
+        }
+
+        // The document pane: the mouse over it, and the keys while it holds
+        // them. A dialog or picker on screen comes first.
+        if (document_pane.open && !modal_owns_screen()) {
+            const auto action = handle_document_pane_event(document_pane, event);
+            document_pane_open.store(document_pane.open, std::memory_order_relaxed);
+            if (action.kind == DocumentPaneAction::Kind::open_url) {
+                core::auth::open_browser(action.url);
+            }
+            if (action.kind != DocumentPaneAction::Kind::ignored) {
+                wake_ui();
+                return true;
+            }
         }
 
         if (opts.remote_mcp_server_enabled
@@ -11187,6 +11311,22 @@ RunResult run(RunOptions opts) {
         const bool question_dialog_active = thread_modals.question_visible(session_id);
         
         auto history_el = history_component->Render() | flex;
+        if (document_pane.open && !document_pane.reader.empty()) {
+            document_pane.reader.refresh(std::chrono::steady_clock::now());
+            auto pane = render_document_pane(document_pane);
+            if (const auto width = document_pane_split_width(Terminal::Size().dimx)) {
+                history_el = hbox({
+                    std::move(history_el) | flex,
+                    separator() | color(ColorTextMuted),
+                    text(" "),
+                    std::move(pane) | size(WIDTH, EQUAL, *width - 2),
+                }) | flex;
+            } else {
+                // Too narrow to share: the pane takes the transcript's place
+                // until it is closed.
+                history_el = std::move(pane) | flex;
+            }
+        }
 
         Element banner_el = emptyElement();
         if (ui_show_banner) {
@@ -11865,7 +12005,8 @@ RunResult run(RunOptions opts) {
                     agents_visualizer_snapshot.selected_file,
                     agents_visualizer_snapshot.scroll_offset,
                     &agents_tab_hitboxes,
-                    agents_visualizer_page),
+                    agents_visualizer_page,
+                    &agents_visualizer_panel_state.metrics),
                 &agents_status_box,
                 PopoverPlacement{.preferred_width = 110,
                                  .min_width = 72,
@@ -11948,6 +12089,7 @@ RunResult run(RunOptions opts) {
     core::logging::Logger::get_instance().clear_callback_sink();
     core::agent::PermissionGate::get_instance().set_notify_fn({});
     ask_user_tool->setQuestionCallback({});
+    open_document_tool->set_opener({});
     for (const auto& runtime : thread_runtimes.snapshot()) {
         runtime->agent()->set_permission_fn({});
         runtime->agent()->set_loop_break_fn({});

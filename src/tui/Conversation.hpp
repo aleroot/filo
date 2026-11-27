@@ -322,6 +322,9 @@ struct ConversationRenderOptions {
     // comparer. Off when the configured comparer is the transcript itself,
     // because then the row already does everything the affordance would.
     bool        show_diff_comparer_affordance = false;
+    // Draws the per-file affordance that shows the file as it is now in the
+    // document pane. Off where no pane exists.
+    bool        show_document_affordance = false;
     std::unordered_map<std::string, bool>* system_disclosure_expanded = nullptr;
     std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
@@ -365,20 +368,28 @@ void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
 [[nodiscard]] std::string turn_file_change_key(std::string_view message_id,
                                                std::string_view path);
 
-/// Key of the affordance that opens one file of a turn's file-change box in the
-/// configured external comparer. It is distinct from the disclosure key because
-/// a single row carries both: clicking the row expands it, clicking the
-/// affordance sends it elsewhere.
-[[nodiscard]] std::string turn_file_change_open_key(std::string_view message_id,
-                                                    std::string_view path);
+/// What a file row's affordance does.
+enum class FileChangeAction {
+    compare,  ///< Open the change in the configured external comparer.
+    view,     ///< Show the file as it is now in the document pane.
+};
+
+/// Key of an affordance that acts on one file of a turn's file-change box.
+/// It is distinct from the disclosure key because a single row carries both:
+/// clicking the row expands it, clicking an affordance acts elsewhere.
+[[nodiscard]] std::string turn_file_change_open_key(
+    std::string_view message_id,
+    std::string_view path,
+    FileChangeAction action = FileChangeAction::compare);
 
 /// True for a key `turn_file_change_open_key` produced.
 [[nodiscard]] bool is_turn_file_change_open_key(std::string_view key);
 
-/// The turn and file an affordance key names.
+/// The turn, file and action an affordance key names.
 struct TurnFileChangeRef {
     std::string message_id;
     std::string path;
+    FileChangeAction action = FileChangeAction::compare;
 };
 
 /// Splits an affordance key back into what it names; nullopt for any other key.

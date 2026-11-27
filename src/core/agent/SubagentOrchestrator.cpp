@@ -949,7 +949,10 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
 
     std::erase_if(tools, [&](const core::llm::Tool& tool) {
         return tool.function.name == core::tools::TaskTool::kToolName
-            || (!profile.allow_task_tool && tool.function.name == kTaskToolName);
+            || (!profile.allow_task_tool && tool.function.name == kTaskToolName)
+            // The pane belongs to the conversation the user reads; a worker
+            // reports to its parent, which decides what to show.
+            || tool.function.name == core::tools::names::kOpenDocument;
     });
 
     const std::string mode = normalize_mode(parent_mode);

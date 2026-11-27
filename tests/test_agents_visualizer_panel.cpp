@@ -208,9 +208,13 @@ TEST_CASE("Agents popover scrolls within the file and switches files",
     const auto files = numbered_files(2, 30);
     const ftxui::Box popover{10, 60, 5, 30};
     const std::vector<ftxui::Box> tabs{{20, 25, 7, 7}, {27, 32, 7, 7}};
-    tui::AgentsVisualizerPanelState state{.active = true};
+    // As drawn: 30 rows of a file, 10 at a time.
+    tui::AgentsVisualizerPanelState state{
+        .active = true,
+        .metrics = {.content_rows = 30, .viewport_rows = 10},
+    };
     const auto send = [&](ftxui::Event event) {
-        return tui::handle_agents_visualizer_panel_event(state, event, files, 10, popover, tabs);
+        return tui::handle_agents_visualizer_panel_event(state, event, files, popover, tabs);
     };
 
     CHECK(send(ftxui::Event::ArrowUp) == Result::handled);
@@ -228,6 +232,7 @@ TEST_CASE("Agents popover scrolls within the file and switches files",
     CHECK(send(ftxui::Event::ArrowRight) == Result::handled);
     CHECK(state.selected_file == 1);
     CHECK(state.scroll_offset == 0);
+    state.metrics = {.content_rows = 30, .viewport_rows = 10};
     CHECK(send(ftxui::Event::ArrowRight) == Result::handled);
     CHECK(state.selected_file == 0);
     CHECK(send(mouse_event(ftxui::Mouse::Left, 28, 7)) == Result::handled);
@@ -248,9 +253,12 @@ TEST_CASE("Agents popover owns the mouse only inside its box",
     using Result = tui::AgentsVisualizerEventResult;
     const auto files = numbered_files(1, 30);
     const ftxui::Box popover{10, 60, 5, 30};
-    tui::AgentsVisualizerPanelState state{.active = true};
+    tui::AgentsVisualizerPanelState state{
+        .active = true,
+        .metrics = {.content_rows = 30, .viewport_rows = 10},
+    };
     const auto send = [&](ftxui::Event event) {
-        return tui::handle_agents_visualizer_panel_event(state, event, files, 10, popover, {});
+        return tui::handle_agents_visualizer_panel_event(state, event, files, popover, {});
     };
 
     CHECK(send(mouse_event(ftxui::Mouse::WheelDown, 20, 10)) == Result::handled);
@@ -270,14 +278,20 @@ TEST_CASE("Agents popover fits the rows under its trigger",
         const auto files = numbered_files(count, 200);
         const int available_rows = 30;
         const int page = tui::agents_visualizer_page_lines(count, available_rows);
-        auto panel = tui::render_agents_visualizer_panel(files, 0, 50, nullptr, page);
+        tui::ScrollMetrics metrics;
+        auto panel = tui::render_agents_visualizer_panel(files, 0, 50, nullptr, page, &metrics);
+        // The popover is given the rows under its trigger.
         auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
-                                            ftxui::Dimension::Fit(panel));
+                                            ftxui::Dimension::Fixed(available_rows));
         ftxui::Render(screen, panel);
-        CHECK(screen.dimy() <= available_rows);
         const auto output = strip_sgr(screen.ToString());
-        CHECK_THAT(output, Catch::Matchers::ContainsSubstring("more lines above"));
-        CHECK_THAT(output, Catch::Matchers::ContainsSubstring("more lines below"));
+        // Every row of the window is the file's, from row 51 on.
+        CHECK(metrics.viewport_rows == page);
+        CHECK(metrics.content_rows >= 200);
+        CHECK(metrics.offset == 50);
+        CHECK_THAT(output, Catch::Matchers::ContainsSubstring("Line 51"));
+        CHECK_THAT(output, Catch::Matchers::ContainsSubstring(
+            std::format("rows 51–{} of {}", 50 + page, metrics.content_rows)));
         CHECK_THAT(output, Catch::Matchers::ContainsSubstring("click outside to close"));
     }
 }

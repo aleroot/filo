@@ -1551,7 +1551,7 @@ TEST_CASE("HistoryComponent sends an affordance click to the comparer, not to th
         [&options]() { return options; });
 
     std::vector<std::string> opened;
-    history.SetDiffComparerOpener(
+    history.SetFileChangeActionOpener(
         [&opened](std::string_view key) { opened.emplace_back(key); });
 
     const auto rendered = render_history_text(history);
@@ -1562,6 +1562,39 @@ TEST_CASE("HistoryComponent sends an affordance click to the comparer, not to th
     REQUIRE(opened.size() == 1);
     CHECK(opened.front() == tui::turn_file_change_open_key(message_id, "src/app.cpp"));
     // The same click must not also have toggled the row open.
+    CHECK_THAT(render_history_text(history),
+               !Catch::Matchers::ContainsSubstring("new-line"));
+}
+
+TEST_CASE("HistoryComponent sends a document click to the pane, not to the comparer",
+          "[tui][history_component][document]") {
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+    const std::string message_id = messages.front().id;
+
+    tui::ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    options.show_document_affordance = true;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    std::vector<std::string> opened;
+    history.SetFileChangeActionOpener(
+        [&opened](std::string_view key) { opened.emplace_back(key); });
+
+    const auto rendered = render_history_text(history);
+    const auto affordance = rendered_cell_of(rendered, "\u2261");
+    REQUIRE(affordance.row >= 0);
+    click(history, affordance);
+
+    REQUIRE(opened.size() == 1);
+    const auto ref = tui::parse_turn_file_change_open_key(opened.front());
+    REQUIRE(ref.has_value());
+    CHECK(ref->action == tui::FileChangeAction::view);
+    CHECK(ref->message_id == message_id);
+    CHECK(ref->path == "src/app.cpp");
     CHECK_THAT(render_history_text(history),
                !Catch::Matchers::ContainsSubstring("new-line"));
 }
@@ -1579,7 +1612,7 @@ TEST_CASE("HistoryComponent still toggles a change row clicked elsewhere",
         [&options]() { return options; });
 
     bool opened = false;
-    history.SetDiffComparerOpener([&opened](std::string_view) { opened = true; });
+    history.SetFileChangeActionOpener([&opened](std::string_view) { opened = true; });
 
     const auto rendered = render_history_text(history);
     const auto row = rendered_cell_of(rendered, "src/app.cpp");
@@ -1603,7 +1636,7 @@ TEST_CASE("HistoryComponent treats the gap before an affordance as the row",
         [&options]() { return options; });
 
     bool opened = false;
-    history.SetDiffComparerOpener([&opened](std::string_view) { opened = true; });
+    history.SetFileChangeActionOpener([&opened](std::string_view) { opened = true; });
 
     const auto rendered = render_history_text(history);
     auto gap = rendered_cell_of(rendered, "\u2197");
@@ -1714,4 +1747,51 @@ TEST_CASE("A redraw notification never reaches the transcript as handled input",
     CHECK_FALSE(container->OnEvent(left_mouse(ftxui::Mouse::Moved, cell.column + 8, cell.row)));
     CHECK_FALSE(container->OnEvent(left_mouse(ftxui::Mouse::Released, cell.column + 8, cell.row)));
     CHECK(modal_claims == 1);
+}
+
+namespace {
+
+void mouse(tui::HistoryComponent& history, RenderedCell cell, ftxui::Mouse::Motion motion) {
+    ftxui::Mouse event;
+    event.button = ftxui::Mouse::Left;
+    event.motion = motion;
+    event.x = cell.column;
+    event.y = cell.row;
+    std::ignore = history.OnEvent(ftxui::Event::Mouse("", event));
+}
+
+} // namespace
+
+TEST_CASE("HistoryComponent opens a link clicked in a reply, not one dragged across",
+          "[tui][history_component][document]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages{tui::make_assistant_message(
+        "The numbers are in [bench.md](/work/bench.md:3) now.", "", false)};
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        []() { return tui::ConversationRenderOptions{}; });
+    std::vector<std::string> opened;
+    history.SetLinkOpener([&opened](std::string_view href) { opened.emplace_back(href); });
+
+    const auto rendered = render_history_text(history);
+    // The label alone: the path is what the click opens, not what is read.
+    CHECK_FALSE(rendered.contains("/work/bench.md"));
+    const auto link = rendered_cell_of(rendered, "bench.md");
+    REQUIRE(link.row >= 0);
+
+    mouse(history, link, ftxui::Mouse::Pressed);
+    mouse(history, {.row = link.row, .column = link.column + 40}, ftxui::Mouse::Released);
+    CHECK(opened.empty());
+
+    // Selecting part of the label, back to where it started, is a drag too.
+    mouse(history, link, ftxui::Mouse::Pressed);
+    mouse(history, {.row = link.row, .column = link.column + 3}, ftxui::Mouse::Moved);
+    mouse(history, link, ftxui::Mouse::Released);
+    CHECK(opened.empty());
+
+    mouse(history, link, ftxui::Mouse::Pressed);
+    mouse(history, link, ftxui::Mouse::Released);
+    REQUIRE(opened.size() == 1);
+    CHECK(opened.front() == "/work/bench.md:3");
 }

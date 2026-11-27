@@ -168,6 +168,9 @@ struct CommandContext {
     /// /changes all, Ctrl+Shift+X). The host owns the comparison: which turns,
     /// which backend, and what the user is told when there is nothing to show.
     std::function<CommandOperationResult(ChangesScope)> open_diff_comparer_fn = {};
+    /// Shows a file in the document pane (/open). The argument is the path as
+    /// typed, possibly with a line (`src/a.cpp:12`); empty reopens the pane.
+    std::function<CommandOperationResult(std::string_view)> open_document_fn = {};
     /// Puts back the files the most recent turn changed (/revert). The host
     /// owns the revert: which turn, whether the workspace still matches it, and
     /// what the user is told. The conversation is left alone — /rewind and

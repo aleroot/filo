@@ -1,4 +1,6 @@
 #include "MarkdownRenderer.hpp"
+#include "DocumentLink.hpp"
+#include "Text.hpp"
 #include "TuiTheme.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -6,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <charconv>
 #include <format>
 #include <optional>
 #include <string>
@@ -38,99 +41,6 @@ inline constexpr ThemedColor kMdTableRowFg = ColorTextSecondary;
 inline constexpr ThemedColor kMdBulletFg = ColorYellowDark;
 inline constexpr ThemedColor kMdNumFg = ColorYellowDark;
 
-// ============================================================================
-// Text sanitization for FTXUI
-// ============================================================================
-
-static bool is_utf8_continuation(unsigned char c) {
-    return (c & 0b1100'0000u) == 0b1000'0000u;
-}
-
-static std::size_t utf8_sequence_length(unsigned char lead) {
-    if ((lead & 0b1110'0000u) == 0b1100'0000u) return 2;
-    if ((lead & 0b1111'0000u) == 0b1110'0000u) return 3;
-    if ((lead & 0b1111'1000u) == 0b1111'0000u) return 4;
-    return 0;
-}
-
-static bool is_valid_utf8_sequence(std::string_view input,
-                                   std::size_t pos,
-                                   std::size_t len) {
-    if (pos + len > input.size()) return false;
-
-    const unsigned char b0 = static_cast<unsigned char>(input[pos]);
-    uint32_t cp = 0;
-
-    if (len == 2) {
-        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
-        if (!is_utf8_continuation(b1)) return false;
-        cp = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
-        return cp >= 0x80u;
-    }
-
-    if (len == 3) {
-        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
-        const unsigned char b2 = static_cast<unsigned char>(input[pos + 2]);
-        if (!is_utf8_continuation(b1) || !is_utf8_continuation(b2)) return false;
-        cp = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
-        if (cp < 0x800u) return false;                       // overlong
-        if (cp >= 0xD800u && cp <= 0xDFFFu) return false;    // surrogate half
-        return true;
-    }
-
-    if (len == 4) {
-        const unsigned char b1 = static_cast<unsigned char>(input[pos + 1]);
-        const unsigned char b2 = static_cast<unsigned char>(input[pos + 2]);
-        const unsigned char b3 = static_cast<unsigned char>(input[pos + 3]);
-        if (!is_utf8_continuation(b1)
-            || !is_utf8_continuation(b2)
-            || !is_utf8_continuation(b3)) return false;
-        cp = ((b0 & 0x07u) << 18)
-           | ((b1 & 0x3Fu) << 12)
-           | ((b2 & 0x3Fu) << 6)
-           | (b3 & 0x3Fu);
-        if (cp < 0x10000u) return false;                     // overlong
-        return cp <= 0x10FFFFu;
-    }
-
-    return false;
-}
-
-static std::string sanitize_for_ftxui(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-
-    for (std::size_t i = 0; i < input.size();) {
-        const unsigned char c = static_cast<unsigned char>(input[i]);
-
-        // Keep visible ASCII + '\n' + '\t'. Drop other ASCII control bytes.
-        if (c < 0x80u) {
-            if (c == '\r') {
-                // Normalize CRLF/CR to '\n' to avoid cursor-jump artifacts.
-                if (i + 1 < input.size() && input[i + 1] == '\n') ++i;
-                out.push_back('\n');
-                ++i;
-                continue;
-            }
-            if (c == '\n' || c == '\t' || (c >= 0x20u && c != 0x7Fu)) {
-                out.push_back(static_cast<char>(c));
-            }
-            ++i;
-            continue;
-        }
-
-        const std::size_t len = utf8_sequence_length(c);
-        if (len == 0 || !is_valid_utf8_sequence(input, i, len)) {
-            ++i;   // drop malformed byte
-            continue;
-        }
-
-        out.append(input.substr(i, len));
-        i += len;
-    }
-
-    return out;
-}
 
 // ============================================================================
 // Inline span types
@@ -152,10 +62,52 @@ struct SpanStyle {
     bool link   = false;
 };
 
+// No link: the span is not part of one.
+constexpr std::size_t kNoLink = static_cast<std::size_t>(-1);
+
 struct TextSpan {
     SpanKind kind = SpanKind::Text;
     SpanStyle style = {};
     std::string text = {};
+    /// The ordinal of the link the span belongs to, in document order.
+    std::size_t link = kNoLink;
+};
+
+/// What one render knows about the links it draws: their targets in
+/// document order, and where the caller wants them recorded.
+class LinkRecorder {
+public:
+    explicit LinkRecorder(const MarkdownLinkTargets* targets) : targets_(targets) {}
+
+    [[nodiscard]] std::size_t add(std::string href) {
+        hrefs_.push_back(std::move(href));
+        return hrefs_.size() - 1;
+    }
+
+    /// @p element, recorded as one part of link @p ordinal and drawn selected
+    /// when that link holds the keyboard.
+    [[nodiscard]] Element mark(Element element, std::size_t ordinal) {
+        if (targets_ == nullptr || ordinal >= hrefs_.size()) return element;
+        if (targets_->selected == ordinal) element = std::move(element) | inverted;
+        if (targets_->hitboxes != nullptr) {
+            element = std::move(element) | reflect((*targets_->hitboxes)[markdown_link_key(
+                targets_->scope, ordinal, next_part_++, hrefs_[ordinal])]);
+        }
+        return element;
+    }
+
+private:
+    const MarkdownLinkTargets* targets_;
+    std::vector<std::string> hrefs_;
+    std::size_t next_part_ = 0;
+};
+
+/// The base colour of the text being drawn, and the links of the render.
+struct InlineContext {
+    Color base;
+    LinkRecorder* links = nullptr;
+
+    [[nodiscard]] InlineContext with_base(Color color) const { return {color, links}; }
 };
 
 // Find the next exact run of `delim_char` repeated `delim_len` times,
@@ -205,21 +157,24 @@ static std::size_t find_closing_backticks(std::string_view sv,
 // Inline parser
 // ============================================================================
 
-static std::vector<TextSpan> parse_inline(std::string_view text);
+static std::vector<TextSpan> parse_inline(std::string_view text, LinkRecorder* links);
 
 // Re-parse emphasis/link/strike bodies so nested markers are not left literal.
 // Code spans stay leaf nodes (content is shown verbatim with code styling).
 static void append_nested(std::vector<TextSpan>& out,
                           std::string_view content,
-                          SpanStyle inherited)
+                          SpanStyle inherited,
+                          LinkRecorder* links,
+                          std::size_t link = kNoLink)
 {
     if (content.empty()) return;
 
-    auto inner = parse_inline(content);
+    auto inner = parse_inline(content, links);
     if (inner.empty()) {
         TextSpan s;
         s.text = std::string(content);
         s.style = inherited;
+        s.link = link;
         out.push_back(std::move(s));
         return;
     }
@@ -233,11 +188,12 @@ static void append_nested(std::vector<TextSpan>& out,
             s.style.strike = s.style.strike || inherited.strike;
         }
         if (inherited.link && s.kind != SpanKind::LinkUrl) s.style.link = true;
+        if (link != kNoLink && s.kind != SpanKind::LinkUrl) s.link = link;
         out.push_back(std::move(s));
     }
 }
 
-static std::vector<TextSpan> parse_inline(std::string_view text)
+static std::vector<TextSpan> parse_inline(std::string_view text, LinkRecorder* links)
 {
     std::vector<TextSpan> spans;
     std::string current;
@@ -290,8 +246,12 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
                     const auto label = text.substr(i + 1, bracket_end - i - 1);
                     const std::string href(text.substr(bracket_end + 2,
                                                        paren_end - bracket_end - 2));
-                    append_nested(spans, label, {.link = true});
-                    if (!href.empty()) {
+                    const std::size_t ordinal =
+                        links != nullptr ? links->add(href) : kNoLink;
+                    append_nested(spans, label, {.link = true}, links, ordinal);
+                    // A local file is opened by the link itself; its path
+                    // would only repeat what the label names.
+                    if (!href.empty() && !parse_document_link(href)) {
                         TextSpan url;
                         url.kind = SpanKind::LinkUrl;
                         url.text = " (" + href + ")";
@@ -311,7 +271,7 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
             if (j != std::string_view::npos) {
                 flush();
                 append_nested(spans, text.substr(i + 2, j - i - 2),
-                              {.strike = true});
+                              {.strike = true}, links);
                 i = j + 2;
                 continue;
             }
@@ -357,7 +317,7 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
                     const bool add_bold = try_len >= 2;
                     const bool add_italic = (try_len == 1 || try_len == 3);
                     append_nested(spans, content,
-                                  {.bold = add_bold, .italic = add_italic});
+                                  {.bold = add_bold, .italic = add_italic}, links);
                     i = j + static_cast<std::size_t>(try_len);
                     handled = true;
                     break;
@@ -448,12 +408,16 @@ static Element apply_span_style(Element e, const TextSpan& span, Color base)
     return e;
 }
 
-static Element render_wrapping_token(const TextSpan& token, Color base)
+static Element render_wrapping_token(const TextSpan& token, const InlineContext& ctx)
 {
-    return apply_span_style(ftxui::text(token.text), token, base);
+    auto element = apply_span_style(ftxui::text(token.text), token, ctx.base);
+    if (ctx.links != nullptr && token.link != kNoLink) {
+        element = ctx.links->mark(std::move(element), token.link);
+    }
+    return element;
 }
 
-static Element render_span_row(const std::vector<TextSpan>& row, Color base)
+static Element render_span_row(const std::vector<TextSpan>& row, const InlineContext& ctx)
 {
     if (row.empty()) return ftxui::text("");
 
@@ -461,7 +425,7 @@ static Element render_span_row(const std::vector<TextSpan>& row, Color base)
     if (row.size() == 1) {
         const auto& s = row[0];
         if (s.kind == SpanKind::Text && !s.style.link) {
-            return apply_span_style(paragraph(s.text), s, base) | xflex;
+            return apply_span_style(paragraph(s.text), s, ctx.base) | xflex;
         }
     }
 
@@ -469,16 +433,16 @@ static Element render_span_row(const std::vector<TextSpan>& row, Color base)
     Elements elems;
     elems.reserve(tokens.size());
     for (const auto& token : tokens) {
-        elems.push_back(render_wrapping_token(token, base));
+        elems.push_back(render_wrapping_token(token, ctx));
     }
     return hflow(std::move(elems)) | xflex;
 }
 
 // Parse once across soft newlines, then split the flattened styled spans back
 // into visual rows. Block renderers can add their own prefix to each row.
-static std::vector<Element> render_inline_rows(std::string_view text, Color base)
+static std::vector<Element> render_inline_rows(std::string_view text, const InlineContext& ctx)
 {
-    auto spans = parse_inline(text);
+    auto spans = parse_inline(text, ctx.links);
 
     // Split styled spans into rows on embedded '\n'.
     std::vector<std::vector<TextSpan>> rows(1);
@@ -505,17 +469,17 @@ static std::vector<Element> render_inline_rows(std::string_view text, Color base
     std::vector<Element> lines;
     lines.reserve(rows.size());
     for (const auto& row : rows) {
-        lines.push_back(render_span_row(row, base));
+        lines.push_back(render_span_row(row, ctx));
     }
     return lines;
 }
 
 // Render one or more soft-broken lines without block-specific prefixes.
-static Element render_inline_line(std::string_view line, Color base)
+static Element render_inline_line(std::string_view line, const InlineContext& ctx)
 {
     if (line.empty()) return ftxui::text("");
 
-    auto rows = render_inline_rows(line, base);
+    auto rows = render_inline_rows(line, ctx);
     if (rows.size() == 1) return std::move(rows.front());
     return vbox(std::move(rows)) | xflex;
 }
@@ -907,7 +871,7 @@ static std::vector<Block> parse_blocks(std::string_view text)
 // Block renderers
 // ============================================================================
 
-static Element render_heading(const Block& block)
+static Element render_heading(const Block& block, const InlineContext& ctx)
 {
     const std::string_view content = block.lines.empty()
         ? std::string_view{}
@@ -916,7 +880,7 @@ static Element render_heading(const Block& block)
     auto make_inline = [&](Color fg, bool do_bold, bool do_underline,
                            bool do_underline_double) -> Element
     {
-        Element e = render_inline_line(content, fg);
+        Element e = render_inline_line(content, ctx.with_base(fg));
         if (do_bold)             e = std::move(e) | ftxui::bold;
         if (do_underline_double) e = std::move(e) | underlinedDouble;
         else if (do_underline)   e = std::move(e) | underlined;
@@ -1000,7 +964,7 @@ static std::vector<std::string> split_table_cells(std::string_view row)
     return cells;
 }
 
-static Element render_table(const Block& block)
+static Element render_table(const Block& block, const InlineContext& ctx)
 {
     if (block.lines.empty()) return emptyElement();
 
@@ -1026,7 +990,7 @@ static Element render_table(const Block& block)
             const std::string& cell = c < rows[r].size() ? rows[r][c] : "";
             Element cell_el = hbox({
                 ftxui::text(" "),
-                render_inline_line(cell, fg),
+                render_inline_line(cell, ctx.with_base(fg)),
                 ftxui::text(" "),
             }) | xflex;
             if (hdr) cell_el = std::move(cell_el) | ftxui::bold;
@@ -1048,12 +1012,12 @@ static std::string join_soft_lines(const std::vector<std::string>& lines)
     return joined;
 }
 
-static Element render_blockquote(const Block& block, Color /*base*/)
+static Element render_blockquote(const Block& block, const InlineContext& ctx)
 {
     if (block.lines.empty()) return emptyElement();
 
     const auto joined = join_soft_lines(block.lines);
-    auto inline_rows = render_inline_rows(joined, kMdQuoteFg);
+    auto inline_rows = render_inline_rows(joined, ctx.with_base(kMdQuoteFg));
     std::vector<Element> rows;
     rows.reserve(inline_rows.size());
     for (auto& inline_row : inline_rows) {
@@ -1067,7 +1031,7 @@ static Element render_blockquote(const Block& block, Color /*base*/)
     return vbox(std::move(rows));
 }
 
-static Element render_list(const Block& block, Color base)
+static Element render_list(const Block& block, const InlineContext& ctx)
 {
     static constexpr std::array<const char*, 3> bullets = {"• ", "◦ ", "▸ "};
     const bool ordered = block.kind == BlockKind::OrderedList;
@@ -1088,7 +1052,7 @@ static Element render_list(const Block& block, Color base)
             rows.push_back(
                 hbox({
                     ftxui::text(std::string(static_cast<std::size_t>(spaces), ' ')),
-                    render_inline_line(l.substr(static_cast<std::size_t>(spaces)), base),
+                    render_inline_line(l.substr(static_cast<std::size_t>(spaces)), ctx),
                 }) | xflex
             );
             ++i;
@@ -1117,7 +1081,7 @@ static Element render_list(const Block& block, Color base)
             content_lines.emplace_back(block.lines[j].substr(
                 static_cast<std::size_t>(continuation_spaces)));
         }
-        auto inline_rows = render_inline_rows(join_soft_lines(content_lines), base);
+        auto inline_rows = render_inline_rows(join_soft_lines(content_lines), ctx);
 
         const int spaces = list_leading_spaces(l);
         const int level = std::min(spaces / 2, 2);
@@ -1155,29 +1119,29 @@ static Element render_list(const Block& block, Color base)
     return vbox(std::move(rows));
 }
 
-static Element render_paragraph(const Block& block, Color base)
+static Element render_paragraph(const Block& block, const InlineContext& ctx)
 {
     if (block.lines.empty()) return emptyElement();
 
     // Join soft-broken lines so emphasis/links can span model line wraps
     // (e.g. "start **bold\nacross** end"). Embedded '\n' is preserved as a
     // visual row break inside render_inline_line.
-    return render_inline_line(join_soft_lines(block.lines), base);
+    return render_inline_line(join_soft_lines(block.lines), ctx);
 }
 
-static Element render_block(const Block& block, Color base)
+static Element render_block(const Block& block, const InlineContext& ctx)
 {
     switch (block.kind) {
         case BlockKind::BlankLine:      return ftxui::text("");
         case BlockKind::HorizontalRule: return separatorHeavy() | ftxui::color(ColorTextMuted);
-        case BlockKind::Heading:        return render_heading(block);
+        case BlockKind::Heading:        return render_heading(block, ctx);
         case BlockKind::FencedCode:     [[fallthrough]];
         case BlockKind::IndentedCode:   return render_code_block(block);
-        case BlockKind::Table:          return render_table(block);
-        case BlockKind::Blockquote:     return render_blockquote(block, base);
+        case BlockKind::Table:          return render_table(block, ctx);
+        case BlockKind::Blockquote:     return render_blockquote(block, ctx);
         case BlockKind::UnorderedList:  [[fallthrough]];
-        case BlockKind::OrderedList:    return render_list(block, base);
-        case BlockKind::Paragraph:      return render_paragraph(block, base);
+        case BlockKind::OrderedList:    return render_list(block, ctx);
+        case BlockKind::Paragraph:      return render_paragraph(block, ctx);
     }
     return emptyElement(); // unreachable
 }
@@ -1190,22 +1154,70 @@ static Element render_block(const Block& block, Color base)
 
 Element render_markdown(std::string_view text, Color base_color)
 {
+    return render_markdown(text, MarkdownRenderOptions{.base_color = base_color});
+}
+
+Element render_markdown(std::string_view text, const MarkdownRenderOptions& options)
+{
+    const Color base_color = options.base_color;
     if (text.empty()) return ftxui::text("") | ftxui::color(base_color);
 
     // Shield FTXUI from malformed UTF-8 and raw control bytes that can show up
     // in streamed model output and cause visual artifacts while rendering.
-    const std::string safe_text = sanitize_for_ftxui(text);
+    const std::string safe_text = sanitize_terminal_text(text);
     if (safe_text.empty()) return ftxui::text("") | ftxui::color(base_color);
 
     const auto blocks = parse_blocks(safe_text);
     if (blocks.empty()) return ftxui::text("") | ftxui::color(base_color);
 
+    LinkRecorder links(options.links.hitboxes != nullptr || options.links.selected
+                           ? &options.links
+                           : nullptr);
+    const InlineContext ctx{base_color, &links};
     Elements elements;
     elements.reserve(blocks.size());
     for (const auto& b : blocks) {
-        elements.push_back(render_block(b, base_color));
+        elements.push_back(render_block(b, ctx));
     }
     return vbox(std::move(elements)) | xflex;
+}
+
+namespace {
+
+constexpr char kLinkKeySeparator = '\x1f';
+constexpr std::string_view kLinkKeyTag = "\x1fmdlink\x1f";
+
+} // namespace
+
+std::string markdown_link_key(std::string_view scope,
+                              std::size_t ordinal,
+                              std::size_t part,
+                              std::string_view href)
+{
+    return std::format("{}{}{}{}{}{}{}", kLinkKeyTag, scope, kLinkKeySeparator, ordinal,
+                       kLinkKeySeparator, part, kLinkKeySeparator) + std::string(href);
+}
+
+std::optional<MarkdownLinkRef> parse_markdown_link_key(std::string_view key)
+{
+    if (!key.starts_with(kLinkKeyTag)) return std::nullopt;
+    key.remove_prefix(kLinkKeyTag.size());
+    std::string_view fields[3];
+    for (auto& field : fields) {
+        const auto separator = key.find(kLinkKeySeparator);
+        if (separator == std::string_view::npos) return std::nullopt;
+        field = key.substr(0, separator);
+        key.remove_prefix(separator + 1);
+    }
+    std::size_t ordinal = 0;
+    const auto [end, error] =
+        std::from_chars(fields[1].data(), fields[1].data() + fields[1].size(), ordinal);
+    if (error != std::errc{} || end != fields[1].data() + fields[1].size()) return std::nullopt;
+    return MarkdownLinkRef{
+        .scope = std::string(fields[0]),
+        .ordinal = ordinal,
+        .href = std::string(key),
+    };
 }
 
 } // namespace tui

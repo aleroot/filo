@@ -50,9 +50,10 @@ std::string_view working_rule_text(WorkingRule rule) noexcept {
                    "drive-by refactors, speculative comments, or defensive code for states "
                    "that cannot happen.";
         case WorkingRule::ReplyShape:
-            return "Lead replies with the outcome and keep them as short as the task allows; "
-                   "end real work with a short recap that stands alone. Correct yourself only "
-                   "when the error would change the user's code or decisions.";
+            return "Lead with the outcome; keep replies as short as the task allows; end real "
+                   "work with a standalone recap. Correct yourself only if the error would "
+                   "change the user's code or decisions. Link files as "
+                   "[name](/abs/path:line).";
         case WorkingRule::RepositorySafety:
             return "Never stage, commit, push, or discard git state unless asked; never revert "
                    "changes you did not make. Never print, log, or commit secrets.";

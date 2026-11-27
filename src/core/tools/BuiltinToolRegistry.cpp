@@ -116,6 +116,11 @@ void register_builtin_tools(ToolManager& tool_manager,
         }
         tool_manager.register_tool(std::move(ask_user_tool));
     }
+    if (options.open_document_tool_out != nullptr) {
+        auto open_document_tool = std::make_shared<OpenDocumentTool>();
+        *options.open_document_tool_out = open_document_tool;
+        tool_manager.register_tool(with_path_visibility(std::move(open_document_tool)));
+    }
 
     // Skill discovery is workspace-scoped: every root granted with -w may
     // contribute instruction and prompt skills, while executable Python skills

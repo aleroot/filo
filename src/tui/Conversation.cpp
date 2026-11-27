@@ -40,6 +40,23 @@
 using namespace ftxui;
 
 namespace tui {
+
+namespace {
+
+/// Markdown whose links the transcript can open: their boxes are recorded
+/// beside the disclosures', under @p scope, whenever the caller collects them.
+[[nodiscard]] Element render_linked_markdown(std::string_view text,
+                                             ftxui::Color base,
+                                             const ConversationRenderOptions& options,
+                                             std::string scope) {
+    return render_markdown(text, MarkdownRenderOptions{
+        .base_color = base,
+        .links = {.hitboxes = options.system_disclosure_hitboxes, .scope = std::move(scope)},
+    });
+}
+
+} // namespace
+
 namespace {
 
 // A small reactive leaf for fixed-size animation fields and elapsed labels.
@@ -2115,6 +2132,11 @@ std::string turn_file_change_key(std::string_view message_id, std::string_view p
 namespace {
 
 constexpr std::string_view kFileChangeOpenPrefix = "file-change-open:";
+constexpr std::string_view kFileChangeViewPrefix = "file-change-view:";
+
+[[nodiscard]] constexpr std::string_view file_change_action_prefix(FileChangeAction action) {
+    return action == FileChangeAction::view ? kFileChangeViewPrefix : kFileChangeOpenPrefix;
+}
 
 // Defined with the change box that renders it; a comparison repeats it.
 [[nodiscard]] std::vector<std::string> turn_change_caveats(
@@ -2122,19 +2144,24 @@ constexpr std::string_view kFileChangeOpenPrefix = "file-change-open:";
 
 } // namespace
 
-std::string turn_file_change_open_key(std::string_view message_id, std::string_view path) {
-    return std::format("{}{}:{}", kFileChangeOpenPrefix, message_id, path);
+std::string turn_file_change_open_key(std::string_view message_id,
+                                      std::string_view path,
+                                      FileChangeAction action) {
+    return std::format("{}{}:{}", file_change_action_prefix(action), message_id, path);
 }
 
 bool is_turn_file_change_open_key(std::string_view key) {
-    return key.starts_with(kFileChangeOpenPrefix);
+    return key.starts_with(kFileChangeOpenPrefix) || key.starts_with(kFileChangeViewPrefix);
 }
 
 std::optional<TurnFileChangeRef> parse_turn_file_change_open_key(std::string_view key) {
-    if (!is_turn_file_change_open_key(key)) {
+    FileChangeAction action = FileChangeAction::compare;
+    if (key.starts_with(kFileChangeViewPrefix)) {
+        action = FileChangeAction::view;
+    } else if (!key.starts_with(kFileChangeOpenPrefix)) {
         return std::nullopt;
     }
-    key.remove_prefix(kFileChangeOpenPrefix.size());
+    key.remove_prefix(file_change_action_prefix(action).size());
     // A message id is hexadecimal, so the first separator ends it and whatever
     // follows is the path — colons and all.
     const auto separator = key.find(':');
@@ -2144,6 +2171,7 @@ std::optional<TurnFileChangeRef> parse_turn_file_change_open_key(std::string_vie
     return TurnFileChangeRef{
         .message_id = std::string(key.substr(0, separator)),
         .path = std::string(key.substr(separator + 1)),
+        .action = action,
     };
 }
 
@@ -2844,7 +2872,7 @@ namespace {
             ftxui::text("  "),
             ftxui::separatorLight() | ftxui::color(ColorTextMuted) | dim,
             ftxui::text(" "),
-            render_markdown(section.details_markdown, ColorTextSecondary) | xflex,
+            render_linked_markdown(section.details_markdown, ColorTextSecondary, options, key) | xflex,
         }) | xflex);
     }
     return vbox(std::move(rows)) | xflex;
@@ -2860,7 +2888,8 @@ namespace {
         if (section.markdown.empty() && !section.has_details()) continue;
         if (!rows.empty()) rows.push_back(ftxui::text(""));
         if (!section.markdown.empty()) {
-            rows.push_back(render_markdown(section.markdown, ColorText));
+            rows.push_back(render_linked_markdown(section.markdown, ColorText, options,
+                                                  assistant_section_key(msg.id, index)));
         }
         if (section.has_details()) {
             rows.push_back(render_section_details(
@@ -3041,6 +3070,7 @@ namespace {
 struct FileChangeColumns {
     std::size_t added = 0;    ///< Width of the "+N" column.
     std::size_t deleted = 0;  ///< Width of the "-N" column.
+    bool view = false;        ///< Whether the document affordance column is drawn.
     bool arrow = false;       ///< Whether the comparer affordance column is drawn.
 };
 
@@ -3052,8 +3082,25 @@ struct FileChangeColumns {
 /// The width of the kind letter and the spaces around it: "  M  ".
 constexpr std::size_t kFileChangeKindColumn = 5;
 
-/// The width of the comparer affordance column: two spaces and the glyph.
+/// The width of an affordance column: two spaces and the glyph.
 constexpr std::size_t kFileChangeArrowColumn = 3;
+
+/// Whether a row offers to compare its change: only a change with a diff has
+/// anything to compare.
+[[nodiscard]] bool offers_comparison(const core::changes::FileChange& change,
+                                     const ConversationRenderOptions& options) {
+    return options.show_diff_comparer_affordance
+        && options.system_disclosure_hitboxes != nullptr
+        && !change.diff.empty();
+}
+
+/// Whether a row offers to show its file: a deleted file is gone.
+[[nodiscard]] bool offers_document(const core::changes::FileChange& change,
+                                   const ConversationRenderOptions& options) {
+    return options.show_document_affordance
+        && options.system_disclosure_hitboxes != nullptr
+        && change.kind != core::changes::FileChangeKind::Deleted;
+}
 
 /// The columns shared by the rows the box draws.
 ///
@@ -3074,12 +3121,8 @@ constexpr std::size_t kFileChangeArrowColumn = 3;
         columns.deleted = count_token_width(total_deleted);
     }
     for (std::size_t i = 0; i < shown; ++i) {
-        const auto& change = files[i];
-        if (options.show_diff_comparer_affordance
-            && options.system_disclosure_hitboxes != nullptr
-            && !change.diff.empty()) {
-            columns.arrow = true;
-        }
+        columns.view = columns.view || offers_document(files[i], options);
+        columns.arrow = columns.arrow || offers_comparison(files[i], options);
     }
     return columns;
 }
@@ -3229,25 +3272,28 @@ constexpr std::size_t kFileChangeArrowColumn = 3;
         header.push_back(ftxui::text("  "));
         header.push_back(render_change_counts(change.added, change.deleted, columns));
     }
-    // The affordance carries its own hitbox, so it is reflected before it joins
-    // the row: the row's own box covers the whole line, this cell included.
-    // Only the glyph is the target; the gap before it still toggles the row.
-    const bool comparable = options.show_diff_comparer_affordance
-        && expandable
-        && options.system_disclosure_hitboxes != nullptr;
-    if (columns.arrow) {
+    // Each affordance carries its own hitbox, so it is reflected before it
+    // joins the row: the row's own box covers the whole line, these cells
+    // included. Only a glyph is a target; the gap before it still toggles the
+    // row. A row without an affordance keeps its column blank, so the counts
+    // beside it stay aligned.
+    const auto push_affordance = [&](bool column, bool offered, std::string_view glyph,
+                                     FileChangeAction action) {
+        if (!column) return;
         header.push_back(ftxui::text("  "));
-        if (comparable) {
-            header.push_back(
-                (ftxui::text("\u2197") | ftxui::color(ColorTextSecondary))
-                | reflect((*options.system_disclosure_hitboxes)[
-                    turn_file_change_open_key(msg.id, change.path)]));
-        } else {
-            // The column is reserved for the rows that have one; this row
-            // keeps the space so the counts beside it stay aligned.
+        if (!offered) {
             header.push_back(ftxui::text(" "));
+            return;
         }
-    }
+        header.push_back(
+            (ftxui::text(std::string(glyph)) | ftxui::color(ColorTextSecondary))
+            | reflect((*options.system_disclosure_hitboxes)[
+                turn_file_change_open_key(msg.id, change.path, action)]));
+    };
+    push_affordance(columns.view, offers_document(change, options), "\u2261",
+                    FileChangeAction::view);
+    push_affordance(columns.arrow, offers_comparison(change, options), "\u2197",
+                    FileChangeAction::compare);
     Element header_el = hbox(std::move(header));
     if (expandable && options.system_disclosure_hitboxes != nullptr) {
         header_el = std::move(header_el) | reflect((*options.system_disclosure_hitboxes)[key]);
@@ -3300,10 +3346,12 @@ constexpr std::size_t kFileChangeArrowColumn = 3;
         summary.push_back(ftxui::filler());
         summary.push_back(ftxui::text(std::string(kFileChangeKindColumn, ' ')));
         summary.push_back(render_change_counts(added, deleted, columns));
-        if (columns.arrow) {
-            // The affordance column belongs to the rows, but the totals end
+        if (columns.view || columns.arrow) {
+            // The affordance columns belong to the rows, but the totals end
             // where the rows' numbers end, so the space is reserved here too.
-            summary.push_back(ftxui::text(std::string(kFileChangeArrowColumn, ' ')));
+            const std::size_t affordances = (columns.view ? 1 : 0) + (columns.arrow ? 1 : 0);
+            summary.push_back(
+                ftxui::text(std::string(affordances * kFileChangeArrowColumn, ' ')));
         }
     }
 
@@ -3361,7 +3409,7 @@ Element render_assistant_message(const UiMessage& msg,
             elements.push_back(ftxui::text(""));
         }
         elements.push_back(msg.sections.empty()
-            ? render_markdown(msg.text, ColorText)
+            ? render_linked_markdown(msg.text, ColorText, options, msg.id)
             : render_assistant_sections(msg, options));
     }
 
