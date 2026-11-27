@@ -2,6 +2,7 @@
 
 #include "ActivityTimer.hpp"
 #include "Conversation.hpp"
+#include "ModelSelectionHistory.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/session/ActiveSessionLease.hpp"
 #include "core/session/SessionData.hpp"
@@ -22,21 +23,6 @@
 #include <vector>
 
 namespace tui {
-
-enum class ModelSelectionMode {
-    Manual,
-    Router,
-    Auto,
-};
-
-struct ModelSelectionSnapshot {
-    ModelSelectionMode mode = ModelSelectionMode::Manual;
-    std::string manual_provider_name = {};
-    std::string manual_model_name = {};
-    std::string router_policy = {};
-
-    bool operator==(const ModelSelectionSnapshot&) const = default;
-};
 
 enum class TurnCompletionStatus {
     None,
@@ -99,7 +85,8 @@ struct ThreadRuntimeMetadata {
     std::string provider = {};
     std::string model = {};
     ModelSelectionSnapshot model_selection = {};
-    std::optional<ModelSelectionSnapshot> previous_model_selection = std::nullopt;
+    /// Earlier selections, most recent first (see record_model_switch).
+    std::vector<ModelSelectionSnapshot> recent_model_selections = {};
     bool yolo_enabled = false;
     std::unordered_set<std::string> permission_rules = {};
     std::optional<core::session::SessionGoal> goal = std::nullopt;

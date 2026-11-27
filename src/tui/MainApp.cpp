@@ -13,6 +13,8 @@
 #include "FileSystemPickerView.hpp"
 #include "KeyInput.hpp"
 #include "MemoryMenu.hpp"
+#include "ModelPickerRows.hpp"
+#include "ModelSelectionHistory.hpp"
 #include "SessionReplay.hpp"
 #include "core/changes/WorkspaceMutationGate.hpp"
 #include "SessionPicker.hpp"
@@ -791,7 +793,7 @@ RunResult run(RunOptions opts) {
     std::string session_advisor_value = opts.startup_advisor.value_or(
         config_manager.get_config().advisor_model);
 
-    std::optional<ModelSelectionSnapshot> previous_model_selection;
+    std::vector<ModelSelectionSnapshot> recent_model_selections;
 
     std::shared_ptr<core::llm::LLMProvider> llm_provider;
     if (model_selection_mode == ModelSelectionMode::Router
@@ -1296,6 +1298,7 @@ RunResult run(RunOptions opts) {
         bool active = false;
         int selected = 0;
         std::vector<tui::ModelProviderPickerRow> providers;
+        bool previous_model_available = false;
     };
     ModelProviderPickerState model_provider_picker_state;
 
@@ -1304,6 +1307,10 @@ RunResult run(RunOptions opts) {
         int selected = 0;
         std::string provider_name;
         std::vector<tui::ModelPickerRow> models;
+        /// recent_model_selections entry Ctrl+P/Ctrl+N moved to; nullopt
+        /// while the walk is on the current model.
+        std::optional<std::size_t> history_position;
+        tui::ProviderModelPickerKeys keys;
     };
     ProviderModelPickerState provider_model_picker_state;
 
@@ -2016,7 +2023,7 @@ RunResult run(RunOptions opts) {
                 .manual_model_name = manual_model_name,
                 .router_policy = active_router_policy,
             },
-            .previous_model_selection = std::nullopt,
+            .recent_model_selections = {},
             .yolo_enabled = startup_yolo_enabled,
             .permission_rules = {},
             .goal = startup_data.has_value() ? startup_data->goal : std::nullopt,
@@ -2099,7 +2106,7 @@ RunResult run(RunOptions opts) {
                 .manual_model_name = manual_model_name,
                 .router_policy = active_router_policy,
             };
-            metadata.previous_model_selection = previous_model_selection;
+            metadata.recent_model_selections = recent_model_selections;
             metadata.goal = goal_manager.current();
             metadata.goal_graph = std::move(graph);
         });
@@ -2877,7 +2884,7 @@ RunResult run(RunOptions opts) {
                         .manual_model_name = data.model,
                         .router_policy = {},
                     },
-                    .previous_model_selection = std::nullopt,
+                    .recent_model_selections = {},
                     .yolo_enabled = startup_yolo_enabled,
                     .permission_rules = {},
                     .goal = data.goal,
@@ -2934,7 +2941,7 @@ RunResult run(RunOptions opts) {
             manual_provider_name = metadata.model_selection.manual_provider_name;
             manual_model_name = metadata.model_selection.manual_model_name;
             active_router_policy = metadata.model_selection.router_policy;
-            previous_model_selection = metadata.previous_model_selection;
+            recent_model_selections = metadata.recent_model_selections;
             refresh_status_labels();
         }
         static_cast<void>(thread_runtimes.select(session_id));
@@ -4128,18 +4135,10 @@ RunResult run(RunOptions opts) {
         };
     };
 
-    auto same_model_selection = [](const ModelSelectionSnapshot& a,
-                                   const ModelSelectionSnapshot& b) {
-        return a.mode == b.mode
-            && a.manual_provider_name == b.manual_provider_name
-            && a.manual_model_name == b.manual_model_name
-            && a.router_policy == b.router_policy;
-    };
-
-    auto remember_previous_model_selection = [&](const ModelSelectionSnapshot& before) {
+    auto record_model_selection_change = [&](const ModelSelectionSnapshot& before) {
         const ModelSelectionSnapshot after = current_model_selection_snapshot();
-        if (!same_model_selection(before, after)) {
-            previous_model_selection = before;
+        if (before != after) {
+            record_model_switch(recent_model_selections, before, after);
             sync_runtime_metadata();
         }
     };
@@ -4147,7 +4146,7 @@ RunResult run(RunOptions opts) {
     auto finalize_model_switch = [&](const ModelSelectionSnapshot& before,
                                      std::string message) -> std::string {
         if (core::commands::is_model_switch_success(message)) {
-            remember_previous_model_selection(before);
+            record_model_selection_change(before);
         }
         return with_persisted_model_preferences(std::move(message));
     };
@@ -4189,16 +4188,15 @@ RunResult run(RunOptions opts) {
     };
 
     auto switch_to_previous_model_selection = [&]() -> std::string {
-        if (!previous_model_selection.has_value()) {
+        if (recent_model_selections.empty()) {
             return "No previous model selection to restore.";
         }
 
         const ModelSelectionSnapshot before = current_model_selection_snapshot();
-        const ModelSelectionSnapshot target = *previous_model_selection;
+        const ModelSelectionSnapshot target = recent_model_selections.front();
         std::string message = restore_model_selection(target);
         if (core::commands::is_model_switch_success(message)) {
-            previous_model_selection = before;
-            sync_runtime_metadata();
+            record_model_selection_change(before);
         }
         return with_persisted_model_preferences(std::move(message));
     };
@@ -4276,11 +4274,6 @@ RunResult run(RunOptions opts) {
             if (!seen_selections.insert(selection_key).second) {
                 return;
             }
-            const bool active = model_selection_mode == ModelSelectionMode::Manual
-                && manual_provider_name == source_provider
-                && (selector.empty()
-                    ? manual_model_name.empty()
-                    : models_equivalent(manual_model_name, selector));
             if (!category_label.empty()) {
                 if (!description.empty()) {
                     description += " ";
@@ -4297,7 +4290,6 @@ RunResult run(RunOptions opts) {
                 .selector = std::move(selector),
                 .source_provider = std::move(source_provider),
                 .description = std::move(description),
-                .active = active,
                 .provider_default = provider_default,
                 .credentials_missing = credentials_missing,
             });
@@ -4871,7 +4863,7 @@ RunResult run(RunOptions opts) {
                 return finalize_model_switch(before, std::move(message));
             }
             if (core::commands::is_model_switch_success(message)) {
-                remember_previous_model_selection(before);
+                record_model_selection_change(before);
             }
             return message;
         };
@@ -5056,22 +5048,30 @@ RunResult run(RunOptions opts) {
             live_result);
     };
 
-    auto open_model_picker = [&]() -> bool {
+    // The provider list, with `focus_provider`'s row selected, else the
+    // provider of the active model.
+    auto open_model_provider_list = [&](std::string_view focus_provider) -> bool {
         auto providers = model_provider_rows();
         if (providers.empty()) {
             return false;
         }
+        const bool previous_model_available =
+            older_model_choice(recent_model_selections, std::nullopt).has_value();
         {
             std::lock_guard lock(ui_mutex);
             model_provider_picker_state.providers = std::move(providers);
             model_provider_picker_state.active = true;
-            model_provider_picker_state.selected = 0;
-            for (std::size_t i = 0; i < model_provider_picker_state.providers.size(); ++i) {
-                if (model_provider_picker_state.providers[i].active) {
-                    model_provider_picker_state.selected = static_cast<int>(i);
-                    break;
-                }
+            model_provider_picker_state.previous_model_available = previous_model_available;
+            const auto& rows = model_provider_picker_state.providers;
+            auto focused = std::ranges::find_if(rows, [&](const auto& row) {
+                return !focus_provider.empty() && row.name == focus_provider;
+            });
+            if (focused == rows.end()) {
+                focused = std::ranges::find_if(rows, &tui::ModelProviderPickerRow::active);
             }
+            model_provider_picker_state.selected = focused == rows.end()
+                ? 0
+                : static_cast<int>(std::distance(rows.begin(), focused));
             provider_model_picker_state.active = false;
             model_picker_state.active = false;
         }
@@ -5079,28 +5079,109 @@ RunResult run(RunOptions opts) {
         return true;
     };
 
-    auto open_provider_model_picker = [&](std::string provider_name) -> bool {
+    // One provider's models with the row that switches to `focus` selected.
+    // Without a focus it is the active model when that belongs to this
+    // provider, else the first row. `history_position` is the
+    // recent_model_selections entry `focus` came from, if any. Rows are
+    // marked (active/previous) only here, so every page agrees.
+    auto open_provider_model_page = [&](std::string provider_name,
+                                        std::optional<ModelSelectionSnapshot> focus,
+                                        bool opened_from_providers,
+                                        std::optional<std::size_t> history_position) -> bool {
         auto rows = provider_model_rows(provider_name);
         if (rows.empty()) {
             return false;
         }
+        const ModelSelectionSnapshot current = current_model_selection_snapshot();
+        if (!focus && is_model_selection(current)
+            && core::llm::provider_catalog_group_name(current.manual_provider_name)
+                == provider_name) {
+            focus = current;
+        }
+        const std::size_t focus_row =
+            focus ? focus_model_row(rows, *focus, models_equivalent) : 0;
+        mark_model_rows(rows, current, recent_model_selections, models_equivalent);
+        const tui::ProviderModelPickerKeys keys{
+            .escape_returns_to_providers = opened_from_providers,
+            .older_model =
+                older_model_choice(recent_model_selections, history_position).has_value(),
+            .newer_model = history_position.has_value(),
+        };
         {
             std::lock_guard lock(ui_mutex);
             provider_model_picker_state.active = true;
             provider_model_picker_state.provider_name = std::move(provider_name);
             provider_model_picker_state.models = std::move(rows);
-            provider_model_picker_state.selected = 0;
-            for (std::size_t i = 0; i < provider_model_picker_state.models.size(); ++i) {
-                if (provider_model_picker_state.models[i].active) {
-                    provider_model_picker_state.selected = static_cast<int>(i);
-                    break;
-                }
-            }
+            provider_model_picker_state.selected = static_cast<int>(focus_row);
+            provider_model_picker_state.history_position = history_position;
+            provider_model_picker_state.keys = keys;
             model_provider_picker_state.active = false;
             model_picker_state.active = false;
         }
         wake_ui();
         return true;
+    };
+
+    // The model page of `selection`'s provider, with its row selected.
+    auto open_model_page_for = [&](const ModelSelectionSnapshot& selection,
+                                   bool opened_from_providers,
+                                   std::optional<std::size_t> history_position) -> bool {
+        return open_provider_model_page(
+            core::llm::provider_catalog_group_name(selection.manual_provider_name),
+            selection,
+            opened_from_providers,
+            history_position);
+    };
+
+    // Ctrl+P / Ctrl+N inside the picker: move the selection to the model the
+    // thread used before (older) or back towards the current one (newer). It
+    // only moves the selection; Enter still makes the switch. Entries whose
+    // provider can no longer list models are skipped.
+    auto walk_model_history = [&](bool older) -> bool {
+        std::optional<std::size_t> position;
+        bool opened_from_providers = true;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (provider_model_picker_state.active) {
+                position = provider_model_picker_state.history_position;
+                opened_from_providers =
+                    provider_model_picker_state.keys.escape_returns_to_providers;
+            }
+        }
+        const std::vector<ModelSelectionSnapshot> recent = recent_model_selections;
+        const ModelSelectionSnapshot current = current_model_selection_snapshot();
+        while (older || position) {
+            const std::optional<std::size_t> target = older
+                ? older_model_choice(recent, position)
+                : newer_model_choice(recent, *position);
+            if (older && !target) {
+                return false;
+            }
+            if (!target) {
+                // Back on the current selection. A router/auto selection
+                // has no model row, so the walk ends on the provider list.
+                return is_model_selection(current)
+                    ? open_model_page_for(current, opened_from_providers, std::nullopt)
+                    : open_model_provider_list({});
+            }
+            if (open_model_page_for(recent[*target], opened_from_providers, target)) {
+                return true;
+            }
+            position = target;
+        }
+        return false;
+    };
+
+    // Ctrl+P and /model: open on the active model so the common moves (keep
+    // it, pick a sibling, Ctrl+P to the previous one) need no navigation. A
+    // router or auto selection has no model row, so it opens on providers.
+    auto open_model_picker = [&]() -> bool {
+        const ModelSelectionSnapshot current = current_model_selection_snapshot();
+        if (is_model_selection(current)
+            && open_model_page_for(current, false, std::nullopt)) {
+            return true;
+        }
+        return open_model_provider_list({});
     };
 
     // Build a sorted listing for the local model file browser.
@@ -5198,7 +5279,7 @@ RunResult run(RunOptions opts) {
 
         std::string result = activate_manual_mode();
         if (core::commands::is_model_switch_success(result)) {
-            remember_previous_model_selection(before);
+            record_model_selection_change(before);
             result = finish_model_switch_message(
                 std::move(result),
                 current_runtime == thread_runtimes.primary()
@@ -6505,7 +6586,7 @@ RunResult run(RunOptions opts) {
                     .manual_model_name = manual_model_name,
                     .router_policy = active_router_policy,
                 },
-                .previous_model_selection = previous_model_selection,
+                .recent_model_selections = recent_model_selections,
                 .yolo_enabled = startup_yolo_enabled,
                 .permission_rules = {},
                 .goal = std::nullopt,
@@ -10317,7 +10398,8 @@ RunResult run(RunOptions opts) {
         std::optional<int> provider_model_choice;
         std::string provider_model_provider_name;
         std::vector<tui::ModelPickerRow> provider_model_rows_snapshot;
-        bool return_to_model_providers = false;
+        std::optional<std::string> return_to_model_providers;
+        std::optional<bool> walk_older_model;
         {
             std::lock_guard lock(ui_mutex);
             if (provider_model_picker_state.active) {
@@ -10340,9 +10422,15 @@ RunResult run(RunOptions opts) {
                         provider_model_rows_snapshot = provider_model_picker_state.models;
                         provider_model_picker_state.active = false;
                     }
+                } else if (is_ctrl_p_event(event) || is_ctrl_n_event(event)) {
+                    walk_older_model = is_ctrl_p_event(event);
+                } else if (event == Event::ArrowLeft || event == Event::Backspace) {
+                    return_to_model_providers = provider_model_picker_state.provider_name;
                 } else if (event == Event::Escape) {
                     provider_model_picker_state.active = false;
-                    return_to_model_providers = true;
+                    if (provider_model_picker_state.keys.escape_returns_to_providers) {
+                        return_to_model_providers = provider_model_picker_state.provider_name;
+                    }
                 } else {
                     for (int n = 1; n <= std::min(count, 9); ++n) {
                         if (event == Event::Character(static_cast<char>('0' + n))) {
@@ -10356,8 +10444,12 @@ RunResult run(RunOptions opts) {
                 }
             }
         }
+        if (walk_older_model) {
+            walk_model_history(*walk_older_model);
+            return true;
+        }
         if (return_to_model_providers) {
-            open_model_picker();
+            open_model_provider_list(*return_to_model_providers);
             return true;
         }
         if (provider_model_picker_was_active) {
@@ -10394,7 +10486,7 @@ RunResult run(RunOptions opts) {
                         model_provider_picker_state.selected =
                             (model_provider_picker_state.selected + 1) % count;
                     }
-                } else if (event == Event::Return) {
+                } else if (event == Event::Return || event == Event::ArrowRight) {
                     if (count > 0) {
                         model_provider_choice = model_provider_picker_state.selected;
                         model_provider_rows_snapshot = model_provider_picker_state.providers;
@@ -10402,6 +10494,8 @@ RunResult run(RunOptions opts) {
                     }
                 } else if (event == Event::Escape) {
                     model_provider_picker_state.active = false;
+                } else if (is_ctrl_p_event(event)) {
+                    walk_older_model = true;
                 } else if (event == Event::Character('l') || event == Event::Character('L')) {
                     open_local_picker_from_model = true;
                     model_provider_picker_state.active = false;
@@ -10421,11 +10515,18 @@ RunResult run(RunOptions opts) {
             open_local_model_picker();
             return true;
         }
+        if (walk_older_model) {
+            walk_model_history(true);
+            return true;
+        }
         if (model_provider_picker_was_active) {
             if (model_provider_choice.has_value()
                 && static_cast<std::size_t>(*model_provider_choice) < model_provider_rows_snapshot.size()) {
-                open_provider_model_picker(
-                    model_provider_rows_snapshot[static_cast<std::size_t>(*model_provider_choice)].name);
+                open_provider_model_page(
+                    model_provider_rows_snapshot[static_cast<std::size_t>(*model_provider_choice)].name,
+                    std::nullopt,
+                    true,
+                    std::nullopt);
             }
             return true;
         }
@@ -10471,7 +10572,7 @@ RunResult run(RunOptions opts) {
                                           activate_router_mode();
                 const bool success = core::commands::is_model_switch_success(result);
                 if (success) {
-                    remember_previous_model_selection(before);
+                    record_model_selection_change(before);
                     result = with_persisted_model_preferences(std::move(result));
                 }
                 append_model_switch_result(result);
@@ -11097,6 +11198,8 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ModelProviderPickerRow> model_provider_picker_providers;
         std::vector<tui::ModelPickerRow> provider_model_picker_models;
         std::string provider_model_picker_provider;
+        tui::ProviderModelPickerKeys provider_model_picker_keys;
+        bool model_provider_picker_previous_model = false;
         std::string            command_option_picker_title;
         std::string            command_option_picker_current;
         std::string            command_option_picker_help;
@@ -11172,6 +11275,9 @@ RunResult run(RunOptions opts) {
             provider_model_picker_selected = provider_model_picker_state.selected;
             provider_model_picker_provider = provider_model_picker_state.provider_name;
             provider_model_picker_models = provider_model_picker_state.models;
+            provider_model_picker_keys = provider_model_picker_state.keys;
+            model_provider_picker_previous_model =
+                model_provider_picker_state.previous_model_available;
             command_option_picker_active = command_option_picker_state.active;
             command_option_picker_selected = command_option_picker_state.selected;
             command_option_picker_title = command_option_picker_state.title;
@@ -11576,7 +11682,8 @@ RunResult run(RunOptions opts) {
             bottom_el = render_provider_model_picker_panel(
                 provider_model_picker_provider,
                 provider_model_picker_models,
-                provider_model_picker_selected);
+                provider_model_picker_selected,
+                provider_model_picker_keys);
         } else if (model_provider_picker_active) {
             constexpr bool kLocalModelAvailable =
 #ifdef FILO_ENABLE_LLAMACPP
@@ -11587,7 +11694,8 @@ RunResult run(RunOptions opts) {
             bottom_el = render_model_provider_picker_panel(
                 model_provider_picker_providers,
                 model_provider_picker_selected,
-                kLocalModelAvailable);
+                kLocalModelAvailable,
+                model_provider_picker_previous_model);
         } else if (provider_picker_active) {
             bottom_el = render_provider_selection_panel(provider_picker_providers,
                                                         provider_picker_selected);

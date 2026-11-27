@@ -255,6 +255,8 @@ set(FILO_CORE_SOURCES
     src/tui/DocumentPane.cpp
     src/tui/MainApp.cpp
     src/tui/MemoryMenu.cpp
+    src/tui/ModelPickerRows.cpp
+    src/tui/ModelSelectionHistory.cpp
     src/tui/KeyInput.cpp
     src/tui/SessionPicker.cpp
     src/tui/ThreadRuntime.cpp
@@ -947,6 +949,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_thread_catalog.cpp
     tests/test_session_picker.cpp
     tests/test_thread_runtime.cpp
+    tests/test_model_selection_history.cpp
     tests/test_ctrl_c_policy.cpp
     tests/test_thread_modal_host.cpp
     tests/test_prompt_cache_guard.cpp
@@ -1241,6 +1244,7 @@ source_group(
         tests/test_thread_catalog.cpp
         tests/test_session_picker.cpp
         tests/test_thread_runtime.cpp
+        tests/test_model_selection_history.cpp
         tests/test_ctrl_c_policy.cpp
         tests/test_thread_modal_host.cpp
         tests/test_prompt_cache_guard.cpp

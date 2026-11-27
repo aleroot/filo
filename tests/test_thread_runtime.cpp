@@ -143,20 +143,20 @@ TEST_CASE("ThreadRuntime keeps model selection and history independent",
         .manual_model_name = "claude-work",
         .router_policy = "work-policy",
     };
-    secondary_metadata.previous_model_selection = tui::ModelSelectionSnapshot{
+    secondary_metadata.recent_model_selections = {tui::ModelSelectionSnapshot{
         .mode = tui::ModelSelectionMode::Manual,
         .manual_provider_name = "anthropic",
         .manual_model_name = "claude-old",
-    };
+    }};
     secondary->update_metadata(secondary_metadata);
 
     CHECK(main->metadata().model_selection.manual_model_name == "gpt-main");
     CHECK(main->metadata().model_selection.mode == tui::ModelSelectionMode::Manual);
-    CHECK_FALSE(main->metadata().previous_model_selection.has_value());
+    CHECK(main->metadata().recent_model_selections.empty());
     CHECK(secondary->metadata().model_selection.manual_model_name == "claude-work");
     CHECK(secondary->metadata().model_selection.router_policy == "work-policy");
-    REQUIRE(secondary->metadata().previous_model_selection.has_value());
-    CHECK(secondary->metadata().previous_model_selection->manual_model_name == "claude-old");
+    REQUIRE(secondary->metadata().recent_model_selections.size() == 1);
+    CHECK(secondary->metadata().recent_model_selections.front().manual_model_name == "claude-old");
 }
 
 TEST_CASE("ThreadRuntime keeps approval state isolated",

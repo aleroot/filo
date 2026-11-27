@@ -1324,7 +1324,8 @@ Element render_model_selection_panel(int selected_index,
 Element render_model_provider_picker_panel(
     const std::vector<ModelProviderPickerRow>& providers,
     int selected_index,
-    bool local_model_available) {
+    bool local_model_available,
+    bool previous_model_available) {
     std::vector<Element> rows;
     const auto [first, last] = picker_visible_range(
         static_cast<int>(providers.size()), selected_index, kCommandPickerMaxDisplayRows);
@@ -1360,17 +1361,35 @@ Element render_model_provider_picker_panel(
         filler(),
         vbox(std::move(rows)),
         filler(),
-        local_model_available
-            ? (text("L: browse local GGUF files   Esc: close") | dim)
-            : (text("Esc closes this panel.") | dim),
+        text(std::string(previous_model_available ? "Ctrl+P: previous model   " : "")
+             + (local_model_available ? "L: browse local GGUF files   " : "")
+             + "Esc: close") | dim,
     }) | UiBorder(ColorYellowBright)
       | size(HEIGHT, GREATER_THAN, std::max(12, (last - first) * 2 + 6));
 }
 
+namespace {
+
+std::string provider_model_picker_key_hints(const ProviderModelPickerKeys& keys) {
+    std::string hints;
+    if (keys.older_model) {
+        hints += "Ctrl+P: previous model   ";
+    }
+    if (keys.newer_model) {
+        hints += "Ctrl+N: newer model   ";
+    }
+    hints += "←: all providers   Esc: ";
+    hints += keys.escape_returns_to_providers ? "providers" : "close";
+    return hints;
+}
+
+} // namespace
+
 Element render_provider_model_picker_panel(
     std::string_view provider_name,
     const std::vector<ModelPickerRow>& models,
-    int selected_index) {
+    int selected_index,
+    const ProviderModelPickerKeys& keys) {
     std::vector<Element> rows;
     // Rendering the entire catalog lets vbox shrink descriptions to zero
     // height when the models outgrow the terminal. Bound the viewport and
@@ -1384,6 +1403,8 @@ Element render_provider_model_picker_panel(
         std::string label = std::format("[{}] {}", i + 1, model.id);
         if (model.active) {
             label += " (active)";
+        } else if (model.previous) {
+            label += " (previous)";
         } else if (model.provider_default) {
             label += " (default)";
         }
@@ -1404,7 +1425,7 @@ Element render_provider_model_picker_panel(
             text(" MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             text("  " + std::string(provider_name)) | ftxui::bold | color(ColorYellowBright),
             filler(),
-            text("Up/Down: select  Enter: switch  Esc: providers")
+            text("Up/Down: select  Enter: switch  1-9: quick choose")
                 | color(ColorTextMuted)
         }),
         separator(),
@@ -1412,7 +1433,7 @@ Element render_provider_model_picker_panel(
         filler(),
         vbox(std::move(rows)),
         filler(),
-        text("Esc returns to providers.") | dim,
+        text(provider_model_picker_key_hints(keys)) | dim,
     }) | UiBorder(ColorYellowBright)
       | size(HEIGHT, GREATER_THAN, std::max(12, (last - first) * 2 + 6));
 }

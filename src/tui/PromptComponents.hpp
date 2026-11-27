@@ -62,6 +62,8 @@ struct ModelPickerRow {
     std::string source_provider = {};
     std::string description;
     bool active = false;
+    /// The model the thread ran before the current one (Ctrl+P's first stop).
+    bool previous = false;
     bool provider_default = false;
     /// The endpoint serving this row has no usable credential configured.
     bool credentials_missing = false;
@@ -225,12 +227,26 @@ ftxui::Element render_model_selection_panel(int selected_index,
 ftxui::Element render_model_provider_picker_panel(
     const std::vector<ModelProviderPickerRow>& providers,
     int selected_index,
-    bool local_model_available);
+    bool local_model_available,
+    bool previous_model_available = false);
+
+/// Keys the model page currently honours, so its footer only advertises
+/// what will do something.
+struct ProviderModelPickerKeys {
+    /// Esc steps back to the provider list (the user came from there)
+    /// instead of closing the picker.
+    bool escape_returns_to_providers = true;
+    /// Ctrl+P has an earlier model to move to.
+    bool older_model = false;
+    /// Ctrl+N has a newer model to move to (the walk is not on the current one).
+    bool newer_model = false;
+};
 
 ftxui::Element render_provider_model_picker_panel(
     std::string_view provider_name,
     const std::vector<ModelPickerRow>& models,
-    int selected_index);
+    int selected_index,
+    const ProviderModelPickerKeys& keys = {});
 
 ftxui::Element render_option_selection_panel(std::string_view title,
                                              const std::vector<OptionPickerRow>& options,
