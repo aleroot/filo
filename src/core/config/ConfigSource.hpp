@@ -35,10 +35,16 @@ public:
     /// Where the login `id` lives: this config's state when it supplies the
     /// login or signed in or out on its own, else the fallback store, used in
     /// place. Refresh tokens are single-use, so an inherited login is never
-    /// copied: its refreshes rotate the fallback's token. Explicit logins and
-    /// logout still stay in this config's state; opening the config folds any
+    /// copied: its refreshes rotate the fallback's token. Sign-ins go where
+    /// login_directory says; a logout stays in this config's state. Opening
+    /// the config folds any
     /// state copy of a fallback login back into one store (newest wins).
     [[nodiscard]] std::filesystem::path credential_directory(std::string_view id) const;
+    /// Where a new sign-in for `id` is written: the fallback, unless this
+    /// config supplies that login or signed in or out of it on its own. So a
+    /// sign-in to a provider the config does not carry repairs the default
+    /// configuration too, instead of hiding a second login here.
+    [[nodiscard]] std::filesystem::path login_directory(std::string_view id) const;
     void claim_credential(std::string_view id) const;
     void verify_available() const;
 
@@ -46,6 +52,7 @@ private:
     ConfigSource(std::filesystem::path input, std::filesystem::path state,
                  std::filesystem::path fallback, Documents documents,
                  std::vector<std::string> credential_files);
+    [[nodiscard]] bool owns_credential(std::string_view id) const;
     std::filesystem::path input_, state_, fallback_;
     Documents documents_;
     std::vector<std::string> credential_files_;

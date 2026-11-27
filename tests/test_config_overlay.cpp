@@ -301,6 +301,58 @@ TEST_CASE("Inherited credentials refresh in place and explicit logout stays loca
     CHECK(source->get_auth().headers.at("Authorization") == "Bearer new-work-login-access");
 }
 
+TEST_CASE("A sign-in the config does not carry is written to the fallback", "[config-overlay][oauth]") {
+    // A browser login that saves a fresh token where it is told to.
+    struct SavingStrategy final : core::auth::IAuthStrategy {
+        mutable std::vector<std::string> directories;
+        std::string_view login_provider() const noexcept override { return "openai"; }
+        std::string_view display_name() const noexcept override { return "OpenAI"; }
+        std::string_view token_store_key() const noexcept override { return "openai-pkce"; }
+        bool supports(std::string_view, std::string_view) const noexcept override { return false; }
+        std::shared_ptr<core::auth::ICredentialSource> create_credential_source(
+            const core::config::ProviderConfig&, std::string_view) const override { return nullptr; }
+        std::vector<std::string> login(std::string_view config_dir) const override {
+            directories.emplace_back(config_dir);
+            FileTokenStore(std::string(config_dir)).save("openai-pkce", token("fresh"));
+            return {};
+        }
+    };
+    Fixture f;
+    // The fallback holds a login whose refresh token was already spent; the
+    // config carries only its own Claude login.
+    FileTokenStore(f.base.string()).save("openai-pkce", token("spent"));
+    FileTokenStore(f.custom.string()).save("claude", token("work"));
+    f.select(f.custom);
+    const auto source = f.manager.get_config_source();
+    const fs::path state = f.manager.get_config_dir();
+    auto strategy = std::make_shared<SavingStrategy>();
+    core::auth::AuthenticationManager auth(state.string());
+    auth.register_strategy(strategy);
+
+    CHECK(source->login_directory("openai-pkce") == f.base);
+    auth.login("openai", source.get());
+    REQUIRE(strategy->directories.size() == 1);
+    CHECK(strategy->directories.back() == f.base.string());
+    // One store: plain Filo and this config both read the new login.
+    CHECK(FileTokenStore(f.base.string()).load("openai-pkce")->account_id == "fresh");
+    CHECK_FALSE(fs::exists(state / "oauth_openai-pkce.json"));
+    CHECK(source->credential_directory("openai-pkce") == f.base);
+
+    // Without a configuration source the manager's own directory is used.
+    auth.login("openai");
+    CHECK(strategy->directories.back() == state.string());
+
+    // A provider the fallback has never signed in to belongs there too.
+    CHECK(source->login_directory("grok") == f.base);
+    // The login the config supplies stays its own.
+    CHECK(source->login_directory("claude") == state);
+    // Once this config signed out on its own, a sign-in is its own again.
+    auth.logout("openai", false, source.get());
+    CHECK_FALSE(fs::exists(state / "oauth_openai-pkce.json"));
+    CHECK(source->login_directory("openai-pkce") == state);
+    CHECK(FileTokenStore(f.base.string()).load("openai-pkce")->account_id == "fresh");
+}
+
 TEST_CASE("Opening a config folds duplicated logins back into one store", "[config-overlay][oauth]") {
     Fixture f;
     // The state is keyed by the source path; create it, then plant what

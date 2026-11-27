@@ -64,9 +64,10 @@ AuthLoginOutcome login_and_persist(std::string_view provider,
     auto auth_manager = AuthenticationManager::create_with_defaults(std::string(config_dir));
 
     AuthLoginOutcome outcome;
+    const auto* source = core::config::ConfigManager::get_instance().get_config_source().get();
     outcome.result = import_source.has_value()
-        ? auth_manager.import_from_app(provider, *import_source)
-        : auth_manager.login(provider);
+        ? auth_manager.import_from_app(provider, *import_source, source)
+        : auth_manager.login(provider, source);
 
     const std::string persist_provider = outcome.result.login_provider.empty()
         ? std::string(provider)

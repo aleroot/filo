@@ -152,8 +152,12 @@ namespace {
         const core::auth::ReauthenticationRequired& error,
         bool retry_safe) {
         const std::string provider_id(error.provider_id());
+        // The reason reaches places with no recovery panel: prompter output
+        // and a subagent's result.
+        const std::string_view reason = error.what();
         return StreamChunk::make_authentication_error(
-            "\n[Authentication required.]\n",
+            reason.empty() ? std::string("\n[Authentication required.]\n")
+                           : std::format("\n[Authentication required: {}]\n", reason),
             AuthenticationRecoveryRequest{
                 .provider_id = provider_id,
                 .reason = error.what(),

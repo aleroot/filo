@@ -428,16 +428,26 @@ fs::path ConfigSource::credential_directory(std::string_view id) const {
     // A login handed to the fallback is read there until this config signs
     // in or out on its own.
     if (fs::exists(inherited_marker(state_, id)) && !fs::exists(state_ / name)) return fallback_;
-    const auto supplied = [&](std::string_view file) { return std::ranges::contains(credential_files_, file); };
-    const auto companions = core::portability::credential_companion_files(id);
-    const bool supplied_identity = supplied(name) || std::ranges::any_of(companions, supplied);
-    const bool owned = supplied_identity || fs::exists(state_ / name)
-        || fs::exists(selected_marker(state_, id));
     // Inherit the fallback login in place, refreshes included. Never copy it:
     // a copied refresh token is a second holder of a single-use secret.
-    if (!owned) return fs::exists(fallback_ / name) ? fallback_ : state_;
+    if (!owns_credential(id)) return fs::exists(fallback_ / name) ? fallback_ : state_;
     if (fs::exists(state_ / name)) claim_credential(id);
     return state_;
+}
+
+fs::path ConfigSource::login_directory(std::string_view id) const {
+    if (credential_directory(id) == fallback_) return fallback_;
+    // A login this config neither supplies nor signed in or out of on its
+    // own belongs to the fallback, even when the fallback has none yet.
+    return owns_credential(id) ? state_ : fallback_;
+}
+
+bool ConfigSource::owns_credential(std::string_view id) const {
+    const auto name = FileTokenStore::file_name(id);
+    const auto supplied = [&](std::string_view file) { return std::ranges::contains(credential_files_, file); };
+    const auto companions = core::portability::credential_companion_files(id);
+    return supplied(name) || std::ranges::any_of(companions, supplied) || fs::exists(state_ / name)
+        || fs::exists(selected_marker(state_, id));
 }
 
 } // namespace core::config

@@ -112,7 +112,10 @@ public:
 
     void register_strategy(std::shared_ptr<IAuthStrategy> strategy);
 
-    LoginResult login(std::string_view provider) const;
+    /// With a `source`, the new session is written where
+    /// ConfigSource::login_directory puts it.
+    LoginResult login(std::string_view provider,
+                      const core::config::ConfigSource* source = nullptr) const;
 
     /**
      * Sign in by adopting the credential the provider's installed app holds
@@ -123,7 +126,8 @@ public:
      * @throws std::runtime_error when the provider supports no import or the
      *         credential cannot be adopted; the stored session is then unchanged.
      */
-    LoginResult import_from_app(std::string_view provider, std::string_view source) const;
+    LoginResult import_from_app(std::string_view provider, std::string_view source,
+                                const core::config::ConfigSource* config_source = nullptr) const;
 
     /**
      * Resolve a login alias or token-store key through the registered
@@ -158,6 +162,8 @@ public:
 private:
     /// The strategy for a login alias; throws listing the known ones otherwise.
     [[nodiscard]] const IAuthStrategy& login_strategy(std::string_view provider) const;
+    [[nodiscard]] std::string login_directory(const IAuthStrategy& strategy,
+                                              const core::config::ConfigSource* source) const;
 
     std::string config_dir_;
     std::vector<std::shared_ptr<IAuthStrategy>> strategies_;

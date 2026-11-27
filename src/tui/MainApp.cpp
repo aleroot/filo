@@ -9393,7 +9393,8 @@ RunResult run(RunOptions opts) {
             if (authentication_recovery_accepted) {
                 auto authenticate = [&]() {
                     try {
-                        authentication_manager.login(provider.login_provider);
+                        authentication_manager.login(provider.login_provider,
+                            config_manager.get_config_source().get());
                         login_succeeded = true;
                     } catch (const std::exception& error) {
                         login_error = error.what();

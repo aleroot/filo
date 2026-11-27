@@ -543,17 +543,25 @@ const IAuthStrategy& AuthenticationManager::login_strategy(std::string_view prov
         + "'. Available: " + join(available));
 }
 
-LoginResult AuthenticationManager::login(std::string_view provider) const {
+std::string AuthenticationManager::login_directory(const IAuthStrategy& strategy,
+                                                   const core::config::ConfigSource* source) const {
+    if (!source || strategy.token_store_key().empty()) return config_dir_;
+    return source->login_directory(strategy.token_store_key()).string();
+}
+
+LoginResult AuthenticationManager::login(std::string_view provider,
+                                         const core::config::ConfigSource* source) const {
     const IAuthStrategy& strategy = login_strategy(provider);
     return {
         .provider = std::string(strategy.display_name()),
         .login_provider = std::string(strategy.login_provider()),
-        .hints = strategy.login(config_dir_),
+        .hints = strategy.login(login_directory(strategy, source)),
     };
 }
 
 LoginResult AuthenticationManager::import_from_app(std::string_view provider,
-                                                   std::string_view source) const {
+                                                   std::string_view source,
+                                                   const core::config::ConfigSource* config_source) const {
     const IAuthStrategy& strategy = login_strategy(provider);
     auto import = strategy.app_credential_import(config_dir_);
     if (!import.has_value()) {
@@ -574,7 +582,7 @@ LoginResult AuthenticationManager::import_from_app(std::string_view provider,
         .hints = {},
         .app_import = import_app_credential(
             *import, source, std::string(strategy.token_store_key()),
-            std::make_shared<FileTokenStore>(config_dir_)),
+            std::make_shared<FileTokenStore>(login_directory(strategy, config_source))),
     };
 }
 

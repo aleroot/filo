@@ -1263,6 +1263,8 @@ TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recover
     CHECK_THAT(failure.content,
                Catch::Matchers::ContainsSubstring("Authentication required"));
     CHECK_THAT(failure.content,
+               Catch::Matchers::ContainsSubstring("Claude rejected the saved refresh token"));
+    CHECK_THAT(failure.content,
                !Catch::Matchers::ContainsSubstring("invalid_grant"));
 }
 
