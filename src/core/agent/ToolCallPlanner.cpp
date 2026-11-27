@@ -1,6 +1,7 @@
 #include "ToolCallPlanner.hpp"
 
 #include "SubagentOrchestrator.hpp"
+#include "../permissions/CommandPolicy.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../tools/read/SerializedPathRecovery.hpp"
@@ -36,6 +37,27 @@ namespace {
             resolved_arg_path(context, raw_args, field),
             recursive),
     };
+}
+
+/// A command started as its own process (an exec script's exec_command: it
+/// carries a yield time) that the built-in command rules let run without
+/// asking, which makes it one that changes nothing. Such commands run beside
+/// reads and each other, as Codex runs exec_command calls in parallel. The
+/// user's rules layer is left out: it allows what the user trusts, builds
+/// included, not only what writes nothing. A command for the persistent
+/// shell stays exclusive: a `cd` there changes what the next command sees.
+[[nodiscard]] bool runs_read_only_command_process(std::string_view raw_args) {
+    using core::permissions::CommandPolicy;
+    static const CommandPolicy built_in =
+        CommandPolicy{}.with_layer(core::permissions::default_command_rules())
+            .value_or(CommandPolicy{});
+    if (core::utils::json::first_int64_field(raw_args, {"process_id"})
+        || !core::utils::json::first_int64_field(raw_args, {"yield_time_ms"})) {
+        return false;
+    }
+    const auto command = core::permissions::shell_command_argument(raw_args);
+    return command
+        && built_in.decide(*command) == core::permissions::CommandDecision::Allow;
 }
 
 } // namespace
@@ -105,6 +127,8 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
         accesses = no_tool_access();
     } else if (name == SubagentOrchestrator::kTaskToolName) {
         accesses = delegated_tool_access();
+    } else if (is_terminal_tool(name) && runs_read_only_command_process(args)) {
+        accesses = read_all_tool_access();
     } else {
         accesses = all_tool_access();
     }

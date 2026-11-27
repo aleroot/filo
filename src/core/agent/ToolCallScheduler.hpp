@@ -3,11 +3,13 @@
 #include "ToolAccess.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
-#include <thread>
 #include <vector>
 
 namespace core::agent {
@@ -35,6 +37,18 @@ public:
         std::vector<bool> finished(tasks.size(), false);
         std::vector<std::size_t> active;
         active.reserve(tasks.size());
+        // Each task reports here as it ends, so the scheduling thread sleeps
+        // until one does instead of polling.
+        const auto completions = std::make_shared<Completions>();
+        const auto launch = [&](std::size_t i) {
+            started[i] = true;
+            active.push_back(i);
+            futures[i] = std::async(std::launch::async,
+                                    [task = std::move(tasks[i].run), completions, i]() mutable {
+                const Reporter reporter{*completions, i};
+                return task();
+            });
+        };
 
         std::size_t completed = 0;
         while (completed < tasks.size()) {
@@ -46,28 +60,20 @@ public:
                 if (is_blocked(i, tasks, active, started, finished)) {
                     continue;
                 }
-                started[i] = true;
-                active.push_back(i);
-                futures[i] = std::async(std::launch::async, [task = std::move(tasks[i].run)]() mutable {
-                    return task();
-                });
+                launch(i);
                 launched = true;
             }
 
             if (!launched && active.empty()) {
                 for (std::size_t i = 0; i < tasks.size(); ++i) {
                     if (!started[i]) {
-                        started[i] = true;
-                        active.push_back(i);
-                        futures[i] = std::async(std::launch::async, [task = std::move(tasks[i].run)]() mutable {
-                            return task();
-                        });
+                        launch(i);
                         break;
                     }
                 }
             }
 
-            const std::size_t done_index = wait_for_one(active, futures);
+            const std::size_t done_index = completions->wait_for_one();
             std::erase(active, done_index);
             results[done_index] = futures[done_index].get();
             finished[done_index] = true;
@@ -86,6 +92,39 @@ public:
     }
 
 private:
+    /// The indices of tasks that ended, in the order they did.
+    class Completions {
+    public:
+        void report(std::size_t index) {
+            {
+                std::lock_guard lock(mutex_);
+                done_.push_back(index);
+            }
+            changed_.notify_one();
+        }
+
+        [[nodiscard]] std::size_t wait_for_one() {
+            std::unique_lock lock(mutex_);
+            changed_.wait(lock, [this] { return !done_.empty(); });
+            const std::size_t index = done_.front();
+            done_.pop_front();
+            return index;
+        }
+
+    private:
+        std::mutex mutex_;
+        std::condition_variable changed_;
+        std::deque<std::size_t> done_;
+    };
+
+    /// Reports its task as ended however the task leaves, a throw included
+    /// (the future then rethrows it on get()).
+    struct Reporter {
+        Completions& completions;
+        std::size_t index;
+        ~Reporter() { completions.report(index); }
+    };
+
     [[nodiscard]] static bool is_blocked(std::size_t index,
                                          const std::vector<ScheduledToolTask<Result>>& tasks,
                                          const std::vector<std::size_t>& active,
@@ -109,19 +148,6 @@ private:
             }
         }
         return false;
-    }
-
-    [[nodiscard]] static std::size_t wait_for_one(const std::vector<std::size_t>& active,
-                                                  std::vector<std::future<Result>>& futures) {
-        using namespace std::chrono_literals;
-        while (true) {
-            for (const std::size_t index : active) {
-                if (futures[index].wait_for(0ms) == std::future_status::ready) {
-                    return index;
-                }
-            }
-            std::this_thread::sleep_for(1ms);
-        }
     }
 };
 

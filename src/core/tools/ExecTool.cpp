@@ -349,15 +349,15 @@ struct ExecPragma {
 
 #ifdef FILO_ENABLE_JAVASCRIPT
 
-// What a script may collect before truncation, so a loop calling text()
-// cannot exhaust memory.
+// What a script may collect for one result before truncation, so a loop
+// calling text() cannot exhaust memory.
 constexpr std::size_t kMaxCollectedBytes = 8 * 1024 * 1024;
 constexpr std::size_t kMemoryLimitBytes = 64 * 1024 * 1024;
 // Scripts run on tool threads, whose native stacks can be as small as 512 KiB.
 constexpr std::size_t kMaxStackBytes = 256 * 1024;
 constexpr int kMaxToolCalls = 256;
-// What a script may attach with image(): enough for screenshots, bounded so
-// a loop cannot fill every later request with images.
+// What a script may attach with image() to one result: enough for
+// screenshots, bounded so a loop cannot fill every later request with images.
 constexpr std::size_t kMaxImages = 16;
 constexpr std::size_t kMaxImageBytes = 20 * 1024 * 1024;
 // Uninterrupted JavaScript between two waits is a runaway loop, not work.
@@ -812,13 +812,18 @@ private:
             : Clock::time_point::max();
     }
 
+    /// The text items since the previous result, joined. What a result
+    /// reported is released, and the collection caps start over, so a cell
+    /// that runs for many waits neither keeps its old output nor stops
+    /// reporting once its lifetime output passes them.
     [[nodiscard]] std::string take_new_items() {
         std::string items;
-        for (std::size_t i = reported_; i < items_.size(); ++i) {
+        for (const auto& item : items_) {
             if (!items.empty()) items += '\n';
-            items += items_[i];
+            items += item;
         }
-        reported_ = items_.size();
+        items_.clear();
+        collected_ = 0;
         return items;
     }
 
@@ -845,12 +850,9 @@ private:
             items += "Script error:\n" + error;
         }
         host_ = nullptr;
-        std::vector<std::string> notes(notes_.begin() + static_cast<std::ptrdiff_t>(notes_reported_),
-                                       notes_.end());
-        notes_reported_ = notes_.size();
-        std::vector<core::llm::ContentPart> images(
-            images_.begin() + static_cast<std::ptrdiff_t>(images_reported_), images_.end());
-        images_reported_ = images_.size();
+        const auto notes = std::exchange(notes_, {});
+        auto images = std::exchange(images_, {});
+        image_bytes_ = 0;
         return ToolScriptOutcome{
             .completed = completed,
             .running = running,
@@ -921,7 +923,7 @@ private:
         auto batch = std::exchange(pending_, {});
         std::vector<ToolScriptCall> calls;
         calls.reserve(batch.size());
-        for (const auto& pending : batch) calls.push_back(pending.call);
+        for (auto& pending : batch) calls.push_back(std::move(pending.call));
         auto replies = host_->run(calls);
 
         std::optional<std::string> failure;
@@ -996,9 +998,6 @@ private:
     std::vector<core::llm::ContentPart> images_;
     std::size_t image_bytes_ = 0;
     std::size_t collected_ = 0;
-    std::size_t reported_ = 0;
-    std::size_t notes_reported_ = 0;
-    std::size_t images_reported_ = 0;
     std::size_t budget_ = 0;
     int calls_ = 0;
     bool exited_ = false;

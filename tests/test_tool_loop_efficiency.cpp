@@ -110,6 +110,36 @@ TEST_CASE("create_directory planner reads the dir_path argument", "[agent][tools
           == context.resolve_path("build/gen").generic_string());
 }
 
+TEST_CASE("Read-only exec_command processes run beside reads; other commands stay exclusive",
+          "[agent][tools]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto kind = [&](std::string_view arguments) {
+        const auto planned = core::agent::plan_tool_call(
+            make_call("shell-1", "run_terminal_command", std::string(arguments)), context);
+        REQUIRE(planned.accesses.size() == 1);
+        return planned.accesses.front().kind;
+    };
+    using Kind = core::agent::ToolAccess::Kind;
+    // What an exec script's exec_command becomes: its own process.
+    CHECK(kind(R"({"command":"rg -n foo src","yield_time_ms":10000})") == Kind::ReadAll);
+    CHECK(kind(R"({"command":"git status && git diff","yield_time_ms":250})") == Kind::ReadAll);
+    // Anything that may write, or that the rules cannot judge.
+    CHECK(kind(R"({"command":"echo hi > out.txt","yield_time_ms":10000})") == Kind::All);
+    CHECK(kind(R"({"command":"make","yield_time_ms":10000})") == Kind::All);
+    // The persistent shell keeps its order: a cd there moves the next command.
+    CHECK(kind(R"({"command":"rg -n foo src"})") == Kind::All);
+    // Writing to a running command.
+    CHECK(kind(R"({"process_id":1234,"input":"","yield_time_ms":5000})") == Kind::All);
+}
+
+TEST_CASE("tool scheduler rethrows a task's exception after the task ends", "[agent][tools]") {
+    std::vector<core::agent::ScheduledToolTask<int>> tasks;
+    tasks.push_back({.accesses = {}, .run = []() -> int { throw std::runtime_error("boom"); }});
+    core::agent::ToolCallScheduler<int> scheduler;
+    CHECK_THROWS_WITH(scheduler.run(std::move(tasks)), "boom");
+}
+
 TEST_CASE("tool scheduler runs non-conflicting reads concurrently", "[agent][tools]") {
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};

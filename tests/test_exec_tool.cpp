@@ -282,6 +282,26 @@ TEST_CASE("wait can terminate a running cell", "[exec]") {
     CHECK(output_of(yielded) == "live");
 }
 
+TEST_CASE("A cell keeps reporting after its earlier results passed the collection cap",
+          "[exec]") {
+    core::tools::ToolScriptSession session;
+    RecordingHost host;
+    // Nine megabytes reported in the first result: past the per-result cap
+    // that once also counted everything a cell had ever reported.
+    const auto yielded = session.execute(
+        "// @exec: {\"yield_time_ms\": 60000}\n"
+        "const big = 'x'.repeat(1 << 20);\n"
+        "for (let i = 0; i < 9; ++i) text(big);\n"
+        "yield_control();\n"
+        "await new Promise(resolve => setTimeout(resolve, 0));\n"
+        "text('after');\n",
+        {}, host);
+    REQUIRE(yielded.running);
+    const auto done = session.resume(R"({"cell_id":"c1","yield_time_ms":1000})", host);
+    CHECK(done.completed);
+    CHECK(output_of(done) == "after");
+}
+
 #else
 
 TEST_CASE("A build without JavaScript fails a script instead of running it", "[exec]") {
