@@ -9030,6 +9030,16 @@ RunResult run(RunOptions opts) {
             }
         });
 
+    // The banner popovers drop over the transcript and the document pane sits
+    // beside it (or replaces it): the wheel and clicks there are theirs.
+    // Boxes are reset every frame, so a closed popover covers nothing.
+    history_component->SetPointerCover(
+        [&mcp_servers_popover_box, &agents_visualizer_popover_box, &document_pane](int x, int y) {
+            return mcp_servers_popover_box.Contain(x, y)
+                || agents_visualizer_popover_box.Contain(x, y)
+                || (document_pane.open && document_pane.pane_box.Contain(x, y));
+        });
+
     // ── Event handling ───────────────────────────────────────────────────────
     auto component = CatchEvent(input_stack, [&](Event event) {
         reset_double_escape_on_non_escape(double_escape_state, event);

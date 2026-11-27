@@ -96,6 +96,10 @@ bool HistoryComponent::Focusable() const {
 
 bool HistoryComponent::OnEvent(ftxui::Event event) {
     if (event.is_mouse()) {
+        // What is drawn over this cell answers for it, not the transcript.
+        if (pointer_covered_ && pointer_covered_(event.mouse().x, event.mouse().y)) {
+            return false;
+        }
         return OnMouseEvent(event);
     }
 
@@ -273,6 +277,10 @@ void HistoryComponent::SetFileChangeActionOpener(std::function<void(std::string_
 
 void HistoryComponent::SetLinkOpener(std::function<void(std::string_view href)> opener) {
     link_opener_ = std::move(opener);
+}
+
+void HistoryComponent::SetPointerCover(std::function<bool(int x, int y)> covered) {
+    pointer_covered_ = std::move(covered);
 }
 
 std::optional<std::string> HistoryComponent::LinkAt(int x, int y) const {

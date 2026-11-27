@@ -59,6 +59,12 @@ public:
     /// that becomes a drag is a selection, not a click.
     void SetLinkOpener(std::function<void(std::string_view href)> opener);
 
+    /// Tells which cells something else is drawn over, beside or on top of
+    /// the transcript. FTXUI offers every mouse event to every component, so
+    /// without it the wheel over a popover or a side pane scrolls the
+    /// transcript instead. Pointer events in a covered cell are left alone.
+    void SetPointerCover(std::function<bool(int x, int y)> covered);
+
     // Read-only introspection (used by unit tests and diagnostics).
     [[nodiscard]] bool  IsAutoScrollFollowing()  const noexcept;
     [[nodiscard]] bool  HasNewContentIndicator() const noexcept;
@@ -101,6 +107,7 @@ private:
     std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
     std::function<void(std::string_view key)>    file_change_action_opener_;
     std::function<void(std::string_view href)>   link_opener_;
+    std::function<bool(int x, int y)>            pointer_covered_;
     /// The link under the last left press and where the press was. The link
     /// opens if the button is released where it was pressed.
     std::optional<std::string>                   pressed_link_;

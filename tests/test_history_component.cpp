@@ -1599,6 +1599,49 @@ TEST_CASE("HistoryComponent sends a document click to the pane, not to the compa
                !Catch::Matchers::ContainsSubstring("new-line"));
 }
 
+TEST_CASE("HistoryComponent leaves the pointer to what covers it",
+          "[tui][history_component][regression]") {
+    // FTXUI offers every mouse event to the transcript first; a popover over
+    // it or a pane beside it must get the wheel and the clicks in its cells.
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+
+    tui::ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+    std::vector<std::string> opened;
+    history.SetFileChangeActionOpener(
+        [&opened](std::string_view key) { opened.emplace_back(key); });
+
+    const auto affordance = rendered_cell_of(render_history_text(history), "\u2197");
+    REQUIRE(affordance.row >= 0);
+    bool covered = true;
+    history.SetPointerCover([&covered](int, int) { return covered; });
+
+    ftxui::Mouse wheel;
+    wheel.button = ftxui::Mouse::WheelUp;
+    wheel.motion = ftxui::Mouse::Pressed;
+    wheel.x = affordance.column;
+    wheel.y = affordance.row;
+    ftxui::Mouse press = wheel;
+    press.button = ftxui::Mouse::Left;
+
+    CHECK_FALSE(history.OnEvent(ftxui::Event::Mouse("", wheel)));
+    CHECK(history.IsAutoScrollFollowing());
+    CHECK_FALSE(history.OnEvent(ftxui::Event::Mouse("", press)));
+    CHECK(opened.empty());
+
+    // The same cells answer again once nothing covers them.
+    covered = false;
+    CHECK(history.OnEvent(ftxui::Event::Mouse("", wheel)));
+    CHECK_FALSE(history.IsAutoScrollFollowing());
+    click(history, affordance);
+    CHECK(opened.size() == 1);
+}
+
 TEST_CASE("HistoryComponent still toggles a change row clicked elsewhere",
           "[tui][history_component][diff_comparer]") {
     std::atomic<size_t> tick{0};
