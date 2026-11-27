@@ -1325,7 +1325,8 @@ Element render_model_provider_picker_panel(
     const std::vector<ModelProviderPickerRow>& providers,
     int selected_index,
     bool local_model_available,
-    bool previous_model_available) {
+    bool previous_model_available,
+    std::string_view purpose) {
     std::vector<Element> rows;
     const auto [first, last] = picker_visible_range(
         static_cast<int>(providers.size()), selected_index, kCommandPickerMaxDisplayRows);
@@ -1357,7 +1358,8 @@ Element render_model_provider_picker_panel(
                 | color(ColorTextMuted)
         }),
         separator(),
-        text("Select a provider to choose a model.") | color(ColorText),
+        text(purpose.empty() ? std::string("Select a provider to choose a model.")
+                             : std::string(purpose)) | color(ColorText),
         filler(),
         vbox(std::move(rows)),
         filler(),
@@ -1389,7 +1391,8 @@ Element render_provider_model_picker_panel(
     std::string_view provider_name,
     const std::vector<ModelPickerRow>& models,
     int selected_index,
-    const ProviderModelPickerKeys& keys) {
+    const ProviderModelPickerKeys& keys,
+    std::string_view purpose) {
     std::vector<Element> rows;
     // Rendering the entire catalog lets vbox shrink descriptions to zero
     // height when the models outgrow the terminal. Bound the viewport and
@@ -1425,11 +1428,13 @@ Element render_provider_model_picker_panel(
             text(" MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             text("  " + std::string(provider_name)) | ftxui::bold | color(ColorYellowBright),
             filler(),
-            text("Up/Down: select  Enter: switch  1-9: quick choose")
+            text(purpose.empty() ? "Up/Down: select  Enter: switch  1-9: quick choose"
+                                 : "Up/Down: select  Enter: choose  1-9: quick choose")
                 | color(ColorTextMuted)
         }),
         separator(),
-        text(std::format("Select a {} model.", provider_name)) | color(ColorText),
+        text(purpose.empty() ? std::format("Select a {} model.", provider_name)
+                             : std::string(purpose)) | color(ColorText),
         filler(),
         vbox(std::move(rows)),
         filler(),
@@ -1608,16 +1613,24 @@ Element render_settings_panel(std::string_view scope_label,
             : nullptr;
     const bool typing = selected_row && selected_row->typed;
     const bool typable = selected_row && !selected_row->custom_hint.empty();
+    const std::string chooser = selected_row ? selected_row->chooser : std::string{};
+    const std::string hints = typing ? "Type a value  Enter: save  Esc: cancel"
+        : !chooser.empty()
+            ? std::format("Tab: scope  Enter: choose {}  Backspace: reset  Esc: categories", chooser)
+        : typable ? "Tab: scope  Left/Right: change  E: custom  Backspace: reset  Esc: categories"
+                  : "Tab: scope  Left/Right: change  Backspace: reset  Esc: categories";
+    const std::string help = typing ? "Enter saves the typed value. Esc keeps the current one."
+        : !chooser.empty()
+            ? std::format("Enter picks the {}. Backspace resets to inherit. Esc returns to categories.",
+                          chooser)
+        : typable ? "Left/Right changes values. E types a custom value. Backspace resets to inherit."
+                  : "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.";
     return make_settings_frame(
         scope_label,
         category_label,
         scope_path,
-        typing    ? "Type a value  Enter: save  Esc: cancel"
-        : typable ? "Tab: scope  Left/Right: change  E: custom  Backspace: reset  Esc: categories"
-                  : "Tab: scope  Left/Right: change  Backspace: reset  Esc: categories",
-        typing    ? "Enter saves the typed value. Esc keeps the current one."
-        : typable ? "Left/Right changes values. E types a custom value. Backspace resets to inherit."
-                  : "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.",
+        hints,
+        help,
         status_message,
         std::move(rendered_rows),
         std::max(10, static_cast<int>(rows.size()) * 2 + (note.empty() ? 6 : 8)));

@@ -138,7 +138,7 @@ ConfigDocument ConfigDocument::load(const ConfigSource& source, const std::files
     source.verify_available();
     ConfigDocument result{{}, JsonValue::object(), JsonValue::object(), {}};
     const auto append_layers = [&](const auto& documents, JsonValue& managed_settings) {
-        for (const auto file : {"config.json", "auth_defaults.json", "settings.json", "mcp_servers.json", "profile_defaults.json"}) {
+        for (const auto file : {"config.json", "auth_defaults.json", "settings.json", "mcp_servers.json", "subagents.json", "profile_defaults.json"}) {
             const auto found = documents.find(file);
             if (found == documents.end()) continue;
             validate(found->second);
@@ -156,7 +156,7 @@ ConfigDocument ConfigDocument::load(const ConfigSource& source, const std::files
     const auto saved_documents = [](const auto& directory) {
         ConfigSource::Documents documents;
         for (const auto file : {"config.json", "auth_defaults.json", "settings.json", "mcp_servers.json",
-                                "profile_defaults.json", "model_defaults.json"}) {
+                                "subagents.json", "profile_defaults.json", "model_defaults.json"}) {
             if (auto document = ConfigSource::read_document(directory / file)) documents.emplace(file, std::move(*document));
         }
         return documents;

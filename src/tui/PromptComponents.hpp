@@ -29,6 +29,9 @@ struct SettingsPanelRow {
     bool inherited = false;
     /// Example input when the value can also be typed (E); empty otherwise.
     std::string custom_hint;
+    /// What Enter opens a chooser for ("model"); empty when Left/Right
+    /// cycles the value instead.
+    std::string chooser;
     /// The text being typed for this row, if any.
     std::optional<std::string> typed;
 };
@@ -228,7 +231,8 @@ ftxui::Element render_model_provider_picker_panel(
     const std::vector<ModelProviderPickerRow>& providers,
     int selected_index,
     bool local_model_available,
-    bool previous_model_available = false);
+    bool previous_model_available = false,
+    std::string_view purpose = {});
 
 /// Keys the model page currently honours, so its footer only advertises
 /// what will do something.
@@ -242,11 +246,14 @@ struct ProviderModelPickerKeys {
     bool newer_model = false;
 };
 
+/// A non-empty @p purpose says what the choice is for when it is not the
+/// conversation's model (see ModelPickerSink).
 ftxui::Element render_provider_model_picker_panel(
     std::string_view provider_name,
     const std::vector<ModelPickerRow>& models,
     int selected_index,
-    const ProviderModelPickerKeys& keys = {});
+    const ProviderModelPickerKeys& keys = {},
+    std::string_view purpose = {});
 
 ftxui::Element render_option_selection_panel(std::string_view title,
                                              const std::vector<OptionPickerRow>& options,

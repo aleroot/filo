@@ -60,6 +60,14 @@ fs::path workspace_mcp_overlay_path(const fs::path& working_dir) {
     return working_dir / ".filo" / "mcp_servers.json";
 }
 
+fs::path user_subagent_overlay_path(const fs::path& config_dir) {
+    return config_dir / kSubagentOverlayFile;
+}
+
+fs::path workspace_subagent_overlay_path(const fs::path& working_dir) {
+    return working_dir / ".filo" / kSubagentOverlayFile;
+}
+
 struct ManagedSettingDescriptor {
     ManagedSettingKey key;
     std::string_view json_key;
@@ -2061,6 +2069,35 @@ std::filesystem::path ConfigManager::get_settings_path(
                           : workspace_settings_path(cwd);
 }
 
+std::filesystem::path ConfigManager::get_subagent_overlay_path(
+    SettingsScope scope,
+    std::optional<std::filesystem::path> working_dir) const {
+    if (scope == SettingsScope::User) {
+        return user_subagent_overlay_path(get_config_dir());
+    }
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+    return config_source_
+        ? config_source_->workspace_state_directory(cwd) / kSubagentOverlayFile
+        : workspace_subagent_overlay_path(cwd);
+}
+
+bool ConfigManager::persist_subagent_model(SettingsScope scope,
+                                           std::string_view subagent,
+                                           const std::optional<SubagentModelChoice>& choice,
+                                           std::optional<std::filesystem::path> working_dir,
+                                           std::string* error) {
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+    const fs::path path = get_subagent_overlay_path(scope, cwd);
+    auto file_lock = acquire_write_lock(path, error);
+    if (!file_lock) return false;
+    if (!write_subagent_model(path, subagent, choice, error)) return false;
+    load(cwd);
+    if (error) error->clear();
+    return true;
+}
+
 void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     if (config_source_) {
         config_source_ = ConfigSource::open(config_source_->input_path(), config_source_->fallback_directory());
@@ -2113,9 +2150,11 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     load_optional_config(auth_overlay_path, config_, profiles_, selected_profile);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
     load_optional_config(user_mcp_overlay, config_, profiles_, selected_profile);
+    load_optional_config(user_subagent_overlay_path(config_dir), config_, profiles_, selected_profile);
     load_optional_config(project_config_path, config_, profiles_, selected_profile);
     workspace_settings_ = load_optional_managed_settings(workspace_settings_file, config_);
     load_optional_config(workspace_mcp_overlay, config_, profiles_, selected_profile);
+    load_optional_config(workspace_subagent_overlay_path(cwd), config_, profiles_, selected_profile);
     load_optional_config(profile_overlay_path, config_, profiles_, selected_profile);
 
     if (const char* env_profile = std::getenv("FILO_PROFILE");

@@ -14,6 +14,7 @@
 #include "KeyInput.hpp"
 #include "MemoryMenu.hpp"
 #include "ModelPickerRows.hpp"
+#include "ModelPickerSink.hpp"
 #include "ModelSelectionHistory.hpp"
 #include "SessionReplay.hpp"
 #include "core/changes/WorkspaceMutationGate.hpp"
@@ -131,6 +132,7 @@
 #include "core/commands/SkillTurnResolver.hpp"
 #include "core/utils/StringUtils.hpp"
 #include "tui/SettingsInput.hpp"
+#include "tui/SubagentSettingsPage.hpp"
 #include "tui/TerminalTheme.hpp"
 #include <atomic>
 #include <cstdint>
@@ -1313,6 +1315,21 @@ RunResult run(RunOptions opts) {
         tui::ProviderModelPickerKeys keys;
     };
     ProviderModelPickerState provider_model_picker_state;
+    // Set while the picker chooses a model for something other than the
+    // conversation (see ModelPickerSink); spans its provider and model pages.
+    // Guarded by ui_mutex like the rest of the picker state.
+    std::optional<tui::ModelPickerSink> model_picker_sink;
+    // The sink's own current model, nullopt when the picker serves /model.
+    const auto model_picker_target = [&]() -> std::optional<tui::ModelSelectionSnapshot> {
+        std::lock_guard lock(ui_mutex);
+        if (!model_picker_sink) return std::nullopt;
+        return model_picker_sink->current;
+    };
+    // Ends the sink's turn; the caller runs choose or cancel outside the lock.
+    const auto take_model_picker_sink = [&]() {
+        std::lock_guard lock(ui_mutex);
+        return std::exchange(model_picker_sink, std::nullopt);
+    };
 
     struct CommandOptionPickerState {
         bool active = false;
@@ -1778,6 +1795,11 @@ RunResult run(RunOptions opts) {
             settings_categories.push_back(definition.category);
         }
     }
+    // Not managed settings: its page is SubagentSettingsPage.
+    settings_categories.emplace_back(kAgentsSettingsCategory);
+    const auto is_agents_category = [&](std::size_t category) {
+        return settings_categories[category] == kAgentsSettingsCategory;
+    };
 
     // Overview blurbs; a category without one still renders, with its setting
     // count as the only description.
@@ -1791,6 +1813,8 @@ RunResult run(RunOptions opts) {
              "What saved conversations occupy on disk, and how long they and their revert "
              "history are kept."},
             {"Context", "Which project steering files load into the prompt."},
+            {std::string(kAgentsSettingsCategory),
+             "Which model each subagent runs on, /review included."},
         };
         const auto it = kBlurbs.find(std::string(category));
         return it == kBlurbs.end() ? std::string{} : it->second;
@@ -2060,6 +2084,17 @@ RunResult run(RunOptions opts) {
             core::workspace::Workspace::get_instance().set_remote_source({});
         }
     } remote_workspace_source_reset;
+
+    // /settings → Agents. A saved choice reloads every open thread's subagent
+    // profiles; /review reads the configuration each time it runs.
+    ConfigSubagentModelStore subagent_model_store(
+        config_manager, [&agent] { return agent->workspace_snapshot().primary(); });
+    SubagentSettingsPage subagent_settings_page(subagent_model_store, [&] {
+        const auto& config = config_manager.get_config();
+        for (const auto& runtime : thread_runtimes.snapshot()) {
+            runtime->agent()->reload_subagent_profiles(config);
+        }
+    });
 
     auto allocate_project_thread_name = [&]() {
         const auto base_name = project_base_name_for(agent->workspace_snapshot().primary());
@@ -5055,8 +5090,8 @@ RunResult run(RunOptions opts) {
         if (providers.empty()) {
             return false;
         }
-        const bool previous_model_available =
-            older_model_choice(recent_model_selections, std::nullopt).has_value();
+        const bool previous_model_available = !model_picker_target()
+            && older_model_choice(recent_model_selections, std::nullopt).has_value();
         {
             std::lock_guard lock(ui_mutex);
             model_provider_picker_state.providers = std::move(providers);
@@ -5092,7 +5127,12 @@ RunResult run(RunOptions opts) {
         if (rows.empty()) {
             return false;
         }
-        const ModelSelectionSnapshot current = current_model_selection_snapshot();
+        // A sink's target has its own current model and no history.
+        const auto target = model_picker_target();
+        const ModelSelectionSnapshot current = target ? *target : current_model_selection_snapshot();
+        const std::span<const ModelSelectionSnapshot> recent = target
+            ? std::span<const ModelSelectionSnapshot>{}
+            : std::span<const ModelSelectionSnapshot>(recent_model_selections);
         if (!focus && is_model_selection(current)
             && core::llm::provider_catalog_group_name(current.manual_provider_name)
                 == provider_name) {
@@ -5100,11 +5140,11 @@ RunResult run(RunOptions opts) {
         }
         const std::size_t focus_row =
             focus ? focus_model_row(rows, *focus, models_equivalent) : 0;
-        mark_model_rows(rows, current, recent_model_selections, models_equivalent);
+        mark_model_rows(rows, current, recent, models_equivalent);
         const tui::ProviderModelPickerKeys keys{
             .escape_returns_to_providers = opened_from_providers,
             .older_model =
-                older_model_choice(recent_model_selections, history_position).has_value(),
+                older_model_choice(recent, history_position).has_value(),
             .newer_model = history_position.has_value(),
         };
         {
@@ -5138,6 +5178,9 @@ RunResult run(RunOptions opts) {
     // only moves the selection; Enter still makes the switch. Entries whose
     // provider can no longer list models are skipped.
     auto walk_model_history = [&](bool older) -> bool {
+        if (model_picker_target()) {
+            return false;
+        }
         std::optional<std::size_t> position;
         bool opened_from_providers = true;
         {
@@ -5175,14 +5218,22 @@ RunResult run(RunOptions opts) {
     // Ctrl+P and /model: open on the active model so the common moves (keep
     // it, pick a sibling, Ctrl+P to the previous one) need no navigation. A
     // router or auto selection has no model row, so it opens on providers.
-    auto open_model_picker = [&]() -> bool {
-        const ModelSelectionSnapshot current = current_model_selection_snapshot();
+    // With a sink the picker chooses for that target instead (see
+    // ModelPickerSink); /model itself never carries one over.
+    auto open_model_picker_with = [&](std::optional<tui::ModelPickerSink> sink) -> bool {
+        {
+            std::lock_guard lock(ui_mutex);
+            model_picker_sink = std::move(sink);
+        }
+        const auto target = model_picker_target();
+        const ModelSelectionSnapshot current = target ? *target : current_model_selection_snapshot();
         if (is_model_selection(current)
             && open_model_page_for(current, false, std::nullopt)) {
             return true;
         }
         return open_model_provider_list({});
     };
+    auto open_model_picker = [&]() -> bool { return open_model_picker_with(std::nullopt); };
 
     // Build a sorted listing for the local model file browser.
     // Directories come first (sorted), then .gguf files (sorted).
@@ -5417,12 +5468,6 @@ RunResult run(RunOptions opts) {
         return {};
     };
 
-    auto settings_scope_label = [](core::config::SettingsScope scope) {
-        return scope == core::config::SettingsScope::User
-            ? std::string("User")
-            : std::string("Workspace");
-    };
-
     auto setting_choice_label = [&](const SettingsDefinition& definition,
                                     std::string_view value) -> std::string {
         for (const auto& choice : definition.choices) {
@@ -5561,6 +5606,59 @@ RunResult run(RunOptions opts) {
             settings_panel_state.status_message = std::move(status);
         }
         wake_ui();
+    };
+
+    // Back on the Agents page, with `status` (when given) as its message.
+    auto show_subagent_settings = [&](std::string status) {
+        {
+            std::lock_guard lock(ui_mutex);
+            settings_panel_state.active = true;
+            if (!status.empty()) settings_panel_state.status_message = std::move(status);
+        }
+        wake_ui();
+    };
+
+    // What a key on the Agents page asked for. Choose hands the model picker
+    // a sink, so the pick is saved for the subagent and the page comes back.
+    auto apply_subagent_settings_action = [&](SubagentSettingsPage::Action action) {
+        using Kind = SubagentSettingsPage::Action::Kind;
+        const auto scope = settings_panel_state.scope;
+        switch (action.kind) {
+            case Kind::Back: {
+                std::lock_guard lock(ui_mutex);
+                settings_panel_state.open_category = std::nullopt;
+                return;
+            }
+            case Kind::Notice:
+                show_subagent_settings(std::move(action.message));
+                return;
+            case Kind::Clear:
+                show_subagent_settings(
+                    subagent_settings_page.save(scope, action.subagent, std::nullopt));
+                return;
+            case Kind::Choose:
+                break;
+        }
+        {
+            std::lock_guard lock(ui_mutex);
+            settings_panel_state.active = false;
+        }
+        const std::string name = action.subagent;
+        const bool opened = open_model_picker_with(ModelPickerSink{
+            .purpose = std::format("Choose the model {} runs on ({} settings).",
+                                   name, settings_scope_label(scope)),
+            .current = subagent_model_selection(
+                config_manager.get_config(), action.current, current_model_selection_snapshot()),
+            .choose = [&, scope, name](std::string provider, std::string model) {
+                show_subagent_settings(subagent_settings_page.save(
+                    scope, name, core::config::SubagentModelChoice{std::move(provider), std::move(model)}));
+            },
+            .cancel = [&] { show_subagent_settings("Model unchanged."); },
+        });
+        if (!opened) {
+            static_cast<void>(take_model_picker_sink());
+            show_subagent_settings("No provider is configured to choose a model from.");
+        }
     };
 
     static constexpr std::array<std::string_view, 4> kCompressionModes{
@@ -9882,6 +9980,7 @@ RunResult run(RunOptions opts) {
         std::optional<core::config::SettingsScope> settings_scope;
         bool settings_reset = false;
         std::optional<std::string> settings_custom_text;
+        std::optional<SubagentSettingsPage::Action> agents_action;
         {
             std::lock_guard lock(ui_mutex);
             if (settings_panel_state.active) {
@@ -9906,7 +10005,12 @@ RunResult run(RunOptions opts) {
                     settings_panel_state.open_category = static_cast<std::size_t>(row);
                     settings_panel_state.category_selected = row;
                     settings_panel_state.selected = 0;
+                    if (is_agents_category(static_cast<std::size_t>(row))) {
+                        subagent_settings_page.open();
+                    }
                 };
+                const bool agents_page =
+                    !overview && is_agents_category(*settings_panel_state.open_category);
 
                 auto& text_entry = settings_panel_state.text_entry;
                 if (text_entry.active()) {
@@ -9920,6 +10024,11 @@ RunResult run(RunOptions opts) {
                         case SettingsTextEntry::Outcome::Editing:
                             break;
                     }
+                } else if (agents_page && event != Event::Tab) {
+                    // Every other key is the page's: the rows below index
+                    // managed settings, which this category has none of.
+                    agents_action = subagent_settings_page.handle(
+                        event, settings_panel_state.scope);
                 } else if (event == Event::ArrowUp) {
                     move_selection(-1);
                 } else if (event == Event::ArrowDown) {
@@ -9985,6 +10094,10 @@ RunResult run(RunOptions opts) {
             }
         }
         if (settings_panel_was_active) {
+            if (agents_action) {
+                apply_subagent_settings_action(std::move(*agents_action));
+                return true;
+            }
             if (settings_selected_index.has_value()
                 && settings_scope.has_value()
                 && *settings_selected_index >= 0
@@ -10400,6 +10513,7 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ModelPickerRow> provider_model_rows_snapshot;
         std::optional<std::string> return_to_model_providers;
         std::optional<bool> walk_older_model;
+        bool provider_model_picker_closed = false;
         {
             std::lock_guard lock(ui_mutex);
             if (provider_model_picker_state.active) {
@@ -10422,7 +10536,7 @@ RunResult run(RunOptions opts) {
                         provider_model_rows_snapshot = provider_model_picker_state.models;
                         provider_model_picker_state.active = false;
                     }
-                } else if (is_ctrl_p_event(event) || is_ctrl_n_event(event)) {
+                } else if (!model_picker_sink && (is_ctrl_p_event(event) || is_ctrl_n_event(event))) {
                     walk_older_model = is_ctrl_p_event(event);
                 } else if (event == Event::ArrowLeft || event == Event::Backspace) {
                     return_to_model_providers = provider_model_picker_state.provider_name;
@@ -10430,6 +10544,8 @@ RunResult run(RunOptions opts) {
                     provider_model_picker_state.active = false;
                     if (provider_model_picker_state.keys.escape_returns_to_providers) {
                         return_to_model_providers = provider_model_picker_state.provider_name;
+                    } else {
+                        provider_model_picker_closed = true;
                     }
                 } else {
                     for (int n = 1; n <= std::min(count, 9); ++n) {
@@ -10459,11 +10575,17 @@ RunResult run(RunOptions opts) {
                 const std::string effective_provider = row.source_provider.empty()
                     ? provider_model_provider_name
                     : row.source_provider;
+                if (auto sink = take_model_picker_sink()) {
+                    sink->choose(effective_provider, row.selector);
+                    return true;
+                }
                 const std::string selector = row.selector.empty()
                     ? effective_provider
                     : effective_provider + " " + row.selector;
                 const std::string result = apply_model_selector(selector, true);
                 append_model_switch_result(result);
+            } else if (provider_model_picker_closed) {
+                if (auto sink = take_model_picker_sink()) sink->cancel();
             }
             return true;
         }
@@ -10471,6 +10593,7 @@ RunResult run(RunOptions opts) {
         bool model_provider_picker_was_active = false;
         std::optional<int> model_provider_choice;
         std::vector<tui::ModelProviderPickerRow> model_provider_rows_snapshot;
+        bool model_provider_picker_closed = false;
         {
             std::lock_guard lock(ui_mutex);
             if (model_provider_picker_state.active) {
@@ -10494,9 +10617,11 @@ RunResult run(RunOptions opts) {
                     }
                 } else if (event == Event::Escape) {
                     model_provider_picker_state.active = false;
-                } else if (is_ctrl_p_event(event)) {
+                    model_provider_picker_closed = true;
+                } else if (!model_picker_sink && is_ctrl_p_event(event)) {
                     walk_older_model = true;
-                } else if (event == Event::Character('l') || event == Event::Character('L')) {
+                } else if (!model_picker_sink
+                           && (event == Event::Character('l') || event == Event::Character('L'))) {
                     open_local_picker_from_model = true;
                     model_provider_picker_state.active = false;
                 } else {
@@ -10522,11 +10647,15 @@ RunResult run(RunOptions opts) {
         if (model_provider_picker_was_active) {
             if (model_provider_choice.has_value()
                 && static_cast<std::size_t>(*model_provider_choice) < model_provider_rows_snapshot.size()) {
-                open_provider_model_page(
+                const bool opened = open_provider_model_page(
                     model_provider_rows_snapshot[static_cast<std::size_t>(*model_provider_choice)].name,
                     std::nullopt,
                     true,
                     std::nullopt);
+                model_provider_picker_closed = !opened;
+            }
+            if (model_provider_picker_closed) {
+                if (auto sink = take_model_picker_sink()) sink->cancel();
             }
             return true;
         }
@@ -11200,6 +11329,7 @@ RunResult run(RunOptions opts) {
         std::string provider_model_picker_provider;
         tui::ProviderModelPickerKeys provider_model_picker_keys;
         bool model_provider_picker_previous_model = false;
+        std::string model_picker_purpose;
         std::string            command_option_picker_title;
         std::string            command_option_picker_current;
         std::string            command_option_picker_help;
@@ -11278,6 +11408,7 @@ RunResult run(RunOptions opts) {
             provider_model_picker_keys = provider_model_picker_state.keys;
             model_provider_picker_previous_model =
                 model_provider_picker_state.previous_model_available;
+            model_picker_purpose = model_picker_sink ? model_picker_sink->purpose : std::string{};
             command_option_picker_active = command_option_picker_state.active;
             command_option_picker_selected = command_option_picker_state.selected;
             command_option_picker_title = command_option_picker_state.title;
@@ -11571,7 +11702,18 @@ RunResult run(RunOptions opts) {
             const std::string scope_path = config_manager.get_settings_path(
                 settings_panel_scope,
                 agent->workspace_snapshot().primary()).string();
-            if (settings_panel_open_category.has_value()) {
+            if (settings_panel_open_category.has_value()
+                && is_agents_category(*settings_panel_open_category)) {
+                bottom_el = render_settings_panel(
+                    settings_scope_label(settings_panel_scope),
+                    config_manager.get_subagent_overlay_path(
+                        settings_panel_scope, agent->workspace_snapshot().primary()).string(),
+                    kAgentsSettingsCategory,
+                    subagent_settings_page.panel_rows(settings_panel_scope),
+                    subagent_settings_page.selected(),
+                    settings_panel_status,
+                    subagent_settings_page.note(settings_panel_scope));
+            } else if (settings_panel_open_category.has_value()) {
                 std::vector<SettingsPanelRow> settings_rows;
                 for (const int index :
                      settings_indices_in_category(*settings_panel_open_category)) {
@@ -11622,7 +11764,15 @@ RunResult run(RunOptions opts) {
                             ++set_in_scope;
                         }
                     }
-                    std::string summary = std::format("{} settings", indices.size());
+                    std::size_t row_count = indices.size();
+                    if (is_agents_category(category)) {
+                        const auto& agents = subagent_settings_page.rows(settings_panel_scope);
+                        row_count = agents.size();
+                        set_in_scope = static_cast<int>(std::ranges::count_if(
+                            agents, [](const auto& row) { return !row.inherited; }));
+                    }
+                    std::string summary = std::format(
+                        "{} {}", row_count, is_agents_category(category) ? "agents" : "settings");
                     if (set_in_scope > 0) {
                         summary += std::format(" · {} set in this scope", set_in_scope);
                     }
@@ -11683,7 +11833,8 @@ RunResult run(RunOptions opts) {
                 provider_model_picker_provider,
                 provider_model_picker_models,
                 provider_model_picker_selected,
-                provider_model_picker_keys);
+                provider_model_picker_keys,
+                model_picker_purpose);
         } else if (model_provider_picker_active) {
             constexpr bool kLocalModelAvailable =
 #ifdef FILO_ENABLE_LLAMACPP
@@ -11694,8 +11845,9 @@ RunResult run(RunOptions opts) {
             bottom_el = render_model_provider_picker_panel(
                 model_provider_picker_providers,
                 model_provider_picker_selected,
-                kLocalModelAvailable,
-                model_provider_picker_previous_model);
+                kLocalModelAvailable && model_picker_purpose.empty(),
+                model_provider_picker_previous_model,
+                model_picker_purpose);
         } else if (provider_picker_active) {
             bottom_el = render_provider_selection_panel(provider_picker_providers,
                                                         provider_picker_selected);

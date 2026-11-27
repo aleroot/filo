@@ -7,6 +7,10 @@
 
 namespace tui {
 
+std::string settings_scope_label(core::config::SettingsScope scope) {
+    return scope == core::config::SettingsScope::User ? "User" : "Workspace";
+}
+
 void SettingsTextEntry::begin() {
     active_ = true;
     text_.clear();

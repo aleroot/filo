@@ -9,6 +9,7 @@
 #include <memory>
 #include "core/llm/ResponseFormat.hpp"
 #include "core/llm/routing/PolicyConfig.hpp"
+#include "SubagentOverlay.hpp"
 
 namespace core::config {
 
@@ -430,6 +431,19 @@ public:
     std::filesystem::path get_settings_path(
         SettingsScope scope,
         std::optional<std::filesystem::path> working_dir = std::nullopt) const;
+
+    /// The scope's subagents.json (see SubagentOverlay.hpp).
+    std::filesystem::path get_subagent_overlay_path(
+        SettingsScope scope,
+        std::optional<std::filesystem::path> working_dir = std::nullopt) const;
+
+    /// Saves (or, with nullopt, clears) one subagent's provider and model in
+    /// the scope's subagents.json, then reloads the configuration.
+    bool persist_subagent_model(SettingsScope scope,
+                                std::string_view subagent,
+                                const std::optional<SubagentModelChoice>& choice,
+                                std::optional<std::filesystem::path> working_dir = std::nullopt,
+                                std::string* error = nullptr);
 
     const ManagedSettings& get_settings_overlay(SettingsScope scope) const {
         return scope == SettingsScope::User ? user_settings_ : workspace_settings_;

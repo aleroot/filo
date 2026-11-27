@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/config/ConfigManager.hpp"
+
 #include <ftxui/component/event.hpp>
 
 #include <functional>
@@ -9,6 +11,9 @@
 #include <vector>
 
 namespace tui {
+
+/// "User" or "Workspace", as /settings names a scope.
+[[nodiscard]] std::string settings_scope_label(core::config::SettingsScope scope);
 
 /// A /settings value that can also be typed, not only picked from the choices.
 struct SettingsCustomInput {

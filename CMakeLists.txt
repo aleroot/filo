@@ -257,6 +257,8 @@ set(FILO_CORE_SOURCES
     src/tui/MemoryMenu.cpp
     src/tui/ModelPickerRows.cpp
     src/tui/ModelSelectionHistory.cpp
+    src/tui/SubagentSettings.cpp
+    src/tui/SubagentSettingsPage.cpp
     src/tui/KeyInput.cpp
     src/tui/SessionPicker.cpp
     src/tui/ThreadRuntime.cpp
@@ -290,6 +292,7 @@ set(FILO_CORE_SOURCES
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
     src/core/config/ConfigSource.cpp
+    src/core/config/SubagentOverlay.cpp
     src/core/config/ConfigDocument.cpp
     src/core/config/ModelDefaultsPersistence.cpp
     src/core/config/SessionModelOverride.cpp
@@ -884,6 +887,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_history_compaction_planner.cpp
     tests/test_config_manager.cpp
     tests/test_config_overlay.cpp
+    tests/test_subagent_settings.cpp
     tests/test_model_defaults_persistence.cpp
     tests/test_session_model_override.cpp
     tests/test_context_mentions.cpp

@@ -86,7 +86,7 @@ ConfigOverlayFiles read_input(const fs::path& path) {
     if (!fs::is_directory(path)) throw std::runtime_error("configuration must be a bundle file or directory");
     ConfigOverlayFiles files;
     for (const auto name : {"config.json", "auth_defaults.json", "settings.json", "mcp_servers.json",
-                            "profile_defaults.json", "model_defaults.json"}) {
+                            "subagents.json", "profile_defaults.json", "model_defaults.json"}) {
         if (auto document = ConfigSource::read_document(path / name)) files.configuration.emplace(name, std::move(*document));
     }
     std::set<std::string> stores;

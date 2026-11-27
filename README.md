@@ -188,6 +188,8 @@ The built-in `code-review` profile also decides who reviews: `/review` and the `
 }
 ```
 
+The model of each subagent can also be chosen in `/settings` → **Agents**: Enter opens the model picker for the selected agent and Backspace returns it to the inherited model. Choices are saved in `subagents.json`, next to `settings.json` for the User scope and in `.filo/` for the Workspace scope (under `--config`, in that config's own state directory), and apply to every open conversation at once.
+
 </details>
 
 <details>
