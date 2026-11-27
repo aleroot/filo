@@ -3,9 +3,11 @@
 #include "MarkdownRenderer.hpp"
 #include "StringUtils.hpp"
 #include "TextLayout.hpp"
+#include "ToolResultParsing.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/changes/ConversationChanges.hpp"
+#include "core/agent/TruncatedToolOutput.hpp"
 #include "core/changes/PatchExport.hpp"
 #include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
@@ -33,6 +35,7 @@
 #include <optional>
 #include <random>
 #include <span>
+#include <utility>
 
 using namespace ftxui;
 
@@ -525,6 +528,9 @@ inline constexpr std::string_view kDoneSummary = "Done";
 /// off screen.
 inline constexpr std::size_t kWebSnippetPreviewChars = 240;
 
+/// A listed memory is one fact among dozens; the full text is one expansion away.
+inline constexpr std::size_t kMemoryListPreviewChars = 240;
+
 /// Ceiling on the JSON a finished tool may retain for its structured renderer.
 /// Transcripts live for the whole session, so a runaway payload must not be
 /// held twice; past this size the tool falls back to plain-text rendering.
@@ -543,6 +549,8 @@ enum class ToolPresentationKind {
     WebFetch,
     Todo,
     Review,
+    Memory,
+    Question,
     Task,
     Generic,
 };
@@ -565,6 +573,8 @@ ToolPresentationKind tool_presentation_kind(std::string_view name) {
     if (name == kFetchUrl) return Kind::WebFetch;
     if (name == kWriteTodos) return Kind::Todo;
     if (name == kReview) return Kind::Review;
+    if (name == kMemory) return Kind::Memory;
+    if (name == kAskUserQuestion) return Kind::Question;
     if (is_subagent_tool(name)) return Kind::Task;
     return Kind::Generic;
 }
@@ -581,6 +591,8 @@ bool tool_result_needs_raw_payload(std::string_view name) {
         case ToolPresentationKind::WebFetch:
         case ToolPresentationKind::Todo:
         case ToolPresentationKind::Review:
+        case ToolPresentationKind::Memory:
+        case ToolPresentationKind::Question:
             return true;
         case ToolPresentationKind::Read:
         case ToolPresentationKind::Write:
@@ -619,284 +631,7 @@ std::string join_with(const std::vector<std::string>& parts,
     return joined;
 }
 
-// ============================================================================
-// Tool Result Parsing
-// ============================================================================
-
-/// Parses `payload` as a JSON object and hands it to `fn`. Returns false when
-/// the payload is absent or not an object, which is the normal case for tools
-/// that report plain-text errors.
-template <typename Fn>
-bool with_json_object(std::string_view payload, Fn&& fn) {
-    if (payload.empty()) return false;
-    simdjson::dom::parser parser;
-    simdjson::dom::element document;
-    if (parser.parse(payload).get(document) != simdjson::SUCCESS) return false;
-    simdjson::dom::object object;
-    if (document.get(object) != simdjson::SUCCESS) return false;
-    fn(object);
-    return true;
-}
-
-struct SearchResultRow {
-    std::string  path;
-    std::int64_t line = 0;
-    std::string  text;
-};
-
-struct PathResultRow {
-    std::string_view marker;  // Points at a string literal.
-    std::string      path;
-};
-
-struct WebResultRow {
-    std::string title;
-    std::string url;
-    std::string snippet;
-};
-
-struct TodoRow {
-    std::string content;
-    std::string status;
-};
-
-struct ReviewFindingRow {
-    std::string  title;
-    std::string  severity;
-    std::string  category;
-    std::string  path;
-    std::int64_t line_start = 0;
-    std::int64_t line_end = 0;
-    std::string  body;
-    std::string  rationale;
-};
-
-struct UnreviewedUnit {
-    std::string unit;
-    std::string reason;
-};
-
-/// The `review` tool's JSON, shaped for reading: blocking findings first,
-/// paths relative to the reviewed repository.
-struct ReviewResult {
-    std::vector<ReviewFindingRow> blocking;
-    std::vector<ReviewFindingRow> follow_ups;
-    std::vector<UnreviewedUnit>   unreviewed;
-    std::string                   error;
-    bool                          empty = false;
-    bool                          incomplete = false;
-};
-
-struct FetchMetadata {
-    std::string  url;
-    std::string  content_type;
-    std::string  title;
-    std::int64_t status_code = 0;
-    bool         truncated = false;
-    bool         parsed = false;
-};
-
-bool parse_search_rows(std::string_view payload, std::vector<SearchResultRow>& out) {
-    bool found = false;
-    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        simdjson::dom::array matches;
-        if (object["matches"].get_array().get(matches) != simdjson::SUCCESS) return;
-        found = true;
-        out.reserve(matches.size());
-        for (const auto item : matches) {
-            simdjson::dom::object match;
-            if (item.get_object().get(match) != simdjson::SUCCESS) continue;
-            const auto path = core::utils::json::first_string_field(match, {"path"});
-            if (!path) continue;
-            const auto text = core::utils::json::first_string_field(match, {"text"});
-            std::int64_t line = 0;
-            core::utils::json::ignore_error(match["line"].get(line));
-            out.push_back({
-                .path = *path,
-                .line = line,
-                .text = text.value_or(std::string{}),
-            });
-        }
-    });
-    return parsed && found;
-}
-
-bool parse_path_rows(std::string_view payload, std::vector<PathResultRow>& out) {
-    bool found = false;
-    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        simdjson::dom::array files;
-        if (object["files"].get_array().get(files) == simdjson::SUCCESS) {
-            found = true;
-            out.reserve(files.size());
-            for (const auto item : files) {
-                std::string_view path;
-                if (item.get(path) == simdjson::SUCCESS) {
-                    out.push_back({.marker = "·", .path = std::string(path)});
-                }
-            }
-            return;
-        }
-
-        simdjson::dom::array entries;
-        if (object["entries"].get_array().get(entries) != simdjson::SUCCESS) return;
-        found = true;
-        out.reserve(entries.size());
-        for (const auto item : entries) {
-            simdjson::dom::object entry;
-            if (item.get_object().get(entry) != simdjson::SUCCESS) continue;
-            const auto name = core::utils::json::first_string_field(entry, {"name"});
-            if (!name) continue;
-            const auto type = core::utils::json::first_string_field(entry, {"type"});
-            out.push_back({
-                .marker = type && *type == "dir" ? "▸" : "·",
-                .path = *name,
-            });
-        }
-    });
-    return parsed && found;
-}
-
-bool parse_web_rows(std::string_view payload, std::vector<WebResultRow>& out) {
-    bool found = false;
-    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        simdjson::dom::array results;
-        if (object["results"].get_array().get(results) != simdjson::SUCCESS) return;
-        found = true;
-        out.reserve(results.size());
-        for (const auto item : results) {
-            simdjson::dom::object result;
-            if (item.get_object().get(result) != simdjson::SUCCESS) continue;
-            out.push_back({
-                .title = core::utils::json::first_string_field(result, {"title"})
-                             .value_or(std::string{"Untitled"}),
-                .url = core::utils::json::first_string_field(result, {"url"})
-                           .value_or(std::string{}),
-                .snippet = core::utils::json::first_string_field(result, {"snippet", "content"})
-                               .value_or(std::string{}),
-            });
-        }
-    });
-    return parsed && found;
-}
-
-bool parse_todo_rows(std::string_view payload, std::vector<TodoRow>& out) {
-    bool found = false;
-    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        simdjson::dom::array array;
-        if (object["todos"].get_array().get(array) != simdjson::SUCCESS) return;
-        found = true;
-        out.reserve(array.size());
-        for (const auto item : array) {
-            simdjson::dom::object todo;
-            if (item.get_object().get(todo) != simdjson::SUCCESS) continue;
-            const auto content = core::utils::json::first_string_field(todo, {"content"});
-            if (!content) continue;
-            const auto status = core::utils::json::first_string_field(todo, {"status"});
-            out.push_back({
-                .content = *content,
-                .status = status.value_or(std::string{"pending"}),
-            });
-        }
-    });
-    return parsed && found;
-}
-
-/// "/repo/src/a.cpp" -> "src/a.cpp" when the finding lies inside `repository`.
-std::string repository_relative_path(std::string path, std::string_view repository) {
-    while (repository.size() > 1 && repository.back() == '/') repository.remove_suffix(1);
-    if (!repository.empty()
-        && path.size() > repository.size() + 1
-        && path.starts_with(repository)
-        && path[repository.size()] == '/') {
-        path.erase(0, repository.size() + 1);
-    }
-    return path;
-}
-
-/// Drops the reviewer's "[P1] " priority tag: the card shows the severity.
-std::string review_title_without_priority(std::string title) {
-    if (title.size() > 5 && title[0] == '[' && (title[1] == 'P' || title[1] == 'p')
-        && title[2] >= '0' && title[2] <= '9' && title[3] == ']' && title[4] == ' ') {
-        title.erase(0, 5);
-    }
-    return title;
-}
-
-bool parse_review_result(std::string_view payload, ReviewResult& out) {
-    bool found = false;
-    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        simdjson::dom::array blocking;
-        simdjson::dom::array follow_ups;
-        const bool has_lists =
-            object["blocking"].get_array().get(blocking) == simdjson::SUCCESS
-            && object["follow_ups"].get_array().get(follow_ups) == simdjson::SUCCESS;
-        out.error = core::utils::json::first_string_field(object, {"error"})
-                        .value_or(std::string{});
-        // A failed review with nothing found carries only `ok` and `error`.
-        if (!has_lists && out.error.empty()) return;
-        found = true;
-        core::utils::json::ignore_error(object["empty"].get(out.empty));
-        core::utils::json::ignore_error(object["incomplete"].get(out.incomplete));
-        const std::string repository =
-            core::utils::json::first_string_field(object, {"repository"})
-                .value_or(std::string{});
-        auto read_findings = [&](simdjson::dom::array array,
-                                 std::vector<ReviewFindingRow>& rows) {
-            rows.reserve(array.size());
-            for (const auto item : array) {
-                simdjson::dom::object finding;
-                if (item.get_object().get(finding) != simdjson::SUCCESS) continue;
-                auto field = [&](const char* name) {
-                    return core::utils::json::first_string_field(finding, {name})
-                        .value_or(std::string{});
-                };
-                ReviewFindingRow row{
-                    .title = review_title_without_priority(field("title")),
-                    .severity = field("severity"),
-                    .category = field("category"),
-                    .path = repository_relative_path(field("path"), repository),
-                    .body = field("body"),
-                    .rationale = field("rationale"),
-                };
-                core::utils::json::ignore_error(finding["line_start"].get(row.line_start));
-                core::utils::json::ignore_error(finding["line_end"].get(row.line_end));
-                rows.push_back(std::move(row));
-            }
-        };
-        if (has_lists) {
-            read_findings(blocking, out.blocking);
-            read_findings(follow_ups, out.follow_ups);
-        }
-        simdjson::dom::array unreviewed;
-        if (object["unreviewed"].get_array().get(unreviewed) == simdjson::SUCCESS) {
-            for (const auto item : unreviewed) {
-                simdjson::dom::object unit;
-                if (item.get_object().get(unit) != simdjson::SUCCESS) continue;
-                out.unreviewed.push_back({
-                    .unit = core::utils::json::first_string_field(unit, {"unit"})
-                                .value_or(std::string{}),
-                    .reason = core::utils::json::first_string_field(unit, {"reason"})
-                                  .value_or(std::string{}),
-                });
-            }
-        }
-    });
-    return parsed && found;
-}
-
-bool parse_fetch_metadata(std::string_view payload, FetchMetadata& out) {
-    out.parsed = with_json_object(payload, [&](simdjson::dom::object object) {
-        out.url = core::utils::json::first_string_field(object, {"url"})
-                      .value_or(std::string{});
-        out.content_type = core::utils::json::first_string_field(object, {"content_type"})
-                               .value_or(std::string{});
-        out.title = core::utils::json::first_string_field(object, {"title"})
-                        .value_or(std::string{});
-        core::utils::json::ignore_error(object["status_code"].get(out.status_code));
-        core::utils::json::ignore_error(object["truncated"].get(out.truncated));
-    });
-    return out.parsed;
-}
+using namespace tool_results;
 
 /// First line requested by a `read` call, so the transcript's gutter
 /// matches the file's real line numbers. Defaults to 1.
@@ -963,6 +698,10 @@ struct ToolResultView {
     std::vector<TodoRow>         todo_rows;
     FetchMetadata                fetch;
     ReviewResult                 review;
+    MemoryResult                 memory;
+    QuestionAnswers              answers;
+    /// Any other JSON result, laid out as labelled fields.
+    std::vector<JsonFieldRow>    json_fields;
     std::size_t                  read_line_count = 0;
     std::int64_t                 read_start_line = 1;
     std::optional<std::string>    read_description;
@@ -1025,9 +764,19 @@ ToolResultView build_tool_result_view(const ToolActivity& tool) {
         case ToolPresentationKind::Review:
             view.payload_parsed = parse_review_result(payload, view.review);
             break;
+        case ToolPresentationKind::Memory:
+            // `status` and `clean` have no card of their own; their fields do.
+            view.payload_parsed = parse_memory_result(payload, view.memory)
+                || parse_json_fields(payload, view.json_fields);
+            break;
+        case ToolPresentationKind::Question:
+            view.payload_parsed = parse_question_answers(payload, tool.args, view.answers);
+            break;
+        case ToolPresentationKind::Generic:
+            view.payload_parsed = parse_json_fields(payload, view.json_fields);
+            break;
         case ToolPresentationKind::Shell:
         case ToolPresentationKind::Task:
-        case ToolPresentationKind::Generic:
             break;
     }
     return view;
@@ -1053,8 +802,10 @@ std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& v
 
     switch (view.kind) {
         case ToolPresentationKind::Read:
-            return succeeded ? count_label(view.read_line_count, "line", "lines")
-                             : std::string{};
+            // An excerpt's line count is the excerpt's, not the file's.
+            return succeeded && tool.result.omitted_chars == 0
+                ? count_label(view.read_line_count, "line", "lines")
+                : std::string{};
         case ToolPresentationKind::Write:
         case ToolPresentationKind::Edit:
             if (succeeded && (view.diff_additions != 0 || view.diff_deletions != 0)) {
@@ -1104,6 +855,21 @@ std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& v
             if (review.incomplete) parts.emplace_back("incomplete");
             return join_with(parts, " · ");
         }
+        case ToolPresentationKind::Memory: {
+            if (!structured || !view.json_fields.empty()) return {};
+            const auto& memory = view.memory;
+            if (!memory.listing) return memory.outcome;
+            const auto shown = memory.entries.size();
+            if (std::cmp_greater(memory.total, shown)) {
+                return std::format("{} of {} entries", shown, memory.total);
+            }
+            return count_label(shown, "entry", "entries");
+        }
+        case ToolPresentationKind::Question:
+            if (!structured) return {};
+            return view.answers.answers.empty()
+                ? std::string("dismissed")
+                : count_label(view.answers.answers.size(), "answer", "answers");
         case ToolPresentationKind::Task:
             return tool.subagents.empty()
                 ? std::string{}
@@ -1433,6 +1199,57 @@ Element render_fetch_result(const ToolActivity& tool,
     return vbox(std::move(rows)) | xflex;
 }
 
+/// One entry of a structured card: a marked headline, a muted meta line, the
+/// text itself, and an optional dimmed note. Review findings, memory facts,
+/// and question answers are all drawn through it, so they read alike.
+struct DetailItem {
+    std::string_view marker;
+    Color            marker_color = ColorTextMuted;
+    std::string      title;
+    std::string      meta;
+    std::string      body;
+    Color            body_color = ColorTextSecondary;
+    std::string      note;
+};
+
+Element indented_text(const std::string& content, Color color) {
+    return hbox({
+        ftxui::text("    "),
+        render_text_lines_preserving_newlines(content, color) | xflex,
+    }) | xflex;
+}
+
+void append_detail_item(std::vector<Element>& rows, const DetailItem& item) {
+    // The marker heads whichever line comes first, so an item without a
+    // title still lines up with its neighbours.
+    const bool titled = !item.title.empty();
+    Element headline = titled
+        ? paragraph(item.title) | ftxui::color(ColorText) | ftxui::bold
+        : paragraph(item.meta) | ftxui::color(ColorYellowDark);
+    rows.push_back(
+        hbox({
+            ftxui::text(std::format("  {} ", item.marker)) | ftxui::color(item.marker_color),
+            std::move(headline) | xflex,
+        }) | xflex);
+    if (titled && !item.meta.empty()) {
+        rows.push_back(hbox({
+            ftxui::text("    "),
+            paragraph(item.meta) | ftxui::color(ColorYellowDark) | xflex,
+        }) | xflex);
+    }
+    if (!item.body.empty()) rows.push_back(indented_text(item.body, item.body_color));
+    if (!item.note.empty()) rows.push_back(indented_text(item.note, ColorTextMuted) | dim);
+}
+
+void append_section_heading(std::vector<Element>& rows,
+                            std::string_view heading,
+                            std::size_t count,
+                            Color color) {
+    if (!rows.empty()) rows.push_back(ftxui::text(""));
+    rows.push_back(
+        ftxui::text(std::format("{} ({})", heading, count)) | ftxui::color(color) | ftxui::bold);
+}
+
 /// Colour of a finding's marker: what must be fixed reads red, what may wait
 /// reads amber, and polish stays quiet.
 Color review_severity_color(std::string_view severity) {
@@ -1441,11 +1258,16 @@ Color review_severity_color(std::string_view severity) {
     return ColorTextMuted;
 }
 
-Element indented_paragraph(const std::string& content, Color color) {
-    return hbox({
-        ftxui::text("    "),
-        render_text_lines_preserving_newlines(content, color) | xflex,
-    }) | xflex;
+std::string finding_location(const ReviewFindingRow& finding) {
+    if (finding.path.empty()) return {};
+    std::string location = finding.path;
+    if (finding.line_start > 0) {
+        location += std::format(":{}", finding.line_start);
+        if (finding.line_end > finding.line_start) {
+            location += std::format("-{}", finding.line_end);
+        }
+    }
+    return location;
 }
 
 void append_review_findings(std::vector<Element>& rows,
@@ -1453,48 +1275,26 @@ void append_review_findings(std::vector<Element>& rows,
                             Color heading_color,
                             const std::vector<ReviewFindingRow>& findings) {
     if (findings.empty()) return;
-    if (!rows.empty()) rows.push_back(ftxui::text(""));
-    rows.push_back(
-        ftxui::text(std::format("{} ({})", heading, findings.size()))
-        | ftxui::color(heading_color)
-        | ftxui::bold);
+    append_section_heading(rows, heading, findings.size(), heading_color);
     for (std::size_t i = 0; i < findings.size(); ++i) {
         const auto& finding = findings[i];
         if (i > 0) rows.push_back(ftxui::text(""));
-        rows.push_back(
-            hbox({
-                ftxui::text("  ● ") | ftxui::color(review_severity_color(finding.severity)),
-                paragraph(finding.title) | ftxui::color(ColorText) | ftxui::bold | xflex,
-            }) | xflex);
-
         std::vector<std::string> meta;
         if (!finding.severity.empty()) meta.push_back(finding.severity);
         if (!finding.category.empty() && finding.category != "unset") {
             meta.push_back(finding.category);
         }
-        if (!finding.path.empty()) {
-            std::string location = finding.path;
-            if (finding.line_start > 0) {
-                location += std::format(":{}", finding.line_start);
-                if (finding.line_end > finding.line_start) {
-                    location += std::format("-{}", finding.line_end);
-                }
-            }
+        if (auto location = finding_location(finding); !location.empty()) {
             meta.push_back(std::move(location));
         }
-        if (!meta.empty()) {
-            rows.push_back(hbox({
-                ftxui::text("    "),
-                paragraph(join_with(meta, " · ")) | ftxui::color(ColorYellowDark) | xflex,
-            }) | xflex);
-        }
-        if (!finding.body.empty()) {
-            rows.push_back(indented_paragraph(finding.body, ColorTextSecondary));
-        }
-        if (!finding.rationale.empty()) {
-            rows.push_back(
-                indented_paragraph("Why: " + finding.rationale, ColorTextMuted) | dim);
-        }
+        append_detail_item(rows, {
+            .marker = "●",
+            .marker_color = review_severity_color(finding.severity),
+            .title = finding.title,
+            .meta = join_with(meta, " · "),
+            .body = finding.body,
+            .note = finding.rationale.empty() ? std::string{} : "Why: " + finding.rationale,
+        });
     }
 }
 
@@ -1516,15 +1316,13 @@ Element render_review_result(const ReviewResult& review) {
     append_review_findings(rows, "Blocking", ColorToolFail, review.blocking);
     append_review_findings(rows, "Follow-ups", ColorYellowDark, review.follow_ups);
     if (!review.unreviewed.empty()) {
-        rows.push_back(ftxui::text(""));
-        rows.push_back(ftxui::text("Not reviewed") | ftxui::color(ColorWarn) | ftxui::bold);
+        append_section_heading(rows, "Not reviewed", review.unreviewed.size(), ColorWarn);
         for (const auto& unit : review.unreviewed) {
-            rows.push_back(hbox({
-                ftxui::text("  ⊘ ") | ftxui::color(ColorWarn),
-                paragraph(unit.reason.empty() ? unit.unit : unit.unit + " — " + unit.reason)
-                    | ftxui::color(ColorTextSecondary)
-                    | xflex,
-            }) | xflex);
+            append_detail_item(rows, {
+                .marker = "⊘",
+                .marker_color = ColorWarn,
+                .meta = unit.reason.empty() ? unit.unit : unit.unit + " — " + unit.reason,
+            });
         }
     } else if (review.incomplete) {
         rows.push_back(ftxui::text(""));
@@ -1532,6 +1330,95 @@ Element render_review_result(const ReviewResult& review) {
             ftxui::text("Some files could not be reviewed.") | ftxui::color(ColorWarn));
     }
     return vbox(std::move(rows)) | xflex;
+}
+
+DetailItem memory_detail_item(const MemoryEntryRow& entry, std::size_t max_chars) {
+    std::vector<std::string> meta;
+    if (!entry.id.empty()) meta.push_back(entry.id);
+    if (!entry.scope.empty()) meta.push_back(entry.scope);
+    return {
+        .marker = "●",
+        .marker_color = ColorYellowDark,
+        .meta = join_with(meta, " · "),
+        .body = max_chars == 0 ? entry.content : truncate_preview(entry.content, max_chars),
+    };
+}
+
+Element render_memory_result(const MemoryResult& memory,
+                             const ConversationRenderOptions& options) {
+    if (!memory.listing) {
+        // A saved or revised fact is short and is the whole point of the
+        // call, so it is shown in full.
+        std::vector<Element> rows;
+        for (const auto& entry : memory.entries) {
+            append_detail_item(rows, memory_detail_item(entry, 0));
+        }
+        if (rows.empty()) return placeholder_text(memory.outcome);
+        return vbox(std::move(rows)) | xflex;
+    }
+    if (memory.entries.empty()) return placeholder_text("No memories");
+    const std::size_t preview_chars =
+        options.expand_tool_results ? 0 : kMemoryListPreviewChars;
+    return render_limited_rows(
+        memory.entries.size(), options, "entries",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            append_detail_item(rows, memory_detail_item(memory.entries[i], preview_chars));
+        });
+}
+
+Element render_question_answers(const QuestionAnswers& answers) {
+    std::vector<Element> rows;
+    for (const auto& answer : answers.answers) {
+        const bool headed = !answer.header.empty();
+        append_detail_item(rows, {
+            .marker = "?",
+            .marker_color = ColorQuestionCyan,
+            .title = headed ? answer.header : answer.question,
+            .meta = headed ? answer.question : std::string{},
+            .body = "→ " + answer.answer,
+            .body_color = ColorText,
+        });
+    }
+    if (rows.empty()) {
+        return placeholder_text(answers.note.empty()
+                                    ? std::string_view{"Dismissed without an answer."}
+                                    : std::string_view{answers.note});
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
+/// Labels line up in one column; a label longer than the cap just pushes its
+/// own value right rather than widening every row.
+Element render_json_fields(const std::vector<JsonFieldRow>& fields,
+                           const ConversationRenderOptions& options) {
+    constexpr int kMaxLabelColumn = 28;
+    int label_column = 0;
+    for (const auto& field : fields) {
+        if (field.value.empty()) continue;
+        label_column = std::max(label_column,
+                                field.depth * 2 + ftxui::string_width(field.label));
+    }
+    label_column = std::min(label_column, kMaxLabelColumn);
+
+    return render_limited_rows(
+        fields.size(), options, "fields",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            const auto& field = fields[i];
+            std::string label = std::string(static_cast<std::size_t>(field.depth) * 2, ' ')
+                + field.label;
+            if (field.value.empty()) {
+                rows.push_back(ftxui::text(std::move(label))
+                               | ftxui::color(ColorYellowDark)
+                               | ftxui::bold);
+                return;
+            }
+            const int padding = std::max(0, label_column - ftxui::string_width(label));
+            label += std::string(static_cast<std::size_t>(padding) + 2, ' ');
+            rows.push_back(hbox({
+                ftxui::text(std::move(label)) | ftxui::color(ColorTextMuted),
+                render_text_lines_preserving_newlines(field.value, ColorTextSecondary) | xflex,
+            }) | xflex);
+        });
 }
 
 Element render_tool_header(const ToolActivity& tool,
@@ -1597,6 +1484,10 @@ Element render_tool_header(const ToolActivity& tool,
         tool.status != ToolActivity::Status::Executing) {
         trailing.push_back(tool_result_metric(tool, view));
     }
+    if (tool.result.omitted_chars != 0) {
+        trailing.push_back(
+            core::agent::tool_output_history::describe_omission(tool.result.omitted_chars));
+    }
     if (!expanded && tool.diff_preview.total_line_count > kToolDiffAutoExpandMaxLines) {
         trailing.push_back(std::format("{} diff lines", tool.diff_preview.total_line_count));
     }
@@ -1655,28 +1546,46 @@ Element render_tool_result(const ToolActivity& tool,
     // Specialized renderers assume a well-formed success payload. Anything else
     // — failed, denied, cancelled mid-write — falls back to plain text so a
     // partial or non-JSON body is shown verbatim instead of as "No results".
+    // A list renderer is only trusted with a payload it parsed: an empty one
+    // would claim "No matches" for output it simply could not read.
     if (tool.status == ToolActivity::Status::Succeeded) {
+        const bool parsed = view.payload_parsed;
         switch (view.kind) {
             case ToolPresentationKind::Read:
+                // An excerpt's second half would be numbered from the wrong
+                // line, so it reads as plain text instead.
+                if (tool.result.omitted_chars != 0) break;
                 return render_numbered_tool_text(
                     tool.result.summary, view.read_start_line, options);
             case ToolPresentationKind::Grep:
-                return render_search_results(view, options);
+                if (parsed) return render_search_results(view, options);
+                break;
             case ToolPresentationKind::Files:
             case ToolPresentationKind::Directory:
-                return render_path_results(view, options);
+                if (parsed) return render_path_results(view, options);
+                break;
             case ToolPresentationKind::WebSearch:
-                return render_web_results(view, options);
+                if (parsed) return render_web_results(view, options);
+                break;
             case ToolPresentationKind::WebFetch:
                 return render_fetch_result(tool, view, options);
             case ToolPresentationKind::Todo:
                 return render_todo_results(view);
+            case ToolPresentationKind::Memory:
+                if (!view.json_fields.empty()) return render_json_fields(view.json_fields, options);
+                if (parsed) return render_memory_result(view.memory, options);
+                break;
+            case ToolPresentationKind::Question:
+                if (parsed) return render_question_answers(view.answers);
+                break;
+            case ToolPresentationKind::Generic:
+                if (parsed) return render_json_fields(view.json_fields, options);
+                break;
             case ToolPresentationKind::Review:
             case ToolPresentationKind::Write:
             case ToolPresentationKind::Edit:
             case ToolPresentationKind::Shell:
             case ToolPresentationKind::Task:
-            case ToolPresentationKind::Generic:
                 break;
         }
     }
@@ -2676,13 +2585,15 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
         return;
     }
 
-    if (const auto output = core::utils::json::first_string_field(object, {"output"})) {
+    // MCP servers answer with `result`.
+    if (const auto output = core::utils::json::first_string_field(object, {"output", "result"})) {
         tool.status = ToolActivity::Status::Succeeded;
         set_result_summary(output->empty() ? std::string("Done") : *output);
         return;
     }
 
-    if (const auto content = core::utils::json::first_string_field(object, {"content"})) {
+    // `extract` is what history kept of a page it cut down to the relevant parts.
+    if (const auto content = core::utils::json::first_string_field(object, {"content", "extract"})) {
         tool.status = ToolActivity::Status::Succeeded;
         set_result_summary(content->empty() ? std::string("Done") : *content);
         return;
@@ -2697,7 +2608,10 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
     bool success = false;
     if (object["success"].get(success) == simdjson::SUCCESS) {
         tool.status = success ? ToolActivity::Status::Succeeded : ToolActivity::Status::Failed;
-        if (success
+        // An excerpt's diff or previous content has a hole in it; the preview
+        // built from the call's arguments stays instead.
+        const bool whole = tool.result.omitted_chars == 0;
+        if (success && whole
             && (core::tools::names::is_replace_tool(tool.name)
                 || tool.name == core::tools::names::kSearchReplace)) {
             if (const auto diff = core::utils::json::first_string_field(object, {"diff"})) {
@@ -2707,7 +2621,7 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
                 }
             }
         }
-        if (success
+        if (success && whole
             && core::tools::names::canonical_alias(tool.name) == core::tools::names::kWriteFile) {
             refresh_write_file_diff(tool, object);
         }
@@ -2723,6 +2637,15 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
 
 void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
     tool.result.clear();
+    // An oversized result reaches the transcript as the history's
+    // head-and-tail envelope. Rebuilding the tool's own shape lets every
+    // renderer below draw it as usual, with the gap marked.
+    const auto excerpt =
+        core::agent::tool_output_history::reassemble_truncated_output(result_payload);
+    if (excerpt) {
+        result_payload = excerpt->payload;
+        tool.result.omitted_chars = excerpt->omitted_chars;
+    }
     apply_tool_result_summary(tool, result_payload);
 
     // Structured renderers (grep, file/dir listings, web, plan, fetch) need

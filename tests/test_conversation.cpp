@@ -18,6 +18,7 @@
 
 #include "tui/Constants.hpp"
 #include "tui/Conversation.hpp"
+#include "core/agent/ToolOutputHistory.hpp"
 #include "tui/RewindPicker.hpp"
 #include "tui/TuiTheme.hpp"
 
@@ -31,6 +32,7 @@
 #include <string>
 #if !defined(_WIN32)
 #include <ctime>
+#include <format>
 #endif
 
 using namespace tui;
@@ -1100,19 +1102,37 @@ TEST_CASE("tool presentation renders todos as a checklist",
     REQUIRE_THAT(expanded, ContainsSubstring("●"));
 }
 
+namespace {
+
+/// A finished tool's card as the transcript draws it: collapsed (header only)
+/// and expanded (header and body).
+struct RenderedToolCard {
+    std::string compact;
+    std::string expanded;
+};
+
+RenderedToolCard render_tool_card(std::string_view name,
+                                  std::string_view args,
+                                  std::string_view payload) {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("card-1", std::string(name), std::string(args), "");
+    apply_tool_result(tool, payload);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+    return {
+        .compact = render_panel_text(messages),
+        .expanded = render_panel_text(
+            messages, ConversationRenderOptions{.expand_tool_results = true}),
+    };
+}
+
+} // namespace
+
 TEST_CASE("tool presentation renders a review as findings rather than JSON",
           "[tui][conversation][render][tool][review]") {
     const auto render_review = [](std::string_view payload) {
-        std::vector<UiMessage> messages;
-        auto msg = make_assistant_message("", "", false);
-        auto tool = make_tool_activity("review-1", "review", "{}", "");
-        apply_tool_result(tool, payload);
-        msg.tools.push_back(std::move(tool));
-        messages.push_back(std::move(msg));
-        return std::pair{
-            render_panel_text(messages),
-            render_panel_text(messages, ConversationRenderOptions{.expand_tool_results = true}),
-        };
+        return render_tool_card("review", "{}", payload);
     };
 
     SECTION("findings are grouped, tagged, and located relative to the repository") {
@@ -1169,6 +1189,146 @@ TEST_CASE("tool presentation renders a review as findings rather than JSON",
         CHECK_THAT(compact, ContainsSubstring("Freed twice."));
         CHECK_THAT(expanded, ContainsSubstring("Not reviewed"));
         CHECK_THAT(expanded, ContainsSubstring("src/b.cpp — transport error"));
+    }
+}
+
+TEST_CASE("tool presentation renders memory calls as facts rather than JSON",
+          "[tui][conversation][render][tool][memory]") {
+    SECTION("a saved fact names what happened and shows the fact") {
+        const auto card = render_tool_card(
+            "memory", R"({"action":"remember"})",
+            R"({"ok":true,"message":"Stored memory {m905}.","entry":{"id":"m905",)"
+            R"("content":"Playlist writes go through MusicDataRequest.","scope":"project"}})");
+        CHECK_THAT(card.compact, ContainsSubstring("Stored memory m905"));
+        CHECK_THAT(card.expanded, ContainsSubstring("m905 · project"));
+        CHECK_THAT(card.expanded, ContainsSubstring("Playlist writes go through MusicDataRequest."));
+        CHECK(card.expanded.find("\"entry\"") == std::string::npos);
+    }
+
+    SECTION("a listing counts the page against the store") {
+        const auto card = render_tool_card(
+            "memory", R"({"action":"list"})",
+            R"({"ok":true,"total":40,"offset":0,"has_more":true,"entries":[)"
+            R"({"id":"m1","content":"First fact.","scope":"project","source":"agent","archived":false},)"
+            R"({"id":"m2","content":"Second fact.","scope":"session","source":"agent","archived":false}]})");
+        CHECK_THAT(card.compact, ContainsSubstring("2 of 40 entries"));
+        CHECK_THAT(card.expanded, ContainsSubstring("m2 · session"));
+        CHECK_THAT(card.expanded, ContainsSubstring("Second fact."));
+    }
+
+    SECTION("status reads as labelled fields") {
+        const auto card = render_tool_card(
+            "memory", R"({"action":"status"})",
+            R"({"ok":true,"enabled":true,"auto_capture":false,"path":"/m.json"})");
+        CHECK_THAT(card.expanded, ContainsSubstring("Auto capture"));
+        CHECK_THAT(card.expanded, ContainsSubstring("no"));
+        CHECK(card.expanded.find("auto_capture") == std::string::npos);
+    }
+}
+
+TEST_CASE("tool presentation pairs each answer with the question it answers",
+          "[tui][conversation][render][tool][question]") {
+    const auto card = render_tool_card(
+        "AskUserQuestion",
+        R"({"questions":[{"id":"owner","header":"Turn owner","question":"Which root owns the turn?",)"
+        R"("options":[{"label":"A"},{"label":"B"}]},{"question":"Ship it?","options":[{"label":"Yes"},{"label":"No"}]}]})",
+        R"({"answers": {"owner": "leave that singleton for now", "Ship it?": "Yes"}})");
+    CHECK_THAT(card.compact, ContainsSubstring("2 answers"));
+    CHECK_THAT(card.expanded, ContainsSubstring("Turn owner"));
+    CHECK_THAT(card.expanded, ContainsSubstring("Which root owns the turn?"));
+    CHECK_THAT(card.expanded, ContainsSubstring("→ leave that singleton for now"));
+    CHECK_THAT(card.expanded, ContainsSubstring("→ Yes"));
+    CHECK(card.expanded.find("\"answers\"") == std::string::npos);
+
+    const auto dismissed = render_tool_card(
+        "AskUserQuestion", "{}",
+        R"({"answers": {}, "note": "User dismissed the question without answering."})");
+    CHECK_THAT(dismissed.compact, ContainsSubstring("dismissed"));
+    CHECK_THAT(dismissed.expanded, ContainsSubstring("User dismissed the question"));
+}
+
+TEST_CASE("tool presentation lays out any other JSON result as labelled fields",
+          "[tui][conversation][render][tool]") {
+    SECTION("a flat object") {
+        const auto card = render_tool_card(
+            "get_workspace_config", "{}",
+            R"({"primary_directory":"/repo","enforcement_enabled":true,)"
+            R"("additional_directories":["/a","/b"],"workspace_version":2})");
+        CHECK_THAT(card.expanded, ContainsSubstring("Primary directory"));
+        CHECK_THAT(card.expanded, ContainsSubstring("/repo"));
+        CHECK_THAT(card.expanded, ContainsSubstring("Enforcement enabled"));
+        CHECK_THAT(card.expanded, ContainsSubstring("yes"));
+        CHECK_THAT(card.expanded, ContainsSubstring("/b"));
+        CHECK(card.expanded.find("primary_directory") == std::string::npos);
+    }
+
+    SECTION("an MCP result carrying JSON in a string is opened") {
+        const auto card = render_tool_card(
+            "BuildProject", "{}",
+            R"({"result":"{\"buildResult\":\"The project built successfully.\",\"errors\":[],\"elapsedTime\":2.1}"})");
+        CHECK_THAT(card.expanded, ContainsSubstring("Build result"));
+        CHECK_THAT(card.expanded, ContainsSubstring("The project built successfully."));
+        CHECK(card.expanded.find("buildResult") == std::string::npos);
+        CHECK(card.expanded.find("\\\"") == std::string::npos);
+    }
+
+    SECTION("plain text stays plain text") {
+        const auto card = render_tool_card("some_mcp_tool", "{}", "just words");
+        CHECK_THAT(card.expanded, ContainsSubstring("just words"));
+    }
+}
+
+TEST_CASE("tool presentation shows a result history cut down as the tool's own output",
+          "[tui][conversation][render][tool][excerpt]") {
+    namespace history = core::agent::tool_output_history;
+    const auto cut = [](std::string_view tool, std::string_view raw) {
+        return history::clamp_for_history(
+            tool, raw, history::Limits{.max_chars = 600, .head_chars = 400, .tail_chars = 200});
+    };
+
+    SECTION("a command's output keeps its exit code, its ends, and says what is missing") {
+        const std::string raw = R"({"output":"BUILD START\n)" + std::string(5000, '.')
+            + R"(\nBUILD FAILED\n","exit_code":65})";
+        const auto card = render_tool_card(
+            "run_terminal_command", R"({"command":"make"})", cut("run_terminal_command", raw));
+        CHECK_THAT(card.compact, ContainsSubstring("exit 65"));
+        CHECK_THAT(card.compact, ContainsSubstring("KB omitted"));
+        CHECK_THAT(card.expanded, ContainsSubstring("BUILD START"));
+        CHECK_THAT(card.expanded, ContainsSubstring("BUILD FAILED"));
+        CHECK(card.expanded.find("digest_fnv1a64") == std::string::npos);
+    }
+
+    SECTION("a search keeps the matches it still has instead of claiming none") {
+        std::string raw = R"({"matches":[)";
+        for (int i = 0; i < 100; ++i) {
+            if (i != 0) raw += ',';
+            raw += std::format(R"({{"path":"src/w.cpp","line":{},"text":"Widget w{};"}})", i + 1, i);
+        }
+        raw += "]}";
+        const auto card = render_tool_card("grep_search", R"({"pattern":"Widget"})", cut("grep_search", raw));
+        CHECK_THAT(card.compact, ContainsSubstring("matches · "));
+        CHECK_THAT(card.compact, ContainsSubstring("omitted"));
+        CHECK_THAT(card.expanded, ContainsSubstring("Widget w0;"));
+        CHECK(card.expanded.find("No matches") == std::string::npos);
+    }
+
+    SECTION("the word \"error\" in an output does not fail the call, a root error does") {
+        const std::string ok = R"({"output":"log said \"error\": none\n)" + std::string(5000, '.')
+            + R"(\ndone\n","exit_code":0})";
+        const auto passed = render_tool_card("python", "{}", cut("python", ok));
+        CHECK_THAT(passed.compact, ContainsSubstring("✓"));
+        CHECK_THAT(passed.expanded, ContainsSubstring("log said"));
+        CHECK(passed.expanded.find("oversized error payload") == std::string::npos);
+
+        const std::string failed = R"({"error":"disk full","detail":")" + std::string(5000, '.') + R"("})";
+        const auto card = render_tool_card("python", "{}", cut("python", failed));
+        CHECK_THAT(card.expanded, ContainsSubstring("disk full"));
+    }
+
+    SECTION("a search whose payload cannot be read is shown, not reported empty") {
+        const auto card = render_tool_card("grep_search", "{}", "grep: unreadable output");
+        CHECK(card.expanded.find("No matches") == std::string::npos);
+        CHECK_THAT(card.expanded, ContainsSubstring("grep: unreadable output"));
     }
 }
 

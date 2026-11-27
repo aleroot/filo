@@ -4,6 +4,7 @@
 #include "core/agent/Agent.hpp"
 #include "core/agent/ToolOutputHistory.hpp"
 #include "core/agent/ToolResultStore.hpp"
+#include "core/agent/TruncatedToolOutput.hpp"
 #include "core/context/SteeringLoader.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/LLMProvider.hpp"
@@ -283,6 +284,120 @@ TEST_CASE("ToolOutputHistory truncates oversized non-error outputs", "[agent][to
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("original_chars":)"));
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("digest_fnv1a64":)"));
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("head":)"));
+}
+
+namespace {
+
+/// Cuts `raw` the way history does, then rebuilds it the way the transcript does.
+std::optional<core::agent::tool_output_history::TruncatedToolOutput> cut_and_reassemble(
+    std::string_view tool, std::string_view raw, std::size_t head, std::size_t tail) {
+    namespace history = core::agent::tool_output_history;
+    const std::string envelope = history::clamp_for_history(
+        tool, raw, history::Limits{.max_chars = head + tail, .head_chars = head, .tail_chars = tail});
+    REQUIRE(envelope.size() < raw.size());
+    return history::reassemble_truncated_output(envelope);
+}
+
+bool parses_as_object(std::string_view json) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{json};
+    simdjson::dom::object object;
+    return parser.parse(padded).get(object) == simdjson::SUCCESS;
+}
+
+} // namespace
+
+TEST_CASE("A truncated result is rebuilt into the tool's own shape",
+          "[agent][tool-history][excerpt]") {
+    namespace history = core::agent::tool_output_history;
+
+    SECTION("a cut inside a top-level string joins head and tail around a marker") {
+        const std::string raw = R"({"output":"first line\n)" + std::string(4000, 'x')
+            + R"(\nlast line\n","exit_code":3})";
+        const auto rebuilt = cut_and_reassemble("python", raw, 200, 100);
+        REQUIRE(rebuilt.has_value());
+        REQUIRE(parses_as_object(rebuilt->payload));
+        CHECK(rebuilt->original_chars == raw.size());
+        CHECK(rebuilt->omitted_chars == raw.size() - 300);
+        const auto output = core::utils::json::first_string_field(rebuilt->payload, {"output"});
+        REQUIRE(output.has_value());
+        CHECK(output->starts_with("first line\n"));
+        CHECK(output->ends_with("\nlast line\n"));
+        CHECK_THAT(*output, Catch::Matchers::ContainsSubstring("KB omitted"));
+        CHECK(core::utils::json::first_int64_field(rebuilt->payload, {"exit_code"}) == 3);
+    }
+
+    SECTION("a cut inside a list keeps the whole elements before it and drops the torn one") {
+        std::string raw = R"({"matches":[)";
+        for (int i = 0; i < 200; ++i) {
+            if (i != 0) raw += ',';
+            raw += std::format(R"({{"path":"src/file_{}.cpp","line":{},"text":"match"}})", i, i);
+        }
+        raw += "]}";
+        const auto rebuilt = cut_and_reassemble("grep_search", raw, 500, 200);
+        REQUIRE(rebuilt.has_value());
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded{rebuilt->payload};
+        simdjson::dom::object object;
+        REQUIRE(parser.parse(padded).get(object) == simdjson::SUCCESS);
+        simdjson::dom::array matches;
+        REQUIRE(object["matches"].get_array().get(matches) == simdjson::SUCCESS);
+        CHECK(matches.size() > 0);
+        CHECK(matches.size() < 200);
+        for (const auto match : matches) {
+            std::string_view path;
+            CHECK(match["path"].get(path) == simdjson::SUCCESS);
+            CHECK(path.find("omitted") == std::string_view::npos);
+        }
+    }
+
+    SECTION("a cut that splits an escape never leaves half of it") {
+        // Every head length lands somewhere different in "\n" and "\u00e9".
+        const std::string raw = R"({"content":")" + [] {
+            std::string body;
+            for (int i = 0; i < 400; ++i) body += R"(ab\n\u00e9\"\\)";
+            return body;
+        }() + R"("})";
+        const auto original = core::utils::json::first_string_field(raw, {"content"});
+        REQUIRE(original.has_value());
+        int joined = 0;
+        int cuts = 0;
+        for (std::size_t head = 12; head < 40; ++head) {
+            for (std::size_t tail = 20; tail < 40; ++tail) {
+                const auto rebuilt = cut_and_reassemble("read", raw, head, tail);
+                REQUIRE(rebuilt.has_value());
+                const auto content = core::utils::json::first_string_field(rebuilt->payload, {"content"});
+                REQUIRE(content.has_value());
+                // What follows the marker is the original's own ending,
+                // never a stray quote or backslash from a split escape.
+                const auto marker_end = content->find(" omitted …]\n");
+                REQUIRE(marker_end != std::string::npos);
+                const std::string ending = content->substr(marker_end + std::string_view(" omitted …]\n").size());
+                INFO("ending: " << ending);
+                CHECK(original->ends_with(ending));
+                ++cuts;
+                if (!ending.empty()) ++joined;
+            }
+        }
+        // A tail that starts inside an escape is still joined, not dropped.
+        CHECK(joined == cuts);
+    }
+
+    SECTION("plain text comes back as text with the gap marked") {
+        const std::string raw = "start\n" + std::string(4000, 'y') + "\nend";
+        const auto rebuilt = cut_and_reassemble("run_terminal_command", raw, 100, 50);
+        REQUIRE(rebuilt.has_value());
+        CHECK(rebuilt->payload.starts_with("start\n"));
+        CHECK(rebuilt->payload.ends_with("\nend"));
+        CHECK_THAT(rebuilt->payload, Catch::Matchers::ContainsSubstring("omitted"));
+    }
+
+    SECTION("anything else is left alone") {
+        CHECK_FALSE(history::reassemble_truncated_output(R"({"output":"short"})"));
+        CHECK_FALSE(history::reassemble_truncated_output("plain text"));
+        CHECK_FALSE(history::reassemble_truncated_output(
+            R"({"truncated":true,"head":"{\"a\":1"})"));
+    }
 }
 
 TEST_CASE("ToolOutputHistory keeps UTF-8 previews valid at byte boundaries",

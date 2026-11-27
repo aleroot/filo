@@ -273,6 +273,7 @@ set(FILO_CORE_SOURCES
     src/tui/RemoteActivityPanel.cpp
     src/tui/StatusFooterLayout.cpp
     src/tui/ReviewCard.cpp
+    src/tui/ToolResultParsing.cpp
     src/tui/UsageDetailsPanel.cpp
     src/tui/WorkspaceDetailsPanel.cpp
     src/tui/AnchoredPopover.cpp
@@ -422,6 +423,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/ScriptToolHost.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
+    src/core/agent/TruncatedToolOutput.cpp
     src/core/verification/Verification.cpp
     src/core/agent/ToolRecovery.cpp
     src/core/agent/ToolResultStore.cpp

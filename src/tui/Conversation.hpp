@@ -43,6 +43,7 @@ struct ToolActivity {
         std::string raw_payload;
         std::optional<int> exit_code;       // Terminal command exit status (when available)
         bool truncated = false;             // True when output was truncated upstream
+        std::size_t omitted_chars = 0;      // Bytes history dropped from an oversized result
 
         [[nodiscard]] bool empty() const noexcept {
             return summary.empty();
@@ -53,6 +54,7 @@ struct ToolActivity {
             raw_payload.clear();
             exit_code.reset();
             truncated = false;
+            omitted_chars = 0;
         }
     };
 

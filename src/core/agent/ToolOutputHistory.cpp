@@ -1,4 +1,5 @@
 #include "ToolOutputHistory.hpp"
+#include "TruncatedToolOutput.hpp"
 
 #include "../context/SteeringLoader.hpp"
 #include "../session/SessionTranscriptReader.hpp"
@@ -2070,23 +2071,24 @@ HistoryOutput prepare_for_history(
     {
         auto object = writer.object();
         if (is_error) {
-            writer.kv_str("error", "Tool output truncated for history (oversized error payload).");
+            writer.kv_str(envelope::kError,
+                          "Tool output truncated for history (oversized error payload).");
         } else {
-            writer.kv_bool("truncated", true);
+            writer.kv_bool(envelope::kTruncated, true);
         }
         writer.comma();
-        writer.kv_str("tool", tool_name);
+        writer.kv_str(envelope::kTool, tool_name);
         writer.comma();
-        writer.kv_num("original_chars", static_cast<int64_t>(raw_output.size()));
+        writer.kv_num(envelope::kOriginalChars, static_cast<int64_t>(raw_output.size()));
         writer.comma();
-        writer.kv_num("kept_chars", static_cast<int64_t>(head.size() + tail.size()));
+        writer.kv_num(envelope::kKeptChars, static_cast<int64_t>(head.size() + tail.size()));
         writer.comma();
-        writer.kv_str("digest_fnv1a64", digest_hex(raw_output));
+        writer.kv_str(envelope::kDigest, digest_hex(raw_output));
         writer.comma();
-        writer.kv_str("head", head);
+        writer.kv_str(envelope::kHead, head);
         if (!tail.empty()) {
             writer.comma();
-            writer.kv_str("tail", tail);
+            writer.kv_str(envelope::kTail, tail);
         }
     }
     std::string preview = std::move(writer).take();
