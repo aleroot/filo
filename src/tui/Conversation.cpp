@@ -542,6 +542,7 @@ enum class ToolPresentationKind {
     WebSearch,
     WebFetch,
     Todo,
+    Review,
     Task,
     Generic,
 };
@@ -563,6 +564,7 @@ ToolPresentationKind tool_presentation_kind(std::string_view name) {
     if (name == kWebSearch) return Kind::WebSearch;
     if (name == kFetchUrl) return Kind::WebFetch;
     if (name == kWriteTodos) return Kind::Todo;
+    if (name == kReview) return Kind::Review;
     if (is_subagent_tool(name)) return Kind::Task;
     return Kind::Generic;
 }
@@ -578,6 +580,7 @@ bool tool_result_needs_raw_payload(std::string_view name) {
         case ToolPresentationKind::WebSearch:
         case ToolPresentationKind::WebFetch:
         case ToolPresentationKind::Todo:
+        case ToolPresentationKind::Review:
             return true;
         case ToolPresentationKind::Read:
         case ToolPresentationKind::Write:
@@ -655,6 +658,33 @@ struct WebResultRow {
 struct TodoRow {
     std::string content;
     std::string status;
+};
+
+struct ReviewFindingRow {
+    std::string  title;
+    std::string  severity;
+    std::string  category;
+    std::string  path;
+    std::int64_t line_start = 0;
+    std::int64_t line_end = 0;
+    std::string  body;
+    std::string  rationale;
+};
+
+struct UnreviewedUnit {
+    std::string unit;
+    std::string reason;
+};
+
+/// The `review` tool's JSON, shaped for reading: blocking findings first,
+/// paths relative to the reviewed repository.
+struct ReviewResult {
+    std::vector<ReviewFindingRow> blocking;
+    std::vector<ReviewFindingRow> follow_ups;
+    std::vector<UnreviewedUnit>   unreviewed;
+    std::string                   error;
+    bool                          empty = false;
+    bool                          incomplete = false;
 };
 
 struct FetchMetadata {
@@ -771,6 +801,89 @@ bool parse_todo_rows(std::string_view payload, std::vector<TodoRow>& out) {
     return parsed && found;
 }
 
+/// "/repo/src/a.cpp" -> "src/a.cpp" when the finding lies inside `repository`.
+std::string repository_relative_path(std::string path, std::string_view repository) {
+    while (repository.size() > 1 && repository.back() == '/') repository.remove_suffix(1);
+    if (!repository.empty()
+        && path.size() > repository.size() + 1
+        && path.starts_with(repository)
+        && path[repository.size()] == '/') {
+        path.erase(0, repository.size() + 1);
+    }
+    return path;
+}
+
+/// Drops the reviewer's "[P1] " priority tag: the card shows the severity.
+std::string review_title_without_priority(std::string title) {
+    if (title.size() > 5 && title[0] == '[' && (title[1] == 'P' || title[1] == 'p')
+        && title[2] >= '0' && title[2] <= '9' && title[3] == ']' && title[4] == ' ') {
+        title.erase(0, 5);
+    }
+    return title;
+}
+
+bool parse_review_result(std::string_view payload, ReviewResult& out) {
+    bool found = false;
+    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        simdjson::dom::array blocking;
+        simdjson::dom::array follow_ups;
+        const bool has_lists =
+            object["blocking"].get_array().get(blocking) == simdjson::SUCCESS
+            && object["follow_ups"].get_array().get(follow_ups) == simdjson::SUCCESS;
+        out.error = core::utils::json::first_string_field(object, {"error"})
+                        .value_or(std::string{});
+        // A failed review with nothing found carries only `ok` and `error`.
+        if (!has_lists && out.error.empty()) return;
+        found = true;
+        core::utils::json::ignore_error(object["empty"].get(out.empty));
+        core::utils::json::ignore_error(object["incomplete"].get(out.incomplete));
+        const std::string repository =
+            core::utils::json::first_string_field(object, {"repository"})
+                .value_or(std::string{});
+        auto read_findings = [&](simdjson::dom::array array,
+                                 std::vector<ReviewFindingRow>& rows) {
+            rows.reserve(array.size());
+            for (const auto item : array) {
+                simdjson::dom::object finding;
+                if (item.get_object().get(finding) != simdjson::SUCCESS) continue;
+                auto field = [&](const char* name) {
+                    return core::utils::json::first_string_field(finding, {name})
+                        .value_or(std::string{});
+                };
+                ReviewFindingRow row{
+                    .title = review_title_without_priority(field("title")),
+                    .severity = field("severity"),
+                    .category = field("category"),
+                    .path = repository_relative_path(field("path"), repository),
+                    .body = field("body"),
+                    .rationale = field("rationale"),
+                };
+                core::utils::json::ignore_error(finding["line_start"].get(row.line_start));
+                core::utils::json::ignore_error(finding["line_end"].get(row.line_end));
+                rows.push_back(std::move(row));
+            }
+        };
+        if (has_lists) {
+            read_findings(blocking, out.blocking);
+            read_findings(follow_ups, out.follow_ups);
+        }
+        simdjson::dom::array unreviewed;
+        if (object["unreviewed"].get_array().get(unreviewed) == simdjson::SUCCESS) {
+            for (const auto item : unreviewed) {
+                simdjson::dom::object unit;
+                if (item.get_object().get(unit) != simdjson::SUCCESS) continue;
+                out.unreviewed.push_back({
+                    .unit = core::utils::json::first_string_field(unit, {"unit"})
+                                .value_or(std::string{}),
+                    .reason = core::utils::json::first_string_field(unit, {"reason"})
+                                  .value_or(std::string{}),
+                });
+            }
+        }
+    });
+    return parsed && found;
+}
+
 bool parse_fetch_metadata(std::string_view payload, FetchMetadata& out) {
     out.parsed = with_json_object(payload, [&](simdjson::dom::object object) {
         out.url = core::utils::json::first_string_field(object, {"url"})
@@ -849,6 +962,7 @@ struct ToolResultView {
     std::vector<WebResultRow>    web_rows;
     std::vector<TodoRow>         todo_rows;
     FetchMetadata                fetch;
+    ReviewResult                 review;
     std::size_t                  read_line_count = 0;
     std::int64_t                 read_start_line = 1;
     std::optional<std::string>    read_description;
@@ -907,6 +1021,9 @@ ToolResultView build_tool_result_view(const ToolActivity& tool) {
             // source while the call is still pending.
             view.payload_parsed = parse_todo_rows(payload, view.todo_rows)
                 || parse_todo_rows(tool.args, view.todo_rows);
+            break;
+        case ToolPresentationKind::Review:
+            view.payload_parsed = parse_review_result(payload, view.review);
             break;
         case ToolPresentationKind::Shell:
         case ToolPresentationKind::Task:
@@ -972,6 +1089,21 @@ std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& v
             return succeeded && !view.todo_rows.empty()
                 ? count_label(view.todo_rows.size(), "item", "items")
                 : std::string{};
+        case ToolPresentationKind::Review: {
+            if (!structured) return {};
+            const auto& review = view.review;
+            if (review.empty) return "nothing to review";
+            std::vector<std::string> parts;
+            if (!review.blocking.empty()) {
+                parts.push_back(std::format("{} blocking", review.blocking.size()));
+            }
+            if (!review.follow_ups.empty()) {
+                parts.push_back(count_label(review.follow_ups.size(), "follow-up", "follow-ups"));
+            }
+            if (parts.empty()) parts.emplace_back("no issues");
+            if (review.incomplete) parts.emplace_back("incomplete");
+            return join_with(parts, " · ");
+        }
         case ToolPresentationKind::Task:
             return tool.subagents.empty()
                 ? std::string{}
@@ -1301,6 +1433,107 @@ Element render_fetch_result(const ToolActivity& tool,
     return vbox(std::move(rows)) | xflex;
 }
 
+/// Colour of a finding's marker: what must be fixed reads red, what may wait
+/// reads amber, and polish stays quiet.
+Color review_severity_color(std::string_view severity) {
+    if (severity == "critical" || severity == "high") return ColorToolFail;
+    if (severity == "medium") return ColorWarn;
+    return ColorTextMuted;
+}
+
+Element indented_paragraph(const std::string& content, Color color) {
+    return hbox({
+        ftxui::text("    "),
+        render_text_lines_preserving_newlines(content, color) | xflex,
+    }) | xflex;
+}
+
+void append_review_findings(std::vector<Element>& rows,
+                            std::string_view heading,
+                            Color heading_color,
+                            const std::vector<ReviewFindingRow>& findings) {
+    if (findings.empty()) return;
+    if (!rows.empty()) rows.push_back(ftxui::text(""));
+    rows.push_back(
+        ftxui::text(std::format("{} ({})", heading, findings.size()))
+        | ftxui::color(heading_color)
+        | ftxui::bold);
+    for (std::size_t i = 0; i < findings.size(); ++i) {
+        const auto& finding = findings[i];
+        if (i > 0) rows.push_back(ftxui::text(""));
+        rows.push_back(
+            hbox({
+                ftxui::text("  ● ") | ftxui::color(review_severity_color(finding.severity)),
+                paragraph(finding.title) | ftxui::color(ColorText) | ftxui::bold | xflex,
+            }) | xflex);
+
+        std::vector<std::string> meta;
+        if (!finding.severity.empty()) meta.push_back(finding.severity);
+        if (!finding.category.empty() && finding.category != "unset") {
+            meta.push_back(finding.category);
+        }
+        if (!finding.path.empty()) {
+            std::string location = finding.path;
+            if (finding.line_start > 0) {
+                location += std::format(":{}", finding.line_start);
+                if (finding.line_end > finding.line_start) {
+                    location += std::format("-{}", finding.line_end);
+                }
+            }
+            meta.push_back(std::move(location));
+        }
+        if (!meta.empty()) {
+            rows.push_back(hbox({
+                ftxui::text("    "),
+                paragraph(join_with(meta, " · ")) | ftxui::color(ColorYellowDark) | xflex,
+            }) | xflex);
+        }
+        if (!finding.body.empty()) {
+            rows.push_back(indented_paragraph(finding.body, ColorTextSecondary));
+        }
+        if (!finding.rationale.empty()) {
+            rows.push_back(
+                indented_paragraph("Why: " + finding.rationale, ColorTextMuted) | dim);
+        }
+    }
+}
+
+Element render_review_result(const ReviewResult& review) {
+    std::vector<Element> rows;
+    if (!review.error.empty()) {
+        rows.push_back(paragraph(review.error) | ftxui::color(ColorToolFail) | xflex);
+    }
+    if (review.empty) {
+        rows.push_back(placeholder_text("No changes to review."));
+    } else if (review.error.empty()
+               && review.blocking.empty() && review.follow_ups.empty()) {
+        rows.push_back(
+            ftxui::text(review.incomplete
+                            ? "✓ No issues in the parts that were reviewed."
+                            : "✓ No issues found.")
+            | ftxui::color(ColorToolDone));
+    }
+    append_review_findings(rows, "Blocking", ColorToolFail, review.blocking);
+    append_review_findings(rows, "Follow-ups", ColorYellowDark, review.follow_ups);
+    if (!review.unreviewed.empty()) {
+        rows.push_back(ftxui::text(""));
+        rows.push_back(ftxui::text("Not reviewed") | ftxui::color(ColorWarn) | ftxui::bold);
+        for (const auto& unit : review.unreviewed) {
+            rows.push_back(hbox({
+                ftxui::text("  ⊘ ") | ftxui::color(ColorWarn),
+                paragraph(unit.reason.empty() ? unit.unit : unit.unit + " — " + unit.reason)
+                    | ftxui::color(ColorTextSecondary)
+                    | xflex,
+            }) | xflex);
+        }
+    } else if (review.incomplete) {
+        rows.push_back(ftxui::text(""));
+        rows.push_back(
+            ftxui::text("Some files could not be reviewed.") | ftxui::color(ColorWarn));
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
 Element render_tool_header(const ToolActivity& tool,
                            const ToolResultView& view,
                            const std::string& disclosure_key,
@@ -1413,6 +1646,12 @@ Element render_tool_result(const ToolActivity& tool,
                           tool.status == ToolActivity::Status::Denied;
     const Color text_color = is_error ? static_cast<Color>(ColorToolFail) : Color{ColorTextSecondary};
 
+    // A review keeps its own layout even when it failed part-way: the units
+    // that did finish still report findings worth reading.
+    if (view.kind == ToolPresentationKind::Review && view.payload_parsed) {
+        return render_review_result(view.review);
+    }
+
     // Specialized renderers assume a well-formed success payload. Anything else
     // — failed, denied, cancelled mid-write — falls back to plain text so a
     // partial or non-JSON body is shown verbatim instead of as "No results".
@@ -1432,6 +1671,7 @@ Element render_tool_result(const ToolActivity& tool,
                 return render_fetch_result(tool, view, options);
             case ToolPresentationKind::Todo:
                 return render_todo_results(view);
+            case ToolPresentationKind::Review:
             case ToolPresentationKind::Write:
             case ToolPresentationKind::Edit:
             case ToolPresentationKind::Shell:

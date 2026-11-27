@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::agent {
 class Agent;
@@ -17,11 +18,13 @@ namespace core::review {
 
 // Result of reviewing one git checkout. An empty diff never calls the model.
 // `ok` is false when the campaign did not finish; `findings` may still hold
-// whatever units completed.
+// whatever units completed, and `failed_groups` names the units that did not.
 struct WorkspaceReview {
     bool ok = false;
     bool empty = false;
     ClassifiedFindings findings;
+    std::vector<FailedGroup> failed_groups;
+    std::string repository;
     std::string error;
 };
 

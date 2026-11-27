@@ -98,6 +98,30 @@ TEST_CASE("Merge blocking follows severity and category", "[review][issues]") {
     const std::string json = core::review::render_review_json(review);
     CHECK_THAT(json, Catch::Matchers::ContainsSubstring("\"blocking_count\":1"));
     CHECK_THAT(json, Catch::Matchers::ContainsSubstring("\"incomplete\":true"));
+
+    // A review that stopped part-way still hands back what it found and which
+    // units it never reached.
+    review.ok = false;
+    review.error = "review was interrupted";
+    review.failed_groups = report.failed_groups;
+    review.findings.blocking.front().body = std::string(2000, 'x') + " tail";
+    const std::string partial = core::review::render_review_json(review);
+    CHECK_THAT(partial, Catch::Matchers::ContainsSubstring("\"ok\":false,\"error\":\"review was interrupted\","));
+    CHECK_THAT(partial, Catch::Matchers::ContainsSubstring("\"blocking_count\":1"));
+    CHECK_THAT(partial, Catch::Matchers::ContainsSubstring(
+        R"("unreviewed":[{"unit":"src/a.cpp","reason":"transport"}])"));
+    CHECK(partial.find(" tail") == std::string::npos);
+    CHECK(partial.back() == '}');
+
+    core::review::WorkspaceReview failed;
+    failed.error = "not a git repository";
+    CHECK(core::review::render_review_json(failed)
+          == R"({"ok":false,"error":"not a git repository"})");
+
+    failed.error = "review was interrupted";
+    failed.failed_groups = report.failed_groups;
+    CHECK_THAT(core::review::render_review_json(failed), Catch::Matchers::ContainsSubstring(
+        R"("unreviewed":[{"unit":"src/a.cpp","reason":"transport"}])"));
 }
 
 TEST_CASE("Open issues are ordered by label priority", "[issues]") {

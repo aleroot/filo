@@ -23,9 +23,21 @@ using core::utils::str::trim_ascii_copy;
         || !trim_ascii_copy(snapshot.status).empty();
 }
 
+// A finding's body carries the suggested fix in its last sentences, so the
+// limit is generous; past it the cut lands on a word boundary and never inside
+// a UTF-8 sequence.
+inline constexpr std::size_t kMaxBodyBytes = 1500;
+inline constexpr std::size_t kMaxRationaleBytes = 800;
+
 [[nodiscard]] std::string clamp_text(std::string_view text, std::size_t limit) {
     if (text.size() <= limit) return std::string(text);
-    std::string out(text.substr(0, limit));
+    std::size_t cut = limit;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
+    if (const auto space = text.find_last_of(" \n\t", cut); space != std::string_view::npos
+        && space > limit / 2) {
+        cut = space;
+    }
+    std::string out(trim_ascii_copy(text.substr(0, cut)));
     out += "...";
     return out;
 }
@@ -42,7 +54,10 @@ void write_finding(core::utils::JsonWriter& writer, const Finding& finding) {
     writer.kv_num("line_start", finding.line_start).comma();
     writer.kv_num("line_end", finding.line_end).comma();
     writer.kv_bool("blocks_merge", blocks_merge(finding)).comma();
-    writer.kv_str("body", clamp_text(finding.body, 400));
+    writer.kv_str("body", clamp_text(finding.body, kMaxBodyBytes));
+    if (!finding.rationale.empty()) {
+        writer.comma().kv_str("rationale", clamp_text(finding.rationale, kMaxRationaleBytes));
+    }
 }
 
 void write_finding_array(core::utils::JsonWriter& writer,
@@ -51,6 +66,29 @@ void write_finding_array(core::utils::JsonWriter& writer,
     for (std::size_t i = 0; i < findings.size(); ++i) {
         if (i != 0) writer.comma();
         write_finding(writer, findings[i]);
+    }
+}
+
+void write_review_body(core::utils::JsonWriter& writer, const WorkspaceReview& review) {
+    if (!review.repository.empty()) {
+        writer.kv_str("repository", review.repository).comma();
+    }
+    writer.kv_bool("empty", review.empty).comma();
+    writer.kv_bool("incomplete", review.findings.incomplete).comma();
+    writer.kv_num("blocking_count", static_cast<int>(review.findings.blocking.size())).comma();
+    writer.kv_num("follow_up_count", static_cast<int>(review.findings.follow_ups.size())).comma();
+    writer.key("blocking");
+    write_finding_array(writer, review.findings.blocking);
+    writer.comma().key("follow_ups");
+    write_finding_array(writer, review.findings.follow_ups);
+    if (review.failed_groups.empty()) return;
+    writer.comma().key("unreviewed");
+    auto array = writer.array();
+    for (std::size_t i = 0; i < review.failed_groups.size(); ++i) {
+        if (i != 0) writer.comma();
+        auto object = writer.object();
+        writer.kv_str("unit", review.failed_groups[i].label).comma();
+        writer.kv_str("reason", clamp_text(review.failed_groups[i].reason, 300));
     }
 }
 
@@ -121,6 +159,7 @@ WorkspaceReview review_workspace(
         review.error = "review requires an active provider";
         return review;
     }
+    review.repository = repository.string();
     const std::filesystem::path reviewed = repository;
     review_agent->update_session_context([&](core::context::SessionContext& context) {
         (void)context.set_workspace_primary(reviewed);
@@ -134,6 +173,7 @@ WorkspaceReview review_workspace(
     });
     CampaignResult result = engine.run(std::move(input));
     review.findings = classify_findings(result.report);
+    review.failed_groups = result.report.failed_groups;
     if (result.interrupted) {
         review.error = "review was interrupted";
         review.findings.incomplete = true;
@@ -152,19 +192,18 @@ std::string render_review_json(const WorkspaceReview& review) {
     core::utils::JsonWriter writer(1024);
     {
         auto root = writer.object();
+        const bool has_findings =
+            !review.findings.blocking.empty() || !review.findings.follow_ups.empty();
+        writer.kv_bool("ok", review.ok).comma();
         if (!review.ok) {
-            writer.kv_bool("ok", false).comma();
             writer.kv_str("error", review.error);
-        } else {
-            writer.kv_bool("ok", true).comma();
-            writer.kv_bool("empty", review.empty).comma();
-            writer.kv_bool("incomplete", review.findings.incomplete).comma();
-            writer.kv_num("blocking_count", static_cast<int>(review.findings.blocking.size())).comma();
-            writer.kv_num("follow_up_count", static_cast<int>(review.findings.follow_ups.size())).comma();
-            writer.key("blocking");
-            write_finding_array(writer, review.findings.blocking);
-            writer.comma().key("follow_ups");
-            write_finding_array(writer, review.findings.follow_ups);
+        }
+        // An interrupted or failed campaign still reports what the finished
+        // units found and which units it never reached; dropping either would
+        // pass a partial review off as a bare error.
+        if (review.ok || has_findings || !review.failed_groups.empty()) {
+            if (!review.ok) writer.comma();
+            write_review_body(writer, review);
         }
     }
     return std::move(writer).take();

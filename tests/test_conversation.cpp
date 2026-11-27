@@ -1100,6 +1100,78 @@ TEST_CASE("tool presentation renders todos as a checklist",
     REQUIRE_THAT(expanded, ContainsSubstring("●"));
 }
 
+TEST_CASE("tool presentation renders a review as findings rather than JSON",
+          "[tui][conversation][render][tool][review]") {
+    const auto render_review = [](std::string_view payload) {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("", "", false);
+        auto tool = make_tool_activity("review-1", "review", "{}", "");
+        apply_tool_result(tool, payload);
+        msg.tools.push_back(std::move(tool));
+        messages.push_back(std::move(msg));
+        return std::pair{
+            render_panel_text(messages),
+            render_panel_text(messages, ConversationRenderOptions{.expand_tool_results = true}),
+        };
+    };
+
+    SECTION("findings are grouped, tagged, and located relative to the repository") {
+        const auto [compact, expanded] = render_review(
+            R"({"ok":true,"repository":"/repo","empty":false,"incomplete":false,)"
+            R"("blocking_count":1,"follow_up_count":2,)"
+            R"("blocking":[{"title":"[P1] Keep the scope alive","severity":"high","category":"bug",)"
+            R"("path":"/repo/src/Tuner.swift","line_start":207,"line_end":212,"blocks_merge":true,)"
+            R"("body":"Reads fail once the scope is released.","rationale":"The defer is gone."}],)"
+            R"("follow_ups":[{"title":"[P3] Tidy docs","severity":"low","category":"documentation",)"
+            R"("path":"/elsewhere/a.md","line_start":3,"line_end":3,"blocks_merge":false,"body":"Reword."},)"
+            R"({"title":"Pin cancellation","severity":"medium","category":"performance",)"
+            R"("path":"/repo/b.swift","line_start":0,"line_end":0,"blocks_merge":false,"body":"Forward it."}]})");
+        CHECK_THAT(compact, ContainsSubstring("1 blocking · 2 follow-ups"));
+
+        CHECK_THAT(expanded, ContainsSubstring("Blocking (1)"));
+        CHECK_THAT(expanded, ContainsSubstring("Follow-ups (2)"));
+        CHECK_THAT(expanded, ContainsSubstring("Keep the scope alive"));
+        CHECK(expanded.find("[P1]") == std::string::npos);
+        CHECK_THAT(expanded, ContainsSubstring("high · bug · src/Tuner.swift:207-212"));
+        CHECK_THAT(expanded, ContainsSubstring("/elsewhere/a.md:3"));
+        CHECK(expanded.find("a.md:3-3") == std::string::npos);
+        CHECK_THAT(expanded, ContainsSubstring("medium · performance · b.swift"));
+        CHECK_THAT(expanded, ContainsSubstring("Reads fail once the scope is released."));
+        CHECK_THAT(expanded, ContainsSubstring("Why: The defer is gone."));
+        CHECK(expanded.find("blocking_count") == std::string::npos);
+    }
+
+    SECTION("a clean review says so") {
+        const auto [compact, expanded] = render_review(
+            R"({"ok":true,"empty":false,"incomplete":false,"blocking_count":0,)"
+            R"("follow_up_count":0,"blocking":[],"follow_ups":[]})");
+        CHECK_THAT(compact, ContainsSubstring("no issues"));
+        CHECK_THAT(expanded, ContainsSubstring("No issues found."));
+        CHECK(expanded.find("\"ok\"") == std::string::npos);
+    }
+
+    SECTION("an empty checkout has nothing to review") {
+        const auto [compact, expanded] = render_review(
+            R"({"ok":true,"empty":true,"incomplete":false,"blocking_count":0,)"
+            R"("follow_up_count":0,"blocking":[],"follow_ups":[]})");
+        CHECK_THAT(compact, ContainsSubstring("nothing to review"));
+        CHECK_THAT(expanded, ContainsSubstring("No changes to review."));
+    }
+
+    SECTION("an interrupted review still shows what it found") {
+        const auto [compact, expanded] = render_review(
+            R"({"ok":false,"error":"review was interrupted","empty":false,"incomplete":true,)"
+            R"("blocking_count":1,"follow_up_count":0,)"
+            R"("blocking":[{"title":"Leak","severity":"critical","category":"bug","path":"x.cpp",)"
+            R"("line_start":4,"line_end":4,"blocks_merge":true,"body":"Freed twice."}],"follow_ups":[],)"
+            R"("unreviewed":[{"unit":"src/b.cpp","reason":"transport error"}]})");
+        CHECK_THAT(compact, ContainsSubstring("review was interrupted"));
+        CHECK_THAT(compact, ContainsSubstring("Freed twice."));
+        CHECK_THAT(expanded, ContainsSubstring("Not reviewed"));
+        CHECK_THAT(expanded, ContainsSubstring("src/b.cpp — transport error"));
+    }
+}
+
 TEST_CASE("tool header always labels a finished tool that produced no metric",
           "[tui][conversation][render][tool][regression]") {
     // A structured tool that fails has no JSON to count, so its metric is empty.
