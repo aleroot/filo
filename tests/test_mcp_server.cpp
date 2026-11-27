@@ -63,6 +63,20 @@ TEST_CASE("MCP 2.0 tool calls do not share implicit shell state", "[mcp][modern]
     REQUIRE_THAT(read_state, Catch::Matchers::ContainsSubstring(R"("output":"unset")"));
 }
 
+TEST_CASE("A cancelled MCP 2.0 tool call stops its running command", "[mcp][modern]") {
+    auto context = make_mcp_test_context();
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = disp().dispatch(
+        R"({"jsonrpc":"2.0","id":303,"method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"sleep 60"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})",
+        context,
+        core::mcp::McpProtocolMode::stateless,
+        [started] {
+            return std::chrono::steady_clock::now() - started > std::chrono::milliseconds{300};
+        });
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("INTERRUPTED"));
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{10});
+}
+
 #define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
 
 /// Returns true if @p s is a well-formed JSON document.

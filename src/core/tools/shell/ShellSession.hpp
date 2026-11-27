@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <poll.h>
 #include <spawn.h>
 #include <random>
@@ -130,6 +131,11 @@ public:
     // Callers can override per-command via the timeout argument to run().
     static constexpr std::chrono::milliseconds kDefaultTimeout{600'000};
     static constexpr std::size_t               kMaxOutput{4 * 1024 * 1024};
+    /// Output a command may still write once kMaxOutput is reached. Past it
+    /// the command is treated as runaway (`yes`, a loop that never ends) and
+    /// stopped: nothing it writes is kept, and draining it would otherwise
+    /// busy a core until the timeout. Even a very noisy build stays far below.
+    static constexpr std::size_t               kMaxDrainedOutput{256 * 1024 * 1024};
     /// Bytes read from the shell per syscall.
     static constexpr std::size_t               kReadChunkBytes{64 * 1024};
     /// Appended to the sentinel's status by the EXIT trap only.
@@ -162,9 +168,12 @@ public:
      * @param command  Arbitrary bash command string.
      * @param timeout  Maximum time to wait for the command to complete.
      *                 Defaults to kDefaultTimeout (10 minutes).
+     * @param cancelled Polled while the command runs; true stops it and
+     *                 resets the session, as interrupt() does.
      */
     Result run(std::string_view command,
-               std::chrono::milliseconds timeout = kDefaultTimeout) {
+               std::chrono::milliseconds timeout = kDefaultTimeout,
+               const std::function<bool()>& cancelled = {}) {
         int stale_exit_code = -1;
         [[maybe_unused]] const bool reaped_stale =
             reap_if_exited(stale_exit_code, true);
@@ -208,7 +217,7 @@ public:
             return {"[ShellSession] Write to bash stdin failed.\n", -1};
         }
 
-        return read_until_done(timeout);
+        return read_until_done(timeout, cancelled);
     }
 
     /// Returns true if the bash process is still running.
@@ -529,10 +538,13 @@ private:
     // next command can be run cleanly.
     /// @p already_read is output consumed before the drain started; the
     /// sentinel line may begin, or even be complete, inside it.
-    [[nodiscard]] bool drain_sentinel_until(
+    enum class DrainOutcome { synced, timed_out, runaway, cancelled };
+
+    [[nodiscard]] DrainOutcome drain_sentinel_until(
         std::chrono::steady_clock::time_point deadline,
-        std::string already_read = {}) {
-        if (stdout_fd_ < 0) return false;
+        std::string already_read = {},
+        const std::function<bool()>& cancelled = {}) {
+        if (stdout_fd_ < 0) return DrainOutcome::timed_out;
 
         const std::string prefix = "\n" + sentinel_ + ":";
         // Complete sentinel line: the prefix, then the exit code and newline.
@@ -544,9 +556,11 @@ private:
         // Rolling tail — only needs to be large enough to detect the sentinel
         // across two consecutive read() chunks.
         std::string tail = std::move(already_read);
-        if (has_sentinel_line(tail)) return true;
+        if (has_sentinel_line(tail)) return DrainOutcome::synced;
+        std::size_t drained = 0;
 
         while (std::chrono::steady_clock::now() < deadline) {
+            if (cancelled && cancelled()) return DrainOutcome::cancelled;
             const auto remaining_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now()).count();
@@ -575,7 +589,9 @@ private:
             }
 
             tail.append(buf.data(), static_cast<std::size_t>(n));
-            if (has_sentinel_line(tail)) return true;
+            if (has_sentinel_line(tail)) return DrainOutcome::synced;
+            drained += static_cast<std::size_t>(n);
+            if (drained > kMaxDrainedOutput) return DrainOutcome::runaway;
             // Keep a rolling window just large enough to detect the sentinel
             // even when it spans two consecutive reads. Searched before this
             // trim, so a sentinel in the middle of a read is never discarded.
@@ -583,10 +599,11 @@ private:
             if (tail.size() > keep * 2)
                 tail = tail.substr(tail.size() - keep);
         }
-        return false;
+        return DrainOutcome::timed_out;
     }
 
-    Result read_until_done(std::chrono::milliseconds timeout) {
+    Result read_until_done(std::chrono::milliseconds timeout,
+                           const std::function<bool()>& cancelled = {}) {
         // Reserved up to the cap once: growing by doubling instead copies the
         // output at every step and leaves the outgrown blocks cached by the
         // allocator. Pages that are never written are never resident, so a
@@ -642,6 +659,10 @@ private:
 
             // Timeout check.
             const auto now = std::chrono::steady_clock::now();
+            if (cancelled && cancelled()) {
+                kill_session();
+                return interrupted_result(std::move(raw));
+            }
             if (now >= deadline) {
                 // Hard-kill the bash process group — the running command
                 // (e.g. a compiler) may still be alive and must not corrupt
@@ -717,12 +738,25 @@ private:
                 raw += "\n... [OUTPUT TRUNCATED AT 4MB] ...";
                 // Drain the remaining output up to the sentinel so the session
                 // stays synchronised for the next command. If the command never
-                // reaches the sentinel before the original deadline, reset the
-                // shell so future calls cannot receive stale output.
-                if (!drain_sentinel_until(deadline, std::move(carry))) {
-                    kill_session();
-                    raw += "\n[TIMEOUT: command exceeded time limit while draining "
-                           "truncated output]\n";
+                // reaches the sentinel, reset the shell so future calls cannot
+                // receive stale output.
+                switch (drain_sentinel_until(deadline, std::move(carry), cancelled)) {
+                    case DrainOutcome::synced:
+                        break;
+                    case DrainOutcome::cancelled:
+                        kill_session();
+                        return interrupted_result(std::move(raw));
+                    case DrainOutcome::runaway:
+                        kill_session();
+                        raw += std::format(
+                            "\n[STOPPED: command kept writing past {} MB of output]\n",
+                            (kMaxOutput + kMaxDrainedOutput) / (1024 * 1024));
+                        break;
+                    case DrainOutcome::timed_out:
+                        kill_session();
+                        raw += "\n[TIMEOUT: command exceeded time limit while draining "
+                               "truncated output]\n";
+                        break;
                 }
                 // Exit code is unknown after truncation — report -1 so callers
                 // do not mistakenly treat a failed command as successful.

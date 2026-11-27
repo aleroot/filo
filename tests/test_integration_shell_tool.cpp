@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/config/ConfigManager.hpp"
@@ -493,6 +494,55 @@ TEST_CASE("ShellTool timeout applies while draining truncated output",
     auto next = tool.execute(R"({"command":"echo clean_after_truncated_timeout"})");
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("clean_after_truncated_timeout"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool stops a command whose output never ends instead of draining it to the timeout",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto res = tool.execute(R"({"command":"yes","timeout_seconds":120})");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(res.find("OUTPUT TRUNCATED AT 4MB") != std::string::npos);
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("STOPPED: command kept writing past"));
+    CHECK(res.find("TIMEOUT") == std::string::npos);
+    CHECK(res.find("\"exit_code\":-1") != std::string::npos);
+    CHECK(elapsed < std::chrono::seconds{30});
+
+    const auto next = tool.execute(R"({"command":"echo clean_after_runaway"})");
+    CHECK(next == R"({"output":"clean_after_runaway\n","exit_code":0})");
+}
+
+TEST_CASE("ShellTool stops a running command when its call is cancelled",
+          "[integration][tools][shell]") {
+    // Before the output cap (a quiet command) and after it (the drain).
+    const auto [label, command] = GENERATE(table<std::string_view, std::string_view>({
+        {"quiet", "sleep 60"},
+        {"draining", "awk 'BEGIN{for (i=0;i<5000000;i++) printf \\\"x\\\"; fflush(); "
+                     "while (1) system(\\\"sleep 1\\\")}'"},
+    }));
+    INFO(label);
+    ShellTool tool;
+    const auto context = make_tool_test_context();
+    const auto started = std::chrono::steady_clock::now();
+    const ToolInvocationContext invocation{
+        .session_context = context,
+        .cancellation_requested = [started] {
+            return std::chrono::steady_clock::now() - started > std::chrono::milliseconds{500};
+        },
+    };
+
+    const auto res = (tool.execute)(
+        std::format(R"({{"command":"{}","timeout_seconds":120}})", command), invocation);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_THAT(res, Catch::Matchers::ContainsSubstring("INTERRUPTED"));
+    CHECK(res.find("\"exit_code\":-1") != std::string::npos);
+    CHECK(elapsed < std::chrono::seconds{10});
+
+    const auto next = tool.execute(R"({"command":"echo clean_after_cancel"})");
+    CHECK(next == R"({"output":"clean_after_cancel\n","exit_code":0})");
 }
 
 TEST_CASE("ShellTool writes large command payloads without truncation",

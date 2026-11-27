@@ -2,6 +2,7 @@
 
 #include "../context/SessionContext.hpp"
 
+#include <functional>
 #include <string>
 
 namespace core::mcp {
@@ -83,10 +84,15 @@ public:
      * @return The JSON-RPC response string, or an @em empty string for
      *         notifications (messages without an @c id field).  Callers must
      *         @em not send an empty response to the client — silently drop it.
+     *
+     * @param cancellation_requested  Polled while a @c tools/call runs; true
+     *         stops the tool (a closed request stream is the 2026-07-28 HTTP
+     *         cancellation signal).
      */
     std::string dispatch(const std::string& json_request,
                          const core::context::SessionContext& context,
-                         McpProtocolMode mode = McpProtocolMode::legacy);
+                         McpProtocolMode mode = McpProtocolMode::legacy,
+                         const std::function<bool()>& cancellation_requested = {});
 
 private:
     McpDispatcher();

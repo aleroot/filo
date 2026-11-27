@@ -860,7 +860,8 @@ take_pending_server_response(HttpSessionState& session,
     const std::string& body,
     const std::optional<core::workspace::WorkspaceSnapshot>& workspace_override,
     std::string_view session_id,
-    core::mcp::McpProtocolMode mode = core::mcp::McpProtocolMode::legacy) {
+    core::mcp::McpProtocolMode mode = core::mcp::McpProtocolMode::legacy,
+    const std::function<bool()>& cancellation_requested = {}) {
     detail::McpDispatchResult result;
     const auto snapshot = workspace_override.value_or(
         core::workspace::Workspace::get_instance().remote_snapshot());
@@ -870,7 +871,8 @@ take_pending_server_response(HttpSessionState& session,
         std::string(session_id));
     session_context.steering_policy = g_steering_policy;
 
-    result.body = core::mcp::McpDispatcher::get_instance().dispatch(body, session_context, mode);
+    result.body = core::mcp::McpDispatcher::get_instance().dispatch(
+        body, session_context, mode, cancellation_requested);
     if (result.body.empty()) {
         result.status = 202;
         return result;
@@ -1123,11 +1125,17 @@ void handle_mcp_post(const std::string& host,
                 {}, client_info.name, client_info.version);
         }
 
+        // In 2026-07-28 a client cancels a request by closing its stream, so
+        // a dropped connection stops the tool instead of letting it run to
+        // its timeout for a reply nobody will read. A client that only
+        // half-closes (shuts down its write side, then waits) cannot be told
+        // apart from one that hung up, so its call is cancelled too.
         auto result = dispatch_mcp_payload(
             req.body,
             std::nullopt,
             {},
-            core::mcp::McpProtocolMode::stateless);
+            core::mcp::McpProtocolMode::stateless,
+            [&req] { return req.is_connection_closed(); });
         if (result.body.find(R"("code":-32601)") != std::string::npos) {
             result.status = 404;
         } else if (result.body.find(R"("code":-32021)") != std::string::npos) {

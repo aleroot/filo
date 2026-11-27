@@ -135,14 +135,16 @@ std::string ShellTool::execute(
         json_args,
         invocation.session_context,
         invocation.tool_call_id,
-        invocation.change_tracker);
+        invocation.change_tracker,
+        invocation.cancellation_requested);
 }
 
 std::string ShellTool::execute_impl(
     const std::string& json_args,
     const core::context::SessionContext& context,
     std::string_view tool_call_id,
-    std::shared_ptr<core::changes::TurnChangeTracker> tracker)
+    std::shared_ptr<core::changes::TurnChangeTracker> tracker,
+    const std::function<bool()>& cancelled)
 {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
@@ -248,7 +250,7 @@ std::string ShellTool::execute_impl(
         .command = std::string(command_view),
         .working_dir = working_dir,
         .tool_call_id = std::string(tool_call_id),
-    }, context.workspace_view().primary(), landrun_policy, timeout, before_dispatch);
+    }, context.workspace_view().primary(), landrun_policy, timeout, before_dispatch, cancelled);
 
     // Field is named "output" because both stdout and stderr are captured.
     // Escaped straight into the reply: output can be megabytes, and an

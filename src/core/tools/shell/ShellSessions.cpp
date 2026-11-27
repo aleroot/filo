@@ -102,7 +102,7 @@ ShellSessions::~ShellSessions() = default;
 
 IShellExecutor::Result ShellSessions::run(ActiveCommand command, const fs::path& workspace,
     const core::landrun::LandrunPolicy& policy, std::chrono::milliseconds timeout,
-    const std::function<void(int)>& before_dispatch) {
+    const std::function<void(int)>& before_dispatch, const std::function<bool()>& cancelled) {
     std::shared_ptr<State::Session> session, evicted;
     {
         std::lock_guard lock(state_->mutex);
@@ -155,7 +155,7 @@ IShellExecutor::Result ShellSessions::run(ActiveCommand command, const fs::path&
                                     {}, std::chrono::seconds(5));
     }
     if (before_dispatch) before_dispatch(session->executor->process_group());
-    auto result = session->executor->run(command.command, command.working_dir, timeout);
+    auto result = session->executor->run(command.command, command.working_dir, timeout, cancelled);
     state_->mark_used(session);
     return result;
 }

@@ -28,7 +28,8 @@ public:
 
     Result run(std::string_view command,
                std::string_view working_dir = {},
-               std::chrono::milliseconds timeout = kDefaultTimeout) override
+               std::chrono::milliseconds timeout = kDefaultTimeout,
+               const std::function<bool()>& cancelled = {}) override
     {
         // When working_dir is given, run inside a subshell so the session's
         // own cwd is left unchanged:  (cd '/path/to/dir' && <command>)
@@ -48,7 +49,7 @@ public:
             effective += "\n)";
         }
 
-        detail::ShellSession::Result r = session_.run(effective, timeout);
+        detail::ShellSession::Result r = session_.run(effective, timeout, cancelled);
         return {std::move(r.output), r.exit_code};
     }
 

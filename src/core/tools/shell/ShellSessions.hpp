@@ -34,7 +34,8 @@ public:
 
     IShellExecutor::Result run(ActiveCommand command,
         const std::filesystem::path& workspace, const core::landrun::LandrunPolicy& policy,
-        std::chrono::milliseconds timeout, const std::function<void(int)>& before_dispatch = {});
+        std::chrono::milliseconds timeout, const std::function<void(int)>& before_dispatch = {},
+        const std::function<bool()>& cancelled = {});
 
     // Command sessions (codex-rs unified exec): a command runs in its own
     // process, and a call returns after its yield time with what the command

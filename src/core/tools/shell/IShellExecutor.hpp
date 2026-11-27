@@ -3,6 +3,7 @@
 #include "../../landrun/LandrunPolicy.hpp"
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -40,9 +41,11 @@ public:
     // working_dir — when non-empty, the command runs with this directory as
     //   its current working directory without permanently changing the
     //   session's own cwd (implemented as a subshell on POSIX).
+    // cancelled — polled while the command runs; returning true stops it.
     virtual Result run(std::string_view command,
                        std::string_view working_dir = {},
-                       std::chrono::milliseconds timeout = kDefaultTimeout) = 0;
+                       std::chrono::milliseconds timeout = kDefaultTimeout,
+                       const std::function<bool()>& cancelled = {}) = 0;
 
     // True if the underlying shell process is still alive.
     virtual bool is_alive() const noexcept = 0;

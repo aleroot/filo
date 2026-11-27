@@ -76,7 +76,8 @@ private:
     std::string execute_impl(const std::string& json_args,
                              const core::context::SessionContext& context,
                              std::string_view tool_call_id,
-                             std::shared_ptr<core::changes::TurnChangeTracker> tracker = {});
+                             std::shared_ptr<core::changes::TurnChangeTracker> tracker = {},
+                             const std::function<bool()>& cancelled = {});
     /// Writes to, or reads, a command session an earlier call started.
     std::string continue_session(int process_id,
                                  std::string_view input,

@@ -1452,7 +1452,8 @@ private:
 [[nodiscard]] RpcExpected<std::string> build_tool_call_result(
     const ParsedToolCallRequest& request,
     const core::context::SessionContext& context,
-    McpProtocolMode mode)
+    McpProtocolMode mode,
+    const std::function<bool()>& cancellation_requested)
 {
     auto& sm = core::tools::ToolManager::get_instance();
     auto tool_def = sm.get_tool_definition(request.name, core::context::SessionTransport::mcp_http);
@@ -1484,7 +1485,10 @@ private:
     const std::string tool_result = sm.execute_tool(
         request.name,
         arguments,
-        execution_context);
+        core::tools::ToolInvocationContext{
+            .session_context = execution_context,
+            .cancellation_requested = cancellation_requested,
+        });
     if (modern) {
         sm.clear_session_state(execution_context.session_id);
     }
@@ -1831,7 +1835,8 @@ using MethodHandler = std::string (*)(
     const RequestId& id,
     simdjson::ondemand::object& root,
     const core::context::SessionContext& context,
-    McpProtocolMode mode)
+    McpProtocolMode mode,
+    const std::function<bool()>& cancellation_requested)
 {
     auto request = parse_tool_call_request(root);
     if (!request) return make_rpc_error(id, request.error());
@@ -1864,7 +1869,7 @@ using MethodHandler = std::string (*)(
         return make_response(id, build_create_task_result(create_result), mode);
     }
 
-    auto result = build_tool_call_result(*request, context, mode);
+    auto result = build_tool_call_result(*request, context, mode, cancellation_requested);
     if (!result) return make_rpc_error(id, result.error());
 
     return make_response_in_place(id, std::move(*result), mode);
@@ -1961,7 +1966,7 @@ struct MethodRoute {
     MethodHandler handler;
 };
 
-constexpr std::array<MethodRoute, 14> kMethodRoutes{{
+constexpr std::array<MethodRoute, 13> kMethodRoutes{{
     {"server/discover", &handle_server_discover},
     {"initialize", &handle_initialize},
     {"prompts/list", &handle_prompts_list},
@@ -1971,7 +1976,6 @@ constexpr std::array<MethodRoute, 14> kMethodRoutes{{
     {"resources/read", &handle_resources_read},
     {"completion/complete", &handle_completion_complete},
     {"tools/list", &handle_tools_list},
-    {"tools/call", &handle_tools_call},
     {"tasks/get", &handle_tasks_get},
     {"tasks/update", &handle_tasks_update},
     {"tasks/cancel", &handle_tasks_cancel},
@@ -1983,8 +1987,13 @@ constexpr std::array<MethodRoute, 14> kMethodRoutes{{
     const RequestId& id,
     simdjson::ondemand::object& root,
     const core::context::SessionContext& context,
-    McpProtocolMode mode)
+    McpProtocolMode mode,
+    const std::function<bool()>& cancellation_requested)
 {
+    // The only method that runs a tool, so the only one a cancel can reach.
+    if (method == "tools/call") {
+        return handle_tools_call(id, root, context, mode, cancellation_requested);
+    }
     const auto it = std::ranges::find(kMethodRoutes, method, &MethodRoute::name);
     if (it == kMethodRoutes.end()) {
         return make_error(id, -32601, "Method not found");
@@ -2000,7 +2009,8 @@ constexpr std::array<MethodRoute, 14> kMethodRoutes{{
 
 std::string McpDispatcher::dispatch(const std::string& json_request,
                                    const core::context::SessionContext& context,
-                                   McpProtocolMode mode) {
+                                   McpProtocolMode mode,
+                                   const std::function<bool()>& cancellation_requested) {
     if (json_request.empty()) return std::string(kParseError);
 
     simdjson::ondemand::parser parser;
@@ -2035,7 +2045,7 @@ std::string McpDispatcher::dispatch(const std::string& json_request,
         return {};
     }
 
-    return route_method(method, id, root, context, mode);
+    return route_method(method, id, root, context, mode, cancellation_requested);
 }
 
 } // namespace core::mcp
